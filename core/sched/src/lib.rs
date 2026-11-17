@@ -18,6 +18,8 @@ mod tree;
 #[cfg(test)]
 mod bench;
 #[cfg(test)]
+mod migration;
+#[cfg(test)]
 mod property;
 #[cfg(test)]
 mod scenarios;
@@ -29,7 +31,7 @@ pub use eevdf::{Eevdf, EevdfConfig};
 pub use fifo::Fifo;
 pub use queue::{QueueFull, RunQueue};
 pub use round_robin::RoundRobin;
-pub use scheduler::{SchedError, SchedParams, Scheduler};
+pub use scheduler::{Detached, SchedError, SchedParams, Scheduler};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TaskId(u32);

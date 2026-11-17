@@ -2,7 +2,7 @@
 //! fontes no capítulo; aqui só o que quebra se mudar a aritmética.
 
 use crate::TaskId;
-use crate::scheduler::{SchedError, SchedParams, Scheduler};
+use crate::scheduler::{Detached, SchedError, SchedParams, Scheduler};
 use crate::table::{IdTable, NIL, slot_u16};
 use crate::tree::{DeadlineTree, signed_diff};
 use crate::weight::{real_to_virtual, virtual_to_real, weight_of_nice};
@@ -43,6 +43,7 @@ pub(crate) struct Entity {
     vlag: i64,
     sleep_vtime: u64,
     weight: u32,
+    nice: i8,
     state: State,
 }
 
@@ -54,6 +55,7 @@ const FRESH: Entity = Entity {
     vlag: 0,
     sleep_vtime: 0,
     weight: 1024,
+    nice: 0,
     state: State::Sleeping,
 };
 
@@ -329,6 +331,82 @@ impl<const N: usize> Eevdf<N> {
         }
     }
 
+    /// Tira uma tarefa pronta ou dormindo da fila para ela entrar em outra (`add_with_lag`),
+    /// com o lag que ela tem aqui. A corrente não sai por aqui: `None`.
+    pub fn detach(&mut self, task: TaskId) -> Option<Detached> {
+        let slot = slot_u16(self.table.find(task)?);
+        match self.ent(slot).state {
+            State::Running => return None,
+            State::Sleeping => self.decay_lag(slot),
+            State::Ready => self.leave_competition(slot),
+        }
+        let ent = *self.ent(slot);
+        self.table.release(usize::from(slot));
+        Some(Detached {
+            params: SchedParams::Fair {
+                nice: ent.nice,
+                slice_ns: Some(ent.slice_ns),
+            },
+            lag_ns: ent.vlag,
+        })
+    }
+
+    /// `add` de quem vem de outra fila: entra com o lag que levava, sem meia fatia de brinde.
+    /// # Errors
+    /// `WrongClass`, `Full` ou `Duplicate`.
+    pub fn add_with_lag(
+        &mut self,
+        task: TaskId,
+        params: SchedParams,
+        lag_ns: i64,
+        now_ns: u64,
+    ) -> Result<(), SchedError> {
+        let SchedParams::Fair { nice, slice_ns } = params else {
+            return Err(SchedError::WrongClass);
+        };
+        let slot = slot_u16(self.table.claim(task)?);
+        self.update_curr(now_ns);
+        let slice = slice_ns
+            .unwrap_or(self.config.base_slice_ns)
+            .clamp(MIN_SLICE_NS, MAX_SLICE_NS);
+        self.max_slice_ns = self.max_slice_ns.max(slice);
+        let lag = lag_ns.clamp(
+            -self.lag_limit(weight_of_nice(nice)),
+            self.lag_limit(weight_of_nice(nice)),
+        );
+        *self.ent_mut(slot) = Entity {
+            slice_ns: slice,
+            weight: weight_of_nice(nice),
+            nice: nice.clamp(-20, 19),
+            vlag: lag,
+            ..FRESH
+        };
+        self.place(slot, false);
+        self.enqueue(slot);
+        self.check_preempt(slot);
+        Ok(())
+    }
+
+    /// Uma tarefa pronta (nunca a corrente) que `accept` aceita, a de prazo mais distante:
+    /// é a que menos espera perder ao trocar de fila. `None` se nenhuma serve.
+    pub fn pull_candidate(&self, mut accept: impl FnMut(TaskId) -> bool) -> Option<TaskId> {
+        let mut best: Option<(i64, TaskId)> = None;
+        for slot in 0..N {
+            let Some(task) = self.table.get(slot) else {
+                continue;
+            };
+            let ent = self.ent(slot_u16(slot));
+            if ent.state != State::Ready || !accept(task) {
+                continue;
+            }
+            let distance = signed_diff(ent.deadline, self.zero_vruntime);
+            if best.is_none_or(|(farthest, _)| distance > farthest) {
+                best = Some((distance, task));
+            }
+        }
+        best.map(|(_, task)| task)
+    }
+
     fn leave_competition(&mut self, slot: u16) {
         match self.ent(slot).state {
             State::Running => {
@@ -368,6 +446,7 @@ impl<const N: usize> Scheduler for Eevdf<N> {
         *self.ent_mut(slot) = Entity {
             slice_ns: slice,
             weight: weight_of_nice(nice),
+            nice: nice.clamp(-20, 19),
             ..FRESH
         };
         self.place(slot, true);
