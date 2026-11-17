@@ -69,7 +69,7 @@ impl Blake2b {
     }
 
     /// Como `new`, com `out_len` e `key` já conferidos.
-    fn init(out_len: usize, key: &[u8]) -> Self {
+    pub(crate) fn init(out_len: usize, key: &[u8]) -> Self {
         let mut h = IV;
         h[0] ^= 0x0101_0000 ^ ((key.len() as u64) << 8) ^ out_len as u64;
         let mut state = Self {
@@ -111,7 +111,7 @@ impl Blake2b {
     }
 
     /// `out.len()` é `out_len`: quem chama já conferiu.
-    fn finish_into(&mut self, out: &mut [u8]) {
+    pub(crate) fn finish_into(&mut self, out: &mut [u8]) {
         self.bytes_done += self.buf_len as u128;
         self.buf[self.buf_len..].fill(0);
         self.compress(true);

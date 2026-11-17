@@ -7,6 +7,7 @@
 pub mod blake2b;
 pub mod chacha20;
 pub mod rng;
+pub mod seed;
 mod wipe;
 
 pub use rng::Rng;
