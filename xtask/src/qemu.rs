@@ -17,7 +17,7 @@ use crate::{image, png, workspace};
 const BOOT_OK: &str = "[rustos] boot ok";
 const PANIC: &str = "[rustos] panic";
 /// Linhas que o kernel imprime quando um autoteste ou o boot falha.
-const FATAL: [&str; 2] = ["[rustos] fault:", "FAILED"];
+const FATAL: [&str; 3] = ["[rustos] fault:", "[rustos] interrupts:", "FAILED"];
 /// Linha que o kernel imprime com as proteções de hardware (guidelines 09).
 const PROTECTIONS: &str = "[rustos] protections:";
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
