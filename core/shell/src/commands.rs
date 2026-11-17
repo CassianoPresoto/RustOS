@@ -27,6 +27,11 @@ pub(crate) struct Command {
 /// Em ordem alfabética: é a ordem em que `help` e o Tab listam.
 pub(crate) const COMMANDS: &[Command] = &[
     Command {
+        name: "alt",
+        summary: "switch to the alternate screen, or back (alt | alt off)",
+        run: alt,
+    },
+    Command {
         name: "bench",
         summary: "measure the context switch and the wake-up jitter",
         run: bench,
@@ -70,6 +75,11 @@ pub(crate) const COMMANDS: &[Command] = &[
         name: "keymap",
         summary: "show or change the keyboard layout (us | br)",
         run: keymap,
+    },
+    Command {
+        name: "lines",
+        summary: "draw a table with the DEC line-drawing character set",
+        run: lines,
     },
     Command {
         name: "mem",
@@ -391,6 +401,75 @@ fn colors(ctx: &mut Ctx<'_>) -> fmt::Result {
     }
     write!(out, "{DIM}Grayscale (232-255){RESET}\r\n")?;
     blocks(out, 232, 256)
+}
+
+const ALT_ON: &str = "\x1b[?1049h";
+const ALT_OFF: &str = "\x1b[?1049l";
+const LINE_SET: &str = "\x1b(0";
+const ASCII_SET: &str = "\x1b(B";
+
+fn alt(ctx: &mut Ctx<'_>) -> fmt::Result {
+    let out = &mut *ctx.out;
+    match ctx.args {
+        ["off"] => out.write_str(ALT_OFF),
+        [] => {
+            write!(
+                out,
+                "{ALT_ON}{CLEAR_SCREEN}{ACCENT}Alternate screen{RESET}\r\n"
+            )?;
+            write!(
+                out,
+                "{DIM}`alt off` brings the main screen back.{RESET}\r\n"
+            )
+        }
+        _ => out.write_str("usage: alt [off]\r\n"),
+    }
+}
+
+/// Uma regra da tabela: `left`, as colunas ligadas por `mid` e `right`, em G0 gráfico.
+fn rule(out: &mut dyn fmt::Write, [left, mid, right]: [char; 3], widths: &[usize]) -> fmt::Result {
+    write!(out, "{LINE_SET}{left}")?;
+    for (index, &width) in widths.iter().enumerate() {
+        if index > 0 {
+            out.write_char(mid)?;
+        }
+        for _ in 0..width {
+            out.write_char('q')?;
+        }
+    }
+    write!(out, "{right}{ASCII_SET}\r\n")
+}
+
+fn lines(ctx: &mut Ctx<'_>) -> fmt::Result {
+    const ROWS: [(&str, &str); 4] = [
+        ("q", "horizontal"),
+        ("x", "vertical"),
+        ("l k m j", "corners"),
+        ("t u v w n", "tees and cross"),
+    ];
+    const WIDTHS: [usize; 2] = [11, 18];
+    let out = &mut *ctx.out;
+    rule(out, ['l', 'w', 'k'], &WIDTHS)?;
+    write!(
+        out,
+        "{LINE_SET}x{ASCII_SET} {ACCENT}{:<9}{RESET} ",
+        "ESC ( 0"
+    )?;
+    write!(
+        out,
+        "{LINE_SET}x{ASCII_SET} {ACCENT}{:<16}{RESET} ",
+        "line drawing"
+    )?;
+    write!(out, "{LINE_SET}x{ASCII_SET}\r\n")?;
+    for (code, meaning) in ROWS {
+        rule(out, ['t', 'n', 'u'], &WIDTHS)?;
+        write!(
+            out,
+            "{LINE_SET}x{ASCII_SET} {code:<9} {LINE_SET}x{ASCII_SET} "
+        )?;
+        write!(out, "{meaning:<16} {LINE_SET}x{ASCII_SET}\r\n")?;
+    }
+    rule(out, ['m', 'v', 'j'], &WIDTHS)
 }
 
 pub(crate) const LOGO_WIDTH: usize = 19;
@@ -768,6 +847,34 @@ mod tests {
             assert!(text.contains(&format!("\x1b[48;5;{color}m")), "{color}");
         }
         assert!(text.contains("ANSI colors"));
+    }
+
+    #[test]
+    fn lines_draws_a_closed_table_with_the_line_drawing_set() {
+        let text = run("lines", &[], &FakeHost::new());
+        let plain = text
+            .replace("\x1b(0", "")
+            .replace("\x1b(B", "")
+            .replace("\x1b[0m", "");
+        let rows: Vec<&str> = plain.lines().collect();
+        let top = format!("l{}w{}k", "q".repeat(11), "q".repeat(18));
+        let bottom = top.replace('l', "m").replace('w', "v").replace('k', "j");
+        assert_eq!(rows[0], top);
+        assert_eq!(*rows.last().unwrap(), bottom);
+        assert!(text.matches("\x1b(0").count() >= 10);
+        assert_eq!(
+            text.matches("\x1b(0").count(),
+            text.matches("\x1b(B").count()
+        );
+    }
+
+    #[test]
+    fn alt_enters_the_alternate_screen_and_alt_off_leaves_it() {
+        let on = run("alt", &[], &FakeHost::new());
+        assert!(on.starts_with("\x1b[?1049h"));
+        assert!(on.contains("alt off"));
+        assert_eq!(run("alt", &["off"], &FakeHost::new()), "\x1b[?1049l");
+        assert!(run("alt", &["x"], &FakeHost::new()).contains("usage"));
     }
 
     #[test]
