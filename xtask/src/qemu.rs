@@ -16,6 +16,8 @@ use crate::{image, png, workspace};
 /// Igual ao `BOOT_OK_MARKER` do kernel; os dois mudam juntos.
 const BOOT_OK: &str = "[rustos] boot ok";
 const PANIC: &str = "[rustos] panic";
+/// Linha que o kernel imprime com as proteções de hardware (guidelines 09).
+const PROTECTIONS: &str = "[rustos] protections:";
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn command(root: &Path, arch: Arch, profile: Profile) -> Result<Command, String> {
@@ -181,6 +183,11 @@ fn wait_for_boot(receiver: &mpsc::Receiver<String>, started: Instant) -> (Outcom
 
 fn report(arch: Arch, outcome: Outcome, log: &str) -> Result<(), String> {
     match outcome {
+        Outcome::Booted(_) if !log.contains(PROTECTIONS) => Err(failure(
+            arch,
+            "boot sem a linha de proteções de hardware (guidelines 09)",
+            log,
+        )),
         Outcome::Booted(elapsed) => {
             println!(
                 "xtask: smoke {} ok em {} ms (relógio de parede, firmware incluso)",

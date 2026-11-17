@@ -66,13 +66,13 @@ extern "C" fn kmain() -> ! {
         "[rustos] frame self-test: {}",
         if frames_ok { "ok" } else { "FAILED" }
     );
-    let irq_tests_ok = !interrupts_on || system::interrupt_self_test();
-    if !frames_ok || !irq_tests_ok {
+    let irq_ok = interrupts_on && system::interrupt_self_test();
+    if !frames_ok || !irq_ok {
         rustos_hal::Cpu::halt_forever(&platform::cpu());
     }
     kprintln!("{BOOT_OK_MARKER}");
     let mut system = system::System::new(&boot, &memory, display);
-    system::run_shell(&mut system, interrupts_on)
+    system::run_shell(&mut system)
 }
 
 fn display_info(screen: &screen::Screen) -> DisplayInfo {

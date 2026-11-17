@@ -1,8 +1,6 @@
 //! O kernel visto pelo shell: implementa a porta `Host` com os números reais
 //! de memória, boot e tela, e roda o laço de entrada.
 
-use core::hint::spin_loop;
-
 use rustos_hal::{BootInfo, Cpu, PAGE_SIZE, RegionKind};
 use rustos_shell::{DisplayInfo, FaultTest, Host, MemoryInfo, Shell, SystemInfo};
 use rustos_term::Layout;
@@ -147,29 +145,20 @@ pub fn interrupt_self_test() -> bool {
     breakpoint_ok
 }
 
-/// Laço do shell. Com interrupção, dorme até chegar tecla; sem, consulta a
-/// serial em espera ativa (DEBT-0007).
-pub fn run_shell(host: &mut impl Host, interrupts_on: bool) -> ! {
+/// Laço do shell: tira bytes da fila que as IRQs de serial e teclado enchem, e
+/// dorme até a próxima interrupção quando ela está vazia.
+pub fn run_shell(host: &mut impl Host) -> ! {
     let mut shell = Shell::<LINE_BYTES, HISTORY_LINES>::new();
     shell.start(host, &mut Sink).ok();
     console::flush();
     let cpu = platform::cpu();
     loop {
-        let byte = if interrupts_on {
-            let were_enabled = cpu.save_and_disable_interrupts();
-            if let Some(byte) = interrupts::pop_input() {
-                cpu.restore_interrupts(were_enabled);
-                byte
-            } else {
-                cpu.enable_interrupts_and_wait();
-                continue;
-            }
-        } else if let Some(byte) = console::read_byte() {
-            byte
-        } else {
-            spin_loop();
+        let were_enabled = cpu.save_and_disable_interrupts();
+        let Some(byte) = interrupts::pop_input() else {
+            cpu.enable_interrupts_and_wait();
             continue;
         };
+        cpu.restore_interrupts(were_enabled);
         shell.feed(byte, host, &mut Sink).ok();
         console::flush();
     }

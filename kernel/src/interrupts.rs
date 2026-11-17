@@ -11,10 +11,6 @@ use crate::{console, platform};
 
 /// De onde veio uma IRQ, na visão do núcleo; o `platform` traduz o número.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    target_arch = "aarch64",
-    allow(dead_code, reason = "a `virt` não tem teclado nesta fase")
-)]
 pub enum IrqSource {
     Timer,
     Serial,
@@ -44,7 +40,7 @@ static BREAKPOINTS: AtomicU64 = AtomicU64::new(0);
 static INPUT: ByteRing<256> = ByteRing::new();
 
 /// Liga exceções, controlador, timer e entrada, e destrava as interrupções da CPU.
-/// `false` quando a plataforma ainda não sabe: o kernel segue sem interrupção.
+/// `false` se a plataforma falhou: sem interrupção o shell não tem entrada.
 pub fn init(boot: &impl BootInfo, memory: &mut Memory) -> bool {
     match platform::init_interrupts(boot, memory, &HANDLERS) {
         Ok(()) => {

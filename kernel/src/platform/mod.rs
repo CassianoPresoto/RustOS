@@ -21,19 +21,8 @@ pub use x86_64::{
 
 /// Por que a plataforma não ligou as interrupções.
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(
-    target_arch = "x86_64",
-    allow(dead_code, reason = "BASE: o x86_64 ainda não constrói")
-)]
 pub enum PlatformError {
-    /// Esta ISA ainda não tem o caminho de interrupção.
-    #[cfg_attr(
-        target_arch = "aarch64",
-        allow(dead_code, reason = "o aarch64 já tem o caminho")
-    )]
-    Unsupported,
     Map(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] rustos_hal::MapError),
-    OutOfMemory,
     /// A CPU não tem um recurso de que o caminho depende (ex.: APIC).
     MissingFeature(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] &'static str),
 }

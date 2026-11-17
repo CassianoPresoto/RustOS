@@ -124,10 +124,7 @@ fn map_gic(
 }
 
 fn map_error(error: MapError) -> PlatformError {
-    match error {
-        MapError::OutOfFrames | MapError::OutOfAddressSpace => PlatformError::OutOfMemory,
-        other => PlatformError::Map(other),
-    }
+    PlatformError::Map(error)
 }
 
 fn gic_error(error: GicError) -> PlatformError {
