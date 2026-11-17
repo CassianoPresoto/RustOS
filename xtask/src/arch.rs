@@ -147,16 +147,39 @@ impl Arch {
         args
     }
 
-    /// Aceleração de hardware quando host e alvo coincidem; TCG sempre como reserva.
+    /// `RUSTOS_ACCEL` (`tcg`, `hvf` ou `kvm`) manda; sem ela, aceleração de
+    /// hardware quando host e alvo coincidem, com TCG sempre como reserva.
     fn accelerators(self) -> Vec<&'static str> {
+        let forced = std::env::var("RUSTOS_ACCEL").ok();
         let same_isa = std::env::consts::ARCH == self.name();
-        let native = match std::env::consts::OS {
-            "macos" if same_isa => Some("hvf"),
-            "linux" if same_isa && std::path::Path::new("/dev/kvm").exists() => Some("kvm"),
-            _ => None,
-        };
-        native.into_iter().chain(["tcg"]).collect()
+        let kvm = std::path::Path::new("/dev/kvm").exists();
+        choose_accelerators(forced.as_deref(), std::env::consts::OS, same_isa, kvm)
     }
+}
+
+/// Aceleração forçada vale sozinha, sem reserva: falhar alto é o ponto de forçar.
+/// Valor desconhecido é ignorado, com aviso.
+fn choose_accelerators(
+    forced: Option<&str>,
+    os: &str,
+    same_isa: bool,
+    kvm: bool,
+) -> Vec<&'static str> {
+    match forced {
+        Some("tcg") => return vec!["tcg"],
+        Some("hvf") => return vec!["hvf"],
+        Some("kvm") => return vec!["kvm"],
+        Some(other) => {
+            eprintln!("xtask: RUSTOS_ACCEL=`{other}` desconhecida (tcg, hvf, kvm); ignorada");
+        }
+        None => {}
+    }
+    let native = match os {
+        "macos" if same_isa => Some("hvf"),
+        "linux" if same_isa && kvm => Some("kvm"),
+        _ => None,
+    };
+    native.into_iter().chain(["tcg"]).collect()
 }
 
 #[cfg(test)]
@@ -171,8 +194,51 @@ mod tests {
 
     #[test]
     fn tcg_is_always_the_last_fallback() {
-        for arch in [Arch::X86_64, Arch::Aarch64] {
-            assert_eq!(arch.accelerators().last(), Some(&"tcg"));
+        for (os, same_isa, kvm) in [
+            ("macos", true, false),
+            ("linux", true, true),
+            ("linux", false, false),
+        ] {
+            let list = choose_accelerators(None, os, same_isa, kvm);
+            assert_eq!(list.last(), Some(&"tcg"));
         }
+    }
+
+    #[test]
+    fn native_acceleration_needs_the_same_isa() {
+        assert_eq!(
+            choose_accelerators(None, "macos", true, false),
+            ["hvf", "tcg"]
+        );
+        assert_eq!(
+            choose_accelerators(None, "linux", true, true),
+            ["kvm", "tcg"]
+        );
+        assert_eq!(choose_accelerators(None, "linux", true, false), ["tcg"]);
+        assert_eq!(choose_accelerators(None, "macos", false, false), ["tcg"]);
+    }
+
+    #[test]
+    fn forced_acceleration_replaces_the_list() {
+        assert_eq!(
+            choose_accelerators(Some("tcg"), "macos", true, false),
+            ["tcg"]
+        );
+        assert_eq!(
+            choose_accelerators(Some("hvf"), "linux", false, false),
+            ["hvf"]
+        );
+        assert_eq!(
+            choose_accelerators(Some("kvm"), "macos", true, false),
+            ["kvm"]
+        );
+    }
+
+    #[test]
+    fn unknown_forced_acceleration_falls_back_to_the_default() {
+        assert_eq!(
+            choose_accelerators(Some("whpx"), "macos", true, false),
+            ["hvf", "tcg"]
+        );
     }
 }
