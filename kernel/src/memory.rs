@@ -15,21 +15,9 @@ use rustos_mm::{
 use rustos_sync::SpinLock;
 
 /// Janela de dispositivos: entrada 510 do nível mais alto, livre no layout do Limine.
-#[cfg_attr(
-    target_arch = "x86_64",
-    allow(dead_code, reason = "a COM1 é porta de E/S (DEBT-0004)")
-)]
 const DEVICE_WINDOW: VirtAddr = VirtAddr::new(0xffff_ff00_0000_0000);
-#[cfg_attr(
-    target_arch = "x86_64",
-    allow(dead_code, reason = "a COM1 é porta de E/S (DEBT-0004)")
-)]
 const DEVICE_WINDOW_LEN: u64 = 1 << 30;
 
-#[cfg_attr(
-    target_arch = "x86_64",
-    allow(dead_code, reason = "a COM1 é porta de E/S (DEBT-0004)")
-)]
 static DEVICES: SpinLock<AddressWindow> =
     SpinLock::new(AddressWindow::new(DEVICE_WINDOW, DEVICE_WINDOW_LEN));
 
@@ -149,10 +137,6 @@ impl Memory {
 }
 
 /// Mapeia registradores de um dispositivo na janela de dispositivos.
-#[cfg_attr(
-    target_arch = "x86_64",
-    allow(dead_code, reason = "a COM1 é porta de E/S (DEBT-0004)")
-)]
 pub fn map_device(
     mapper: &mut impl PageMapper,
     frames: &mut impl FrameSource,

@@ -1,0 +1,50 @@
+//! Relógio monotônico sobre o TSC já calibrado. Só aritmética inteira.
+
+const NS_PER_SECOND: u128 = 1_000_000_000;
+
+/// Converte ticks do TSC em nanossegundos; satura em `u64::MAX`. `hz` zero dá 0.
+pub fn ticks_to_ns(ticks: u64, hz: u64) -> u64 {
+    if hz == 0 {
+        return 0;
+    }
+    let ns = u128::from(ticks) * NS_PER_SECOND / u128::from(hz);
+    u64::try_from(ns).unwrap_or(u64::MAX)
+}
+
+/// Nanossegundos desde `origin`, para um TSC que nunca deve andar para trás.
+pub fn elapsed_ns(now: u64, origin: u64, hz: u64) -> u64 {
+    ticks_to_ns(now.saturating_sub(origin), hz)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_second_of_ticks_is_a_billion_ns() {
+        assert_eq!(ticks_to_ns(2_995_200_000, 2_995_200_000), 1_000_000_000);
+    }
+
+    #[test]
+    fn conversion_does_not_overflow_u64_intermediate() {
+        let hz = 3_000_000_000;
+        let one_hour = 3_600 * hz;
+        assert_eq!(ticks_to_ns(one_hour, hz), 3_600 * 1_000_000_000);
+    }
+
+    #[test]
+    fn saturates_instead_of_wrapping() {
+        assert_eq!(ticks_to_ns(u64::MAX, 1), u64::MAX);
+    }
+
+    #[test]
+    fn zero_frequency_reads_as_zero() {
+        assert_eq!(ticks_to_ns(1_000, 0), 0);
+    }
+
+    #[test]
+    fn elapsed_clamps_a_tsc_behind_the_origin() {
+        assert_eq!(elapsed_ns(10, 20, 1_000_000_000), 0);
+        assert_eq!(elapsed_ns(1_020, 20, 1_000_000_000), 1_000);
+    }
+}

@@ -11,7 +11,10 @@ use crate::{console, platform};
 
 /// De onde veio uma IRQ, na visão do núcleo; o `platform` traduz o número.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code, reason = "BASE: os adaptadores de cada ISA constroem")]
+#[cfg_attr(
+    target_arch = "aarch64",
+    allow(dead_code, reason = "BASE: o adaptador do aarch64 ainda não constrói")
+)]
 pub enum IrqSource {
     Timer,
     Serial,
