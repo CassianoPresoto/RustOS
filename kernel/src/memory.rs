@@ -9,10 +9,13 @@ use rustos_hal::{
     VirtAddr,
 };
 use rustos_mm::{
-    AddressWindow, BitmapFrameAllocator, FrameError, MemorySummary, PhysFrame, find_free_block,
-    summarize,
+    AddressWindow, BuddyAllocator, FrameAllocator, FrameError, MemorySummary, PhysFrame,
+    find_free_block, summarize,
 };
 use rustos_sync::SpinLock;
+
+use crate::frames::{self, Frames};
+use crate::heap;
 
 /// Janela de dispositivos: entrada 510 do nível mais alto, livre no layout do Limine.
 const DEVICE_WINDOW: VirtAddr = VirtAddr::new(0xffff_ff00_0000_0000);
@@ -31,19 +34,20 @@ static STACKS: SpinLock<AddressWindow> =
 #[derive(Debug)]
 pub enum MemoryError {
     NoUsableMemory,
-    NoRoomForBitmap,
+    NoRoomForMetadata,
     Frames(#[allow(dead_code, reason = "lido pelo Debug da mensagem de pânico")] FrameError),
 }
 
 #[derive(Debug)]
 pub struct Memory {
-    pub frames: BitmapFrameAllocator<'static>,
+    pub frames: Frames,
     pub summary: MemorySummary,
-    pub bitmap_bytes: u64,
+    pub metadata_bytes: u64,
     direct_map_offset: u64,
 }
 
 impl Memory {
+    /// Instala os globais de frames e de heap.
     /// # Safety
     /// Chamar uma vez. As regiões utilizáveis do mapa estão livres e acessíveis
     /// em `físico + direct_map_offset`.
@@ -52,23 +56,26 @@ impl Memory {
         let (base, _) = summary.usable_span.ok_or(MemoryError::NoUsableMemory)?;
         let frames =
             usize::try_from(summary.span_frames()).map_err(|_| MemoryError::NoUsableMemory)?;
-        let words = BitmapFrameAllocator::words_needed(frames);
-        let bitmap_bytes = words as u64 * 8;
-        let block = find_free_block(boot.memory_regions(), bitmap_bytes)
-            .ok_or(MemoryError::NoRoomForBitmap)?;
+        let words = BuddyAllocator::words_needed(frames);
+        let metadata_bytes = words as u64 * 8;
+        let block = find_free_block(boot.memory_regions(), metadata_bytes)
+            .ok_or(MemoryError::NoRoomForMetadata)?;
 
         // SAFETY: o bloco é utilizável e ninguém o usa ainda, pelo contrato da função.
         let storage = unsafe { direct_map_slice(block, words, boot.direct_map_offset()) };
         let mut allocator =
-            BitmapFrameAllocator::new(storage, base, frames).map_err(MemoryError::Frames)?;
+            BuddyAllocator::new(storage, base, frames).map_err(MemoryError::Frames)?;
         for region in boot.memory_regions().filter(MemoryRegion::is_usable) {
             allocator.release_range(region.start, region.len);
         }
-        allocator.reserve_range(block, bitmap_bytes);
+        allocator.reserve_range(block, metadata_bytes);
+        let frames = frames::install(allocator);
+        // SAFETY: o contrato desta função põe todo frame utilizável no mapa direto.
+        unsafe { heap::install(frames, boot.direct_map_offset()) };
         Ok(Self {
-            frames: allocator,
+            frames,
             summary,
-            bitmap_bytes,
+            metadata_bytes,
             direct_map_offset: boot.direct_map_offset(),
         })
     }

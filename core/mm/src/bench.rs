@@ -7,9 +7,10 @@ use std::time::Instant;
 
 use rustos_hal::PhysAddr;
 
+use crate::bench_bitmap::BitmapFrameAllocator;
 use crate::buddy::{BuddyAllocator, FrameAllocator, MAX_ORDER};
 use crate::cache::FrameCache;
-use crate::frame::{BitmapFrameAllocator, FRAME_SIZE, PhysFrame};
+use crate::frame::{FRAME_SIZE, PhysFrame};
 use crate::heap::KernelHeap;
 use crate::memory::{FrameMemory, fake::FakeMemory};
 

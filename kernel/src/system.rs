@@ -6,6 +6,7 @@ use rustos_shell::{DisplayInfo, FaultTest, Host, MemoryInfo, Shell, SystemInfo};
 use rustos_term::Layout;
 
 use crate::console::{self, Sink};
+use crate::heap;
 use crate::interrupts;
 use crate::memory::Memory;
 use crate::platform;
@@ -67,7 +68,8 @@ impl<'a, B: BootInfo> System<'a, B> {
 
 impl<B: BootInfo> Host for System<'_, B> {
     fn info(&self) -> SystemInfo<'_> {
-        let frames = &self.memory.frames;
+        let frames = self.memory.frames;
+        let heap = heap::stats();
         SystemInfo {
             os_name: "RustOS",
             os_version: env!("CARGO_PKG_VERSION"),
@@ -83,7 +85,9 @@ impl<B: BootInfo> Host for System<'_, B> {
                     RegionKind::AcpiReclaimable,
                     RegionKind::AcpiNvs,
                 ]),
-                frame_bitmap_bytes: self.memory.bitmap_bytes,
+                frame_metadata_bytes: self.memory.metadata_bytes,
+                heap_pages: heap.pages,
+                heap_used_bytes: heap.used_bytes,
                 kernel_bytes: self.region_bytes(&[RegionKind::KernelAndModules]),
             },
             display: self.display,

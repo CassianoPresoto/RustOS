@@ -4,12 +4,16 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 #[cfg(not(target_os = "none"))]
 compile_error!("o kernel só compila para alvos bare-metal: use `cargo xtask build`");
 
 #[macro_use]
 mod console;
 mod fmt;
+mod frames;
+mod heap;
 mod interrupts;
 mod memory;
 mod panic;
@@ -66,8 +70,13 @@ extern "C" fn kmain() -> ! {
         "[rustos] frame self-test: {}",
         if frames_ok { "ok" } else { "FAILED" }
     );
+    let heap_ok = heap::self_test();
+    kprintln!(
+        "[rustos] heap self-test: {}",
+        if heap_ok { "ok" } else { "FAILED" }
+    );
     let irq_ok = interrupts_on && system::interrupt_self_test();
-    if !frames_ok || !irq_ok {
+    if !frames_ok || !heap_ok || !irq_ok {
         rustos_hal::Cpu::halt_forever(&platform::cpu());
     }
     kprintln!("{BOOT_OK_MARKER}");
@@ -111,10 +120,10 @@ fn report(boot: &impl BootInfo, memory: &memory::Memory, display: Option<Display
         summary.regions
     );
     kprintln!(
-        "[rustos] frames: {} free of {} tracked, bitmap {} bytes",
+        "[rustos] frames: {} free of {} tracked, metadata {} bytes",
         memory.frames.free_frames(),
         memory.frames.total_frames(),
-        memory.bitmap_bytes
+        memory.metadata_bytes
     );
     match display {
         Some(display) => kprintln!(

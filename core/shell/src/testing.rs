@@ -25,7 +25,9 @@ pub(crate) fn info() -> SystemInfo<'static> {
             usable_bytes: 512 << 20,
             free_bytes: 500 << 20,
             reserved_bytes: 1_572_864,
-            frame_bitmap_bytes: 16_384,
+            frame_metadata_bytes: 16_384,
+            heap_pages: 12,
+            heap_used_bytes: 5_000,
             kernel_bytes: 2_306_868,
         },
         display: Some(DisplayInfo {

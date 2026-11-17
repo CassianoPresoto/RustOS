@@ -3,19 +3,26 @@
 > **O que este capítulo responde:** como o `core/mm` entrega frames e bytes (buddy,
 > cache por CPU, heap), por que cada escolha, e o que o `kernel/` precisa ligar.
 
-Estado: o núcleo puro está em `core/mm` e testado no host. O kernel ainda usa o
-`BitmapFrameAllocator` e não tem `GlobalAlloc` (DEBT-0016); a ligação é a fase 2 do
-[roadmap](08_roadmap.md). Os números medidos estão no [SDD 07](07_desempenho_e_recursos.md).
+Estado: o núcleo puro está em `core/mm`, testado no host, e o kernel o liga: o buddy
+entrega os frames e o heap é o `GlobalAlloc` (fase 2 do [roadmap](08_roadmap.md)). O
+cache por CPU ainda não está ligado (DEBT-0018). Os números medidos estão no
+[SDD 07](07_desempenho_e_recursos.md).
 
 ## As camadas
 
 | Tipo | Arquivo | Papel | Metadado |
 | --- | --- | --- | --- |
-| `BitmapFrameAllocator` | `frame.rs` | Alocador de boot: 1 bit por frame, varredura | 1 bit/frame |
 | `BuddyAllocator` | `buddy.rs` | Blocos de 2^k frames alinhados a 2^k, fusão com o irmão, corrida contígua | 2,03 bits/frame |
 | `FrameCache<CAP>`, `FrameCaches<CPUS, CAP>` | `cache.rs` | Pilha de frames de ordem 0 por CPU, em lote sobre o buddy | `CAP` × 8 bytes por CPU |
 | `KernelHeap<M>` | `heap.rs` | Slabs de uma página por classe de tamanho; o resto em páginas do buddy | 32 bytes por slab, dentro da página |
 | `BitTree` | `bittree.rs` | Bitmap hierárquico (interno) | — |
+
+O `BitmapFrameAllocator` saiu do `core/mm` quando o kernel passou ao buddy:
+dois alocadores de frames no mesmo crate eram a dívida que isso paga, e o
+bitmap perdia onde o kernel precisa (bloco contíguo por varredura O(frames), 1 240 ns
+para 2 MiB contra 33 ns). Ficou uma cópia só de teste, `core/mm/src/bench_bitmap.rs`,
+como base de comparação do `bench.rs`. O preço é o dobro de metadado: 8 144 para
+16 704 bytes em 254 MiB.
 
 Duas portas, as duas definidas em `core/mm`, no padrão do `TableMemory` do
 `arch/aarch64/src/walk.rs`:
@@ -137,18 +144,53 @@ ponteiro, e o subtrai em `dealloc`. `deallocate` recebe o mesmo `Layout` de
 | 512 | 7 | 87,5% |
 | 1024 | 3 | 75,0% |
 
-## O que o kernel precisa ligar
+## Como o kernel liga
 
-1. **`FrameMemory` pelo mapa direto:** um adaptador em `kernel/src/memory.rs` com
-   `direct_map_offset`; `read_u64`/`write_u64` com `read_volatile`/`write_volatile` ou
-   ponteiro comum (a memória é do kernel), `zero` com `write_bytes`. É o `unsafe`
-   desta etapa, com o invariante no construtor.
-2. **`BuddyAllocator` no lugar do bitmap:** `words_needed`, `new`, `release_range`
-   das regiões utilizáveis e `reserve_range` do bloco do próprio metadado, como hoje.
-   `allocate`, `deallocate`, `allocate_contiguous`, `free_frames` e `total_frames` têm
-   as mesmas assinaturas; `FrameSource` também.
-3. **Locks:** um lock para o buddy; um cache por CPU, sem lock, acessado só com as
-   interrupções mascaradas na CPU dona; um lock para o `KernelHeap` (ou um heap por
-   CPU, depois de medir). A ordem é sempre heap, depois buddy.
-4. **`GlobalAlloc`:** `alloc` chama `KernelHeap::allocate` e soma o deslocamento;
-   `dealloc` subtrai e chama `deallocate`, e entra em pânico no `Err`.
+| Peça | Arquivo | O que é |
+| --- | --- | --- |
+| Frames | `kernel/src/frames.rs` | `static FRAMES: IrqLock<Option<BuddyAllocator<'static>>>` e o `Frames`, um tipo sem dados e `Copy`. Só `install` o cria, então ele prova que o alocador existe. Cada método trava `FRAMES` só pela duração da chamada. Implementa `FrameSource` e `FrameAllocator`, e é o `Memory::frames` |
+| `FrameMemory` | `kernel/src/heap.rs` | `DirectMap`: `físico + deslocamento do mapa direto`. O `unsafe` é o `DirectMap::new` (todo endereço é de frame do kernel, alinhado e visível no mapa direto); os métodos da porta são seguros |
+| Heap | `kernel/src/heap.rs` | `static HEAP: IrqLock<Option<State>>` com `KernelHeap<DirectMap>`, o `Frames` e a conta de bytes; `#[global_allocator]` |
+
+`Memory::init` faz, na ordem de hoje: `BuddyAllocator::new` sobre o bloco que
+`find_free_block` achou, `release_range` das regiões utilizáveis, `reserve_range` do
+próprio metadado, `frames::install` e `heap::install`.
+
+**Ordem de lock: `HEAP`, depois `FRAMES`.** Só o heap trava os dois, nessa ordem,
+e quem segura `FRAMES` (só dentro de um método de `Frames`) nunca chama o heap. Os
+dois são `IrqLock`: com a CPU única de hoje, a máscara de interrupção basta, e a
+ordem fica escrita para a fase 3, quando houver disputa.
+
+- **`alloc`** chama `KernelHeap::allocate` e soma o deslocamento do mapa direto ao
+  `PhysAddr`; devolve nulo se o heap não foi instalado ou não há frames.
+- **`dealloc`** subtrai o deslocamento e chama `deallocate` com o mesmo `Layout`. `Err`
+  (ponteiro que não é do heap, dupla liberação) é defeito do kernel: pânico com o
+  ponteiro, o `Layout` e o erro, depois de soltar o lock.
+- **`heap::stats()`** dá `pages` (`KernelHeap::pages_held`: slabs mais blocos de
+  páginas) e `used_bytes`: soma dos `Layout::size` pedidos e ainda não devolvidos, sem o
+  arredondamento da classe. É o que `mem` mostra na linha `heap`.
+- **`heap::self_test()`** roda no boot e imprime `[rustos] heap self-test: ok`: `Vec<u8>`
+  de 15 tamanhos (1 byte a 70 000, com as bordas 1024/1025 e 4096/4097), `Box` de
+  `u64`, `[u32; 300]` e dois tipos alinhados a 64 e a 4096, um `Vec<u32>` que cresce até
+  10 000, e a contabilidade de volta ao ponto de partida. Depois aloca um bloco de duas
+  páginas, o solta, lê as palavras dele pelo mapa direto (voltam zeradas) e confere
+  que os frames voltaram ao buddy.
+- **Zerar ao liberar está ligado** (`ZERO_ON_FREE`). O custo no alvo está no
+  [SDD 07](07_desempenho_e_recursos.md).
+- **Só o kernel usa `alloc`**: `extern crate alloc` está em `kernel/src/main.rs`, e
+  `core/` continua sem chamar o alocador global (guidelines 05).
+
+### O cache por CPU não está ligado
+
+Decisão desta etapa: o `FrameCache` fica de fora até a fase 3 (DEBT-0018).
+
+- **Não há disputa:** uma CPU só, então o lock do buddy nunca espera ninguém.
+- **Custo de ligar agora:** o cache esconde frames do `free_frames` (o `mem` e a linha
+  `frames:` do boot passariam a mentir), e pede uma identidade de CPU que o kernel
+  ainda não tem.
+- **Pouco ganho agora:** o slab do heap já guarda uma página livre por classe (a
+  histerese), e frame solto fora do boot só aparece com o page fault de usuário, na
+  fase 4. O 1,7 ns do cache de 64 contra 21 ns do buddy (SDD 07) paga só num caminho
+  que ainda não existe.
+
+O heap também fica com um lock global; um heap por CPU espera a medição da fase 3.

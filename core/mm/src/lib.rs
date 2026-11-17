@@ -6,6 +6,8 @@
 
 #[cfg(test)]
 mod bench;
+#[cfg(test)]
+mod bench_bitmap;
 mod bittree;
 pub mod buddy;
 pub mod cache;
@@ -19,7 +21,7 @@ pub mod window;
 
 pub use buddy::{BuddyAllocator, FrameAllocator, MAX_ORDER};
 pub use cache::{Cached, FrameCache, FrameCaches};
-pub use frame::{BitmapFrameAllocator, FRAME_SIZE, FrameError, PhysFrame};
+pub use frame::{FRAME_SIZE, FrameError, PhysFrame};
 pub use heap::{HeapError, KernelHeap};
 pub use layout::{MemorySummary, find_free_block, summarize};
 pub use memory::FrameMemory;

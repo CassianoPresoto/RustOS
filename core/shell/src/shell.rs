@@ -981,7 +981,7 @@ mod tests {
         let mut term = Term::<64, 4>::new();
         term.type_str("mem\rcolors\rhelp\r");
         let text = term.screen.text();
-        assert!(text.contains("frame bitmap"));
+        assert!(text.contains("frame meta"));
         assert!(text.contains("Grayscale (232-255)"));
         assert!(text.contains("list the commands"));
     }

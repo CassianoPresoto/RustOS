@@ -5,6 +5,8 @@ use core::fmt;
 use crate::ansi::{ACCENT, CLEAR_SCREEN, DIM, LOGO, RESET};
 use crate::fmtutil::{Bytes, Millis, Percent, Uptime};
 use crate::history::Entries;
+use rustos_hal::PAGE_SIZE;
+
 use crate::host::{FaultTest, Host, SystemInfo};
 
 /// O que um comando recebe: seus argumentos (sem o nome) e as portas.
@@ -237,17 +239,25 @@ fn mem(ctx: &mut Ctx<'_>) -> fmt::Result {
         "reserved",
         Bytes(memory.reserved_bytes)
     )?;
-    let bitmap = Percent {
-        part: memory.frame_bitmap_bytes,
+    let metadata = Percent {
+        part: memory.frame_metadata_bytes,
         whole: memory.usable_bytes,
         decimals: 3,
     };
-    let bitmap_bytes = memory.frame_bitmap_bytes;
+    let metadata_bytes = memory.frame_metadata_bytes;
     write!(
         out,
-        "  {:<13}{bitmap_bytes:>8} B  ({}, {bitmap} of RAM)\r\n",
-        "frame bitmap",
-        Bytes(bitmap_bytes),
+        "  {:<13}{metadata_bytes:>8} B  ({}, {metadata} of RAM)\r\n",
+        "frame meta",
+        Bytes(metadata_bytes),
+    )?;
+    write!(
+        out,
+        "  {:<13}{:>10}  ({} pages, {} held)\r\n",
+        "heap",
+        Bytes(memory.heap_used_bytes),
+        memory.heap_pages,
+        Bytes(memory.heap_pages * PAGE_SIZE),
     )?;
     write!(
         out,
@@ -558,6 +568,15 @@ mod tests {
         assert!(text.contains("16384 B"), "{text}");
         assert!(text.contains("0.003% of RAM"), "{text}");
         assert!(text.contains("2.2 MiB"), "{text}");
+    }
+
+    #[test]
+    fn mem_reports_the_heap_in_use_and_held() {
+        let text = run("mem", &[], &FakeHost::new());
+        assert!(text.contains("frame meta"), "{text}");
+        assert!(text.contains("heap"), "{text}");
+        assert!(text.contains("4.8 KiB"), "{text}");
+        assert!(text.contains("12 pages, 48.0 KiB held"), "{text}");
     }
 
     #[test]

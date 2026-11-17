@@ -9,7 +9,7 @@
 - **Nenhum crate externo** (guidelines 03, regra 7). Cada linha que roda no kernel
   está neste repositório e cabe no `make size`.
 - **Estrutura do núcleo tem capacidade fixa ou recebe a memória de fora.** `RunQueue<N>`
-  usa `const N`; `BitmapFrameAllocator` recebe a fatia. Nada em `core/` chama o
+  usa `const N`; `BuddyAllocator` recebe a fatia. Nada em `core/` chama o
   alocador global.
 - **Nada de alocação, `format!` ou laço sem limite no caminho quente** (interrupção,
   escalonador, syscall). Formatação é só para o console.

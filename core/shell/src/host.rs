@@ -62,8 +62,12 @@ pub struct MemoryInfo {
     pub free_bytes: u64,
     /// RAM que o bootloader ou o firmware reservaram.
     pub reserved_bytes: u64,
-    /// Tamanho do bitmap de frames.
-    pub frame_bitmap_bytes: u64,
+    /// Metadado do alocador de frames (bitmaps do buddy).
+    pub frame_metadata_bytes: u64,
+    /// Páginas que o heap do kernel segura do alocador de frames.
+    pub heap_pages: u64,
+    /// Bytes que o kernel pediu ao heap e ainda não devolveu.
+    pub heap_used_bytes: u64,
     /// Tamanho da imagem do kernel.
     pub kernel_bytes: u64,
 }
