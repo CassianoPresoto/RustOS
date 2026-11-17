@@ -65,17 +65,24 @@ de fonte secundária e precisa da leitura do manual antes de virar código.
 Estas decisões estão na lista fechada do `AGENTS.md` (casos 2, 4 e 6): o agente
 não as toma.
 
-### 1. Modelo de controle de acesso (caso 6)
+### 1. Modelo de controle de acesso — decidido: A
 
-O modelo aparece para fora: syscalls, credenciais e permissões de arquivo.
+Decidido pelo dono do projeto em 2026-11-17, no PR #3:
 
-| Opção | Como é | A favor | Contra |
-| --- | --- | --- | --- |
-| **A — Capacidades por dentro, Unix na ABI Linux** | O núcleo só conhece handles com direitos (como Fuchsia e seL4). A camada da ABI Linux mantém uid/gid/grupos/capabilities(7) por processo e os traduz em direitos | Núcleo sem autoridade ambiente; programas Linux veem o modelo que esperam; é o desenho do Asterinas e do gVisor | Duas camadas de permissão para manter coerentes |
-| **B — Unix em tudo** | uid/gid e bits de modo no núcleo, como o Linux | Uma camada só; mais simples no começo | Autoridade ambiente (`root` pode tudo); endurecer depois exige LSM por cima |
-| **C — Só capacidades** | Sem uid/gid, nem na ABI | Modelo mais limpo | Quebra programa Linux que consulta uid ou permissão; contradiz a meta da fase 5 |
+- **No núcleo:** só handles com direitos que só diminuem, no modelo Fuchsia/seL4,
+  sem autoridade ambiente.
+- **Na camada da ABI Linux (fase 5):** uid, gid, grupos e capabilities(7) por
+  processo, traduzidos para esses direitos. É o desenho do Asterinas e do gVisor.
 
-**Recomendação: A.** Decidir até o começo da fase 4, quando nasce o primeiro handle.
+| Opção | Como é | Por que não |
+| --- | --- | --- |
+| **A — Capacidades por dentro, Unix na ABI Linux** ✅ | Escolhida | — |
+| B — Unix em tudo | uid/gid e bits de modo no núcleo, como o Linux | Autoridade ambiente (`root` pode tudo); endurecer depois exige LSM por cima |
+| C — Só capacidades | Sem uid/gid, nem na ABI | Quebra programa Linux que consulta uid ou permissão; contradiz a meta da fase 5 |
+
+Consequência para o código: nenhuma API do núcleo recebe uid. Quem precisa de
+permissão recebe um handle; a tradução de uid para direito mora no adaptador da
+ABI Linux.
 
 ### 2. Boot verificado (casos 2 e 4)
 

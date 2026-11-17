@@ -96,7 +96,7 @@ quando houver medição para decidir.
 - **Adaptador de entrada:** traduz syscalls Linux para os serviços do núcleo, no
   modelo do Asterinas.
 - **Credenciais Linux:** uid, gid, grupos e capabilities(7), traduzidos para os
-  direitos internos. O modelo depende da decisão do SDD 09.
+  direitos internos (modelo A, decidido no SDD 09).
 - **Primeiros aplicativos:** musl estático, BusyBox (`sh`, coreutils, `vi`, `top`),
   pipes, tabela de descritores e `/proc` mínimo.
 - **Shell embutido:** vira console de recuperação.
