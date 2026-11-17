@@ -92,6 +92,14 @@ inteiras.
 de pixels, `gfx` não sabe de terminal, e o `shell` só escreve texto em
 `core::fmt::Write`.
 
+## O caminho de uma interrupção (aarch64)
+
+`ICC_IAR1_EL1` (`arch/aarch64/src/gic_cpu.rs`) dentro da entrada de vetor
+(`exception.rs`) → `hal::Handlers::irq(Irq(intid))` → `interrupts::on_irq` →
+`platform::irq_source` traduz o INTID em `IrqSource` → o tratador da fonte (tique
+do timer, ou drenar a UART para a fila de entrada) → `ICC_EOIR1_EL1`. O núcleo
+dorme em `wfi` quando a fila está vazia. Detalhes em [SDD 04](04_boot.md).
+
 ## Portas de entrada que virão
 
 Hoje toda porta é de saída (o núcleo chama o hardware). Na fase 4, a entrada de

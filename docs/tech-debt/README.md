@@ -23,7 +23,7 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | # | Dívida | Status | Gatilho |
 | --- | --- | --- | --- |
 | [0001](0001-boot-pelo-limine.md) | Boot depende do Limine, binário de terceiros | Open | O tempo do bootloader passar a ser a maior parcela do boot medido em metal, ou o primeiro alvo sem UEFI |
-| [0002](0002-pl011-no-endereco-da-qemu-virt.md) | Endereço da PL011 fixo no da QEMU `virt` | Open | A primeira placa aarch64 que não seja a QEMU `virt` |
+| [0002](0002-dispositivos-no-endereco-da-qemu-virt.md) | Endereços da PL011 e do GICv3 fixos nos da QEMU `virt` | Open | A primeira placa aarch64 que não seja a QEMU `virt` |
 | [0003](0003-spinlock-sem-mascarar-interrupcao.md) | `SpinLock` não mascara interrupção | Open | O primeiro handler de interrupção que pegue um lock, inclusive o do console |
 | [0005](0005-panico-antes-do-console-e-mudo.md) | Pânico antes do console não aparece | Open | O primeiro boot que trave sem saída na serial, ou o primeiro boot em metal |
 | [0006](0006-memoria-do-bootloader-nao-recuperada.md) | Memória do bootloader não volta para o alocador | Open | O primeiro benchmark de memória ociosa contra o Linux |

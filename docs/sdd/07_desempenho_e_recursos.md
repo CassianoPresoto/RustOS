@@ -7,12 +7,14 @@
 
 | Métrica | Como | Valor hoje (QEMU, 256 MiB) |
 | --- | --- | --- |
-| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 100 541 / 61 725 bytes · aarch64: 86 500 / 59 952 bytes |
+| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 100 541 / 61 725 bytes · aarch64: 101 044 / 70 340 bytes (fase 1: vetores, GICv3, timer; eram 89 772 / 62 240 na base) |
 | Grade do terminal | 8 bytes por célula (`size_of::<Cell>()`), em frames contíguos | x86_64 1280x800: 158x47 células, 59 408 bytes (15 frames) · aarch64 1024x768: 126x45, 45 360 bytes (12 frames) |
 | Fonte própria | tabelas em `.rodata` (teste em `core/gfx/src/font`) | 3 884 bytes para 237 glifos 8x16 |
 | Shell | `size_of::<Shell<256, 32>>()`, na pilha do `kmain` | 8 880 bytes |
 | Metadado de memória física | bitmap do `BitmapFrameAllocator`: 1 bit por frame de 4 KiB | 8 144 bytes para 254 MiB rastreados (0,003%) |
 | Boot até o kernel | linha `boot timeline` (pedido *bootloader performance* do Limine) | Limine: 52 ms (aarch64, HVF) / 350 ms (x86_64, TCG) |
+| Pilha de exceção (aarch64) | `Memory::map_stack`: 4 páginas mapeadas e uma de guarda, por CPU | 16 384 bytes de RAM, mais as tabelas de página que faltarem |
+| Timer (aarch64) | linha `timer:` do boot; `CNTV` com `CVAL` absoluto, 100 Hz | 50 tiques em 497 ms (HVF) e 488 ms (TCG); núcleo ocioso em `wfi` usa 0,3% de CPU do host (HVF) |
 | Boot de parede | `make smoke` | inclui firmware EDK2: ~2–5 s, dominado pelo firmware |
 
 ### Para onde foi o tamanho do kernel

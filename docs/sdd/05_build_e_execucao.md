@@ -53,7 +53,7 @@ não há ISO nem `xorriso`.
 
 | | x86_64 | aarch64 |
 | --- | --- | --- |
-| Máquina | `-machine q35 -cpu max -m 256M` | `-machine virt -cpu max -m 256M` |
+| Máquina | `-machine q35 -cpu max -m 256M` | `-machine virt,gic-version=3 -cpu max -m 256M` |
 | Firmware | EDK2 em `-drive if=pflash,readonly=on` | EDK2 em `-bios` |
 | Disco | AHCI (padrão da q35) | `virtio-blk-pci` |
 | Tela | VGA padrão da q35 (GOP do OVMF) | `-device ramfb` (a `virt` não tem placa de vídeo) |
@@ -66,7 +66,14 @@ A resolução vem do `limine.conf` (`resolution:`), por ISA em
 
 Sem rede de propósito: a placa padrão da `virt` (virtio-net) carrega a option ROM
 `efi-virtio.rom` do iPXE, que o Ubuntu só instala com o pacote `ipxe-qemu`, e a
-QEMU sai antes do boot sem ela. TCG é sempre a reserva (`-accel <nativo> -accel tcg`). O firmware é procurado nos
+QEMU sai antes do boot sem ela. TCG é sempre a reserva (`-accel <nativo> -accel tcg`).
+
+`RUSTOS_ACCEL=tcg|hvf|kvm` troca a lista inteira por esse acelerador, sem reserva
+(`xtask/src/arch.rs`): serve para rodar o TCG no Mac, o caminho do CI (que não
+tem HVF): `RUSTOS_ACCEL=tcg make smoke ARCH=aarch64`. Valor desconhecido é ignorado, com aviso. O `gic-version=3` é fixo porque, sem ele, a
+`virt` escolhe a versão pelo acelerador (TCG: v2; HVF com o vGIC da Apple: v3).
+
+O firmware é procurado nos
 caminhos do Homebrew, Debian/Ubuntu e Fedora/Arch (`xtask/src/arch.rs`), ou nas
 variáveis `RUSTOS_FIRMWARE_X86_64` e `RUSTOS_FIRMWARE_AARCH64`.
 
