@@ -26,4 +26,5 @@ mesmo PR.
 | [`05_build_e_execucao.md`](05_build_e_execucao.md) | Toolchain, alvos, perfis, `make`/`xtask`, QEMU e firmware |
 | [`06_testes.md`](06_testes.md) | Os andares de teste, onde cada um roda e o que ainda não existe |
 | [`07_desempenho_e_recursos.md`](07_desempenho_e_recursos.md) | O que já se mede, como comparar com Linux e Windows, e as técnicas que a pesquisa aponta |
-| [`08_roadmap.md`](08_roadmap.md) | As fases, do esqueleto à compatibilidade com binários Linux |
+| [`08_roadmap.md`](08_roadmap.md) | A fila de implementação: as fases, o que cada uma entrega e quando termina |
+| [`09_seguranca.md`](09_seguranca.md) | Modelo de ameaça, mecanismos por fase com custo e fonte, e as decisões de segurança abertas |

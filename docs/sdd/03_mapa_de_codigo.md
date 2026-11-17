@@ -62,7 +62,7 @@
 | `xtask` | nada (só `std`) |
 
 O `rustos-sched` existe com fila e política testadas, mas o kernel ainda não o usa:
-ele entra com a troca de contexto, na fase 2 do [roadmap](08_roadmap.md). Por isso
+ele entra com a troca de contexto, na fase 3 do [roadmap](08_roadmap.md). Por isso
 também não está em `[workspace.dependencies]` (o cargo avisa dependência declarada
 e não usada).
 
