@@ -108,6 +108,8 @@ fn capture(
     commands: &[String],
 ) -> Result<(), String> {
     thread::sleep(SETTLE);
+    let mut monitor =
+        UnixStream::connect(socket).map_err(|error| format!("monitor da QEMU: {error}"))?;
     let stdin = child.stdin.as_mut().ok_or("QEMU sem stdin")?;
     let typed = commands
         .iter()
@@ -115,14 +117,16 @@ fn capture(
         .map(str::trim)
         .filter(|command| !command.is_empty());
     for command in typed {
-        stdin
-            .write_all(format!("{command}\r").as_bytes())
-            .and_then(|()| stdin.flush())
-            .map_err(|error| format!("digitar na serial: {error}"))?;
+        if let Some(keys) = command.strip_prefix(KEYS_PREFIX) {
+            press_keys(&mut monitor, keys)?;
+        } else {
+            stdin
+                .write_all(format!("{command}\r").as_bytes())
+                .and_then(|()| stdin.flush())
+                .map_err(|error| format!("digitar na serial: {error}"))?;
+        }
         thread::sleep(SETTLE);
     }
-    let mut monitor =
-        UnixStream::connect(socket).map_err(|error| format!("monitor da QEMU: {error}"))?;
     writeln!(monitor, "screendump {}", ppm.display())
         .map_err(|error| format!("screendump: {error}"))?;
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -134,6 +138,19 @@ fn capture(
         thread::sleep(Duration::from_millis(100));
     }
     Err(format!("a QEMU não gravou {}", ppm.display()))
+}
+
+/// Comando que começa assim vai pelo teclado da máquina (`sendkey` do monitor),
+/// em qcodes da QEMU separados por espaço: `keys: e c h o spc semicolon ret`.
+const KEYS_PREFIX: &str = "keys:";
+const KEY_GAP: Duration = Duration::from_millis(60);
+
+fn press_keys(monitor: &mut UnixStream, keys: &str) -> Result<(), String> {
+    for key in keys.split_whitespace() {
+        writeln!(monitor, "sendkey {key}").map_err(|error| format!("sendkey {key}: {error}"))?;
+        thread::sleep(KEY_GAP);
+    }
+    Ok(())
 }
 
 fn stream_stdout(child: &mut std::process::Child) -> Result<mpsc::Receiver<String>, String> {

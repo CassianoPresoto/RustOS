@@ -5,7 +5,7 @@ use core::{ptr, slice};
 
 use rustos_gfx::{MAX_SCALE, Pixel, PixelFormat, Rect, Rgb, Style, Surface, font};
 use rustos_hal::FramebufferInfo;
-use rustos_term::{Cell, Flags, Terminal, xterm_rgb};
+use rustos_term::{Cell, Flags, Keyboard, Layout, Terminal, xterm_rgb};
 
 use crate::memory::Memory;
 
@@ -120,6 +120,7 @@ pub struct Screen {
     scale: usize,
     grid_x: usize,
     grid_y: usize,
+    keyboard: Keyboard,
 }
 
 impl Screen {
@@ -162,6 +163,7 @@ impl Screen {
             scale,
             grid_x,
             grid_y,
+            keyboard: Keyboard::new(Layout::Us),
         };
         screen.surface.fill(screen.palette.background);
         screen.draw_bar();
@@ -176,14 +178,19 @@ impl Screen {
         (self.terminal.cols(), self.terminal.rows())
     }
 
-    /// Bytes que a tecla gera no terminal. O layout entra com o teclado da fase 1.
-    #[allow(clippy::unused_self, reason = "BASE: o teclado preenche")]
-    pub fn key_bytes<'b>(
-        &mut self,
-        _event: rustos_hal::KeyEvent,
-        _out: &'b mut [u8; 8],
-    ) -> &'b [u8] {
-        &[]
+    /// Tecla física vira bytes pelo layout e pelo modo de cursor do terminal.
+    pub fn key_event(&mut self, event: rustos_hal::KeyEvent, push: &mut dyn FnMut(u8)) {
+        let mut next = self.keyboard.feed(event);
+        while let Some(key) = next {
+            let mut bytes = [0; 8];
+            let len = self.terminal.encode_key(key, &mut bytes);
+            bytes[..len].iter().for_each(|&byte| push(byte));
+            next = self.keyboard.next_queued();
+        }
+    }
+
+    pub fn set_layout(&mut self, layout: Layout) {
+        self.keyboard.set_layout(layout);
     }
 
     /// Texto do kernel e do shell; `\n` vira `\r\n`, como o `onlcr` de um tty.

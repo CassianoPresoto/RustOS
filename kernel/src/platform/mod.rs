@@ -10,13 +10,13 @@ mod x86_64;
 
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::{
-    ARCH, PlatformConsole, TIMER_HZ, console, cpu, init_interrupts, irq_source, keyboard_event,
-    now_ns, protections, serial_irq_done, timer_tick, trigger,
+    ARCH, PlatformConsole, TIMER_HZ, console, cpu, has_keyboard, init_interrupts, irq_source,
+    keyboard_event, now_ns, protections, serial_irq_done, timer_tick, trigger,
 };
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::{
-    ARCH, PlatformConsole, TIMER_HZ, console, cpu, init_interrupts, irq_source, keyboard_event,
-    now_ns, protections, serial_irq_done, timer_tick, trigger,
+    ARCH, PlatformConsole, TIMER_HZ, console, cpu, has_keyboard, init_interrupts, irq_source,
+    keyboard_event, now_ns, protections, serial_irq_done, timer_tick, trigger,
 };
 
 /// Por que a plataforma não ligou as interrupções.

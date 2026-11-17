@@ -42,6 +42,7 @@ pub(crate) struct FakeHost {
     pub(crate) uptime: Option<u64>,
     pub(crate) size: (u16, u16),
     pub(crate) faults: bool,
+    pub(crate) keymap: core::cell::Cell<Option<&'static str>>,
 }
 
 impl FakeHost {
@@ -51,6 +52,7 @@ impl FakeHost {
             uptime: Some(65_000_000_000),
             size: (80, 24),
             faults: false,
+            keymap: core::cell::Cell::new(Some("us")),
         }
     }
 }
@@ -70,6 +72,22 @@ impl Host for FakeHost {
 
     fn fault_test(&self, _kind: crate::host::FaultTest) -> bool {
         self.faults
+    }
+
+    fn keymap(&self) -> Option<&'static str> {
+        self.keymap.get()
+    }
+
+    fn set_keymap(&self, name: &str) -> bool {
+        let known = match name {
+            "us" => Some("us"),
+            "br" => Some("br"),
+            _ => None,
+        };
+        if known.is_some() && self.keymap.get().is_some() {
+            self.keymap.set(known);
+        }
+        known.is_some()
     }
 }
 

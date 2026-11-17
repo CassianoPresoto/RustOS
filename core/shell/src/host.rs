@@ -15,6 +15,14 @@ pub trait Host {
     fn fault_test(&self, _kind: FaultTest) -> bool {
         false
     }
+    /// Layout do teclado em uso; `None` quando não há teclado.
+    fn keymap(&self) -> Option<&'static str> {
+        None
+    }
+    /// Troca o layout pelo nome (`us`, `br`); `false` se o nome é desconhecido.
+    fn set_keymap(&self, _name: &str) -> bool {
+        false
+    }
 }
 
 /// Exceção que o comando `fault` provoca.

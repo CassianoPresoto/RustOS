@@ -52,6 +52,11 @@ pub fn timer_tick() {}
 /// Chamado depois de drenar a UART, dentro da IRQ: limpa a interrupção dela.
 pub fn serial_irq_done() {}
 
+/// A `virt` não tem teclado nesta fase: a entrada é a serial.
+pub fn has_keyboard() -> bool {
+    false
+}
+
 /// Próxima tecla do teclado da plataforma, dentro da IRQ; `None` se não há.
 pub fn keyboard_event() -> Option<rustos_hal::KeyEvent> {
     None

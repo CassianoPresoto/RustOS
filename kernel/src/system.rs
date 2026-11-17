@@ -5,11 +5,30 @@ use core::hint::spin_loop;
 
 use rustos_hal::{BootInfo, Cpu, PAGE_SIZE, RegionKind};
 use rustos_shell::{DisplayInfo, FaultTest, Host, MemoryInfo, Shell, SystemInfo};
+use rustos_term::Layout;
 
 use crate::console::{self, Sink};
 use crate::interrupts;
 use crate::memory::Memory;
 use crate::platform;
+
+/// Layout em uso; só o laço do shell lê e escreve, numa CPU.
+static KEYMAP: KeymapCell = KeymapCell(core::cell::Cell::new(Some("us")));
+
+struct KeymapCell(core::cell::Cell<Option<&'static str>>);
+
+// SAFETY: só o laço do shell, numa CPU e fora de interrupção, usa a célula.
+unsafe impl Sync for KeymapCell {}
+
+impl KeymapCell {
+    fn get(&self) -> Option<&'static str> {
+        self.0.get()
+    }
+
+    fn set(&self, value: Option<&'static str>) {
+        self.0.set(value);
+    }
+}
 
 /// Tiques que o autoteste espera: 50 ms a 100 Hz.
 const SELF_TEST_TICKS: u64 = 5;
@@ -72,6 +91,22 @@ impl<B: BootInfo> Host for System<'_, B> {
 
     fn uptime_ns(&self) -> Option<u64> {
         platform::now_ns()
+    }
+
+    fn keymap(&self) -> Option<&'static str> {
+        platform::has_keyboard().then(|| KEYMAP.get()).flatten()
+    }
+
+    fn set_keymap(&self, name: &str) -> bool {
+        let (layout, label) = match name {
+            "us" => (Layout::Us, "us"),
+            "br" | "abnt2" => (Layout::BrAbnt2, "br"),
+            _ => return false,
+        };
+        if console::set_layout(layout) {
+            KEYMAP.set(Some(label));
+        }
+        true
     }
 
     fn fault_test(&self, kind: FaultTest) -> bool {

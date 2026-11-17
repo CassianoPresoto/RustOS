@@ -42,11 +42,17 @@ pub fn read_byte() -> Option<u8> {
 /// Tecla física vira bytes de terminal, pelo layout e pelo modo de cursor da tela.
 pub fn key_event(event: KeyEvent, mut push: impl FnMut(u8)) {
     if let Some(screen) = SCREEN.lock().as_mut() {
-        let mut bytes = [0; 8];
-        for &byte in screen.key_bytes(event, &mut bytes) {
-            push(byte);
-        }
+        screen.key_event(event, &mut push);
     }
+}
+
+/// Troca o layout do teclado; `false` sem tela, onde o teclado não é lido.
+pub fn set_layout(layout: rustos_term::Layout) -> bool {
+    SCREEN
+        .lock()
+        .as_mut()
+        .map(|screen| screen.set_layout(layout))
+        .is_some()
 }
 
 /// Caminho do pânico: não espera nenhum lock, que pode estar com quem entrou em pânico.

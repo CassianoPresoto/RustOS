@@ -15,10 +15,12 @@ use rustos_arch_x86_64::{
     Protections, X86Cpu, X86PageMapper, breakpoint, cpu_features, detect_apic, enable_protections,
     install_traps, publish_apic, rdtsc,
 };
+use rustos_driver_i8042::I8042;
 use rustos_driver_uart16550::{DIVISOR_115200, Uart16550};
 use rustos_hal::{
     BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, PAGE_SIZE, PageMapper, PhysAddr,
 };
+use rustos_sync::SpinLock;
 
 use super::{PlatformError, Protection};
 use crate::interrupts::{FaultTest, IrqSource};
@@ -41,6 +43,11 @@ const PIT_MAX_POLLS: u32 = 50_000_000;
 /// sem redirecionamento do MADT (DEBT-0009).
 const IOAPIC_PIN_KEYBOARD: u8 = 1;
 const IOAPIC_PIN_SERIAL: u8 = 4;
+/// Base das portas do controlador PS/2: dado em 0x60, status e comando em 0x64.
+const I8042_PORTS: u16 = 0x60;
+
+/// Só a IRQ do teclado lê depois do boot: não há outro dono para disputar.
+static KEYBOARD: SpinLock<Option<I8042<PortBus>>> = SpinLock::new(None);
 
 static READY: AtomicBool = AtomicBool::new(false);
 /// Primeira página, sem mapeamento, da pilha de #DF: lê-la provoca um #PF.
@@ -129,7 +136,8 @@ pub fn init_interrupts(
     let (apic, mmio) = enable_local_apic(mode, memory, &mut mapper)?;
     let destination = u8::try_from(apic.local().id(apic.is_x2apic()))
         .map_err(|_| PlatformError::MissingFeature("8-bit apic id"))?;
-    route_io_apic(memory, &mut mapper, destination)?;
+    let keyboard = start_keyboard();
+    route_io_apic(memory, &mut mapper, destination, keyboard)?;
     publish_apic(apic, mmio);
     start_clocks(&apic)?;
 
@@ -183,10 +191,22 @@ fn enable_local_apic(
     }
 }
 
+/// Liga o controlador PS/2; sem ele, o pino do teclado fica mascarado.
+fn start_keyboard() -> bool {
+    // SAFETY: as portas 0x60 e 0x64 são só do teclado; este é o boot, com IF desligado.
+    let mut controller = I8042::new(unsafe { PortBus::new(I8042_PORTS) });
+    let ready = controller.init().is_ok();
+    if ready {
+        *KEYBOARD.lock() = Some(controller);
+    }
+    ready
+}
+
 fn route_io_apic(
     memory: &mut Memory,
     mapper: &mut X86PageMapper,
     destination: u8,
+    keyboard: bool,
 ) -> Result<(), PlatformError> {
     let virt = map_device(
         mapper,
@@ -202,7 +222,7 @@ fn route_io_apic(
         .route(IOAPIC_PIN_SERIAL, VECTOR_SERIAL, destination, false)
         .map_err(missing)?;
     ioapic
-        .route(IOAPIC_PIN_KEYBOARD, VECTOR_KEYBOARD, destination, true)
+        .route(IOAPIC_PIN_KEYBOARD, VECTOR_KEYBOARD, destination, !keyboard)
         .map_err(missing)
 }
 
@@ -240,9 +260,14 @@ pub fn timer_tick() {}
 /// Ler o `DATA` até esvaziar a FIFO já baixou a linha da UART; o EOI é do `arch/`.
 pub fn serial_irq_done() {}
 
-/// O teclado PS/2 ainda não é lido: o pino está roteado e mascarado.
+/// Se o controlador PS/2 respondeu no boot.
+pub fn has_keyboard() -> bool {
+    KEYBOARD.lock().is_some()
+}
+
+/// Próxima tecla do PS/2, dentro da IRQ 1; ler o dado baixa a linha.
 pub fn keyboard_event() -> Option<KeyEvent> {
-    None
+    KEYBOARD.lock().as_mut().and_then(I8042::read_event)
 }
 
 /// Nanossegundos desde que `init_interrupts` ligou o relógio; `None` antes.

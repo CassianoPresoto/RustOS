@@ -60,6 +60,11 @@ pub(crate) const COMMANDS: &[Command] = &[
         run: history,
     },
     Command {
+        name: "keymap",
+        summary: "show or change the keyboard layout (us | br)",
+        run: keymap,
+    },
+    Command {
         name: "mem",
         summary: "show the physical memory usage",
         run: mem,
@@ -161,6 +166,22 @@ fn fault(ctx: &mut Ctx<'_>) -> fmt::Result {
     } else {
         ctx.out.write_str("fault: not available yet\r\n")
     }
+}
+
+fn keymap(ctx: &mut Ctx<'_>) -> fmt::Result {
+    if ctx.host.keymap().is_none() {
+        return ctx.out.write_str("keymap: no keyboard\r\n");
+    }
+    if let Some(&name) = ctx.args.first()
+        && !ctx.host.set_keymap(name)
+    {
+        return write!(ctx.out, "keymap: unknown layout '{name}' (us, br)\r\n");
+    }
+    write!(
+        ctx.out,
+        "keymap: {}\r\n",
+        ctx.host.keymap().unwrap_or("none")
+    )
 }
 
 fn uptime(ctx: &mut Ctx<'_>) -> fmt::Result {
@@ -478,6 +499,22 @@ mod tests {
         let mut host = FakeHost::new();
         host.faults = true;
         assert!(run("fault", &["break"], &host).contains("back in the shell"));
+    }
+
+    #[test]
+    fn keymap_shows_and_changes_the_layout() {
+        let host = FakeHost::new();
+        assert_eq!(run("keymap", &[], &host), "keymap: us\r\n");
+        assert_eq!(run("keymap", &["br"], &host), "keymap: br\r\n");
+        assert!(run("keymap", &["dvorak"], &host).contains("unknown layout 'dvorak'"));
+        assert_eq!(run("keymap", &[], &host), "keymap: br\r\n");
+    }
+
+    #[test]
+    fn keymap_without_keyboard_says_so() {
+        let host = FakeHost::new();
+        host.keymap.set(None);
+        assert_eq!(run("keymap", &["br"], &host), "keymap: no keyboard\r\n");
     }
 
     #[test]
