@@ -19,6 +19,8 @@ mod apic;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod cpu;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+mod entropy;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod mmio;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod mmu;
@@ -35,6 +37,8 @@ mod traps;
 pub use apic::{ApicAccess, ApicMode, detect as detect_apic, eoi, publish as publish_apic};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use cpu::X86Cpu;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub use entropy::X86Entropy;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use mmio::MmioBus;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]

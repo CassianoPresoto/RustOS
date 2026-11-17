@@ -13,6 +13,8 @@ pub mod walk;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod cpu;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+mod entropy;
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod exception;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod gic_cpu;
@@ -27,6 +29,8 @@ pub mod timer;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use cpu::Aarch64Cpu;
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub use entropy::Aarch64Entropy;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use mmio::MmioBus;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
