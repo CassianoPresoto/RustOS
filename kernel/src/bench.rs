@@ -3,11 +3,11 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use rustos_sched::TaskId;
+use rustos_sched::{Composite, SchedParams, Scheduler, TaskId};
 use rustos_shell::BenchReport;
 
-use crate::platform;
 use crate::task::{self, Spawn};
+use crate::{interrupts, platform};
 
 /// Quanto cada medida repete.
 #[derive(Clone, Copy, Debug)]
@@ -98,6 +98,7 @@ fn ping_pong(rounds: u32, simd: bool) -> Option<u64> {
         entry,
         arg: 0,
         simd,
+        params: SchedParams::fair(0),
     };
     let second = task::spawn(spawn("pong", pong)).ok()?;
     PONG.store(second.as_u32() as usize, Ordering::Relaxed);
@@ -125,6 +126,7 @@ pub fn wake_jitter_ns(samples: u32, loaded: bool) -> Option<(u64, u64)> {
             entry: hog,
             arg: 0,
             simd: false,
+            params: SchedParams::fair(0),
         })
         .ok()?;
     }
@@ -144,11 +146,57 @@ pub fn wake_jitter_ns(samples: u32, loaded: bool) -> Option<(u64, u64)> {
     Some((sum / u64::from(samples.max(1)), max))
 }
 
+/// Interrupções do timer numa janela em que só a ociosa roda: sem tique periódico, só a
+/// que acorda quem dorme (uma). Devolve a contagem e o tamanho da janela, em ms.
+pub fn idle_timer_irqs() -> (u64, u64) {
+    const WINDOW_MS: u64 = 50;
+    let before = interrupts::ticks();
+    let deadline = platform::now_ns().unwrap_or(0) + WINDOW_MS * 1_000_000;
+    task::sleep_until(deadline);
+    (interrupts::ticks() - before, WINDOW_MS)
+}
+
+/// Nanossegundos por `pick_next` e por `tick` da política, com 8 tarefas prontas e um
+/// relógio de mentira que anda uma fatia (ou um décimo) por chamada: o custo é o do código.
+pub fn policy_ns(rounds: u32) -> (u64, u64) {
+    const TASKS: u32 = 8;
+    let mut policy = Composite::<{ task::RT_SLOTS }, { task::MAX_TASKS }>::new();
+    for raw in 0..TASKS {
+        if policy
+            .add(TaskId::new(raw), SchedParams::fair(0), 0)
+            .is_err()
+        {
+            return (0, 0);
+        }
+    }
+    let rounds = u64::from(rounds.max(1));
+    let (mut pick, mut tick) = (u64::MAX, u64::MAX);
+    let mut now = 0_u64;
+    for _ in 0..4 {
+        let start = platform::cycles();
+        for _ in 0..rounds {
+            now += 700_000;
+            core::hint::black_box(policy.pick_next(now));
+        }
+        let spent = platform::cycles_to_ns(platform::cycles().wrapping_sub(start));
+        pick = pick.min(spent / rounds);
+        let start = platform::cycles();
+        for _ in 0..rounds {
+            now += 70_000;
+            core::hint::black_box(policy.tick(now));
+        }
+        let spent = platform::cycles_to_ns(platform::cycles().wrapping_sub(start));
+        tick = tick.min(spent / rounds);
+    }
+    (pick, tick)
+}
+
 pub fn run(effort: Effort) -> Option<BenchReport> {
     let plain = context_switch_ns(effort.rounds, false)?;
     let simd = context_switch_ns(effort.rounds, true)?;
     let (idle_mean, idle_max) = wake_jitter_ns(effort.samples, false)?;
     let (load_mean, load_max) = wake_jitter_ns(effort.samples, true)?;
+    let (pick_next_ns, tick_ns) = policy_ns(effort.rounds);
     Some(BenchReport {
         switch_ns: plain,
         switch_simd_ns: simd,
@@ -157,6 +205,8 @@ pub fn run(effort: Effort) -> Option<BenchReport> {
         wake_max_ns: idle_max,
         wake_loaded_mean_ns: load_mean,
         wake_loaded_max_ns: load_max,
+        pick_next_ns,
+        tick_ns,
     })
 }
 
@@ -201,6 +251,7 @@ pub fn simd_self_test() -> Option<u64> {
             entry: simd_worker,
             arg: index,
             simd: true,
+            params: SchedParams::fair(0),
         })
         .ok()?;
         first.get_or_insert(spawned);

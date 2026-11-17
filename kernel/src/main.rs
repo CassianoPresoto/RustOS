@@ -172,11 +172,13 @@ fn report_tasks(boot: &impl BootInfo, memory: &memory::Memory) -> bool {
         summary.components
     );
     kprintln!(
-        "[rustos] sched: round-robin, {} Hz slice, {} tasks max, timer {}",
-        platform::TIMER_HZ,
+        "[rustos] sched: fifo+eevdf, {} us base slice, {} tasks max, timer {}",
+        rustos_sched::eevdf::BASE_SLICE_NS / 1000,
         task::MAX_TASKS,
         platform::timer_mode()
     );
+    let (irqs, window_ms) = bench::idle_timer_irqs();
+    kprintln!("[rustos] idle: {irqs} timer irqs in {window_ms} ms (tickless)");
     let preempted = bench::simd_self_test();
     match preempted {
         Some(count) => {
@@ -186,9 +188,11 @@ fn report_tasks(boot: &impl BootInfo, memory: &memory::Memory) -> bool {
     }
     match bench::run(bench::BOOT) {
         Some(report) => kprintln!(
-            "[rustos] switch: {} ns ({} ns with simd), wake jitter: mean {} ns, max {} ns ({} samples)",
+            "[rustos] switch: {} ns ({} with simd), pick_next {} ns, tick {} ns, wake: mean {} ns, max {} ns, {} samples",
             report.switch_ns,
             report.switch_simd_ns,
+            report.pick_next_ns,
+            report.tick_ns,
             report.wake_mean_ns,
             report.wake_max_ns,
             report.wake_samples

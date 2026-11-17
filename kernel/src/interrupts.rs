@@ -37,8 +37,11 @@ static HANDLERS: Handlers = Handlers {
     irq: on_irq,
     preempt: task::preempt,
 };
-/// Período do tique, que é também a fatia do rodízio.
+/// Período do tique de boot, antes de o escalonador ligar; depois dele não há tique periódico.
 const TICK_NS: u64 = 1_000_000_000 / platform::TIMER_HZ as u64;
+/// Prazo do timer quando nada o exige: longe, como o `start` do `CNTV` o deixa.
+const PARKED_NS: u64 = 3_600_000_000_000;
+/// Interrupções do timer desde o boot.
 static TICKS: AtomicU64 = AtomicU64::new(0);
 static NEXT_TICK_NS: AtomicU64 = AtomicU64::new(0);
 /// O prazo que está no timer de um tiro agora.
@@ -84,21 +87,22 @@ pub fn in_irq() -> bool {
     IN_IRQ.load(Ordering::Relaxed)
 }
 
-/// IRQ do timer: conta o tique, acorda quem dorme e rearma para o que vier antes,
-/// o próximo tique ou o próximo acordar. Pede a troca no fim da IRQ se houve um dos dois.
+/// IRQ do timer. Antes do escalonador, o tique periódico do autoteste. Depois, só o
+/// que ele pede: o fim da fatia da corrente ou o próximo acordar; sem nenhum dos
+/// dois o timer fica longe e a CPU ociosa não acorda por ele. A troca vem no fim da IRQ.
 fn on_timer() {
     let now = platform::now_ns().unwrap_or(0);
+    TICKS.fetch_add(1, Ordering::Relaxed);
+    if task::is_ready() {
+        match task::timer_irq(now) {
+            Some(at) => arm(at),
+            None => arm(now + PARKED_NS),
+        }
+        return;
+    }
     let tick_due = NEXT_TICK_NS.load(Ordering::Relaxed);
-    let ticked = now >= tick_due;
-    if ticked {
-        TICKS.fetch_add(1, Ordering::Relaxed);
-        NEXT_TICK_NS.store(next_tick(tick_due, now), Ordering::Relaxed);
-    }
-    let (woke, next_wake) = task::wake_due(now);
-    if ticked || woke {
-        task::request_reschedule();
-    }
-    arm(NEXT_TICK_NS.load(Ordering::Relaxed).min(next_wake));
+    NEXT_TICK_NS.store(next_tick(tick_due, now), Ordering::Relaxed);
+    arm(NEXT_TICK_NS.load(Ordering::Relaxed));
 }
 
 /// O tique seguinte, um período depois do anterior sem acumular atraso; se a IRQ
@@ -108,6 +112,7 @@ const fn next_tick(previous: u64, now: u64) -> u64 {
     if next > now { next } else { now + TICK_NS }
 }
 
+/// Interrupções do timer desde o boot.
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }

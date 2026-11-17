@@ -1,6 +1,6 @@
 //! Threads do kernel: tabela de tarefas, escalonador global e troca de contexto.
-//! A política é o `RoundRobin` de `core/sched`; aqui moram o estado, a pilha e a
-//! área de FPU/SIMD de cada tarefa, e o caminho da preempção (SDD 15).
+//! A política é o `Composite` de `core/sched` (FIFO e EEVDF); aqui moram o estado,
+//! a pilha e a área de FPU/SIMD de cada tarefa, e o caminho da preempção (SDD 15).
 
 use alloc::alloc::{alloc_zeroed, dealloc};
 use core::alloc::Layout;
@@ -10,7 +10,7 @@ use core::slice;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use rustos_hal::{Cpu, MapError, VirtAddr};
-use rustos_sched::{RoundRobin, TaskId};
+use rustos_sched::{Composite, SchedError, SchedParams, Scheduler as Policy, TaskId};
 
 use crate::frames::Frames;
 use crate::interrupts;
@@ -20,10 +20,16 @@ use crate::sync::{IrqLock, locks_held};
 
 /// Tarefas ao mesmo tempo, com a ociosa e a do boot.
 pub const MAX_TASKS: usize = 16;
-/// A ociosa não entra no rodízio: roda quando ninguém mais está pronto.
+/// A ociosa fica fora da política: roda quando ela não devolve ninguém.
 const IDLE: usize = 0;
 /// A do boot vira a primeira tarefa e, no fim, o shell.
 const BOOT: usize = 1;
+/// Vagas da classe de tempo real na política; nenhuma tarefa do kernel a usa ainda.
+pub const RT_SLOTS: usize = 4;
+/// Fatia pedida pelo shell: curta, para o interativo acordar na frente de quem só calcula.
+const SHELL_SLICE_NS: u64 = 200_000;
+/// A tarefa do boot vira o shell: classe justa, nice 0 e a fatia curta.
+pub const SHELL_PARAMS: SchedParams = SchedParams::fair_with_slice(0, SHELL_SLICE_NS);
 /// Páginas da pilha de uma tarefa, fora a de guarda: 32 KiB.
 const STACK_PAGES: u64 = 8;
 const IDLE_STACK_PAGES: u64 = 4;
@@ -45,6 +51,7 @@ pub enum State {
 pub enum TaskError {
     NoSlot,
     NoMemory,
+    Sched(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] SchedError),
     Stack(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] MapError),
     Fpu(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] platform::PlatformError),
 }
@@ -57,6 +64,7 @@ pub struct Spawn {
     pub arg: usize,
     /// Usa FPU/SIMD: só essas pagam o salvamento e a restauração na troca.
     pub simd: bool,
+    pub params: SchedParams,
 }
 
 /// Área de estado de FPU/SIMD, alocada uma vez por tarefa que a usa.
@@ -104,16 +112,17 @@ struct Task {
     arg: usize,
     /// A pilha mapeada fica com o slot: a tarefa nova que o reusa não mapeia outra.
     stack_top: Option<VirtAddr>,
+    /// Quando acorda, se está em `Sleeping`.
     wake_at_ns: u64,
     /// `unpark` que chegou antes do `park`.
     permit: bool,
-    cpu_cycles: u64,
-    since: u64,
+    cpu_ns: u64,
+    /// Quando a tarefa assumiu a CPU, no relógio `now_ns`.
+    since_ns: u64,
     switches: u64,
     /// A tarefa usa FPU/SIMD: a troca salva e restaura `fpu`.
     simd: bool,
     fpu: Option<FpuArea>,
-    in_ring: bool,
 }
 
 impl Task {
@@ -125,51 +134,54 @@ impl Task {
         stack_top: None,
         wake_at_ns: 0,
         permit: false,
-        cpu_cycles: 0,
-        since: 0,
+        cpu_ns: 0,
+        since_ns: 0,
         switches: 0,
         simd: false,
         fpu: None,
-        in_ring: false,
     };
 }
 
+/// O estado do escalonador: a política só conhece `TaskId` (o slot), e a tabela
+/// guarda o resto. `next_wake_ns` é o acordar mais próximo dos que dormem.
 #[derive(Debug)]
 struct Scheduler {
     tasks: [Task; MAX_TASKS],
-    policy: RoundRobin<MAX_TASKS>,
+    policy: Composite<RT_SLOTS, MAX_TASKS>,
     current: usize,
+    next_wake_ns: u64,
 }
 
 impl Scheduler {
     const fn new() -> Self {
         Self {
             tasks: [Task::FREE; MAX_TASKS],
-            policy: RoundRobin::new(),
+            policy: Composite::new(),
             current: BOOT,
+            next_wake_ns: u64::MAX,
         }
     }
 
-    /// A próxima pronta, na ordem do rodízio, no máximo uma volta; sem nenhuma, a
-    /// ociosa. O rodízio não remove ninguém: quem não está pronto é pulado (DEBT-0033).
-    fn pick(&mut self) -> usize {
-        for _ in 0..MAX_TASKS {
-            let Some(id) = self.policy.tick() else { break };
-            let slot = id.as_u32() as usize;
-            if self.tasks[slot].state == State::Ready {
-                return slot;
-            }
+    /// O próximo disparo que o timer de um tiro precisa: o fim da fatia da corrente
+    /// ou o próximo acordar, o que vier antes. `None`: nada o exige.
+    fn next_timer_ns(&self, now: u64) -> Option<u64> {
+        let slice = self.policy.next_deadline_ns(now);
+        let wake = (self.next_wake_ns != u64::MAX).then_some(self.next_wake_ns);
+        match (slice, wake) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
-        IDLE
     }
 
-    fn enroll(&mut self, slot: usize) {
-        if !self.tasks[slot].in_ring && slot != IDLE {
-            let id = TaskId::new(u32::try_from(slot).unwrap_or(0));
-            if self.policy.admit(id).is_ok() {
-                self.tasks[slot].in_ring = true;
-            }
+    /// Antecipa o timer se o que a política ou os que dormem pedem vem antes do armado.
+    fn rearm(&self, now: u64) {
+        if let Some(at) = self.next_timer_ns(now) {
+            interrupts::arm_no_later_than(at);
         }
+    }
+
+    fn id(slot: usize) -> TaskId {
+        TaskId::new(u32::try_from(slot).unwrap_or(0))
     }
 }
 
@@ -182,6 +194,7 @@ unsafe impl Sync for Contexts {}
 
 static CONTEXTS: Contexts =
     Contexts([const { UnsafeCell::new(platform::Context::empty()) }; MAX_TASKS]);
+/// Uma CPU só, e o estado de troca é global (DEBT-0036).
 static SCHED: IrqLock<Scheduler> = IrqLock::new(Scheduler::new());
 
 /// Tabelas de página e frames para mapear as pilhas das tarefas novas.
@@ -192,8 +205,6 @@ struct Space {
 
 static SPACE: IrqLock<Option<Space>> = IrqLock::new(None);
 static READY: AtomicBool = AtomicBool::new(false);
-/// Troca pedida para o fim da IRQ em curso. Uma CPU só (DEBT-0036).
-static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
 /// Quem espera a entrada do teclado ou da serial: slot + 1, ou 0.
 static INPUT_WAITER: AtomicUsize = AtomicUsize::new(0);
 
@@ -208,12 +219,19 @@ pub unsafe fn init(frames: Frames, direct_map_offset: u64) -> Result<FpuSummary,
     *SPACE.lock() = Some(Space { tables, frames });
     {
         let mut sched = SCHED.lock();
+        let now = now();
         let boot = &mut sched.tasks[BOOT];
         boot.name = "init";
         boot.state = State::Running;
-        boot.since = platform::cycles();
+        boot.since_ns = now;
+        boot.simd = false;
         sched.current = BOOT;
-        sched.enroll(BOOT);
+        let id = Scheduler::id(BOOT);
+        sched
+            .policy
+            .add(id, SHELL_PARAMS, now)
+            .map_err(TaskError::Sched)?;
+        sched.policy.pick_next(now);
     }
     start(
         IDLE,
@@ -222,6 +240,7 @@ pub unsafe fn init(frames: Frames, direct_map_offset: u64) -> Result<FpuSummary,
             entry: idle_main,
             arg: 0,
             simd: false,
+            params: SHELL_PARAMS,
         },
         IDLE_STACK_PAGES,
     )?;
@@ -275,7 +294,7 @@ fn start(slot: usize, config: Spawn, stack_pages: u64) -> Result<(), TaskError> 
     task.arg = config.arg;
     task.stack_top = Some(top);
     task.permit = false;
-    task.cpu_cycles = 0;
+    task.cpu_ns = 0;
     task.switches = 0;
     task.simd = config.simd;
     if area.is_some() {
@@ -283,8 +302,15 @@ fn start(slot: usize, config: Spawn, stack_pages: u64) -> Result<(), TaskError> 
     } else if let Some(existing) = task.fpu.as_mut() {
         existing.reset();
     }
-    task.state = State::Ready;
-    sched.enroll(slot);
+    if slot != IDLE {
+        let now = now();
+        sched
+            .policy
+            .add(Scheduler::id(slot), config.params, now)
+            .map_err(TaskError::Sched)?;
+        sched.rearm(now);
+    }
+    sched.tasks[slot].state = State::Ready;
     Ok(())
 }
 
@@ -319,35 +345,46 @@ fn idle_main(_: usize) {
     }
 }
 
+/// A ociosa roda: a política pede troca se alguém ficou pronto.
 fn has_ready() -> bool {
-    SCHED
-        .lock()
-        .tasks
-        .iter()
-        .any(|task| task.state == State::Ready)
+    SCHED.lock().policy.needs_resched()
+}
+
+fn now() -> u64 {
+    platform::now_ns().unwrap_or(0)
 }
 
 /// Escolhe a próxima tarefa e troca para ela. Chamar com a interrupção mascarada
 /// e sem `IrqLock` preso: o lock do escalonador é solto antes da troca.
 fn schedule() {
+    schedule_at(now());
+}
+
+/// `schedule` com o relógio que o chamador já leu: a leitura custa de 15 a 25 ns no HVF.
+fn schedule_at(now_ns: u64) {
     debug_assert_eq!(locks_held(), 0, "troca de contexto com IrqLock preso");
     let (from, to, save, load) = {
         let mut sched = SCHED.lock();
-        let now = platform::cycles();
         let from = sched.current;
         let outgoing = &mut sched.tasks[from];
-        outgoing.cpu_cycles += now.wrapping_sub(outgoing.since);
+        outgoing.cpu_ns += now_ns.saturating_sub(outgoing.since_ns);
         if outgoing.state == State::Running {
             outgoing.state = State::Ready;
         }
-        let to = sched.pick();
+        let to = sched
+            .policy
+            .pick_next(now_ns)
+            .map_or(IDLE, |id| id.as_u32() as usize);
         let incoming = &mut sched.tasks[to];
         incoming.state = State::Running;
-        incoming.since = now;
+        incoming.since_ns = now_ns;
+        if to != from {
+            incoming.switches += 1;
+        }
+        sched.rearm(now_ns);
         if to == from {
             return;
         }
-        incoming.switches += 1;
         sched.current = to;
         let save = fpu_pointer(&sched.tasks[from]);
         let load = fpu_pointer(&sched.tasks[to]);
@@ -380,7 +417,14 @@ pub fn yield_now() {
     assert_task_context();
     let cpu = platform::cpu();
     let were_enabled = cpu.save_and_disable_interrupts();
-    schedule();
+    let now = now();
+    {
+        let mut sched = SCHED.lock();
+        if sched.current != IDLE {
+            sched.policy.yield_current(now);
+        }
+    }
+    schedule_at(now);
     cpu.restore_interrupts(were_enabled);
 }
 
@@ -389,16 +433,18 @@ pub fn sleep_until(deadline_ns: u64) {
     assert_task_context();
     let cpu = platform::cpu();
     let were_enabled = cpu.save_and_disable_interrupts();
-    if platform::now_ns().is_some_and(|now| now < deadline_ns) {
+    let now = now();
+    if now < deadline_ns {
         {
             let mut sched = SCHED.lock();
             let current = sched.current;
             let task = &mut sched.tasks[current];
             task.wake_at_ns = deadline_ns;
             task.state = State::Sleeping;
+            sched.next_wake_ns = sched.next_wake_ns.min(deadline_ns);
+            sched.policy.sleep(Scheduler::id(current), now);
         }
-        interrupts::arm_no_later_than(deadline_ns);
-        schedule();
+        schedule_at(now);
     }
     cpu.restore_interrupts(were_enabled);
 }
@@ -414,6 +460,7 @@ pub fn park() {
 
 /// `park` para quem já decidiu com a interrupção mascarada, sem janela para perder o acordar.
 pub fn park_masked() {
+    let now = now();
     {
         let mut sched = SCHED.lock();
         let current = sched.current;
@@ -422,8 +469,9 @@ pub fn park_masked() {
             return;
         }
         task.state = State::Blocked;
+        sched.policy.sleep(Scheduler::id(current), now);
     }
-    schedule();
+    schedule_at(now);
 }
 
 /// Acorda a tarefa de `slot`, ou deixa o aviso para o próximo `park` dela.
@@ -435,6 +483,9 @@ pub fn unpark(id: TaskId) {
         let task = &mut sched.tasks[id.as_u32() as usize];
         if task.state == State::Blocked {
             task.state = State::Ready;
+            let now = now();
+            sched.policy.wake(id, now);
+            sched.rearm(now);
         } else {
             task.permit = true;
         }
@@ -450,6 +501,7 @@ pub fn exit() -> ! {
         let mut sched = SCHED.lock();
         let current = sched.current;
         sched.tasks[current].state = State::Exited;
+        sched.policy.remove(Scheduler::id(current));
     }
     schedule();
     unreachable!("tarefa encerrada voltou a rodar");
@@ -479,35 +531,37 @@ pub fn switches(id: TaskId) -> u64 {
     SCHED.lock().tasks[id.as_u32() as usize].switches
 }
 
-/// Acorda quem dorme com prazo vencido. Devolve se alguém acordou e o prazo mais
-/// próximo dos que ainda dormem (`u64::MAX` se nenhum). Chamado da IRQ do timer.
-pub fn wake_due(now_ns: u64) -> (bool, u64) {
-    let mut woke = false;
-    let mut next = u64::MAX;
+/// Chamado da IRQ do timer: acorda quem dorme com prazo vencido, cobra a corrente
+/// e devolve o próximo disparo que o escalonador pede (`None`: nenhum, sem tique).
+pub fn timer_irq(now_ns: u64) -> Option<u64> {
     let mut sched = SCHED.lock();
-    for task in &mut sched.tasks {
+    let mut next = u64::MAX;
+    for slot in 0..MAX_TASKS {
+        let task = &mut sched.tasks[slot];
         if task.state != State::Sleeping {
             continue;
         }
         if task.wake_at_ns <= now_ns {
             task.state = State::Ready;
-            woke = true;
+            sched.policy.wake(Scheduler::id(slot), now_ns);
         } else {
             next = next.min(task.wake_at_ns);
         }
     }
-    (woke, next)
+    sched.next_wake_ns = next;
+    sched.policy.tick(now_ns);
+    sched.next_timer_ns(now_ns)
 }
 
-/// Pede a troca no retorno da interrupção em curso.
-pub fn request_reschedule() {
-    NEED_RESCHED.store(true, Ordering::Relaxed);
+/// O escalonador já tem a política ligada; antes disso o tique periódico manda.
+pub fn is_ready() -> bool {
+    READY.load(Ordering::Acquire)
 }
 
 /// Chamado pelo `arch/` no fim de toda IRQ, depois do EOI, com a interrupção
 /// mascarada e na pilha da tarefa interrompida: o quadro dela sobrevive à troca.
 pub fn preempt() {
-    if READY.load(Ordering::Acquire) && NEED_RESCHED.swap(false, Ordering::Relaxed) {
+    if READY.load(Ordering::Acquire) && SCHED.lock().policy.needs_resched() {
         schedule();
     }
 }
@@ -525,7 +579,6 @@ pub fn notify_input() {
     if waiter != 0 {
         let id = TaskId::new(u32::try_from(waiter - 1).unwrap_or(0));
         unpark(id);
-        request_reschedule();
     }
 }
 
@@ -544,13 +597,13 @@ pub struct Snapshot {
 pub fn snapshot() -> [Option<Snapshot>; MAX_TASKS] {
     let mut out = [None; MAX_TASKS];
     let sched = SCHED.lock();
-    let now = platform::cycles();
+    let now = now();
     for (slot, task) in sched.tasks.iter().enumerate() {
         if matches!(task.state, State::Free | State::Exited | State::New) {
             continue;
         }
         let running = if slot == sched.current {
-            now.wrapping_sub(task.since)
+            now.saturating_sub(task.since_ns)
         } else {
             0
         };
@@ -558,7 +611,7 @@ pub fn snapshot() -> [Option<Snapshot>; MAX_TASKS] {
             id: u32::try_from(slot).unwrap_or(0),
             name: task.name,
             state: task.state,
-            cpu_ns: platform::cycles_to_ns(task.cpu_cycles + running),
+            cpu_ns: task.cpu_ns + running,
             switches: task.switches,
             simd: task.simd,
         });

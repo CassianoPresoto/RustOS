@@ -66,6 +66,8 @@ impl FakeHost {
                 wake_max_ns: 45_678,
                 wake_loaded_mean_ns: 20_000,
                 wake_loaded_max_ns: 99_999,
+                pick_next_ns: 88,
+                tick_ns: 31,
             }),
         }
     }

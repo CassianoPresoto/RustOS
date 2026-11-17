@@ -38,6 +38,19 @@ impl<const N: usize> RunQueue<N> {
         Ok(())
     }
 
+    /// Tira `task` de onde estiver, preservando a ordem das demais. O(n).
+    pub fn remove(&mut self, task: TaskId) -> bool {
+        let Some(at) = (0..self.len).find(|i| self.slots[(self.head + i) % N] == Some(task)) else {
+            return false;
+        };
+        for i in at..self.len - 1 {
+            self.slots[(self.head + i) % N] = self.slots[(self.head + i + 1) % N];
+        }
+        self.slots[(self.head + self.len - 1) % N] = None;
+        self.len -= 1;
+        true
+    }
+
     pub fn pop_front(&mut self) -> Option<TaskId> {
         if self.len == 0 {
             return None;
@@ -80,6 +93,20 @@ mod tests {
             Err(QueueFull(TaskId::new(2)))
         );
         assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn remove_keeps_the_order_of_the_rest() {
+        let mut queue = RunQueue::<4>::new();
+        for raw in 1..=4 {
+            queue.push_back(TaskId::new(raw)).unwrap();
+        }
+        assert_eq!(queue.pop_front(), Some(TaskId::new(1)));
+        queue.push_back(TaskId::new(5)).unwrap();
+        assert!(queue.remove(TaskId::new(3)));
+        assert!(!queue.remove(TaskId::new(3)));
+        let rest: Vec<_> = core::iter::from_fn(|| queue.pop_front()).collect();
+        assert_eq!(rest, [TaskId::new(2), TaskId::new(4), TaskId::new(5)]);
     }
 
     #[test]

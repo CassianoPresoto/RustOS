@@ -77,6 +77,9 @@ pub struct BenchReport {
     /// O mesmo, com uma tarefa ocupando a CPU.
     pub wake_loaded_mean_ns: u64,
     pub wake_loaded_max_ns: u64,
+    /// Custo de uma chamada à política de escalonamento, com 8 tarefas prontas.
+    pub pick_next_ns: u64,
+    pub tick_ns: u64,
 }
 
 /// Exceção que o comando `fault` provoca.

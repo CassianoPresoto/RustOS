@@ -354,7 +354,17 @@ fn bench(ctx: &mut Ctx<'_>) -> fmt::Result {
         "one busy task",
         report.wake_loaded_mean_ns,
         report.wake_loaded_max_ns,
-    )
+    )?;
+    write!(
+        out,
+        "{DIM}Scheduler policy (8 ready tasks, per call){RESET}\r\n"
+    )?;
+    write!(
+        out,
+        "  {:<14}{:>7} ns\r\n",
+        "pick_next", report.pick_next_ns
+    )?;
+    write!(out, "  {:<14}{:>7} ns\r\n", "tick", report.tick_ns)
 }
 
 fn random(ctx: &mut Ctx<'_>) -> fmt::Result {
@@ -611,6 +621,8 @@ mod tests {
         assert!(out.contains("200 samples"));
         assert!(out.contains("mean   12.3 us") && out.contains("max   45.6 us"));
         assert!(out.contains("one busy task"));
+        assert!(out.contains("pick_next") && out.contains("88 ns"));
+        assert!(out.contains("tick") && out.contains("31 ns"));
     }
 
     #[test]
