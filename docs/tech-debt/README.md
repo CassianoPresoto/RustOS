@@ -30,3 +30,4 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0007](0007-shell-em-espera-ativa.md) | Shell lê a serial em espera ativa | Open | A primeira interrupção de UART entregue ao kernel (fase 1) |
 | [0008](0008-terminal-sem-tela-alternativa.md) | Terminal sem tela alternativa, rolagem para trás nem caractere largo | Open | O primeiro programa de tela cheia (vi, less, top) rodando no terminal, na fase 5 |
 | [0009](0009-ioapic-no-endereco-fixo-da-qemu.md) | I/O APIC no endereço fixo e IRQs ISA sem redirecionamento do MADT | Open | A primeira máquina x86_64 que não seja a QEMU q35, ou o parser de ACPI da fase 6 |
+| [0010](0010-teclado-sem-comandos-ao-dispositivo.md) | Teclado sem comandos ao dispositivo, LEDs nem Num Lock | Open | O primeiro boot em metal com um teclado PS/2 real |

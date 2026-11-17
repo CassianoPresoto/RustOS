@@ -24,7 +24,7 @@
 │   ├── mm/                     # rustos-mm: BitmapFrameAllocator, summarize/find_free_block, AddressWindow
 │   ├── sched/                  # rustos-sched: TaskId, RunQueue, RoundRobin (ainda não ligado ao kernel)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16
-│   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células), Cell, teclas
+│   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células), Cell, Key, Keyboard (layouts)
 │   └── shell/                  # rustos-shell: Shell (edição de linha, histórico, comandos) e a porta Host
 ├── lib/
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set)
@@ -35,6 +35,7 @@
 │   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 escrito aqui → hal::BootInfo
 ├── drivers/                    # adaptadores de dispositivo: genéricos sobre hal::RegisterBus, sem unsafe
 │   ├── uart16550/              # COM1 do PC (porta) ou 16550 em MMIO; recepção por consulta ou interrupção
+│   ├── i8042/                  # teclado PS/2 do PC: controlador e decodificador do conjunto 1
 │   └── pl011/                  # serial da QEMU virt e de placas ARM
 ├── xtask/                      # ferramenta de host (só std): build, image, run, smoke, screenshot, size, font-preview, check-*
 ├── docs/                       # sdd/, guidelines/, tech-debt/
@@ -51,13 +52,14 @@
 | `rustos-hal` | nada |
 | `rustos-mm` | `rustos-hal` |
 | `rustos-sched` | nada |
-| `rustos-gfx`, `rustos-term` | nada |
+| `rustos-gfx` | nada |
+| `rustos-term` | `rustos-hal` |
 | `rustos-shell` | `rustos-hal` |
 | `rustos-sync` | nada |
 | `rustos-arch-x86_64` | `rustos-hal` (só no alvo bare-metal) |
 | `rustos-arch-aarch64` | `rustos-hal` |
 | `rustos-boot-limine` | `rustos-hal` |
-| `rustos-driver-uart16550`, `rustos-driver-pl011` | `rustos-hal` |
+| `rustos-driver-uart16550`, `rustos-driver-pl011`, `rustos-driver-i8042` | `rustos-hal` |
 | `rustos-kernel` | `hal`, `mm`, `gfx`, `term`, `shell`, `sync`, `boot-limine`; por ISA, `arch-*` e o driver da serial |
 | `xtask` | nada (só `std`) |
 
@@ -72,7 +74,7 @@ e não usada).
 | --- | --- |
 | Algoritmo ou política (alocador, escalonador, cache, fila) | crate de `core/` do assunto |
 | Desenho de pixel, glifo da fonte | `core/gfx/` |
-| Sequência de terminal, codificação de tecla | `core/term/` |
+| Sequência de terminal, codificação de tecla, layout de teclado | `core/term/` |
 | Comando do shell embutido | `core/shell/`; o dado do sistema chega pela porta `Host` |
 | Tema, barra do topo, como a grade vira pixel | `kernel/src/screen.rs` |
 | Contrato que o núcleo precisa do hardware | trait em `core/hal` |

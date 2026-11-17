@@ -28,3 +28,4 @@ mesmo PR.
 | [`07_desempenho_e_recursos.md`](07_desempenho_e_recursos.md) | O que já se mede, como comparar com Linux e Windows, e as técnicas que a pesquisa aponta |
 | [`08_roadmap.md`](08_roadmap.md) | As fases, do esqueleto à compatibilidade com binários Linux |
 | [`10_interrupcoes_x86_64.md`](10_interrupcoes_x86_64.md) | Exceções, IRQ e tempo no x86_64: sequência de init, vetores, seletores, calibração do tique e fontes |
+| [`11_teclado.md`](11_teclado.md) | Da tecla do PC à `Key` do terminal: i8042, decodificador, layouts US e ABNT2, teclas mortas |
