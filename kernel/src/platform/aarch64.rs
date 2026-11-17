@@ -4,16 +4,19 @@
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 pub use rustos_arch_aarch64::call_on_stack;
+use rustos_arch_aarch64::descriptor::Aarch64Format;
 use rustos_arch_aarch64::intid::{QEMU_VIRT_PL011_INTID, VIRTUAL_TIMER_INTID};
 use rustos_arch_aarch64::{
-    Aarch64Cpu, Aarch64Entropy, Aarch64PageMapper, MmioBus, QEMU_VIRT_GICD, QEMU_VIRT_GICR,
-    QEMU_VIRT_PL011, exception, gic_cpu, intid, protection, timer,
+    Aarch64Cpu, Aarch64Entropy, Aarch64Mmu, DirectMapTables, MmioBus, QEMU_VIRT_GICD,
+    QEMU_VIRT_GICR, QEMU_VIRT_PL011, active_root, exception, gic_cpu, intid, prepare_space,
+    protection, timer,
 };
 use rustos_driver_gicv3::{GicError, GicV3, affinity_from_mpidr, router_for};
 use rustos_driver_pl011::Pl011;
 use rustos_hal::{
     BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, PAGE_SIZE, PhysAddr, VirtAddr,
 };
+use rustos_mm::PageTables;
 
 use super::{PlatformError, Protection};
 use crate::interrupts::{FaultTest, IrqSource};
@@ -24,7 +27,36 @@ pub const ARCH: &str = "aarch64";
 pub type PlatformConsole = Pl011<MmioBus>;
 pub type PlatformEntropy = Aarch64Entropy;
 /// Espaço de endereçamento: as tabelas da metade alta atrás do `TTBR1_EL1`.
-pub type PlatformSpace = Aarch64PageMapper;
+pub type PlatformSpace = PageTables<Aarch64Format, DirectMapTables, Aarch64Mmu>;
+
+/// As tabelas que o `TTBR1_EL1` aponta agora.
+///
+/// # Safety
+/// O mapa direto cobre as tabelas atuais e todo frame novo, e só o chamador mexe nelas.
+pub unsafe fn active_space(direct_map_offset: u64) -> PlatformSpace {
+    // SAFETY: o índice 7 do MAIR não é usado pelo Limine nem por mapeamento algum ainda.
+    unsafe { prepare_space() };
+    // SAFETY: EL1 com MMU ligada.
+    let root = unsafe { active_root() };
+    // SAFETY: o contrato desta função.
+    let tables = unsafe { DirectMapTables::new(direct_map_offset) };
+    PageTables::new(root, tables, Aarch64Mmu)
+}
+
+/// Espaço novo e vazio, para montar antes de ativar.
+///
+/// # Safety
+/// Todo frame de `frames` é acessível em `físico + offset` antes e depois da troca.
+pub unsafe fn new_space(
+    frames: &mut impl FrameSource,
+    direct_map_offset: u64,
+) -> Result<PlatformSpace, MapError> {
+    // SAFETY: o índice 7 do MAIR não é usado pelo Limine nem por mapeamento algum ainda.
+    unsafe { prepare_space() };
+    // SAFETY: o contrato desta função.
+    let tables = unsafe { DirectMapTables::new(direct_map_offset) };
+    PageTables::new_empty(frames, tables, Aarch64Mmu)
+}
 
 /// Frequência do tique do timer.
 pub const TIMER_HZ: u32 = 100;
@@ -64,7 +96,7 @@ pub fn console(
     frames: &mut impl FrameSource,
 ) -> Result<PlatformConsole, MapError> {
     // SAFETY: MMU ligada; as tabelas do Limine e os frames novos estão no mapa direto.
-    let mut mapper = unsafe { Aarch64PageMapper::active(boot.direct_map_offset()) };
+    let mut mapper = unsafe { active_space(boot.direct_map_offset()) };
     let registers = PhysAddr::new(QEMU_VIRT_PL011);
     let virt = map_device(&mut mapper, frames, registers, PAGE_SIZE)?;
     UART_BASE.store(virt.as_u64(), Ordering::Relaxed);
@@ -83,7 +115,7 @@ pub fn init_interrupts(
     handlers: &'static Handlers,
 ) -> Result<(), PlatformError> {
     // SAFETY: MMU ligada; as tabelas do Limine e os frames novos estão no mapa direto.
-    let mut mapper = unsafe { Aarch64PageMapper::active(boot.direct_map_offset()) };
+    let mut mapper = unsafe { active_space(boot.direct_map_offset()) };
     let stack_top = memory
         .map_stack(&mut mapper, EXCEPTION_STACK_PAGES)
         .map_err(map_error)?;
@@ -122,7 +154,7 @@ pub fn init_interrupts(
 }
 
 fn map_gic(
-    mapper: &mut Aarch64PageMapper,
+    mapper: &mut PlatformSpace,
     memory: &mut Memory,
     phys: u64,
     len: u64,

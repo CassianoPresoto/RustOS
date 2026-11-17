@@ -14,7 +14,7 @@
   lida por ferramenta (`make smoke` procura `[rustos] boot ok`).
 - **Teste diz o comportamento em frase:** `allocates_lowest_released_frame_first`,
   não `test_alloc_1`. Sem prefixo `test_`.
-- **Adaptador diz o que adapta:** `PortBus`, `MmioBus`, `Aarch64PageMapper`,
+- **Adaptador diz o que adapta:** `PortBus`, `MmioBus`, `Aarch64Mmu`,
   `LimineBoot`. Porta diz o papel: `Console`, `RegisterBus`, `PageMapper`.
 - **Tipo de endereço nunca é `u64` solto na fronteira:** `PhysAddr` ou `VirtAddr`.
 - **Branch em inglês** (é identificador): `feat/x86-interrupts`.

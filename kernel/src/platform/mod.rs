@@ -10,13 +10,13 @@ mod x86_64;
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::{
     ARCH, PlatformConsole, PlatformSpace, TIMER_HZ, call_on_stack, console, cpu, cycles, harden,
-    hardware_entropy, has_keyboard, init_interrupts, irq_source, keyboard_event, now_ns,
+    hardware_entropy, has_keyboard, init_interrupts, irq_source, keyboard_event, new_space, now_ns,
     protections, serial_irq_done, timer_tick, trigger,
 };
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::{
     ARCH, PlatformConsole, PlatformSpace, TIMER_HZ, call_on_stack, console, cpu, cycles, harden,
-    hardware_entropy, has_keyboard, init_interrupts, irq_source, keyboard_event, now_ns,
+    hardware_entropy, has_keyboard, init_interrupts, irq_source, keyboard_event, new_space, now_ns,
     protections, serial_irq_done, timer_tick, trigger,
 };
 

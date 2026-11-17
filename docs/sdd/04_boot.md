@@ -69,7 +69,7 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
    troca `CR3` / `TTBR1_EL1`. `Memory::map_stack` cria a pilha de 64 KiB e
    `call_on_stack` passa a rodar nela ([SDD 13](13_memoria_virtual.md)).
 4. `platform::console` monta a serial. No aarch64 isso mapeia a PL011: o
-   `Aarch64PageMapper` lê `TTBR1_EL1` (já o das tabelas próprias), grava
+   `platform::active_space` lê `TTBR1_EL1` (já o das tabelas próprias), grava
    Device-nGnRnE no índice 7 do `MAIR_EL1`, aloca as tabelas que faltam do alocador de
    frames e mapeia a página na janela de dispositivos.
 5. Se há framebuffer, `Screen::new` aloca a grade do terminal em frames contíguos

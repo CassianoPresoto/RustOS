@@ -8,7 +8,7 @@ use rustos_hal::{
 use rustos_mm::{Section, Violation, WxChecker};
 
 use crate::frames::Frames;
-use crate::platform::PlatformSpace;
+use crate::platform::{self, PlatformSpace};
 
 unsafe extern "C" {
     static __image_start: u8;
@@ -155,7 +155,7 @@ impl Vm {
         let offset = boot.direct_map_offset();
         let mut frames = Counting { frames, taken: 0 };
         // SAFETY: o contrato desta função dá o acesso aos frames pelo mapa direto.
-        let mut space = unsafe { PlatformSpace::new_space(&mut frames, offset) }?;
+        let mut space = unsafe { platform::new_space(&mut frames, offset) }?;
         let mut stats = VmStats::default();
 
         for section in &sections {

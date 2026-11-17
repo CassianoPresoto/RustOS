@@ -15,6 +15,7 @@ pub mod frame;
 pub mod heap;
 pub mod layout;
 pub mod memory;
+pub mod tables;
 #[cfg(test)]
 mod testing;
 pub mod window;
@@ -26,5 +27,6 @@ pub use frame::{FRAME_SIZE, FrameError, PhysFrame};
 pub use heap::{HeapError, KernelHeap};
 pub use layout::{MemorySummary, find_free_block, summarize};
 pub use memory::FrameMemory;
+pub use tables::PageTables;
 pub use window::{AddressWindow, free_top_level_slot};
 pub use wx::{Section, Violation, WxChecker};

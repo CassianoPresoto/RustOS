@@ -74,6 +74,8 @@ pub enum MapError {
     OutOfAddressSpace,
     /// A CPU não tem o que o mapeamento pede (ex.: NX, write-combining).
     Unsupported(&'static str),
+    /// Gravável e executável ao mesmo tempo: o mapeador recusa (guidelines 09).
+    WriteExecute(VirtAddr),
 }
 
 /// Fonte de frames físicos para as tabelas de página intermediárias.
@@ -99,6 +101,46 @@ pub trait PageMapper {
         flags: PageFlags,
         frames: &mut F,
     ) -> Result<(), MapError>;
+}
+
+/// Memória das tabelas de página: o que o mapeador lê e escreve, entrada a entrada.
+/// O kernel a liga ao mapa direto; os testes, a um `HashMap`.
+pub trait TableMemory {
+    fn read(&self, table: PhysAddr, index: usize) -> u64;
+    fn write(&mut self, table: PhysAddr, index: usize, entry: u64);
+    /// Zera a tabela inteira (`PAGE_SIZE` bytes).
+    fn zero(&mut self, table: PhysAddr);
+}
+
+/// Formato dos descritores de uma ISA: só a codificação. A caminhada de 4 níveis é
+/// uma só, em `core/mm`, e consulta o formato por esta porta.
+pub trait PageFormat {
+    /// Entrada de nível intermediário: permissão ampla, quem restringe é a folha.
+    fn table_entry(next: PhysAddr) -> u64;
+    /// Folha de `PAGE_SIZE` (último nível).
+    fn page_entry(phys: PhysAddr, flags: PageFlags) -> u64;
+    /// Folha de `LARGE_PAGE_SIZE` (um nível acima do último).
+    fn large_entry(phys: PhysAddr, flags: PageFlags) -> u64;
+    /// A entrada mapeia alguma coisa (presente, válida).
+    fn is_valid(entry: u64) -> bool;
+    /// A entrada válida do nível `level` (0 a 2) aponta para tabela, não para folha.
+    fn is_table(entry: u64, level: usize) -> bool;
+    fn table_address(entry: u64) -> PhysAddr;
+    /// Endereço e permissão de uma folha. `large` diz o tamanho dela.
+    fn decode_leaf(entry: u64, large: bool) -> (PhysAddr, PageFlags);
+    /// Permissão efetiva ao descer por uma entrada: escrita é o E dos níveis, e
+    /// não-execução, o OU. Recebe e devolve `(gravável, sem execução)`.
+    fn restrict(writable: bool, no_execute: bool, entry: u64) -> (bool, bool);
+    /// Endereço virtual que a caminhada resolveu, estendido ao canônico da metade alta.
+    fn canonical(virt: u64) -> u64;
+}
+
+/// O que o mapeador pede à CPU: publicar uma entrada nova e trocar de espaço.
+pub trait MmuControl {
+    /// A entrada de `virt` mudou: a CPU tem de enxergá-la (`invlpg`; barreiras).
+    fn entry_changed(&self, virt: VirtAddr);
+    /// Passa a traduzir pela raiz `root` e descarta o TLB.
+    fn activate(&self, root: PhysAddr);
 }
 
 /// Uma folha da tabela de páginas, já decodificada.

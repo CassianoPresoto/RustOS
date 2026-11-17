@@ -12,7 +12,6 @@ pub mod pic;
 pub mod pit;
 pub mod pte;
 pub mod segments;
-pub mod walk;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod apic;
@@ -44,7 +43,7 @@ pub use entropy::X86Entropy;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use mmio::MmioBus;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub use mmu::X86PageMapper;
+pub use mmu::{DirectMapTables, X86Mmu, active_root, require_features};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use port::PortBus;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]

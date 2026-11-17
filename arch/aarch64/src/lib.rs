@@ -8,7 +8,6 @@ pub mod esr;
 pub mod features;
 pub mod intid;
 pub mod time;
-pub mod walk;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod cpu;
@@ -36,7 +35,7 @@ pub use entropy::Aarch64Entropy;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use mmio::MmioBus;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub use mmu::Aarch64PageMapper;
+pub use mmu::{Aarch64Mmu, DirectMapTables, active_root, prepare_space};
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use stack::{Continuation, call_on_stack};
 

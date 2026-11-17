@@ -27,6 +27,6 @@ pub use interrupt::{Fault, FaultKind, Handlers, Irq};
 pub use io::RegisterBus;
 pub use memory::{MemoryRegion, RegionKind};
 pub use paging::{
-    AddressSpace, CacheMode, FrameSource, LARGE_PAGE_SIZE, MapError, Mapping, PAGE_SIZE, PageFlags,
-    PageMapper,
+    AddressSpace, CacheMode, FrameSource, LARGE_PAGE_SIZE, MapError, Mapping, MmuControl,
+    PAGE_SIZE, PageFlags, PageFormat, PageMapper, TableMemory,
 };

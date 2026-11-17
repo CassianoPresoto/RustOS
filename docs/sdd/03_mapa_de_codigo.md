@@ -26,7 +26,7 @@
 │       └── platform/           # um módulo por ISA: ARCH, PlatformConsole, cpu(), console()
 ├── core/                       # o centro do hexágono: no_std, forbid(unsafe_code), testado no host
 │   ├── hal/                    # rustos-hal: as portas (traits) e os tipos de fronteira
-│   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow, WxChecker; portas FrameMemory e FrameAllocator (SDD 12, SDD 13)
+│   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow, WxChecker, PageTables (a caminhada de 4 níveis das duas ISAs); porta FrameMemory e trait FrameAllocator (SDD 12, SDD 13)
 │   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) Rng (fast key erasure) e a semente de reserva por jitter
 │   ├── sched/                  # rustos-sched: TaskId, RunQueue, RoundRobin (ainda não ligado ao kernel)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16
@@ -35,9 +35,9 @@
 ├── lib/
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set)
 ├── arch/                       # adaptadores de ISA: o único lugar com asm!
-│   ├── x86_64/                 # X86Cpu, PortBus, X86PageMapper (espaço novo, ativação, troca de pilha), X86Entropy, GDT/TSS/IDT, APIC, PIT; módulos puros (pte, walk, segments, fault, lapic, ioapic, pit, clock) testados no host
-│   └── aarch64/                # Aarch64Cpu, MmioBus, Aarch64PageMapper (TTBR1), Aarch64Entropy; vetores, ICC_*, CNTV e PAN;
-│                               # puros: descriptor, walk, esr, time, intid, features
+│   ├── x86_64/                 # X86Cpu, PortBus, X86Mmu e DirectMapTables (`invlpg`, `CR3`, memória das tabelas), X86Entropy, GDT/TSS/IDT, APIC, PIT, troca de pilha; módulos puros (pte com `X86Format`, segments, fault, lapic, ioapic, pit, clock) testados no host
+│   └── aarch64/                # Aarch64Cpu, MmioBus, Aarch64Mmu e DirectMapTables (TTBR1), Aarch64Entropy; vetores, ICC_*, CNTV e PAN;
+│                               # puros: descriptor (com `Aarch64Format`), esr, time, intid, features
 ├── boot/
 │   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 escrito aqui → hal::BootInfo
 ├── drivers/                    # adaptadores de dispositivo: genéricos sobre hal::RegisterBus, sem unsafe

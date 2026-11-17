@@ -24,8 +24,7 @@ para 2 MiB contra 33 ns). Ficou uma cópia só de teste, `core/mm/src/bench_bitm
 como base de comparação do `bench.rs`. O preço é o dobro de metadado: 8 144 para
 16 704 bytes em 254 MiB.
 
-Duas portas, as duas definidas em `core/mm`, no padrão do `TableMemory` do
-`arch/aarch64/src/walk.rs`:
+Duas portas, as duas definidas em `core/mm`, no padrão do `TableMemory` do `hal`:
 
 - **`FrameMemory`** (`memory.rs`): `read_u64`, `write_u64` e `zero` sobre endereço
   físico. O teste a implementa com um `Vec`; o kernel, com o mapa direto

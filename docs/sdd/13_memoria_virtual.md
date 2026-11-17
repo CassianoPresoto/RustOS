@@ -63,9 +63,21 @@ teste no host que confere ida e volta (`decode_leaf(page_entry(f)) == f`).
 
 Em todas as folhas do aarch64 o UXN fica ligado (página do kernel nunca executa em EL0).
 
+- **Uma caminhada só.** `rustos_mm::PageTables<Fmt, Mem, Ctl>` (`core/mm/src/tables.rs`)
+  desce os 4 níveis, cria tabelas zeradas, recusa folha em cima de folha e percorre
+  as folhas com a permissão efetiva. Ela fala com três portas do `hal`: `PageFormat`
+  (a codificação, em `pte.rs` e `descriptor.rs`), `TableMemory` (o mapa direto, em
+  `mmu.rs`) e `MmuControl` (`invlpg` ou barreiras, e a troca de `CR3` ou `TTBR1_EL1`).
+  Como `arch/` não depende de `core/mm` (guidelines 03), quem monta o espaço é
+  `kernel/src/platform/`: `PlatformSpace = PageTables<X86Format, DirectMapTables, X86Mmu>`.
+- **W^X na hora de mapear.** `map_page` e `map_large_page` devolvem
+  `MapError::WriteExecute` para `PageFlags` gravável e executável, antes de tocar a
+  tabela, nas duas ISAs. Os codificadores (`page_entry`, `page_descriptor`) seguem
+  puros e não recusam: quem recusa é o mapeador.
 - **x86_64, write-combining.** O Limine deixa `PAT[5] = WC` (PROTOCOL.md, *Caching*).
-  `X86PageMapper::new_space` lê o `IA32_PAT` e recusa o boot se a entrada 5 não for
-  WC (tipo `0x01`), e se o NX não estiver ligado no `EFER`. O bit PAT é o 7 na folha de
+  `require_features` lê o `IA32_PAT` e recusa o boot se a entrada 5 não for
+  WC (tipo `0x01`), se o NX não estiver ligado no `EFER` e se `CR4.PGE` estiver ligado
+  (o `mov cr3` não descarta página global). O bit PAT é o 7 na folha de
   4 KiB e o 12 na de 2 MiB (`_PAGE_BIT_PAT` e `_PAGE_BIT_PAT_LARGE` em
   [`pgtable_types.h` do Linux](https://github.com/torvalds/linux/blob/master/arch/x86/include/asm/pgtable_types.h)).
 - **aarch64, framebuffer.** `MAIR_EL1.Attr1` é "o do framebuffer, do tipo certo" a partir
@@ -207,6 +219,7 @@ Decisão: **KASLR ligado**, porque o custo é de 3 a 6 KiB e a base muda mesmo.
 | Janelas depois do mapa direto | O Limine sorteia o deslocamento | PROTOCOL.md, *Memory Layout at Entry* |
 | 64 KiB de pilha | Mínimo do Limine, com que o kernel já rodava | PROTOCOL.md, *Machine State at Entry* |
 | KASLR por PIE e Limine | Custo de 3 a 6 KiB, base muda a cada boot | medida acima |
+| Uma caminhada genérica em `core/mm`, sobre `PageFormat`, `TableMemory` e `MmuControl` | A caminhada era a mesma nas duas ISAs; a dívida da cópia por ISA está paga | Caso 1 do `AGENTS.md` (porta nova no `hal`, sem crate novo) |
 | Dois TLB flush na troca do aarch64 | Evita duas traduções do mesmo endereço (bloco de tamanho diferente) vivas ao mesmo tempo | Arm ARM, *TLB conflict abort* (não lido nesta rodada) |
 
 ## O que a QEMU não prova

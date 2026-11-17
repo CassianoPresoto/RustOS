@@ -33,7 +33,8 @@ cargo test --release -p rustos-mm bench -- --ignored --nocapture --test-threads=
 | Teste | Porta falsa |
 | --- | --- |
 | `drivers/uart16550`, `drivers/pl011` | `FakeBus: RegisterBus` que grava cada escrita e simula FIFO cheia |
-| `arch/aarch64/src/walk.rs`, `arch/x86_64/src/walk.rs` | `FakeTables: TableMemory` em `HashMap` e `Frames: FrameSource` em `Vec`; mapeia página de 4 KiB e de 2 MiB e percorre as folhas |
+| `core/mm/src/tables.rs` | `Toy: PageFormat` (mesma forma dos formatos reais), `FakeTables: TableMemory` em `HashMap`, `Cpu: MmuControl` que conta as publicações e `Frames: FrameSource` em `Vec`; mapeia página de 4 KiB e de 2 MiB, recusa W+X e percorre as folhas |
+| `arch/*/src/pte.rs`, `descriptor.rs` | A codificação: ida e volta de cada `PageFlags`, e o `PageFormat` que distingue tabela, folha grande e entrada vazia |
 | `core/mm/src/wx.rs` | Lista de `Mapping` montada à mão: W+X, seção com permissão trocada, alias da imagem no mapa direto, metade baixa |
 | `boot/limine` | Layout das structs contra `limine.h` (`size_of`, `offset_of`), tradução dos tipos de região e do formato do framebuffer |
 | `core/mm/src/heap.rs` | `FakeMemory: FrameMemory`, uma faixa de palavras que derruba o teste em acesso fora dela, desalinhado ou abaixo da base |
@@ -41,8 +42,8 @@ cargo test --release -p rustos-mm bench -- --ignored --nocapture --test-threads=
 | `core/term` | Fuzz determinístico (xorshift, 300 mil bytes por tamanho de grade) que confere cursor, região e anel; o mesmo fluxo em bloco e byte a byte dá a mesma grade |
 
 O que tem `asm!` só compila com `target_os = "none"`; a parte pura do mesmo crate
-(`descriptor.rs`, `walk.rs`) roda no host. É por isso que a caminhada de tabela
-mora separada do `mmu.rs`.
+(`descriptor.rs`, `pte.rs`) roda no host. A caminhada de tabela é uma só, em
+`core/mm`; o `mmu.rs` de cada ISA tem só o que precisa de `asm!` e de ponteiro.
 
 ## Andar 3 — fumaça
 

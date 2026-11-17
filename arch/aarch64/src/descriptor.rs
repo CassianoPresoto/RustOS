@@ -1,9 +1,6 @@
 //! Formato dos descritores de tabela de página do aarch64 (VMSAv8-64, grânulo de 4 KiB).
 
-use rustos_hal::{CacheMode, LARGE_PAGE_SIZE, PageFlags, PhysAddr, VirtAddr};
-
-pub const ENTRIES: usize = 512;
-pub const LEVELS: usize = 4;
+use rustos_hal::{CacheMode, PageFlags, PageFormat, PhysAddr};
 
 pub const VALID: u64 = 1 << 0;
 /// Nos níveis 0-2 distingue tabela (1) de bloco (0); no nível 3 é obrigatório.
@@ -29,15 +26,6 @@ pub const MAIR_FRAMEBUFFER_INDEX: u64 = 1;
 pub const MAIR_DEVICE_INDEX: u64 = 7;
 /// Device-nGnRnE: sem junção, sem reordenação, sem confirmação antecipada.
 pub const MAIR_DEVICE_NGNRNE: u64 = 0x00;
-
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "o índice é mascarado para < 512"
-)]
-pub const fn table_index(virt: VirtAddr, level: usize) -> usize {
-    let shift = 39 - 9 * level;
-    ((virt.as_u64() >> shift) & (ENTRIES as u64 - 1)) as usize
-}
 
 pub const fn table_descriptor(next: PhysAddr) -> u64 {
     (next.as_u64() & OUTPUT_ADDRESS) | VALID | TABLE_OR_PAGE
@@ -101,31 +89,55 @@ pub const fn upper_half(virt: u64) -> u64 {
     virt | 0xffff_0000_0000_0000
 }
 
-/// Tamanho do que uma entrada do nível `level` cobre (0 = 512 GiB, 3 = 4 KiB).
-pub const fn level_span(level: usize) -> u64 {
-    1 << (39 - 9 * level)
-}
-
-/// O bloco de 2 MiB mora no nível 2.
-pub const LARGE_LEVEL: usize = 2;
-const _: () = assert!(level_span(LARGE_LEVEL) == LARGE_PAGE_SIZE);
-
 pub const fn is_table(entry: u64) -> bool {
     entry & (VALID | TABLE_OR_PAGE) == VALID | TABLE_OR_PAGE
+}
+
+/// Formato dos descritores do aarch64, para a caminhada genérica de `core/mm`.
+#[derive(Debug)]
+pub struct Aarch64Format;
+
+impl PageFormat for Aarch64Format {
+    fn table_entry(next: PhysAddr) -> u64 {
+        table_descriptor(next)
+    }
+
+    fn page_entry(phys: PhysAddr, flags: PageFlags) -> u64 {
+        page_descriptor(phys, flags)
+    }
+
+    fn large_entry(phys: PhysAddr, flags: PageFlags) -> u64 {
+        block_descriptor(phys, flags)
+    }
+
+    fn is_valid(entry: u64) -> bool {
+        entry & VALID != 0
+    }
+
+    fn is_table(entry: u64, _level: usize) -> bool {
+        is_table(entry)
+    }
+
+    fn table_address(entry: u64) -> PhysAddr {
+        PhysAddr::new(entry & OUTPUT_ADDRESS)
+    }
+
+    fn decode_leaf(entry: u64, large: bool) -> (PhysAddr, PageFlags) {
+        decode_leaf(entry, large)
+    }
+
+    fn restrict(writable: bool, no_execute: bool, entry: u64) -> (bool, bool) {
+        restrict(writable, no_execute, entry)
+    }
+
+    fn canonical(virt: u64) -> u64 {
+        upper_half(virt)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn indexes_follow_the_48_bit_split() {
-        let virt = VirtAddr::new(0xffff_ff80_4020_3000);
-        assert_eq!(table_index(virt, 0), 511);
-        assert_eq!(table_index(virt, 1), 1);
-        assert_eq!(table_index(virt, 2), 1);
-        assert_eq!(table_index(virt, 3), 3);
-    }
 
     #[test]
     fn device_page_is_non_executable_with_device_attribute() {
@@ -228,5 +240,19 @@ mod tests {
         assert!(is_table(table_descriptor(PhysAddr::new(0x1000))));
         assert!(!is_table(VALID));
         assert!(!is_table(0));
+    }
+
+    #[test]
+    fn the_format_port_tells_tables_from_blocks_and_empty_entries() {
+        let table = Aarch64Format::table_entry(PhysAddr::new(0x2000));
+        let block = Aarch64Format::large_entry(PhysAddr::new(0x4020_0000), PageFlags::DATA);
+        let page = Aarch64Format::page_entry(PhysAddr::new(0x1000), PageFlags::DATA);
+        assert!(Aarch64Format::is_valid(table) && Aarch64Format::is_valid(block));
+        assert!(!Aarch64Format::is_valid(0));
+        assert!(Aarch64Format::is_table(table, 1));
+        assert!(!Aarch64Format::is_table(block, 2));
+        assert!(!Aarch64Format::is_table(VALID, 1));
+        assert!(Aarch64Format::is_valid(page));
+        assert_eq!(Aarch64Format::table_address(table), PhysAddr::new(0x2000));
     }
 }

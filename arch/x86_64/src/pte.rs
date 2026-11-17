@@ -1,9 +1,6 @@
 //! Formato das entradas de tabela de página do x86_64 (paginação de 4 níveis, 4 KiB).
 
-use rustos_hal::{CacheMode, LARGE_PAGE_SIZE, PageFlags, PhysAddr, VirtAddr};
-
-pub const ENTRIES: usize = 512;
-pub const LEVELS: usize = 4;
+use rustos_hal::{CacheMode, PageFlags, PageFormat, PhysAddr};
 
 pub const PRESENT: u64 = 1 << 0;
 pub const WRITABLE: u64 = 1 << 1;
@@ -27,15 +24,6 @@ const UNCACHED: u64 = CACHE_DISABLE | WRITE_THROUGH;
 pub const PAT_WRITE_COMBINING_INDEX: u64 = 5;
 /// Tipo de memória do PAT que o `IA32_PAT` guarda para write-combining (SDM vol. 3A, 11.12.2).
 pub const PAT_TYPE_WRITE_COMBINING: u8 = 0x01;
-
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "o índice é mascarado para < 512"
-)]
-pub const fn table_index(virt: VirtAddr, level: usize) -> usize {
-    let shift = 39 - 9 * level;
-    ((virt.as_u64() >> shift) & (ENTRIES as u64 - 1)) as usize
-}
 
 /// Entrada de nível intermediário: permissão ampla, quem restringe é a folha.
 pub const fn table_entry(next: PhysAddr) -> u64 {
@@ -115,15 +103,6 @@ pub const fn canonical(virt: u64) -> u64 {
     }
 }
 
-/// Tamanho do que uma entrada do nível `level` cobre (0 = 512 GiB, 3 = 4 KiB).
-pub const fn level_span(level: usize) -> u64 {
-    1 << (39 - 9 * level)
-}
-
-/// A folha de 2 MiB cabe no nível 2 e ocupa `LARGE_PAGE_SIZE`.
-pub const LARGE_LEVEL: usize = 2;
-const _: () = assert!(level_span(LARGE_LEVEL) == LARGE_PAGE_SIZE);
-
 pub const fn is_present(entry: u64) -> bool {
     entry & PRESENT != 0
 }
@@ -132,24 +111,51 @@ pub const fn is_huge(entry: u64) -> bool {
     entry & HUGE != 0
 }
 
+/// Formato das entradas do x86_64, para a caminhada genérica de `core/mm`.
+#[derive(Debug)]
+pub struct X86Format;
+
+impl PageFormat for X86Format {
+    fn table_entry(next: PhysAddr) -> u64 {
+        table_entry(next)
+    }
+
+    fn page_entry(phys: PhysAddr, flags: PageFlags) -> u64 {
+        page_entry(phys, flags)
+    }
+
+    fn large_entry(phys: PhysAddr, flags: PageFlags) -> u64 {
+        large_entry(phys, flags)
+    }
+
+    fn is_valid(entry: u64) -> bool {
+        is_present(entry)
+    }
+
+    fn is_table(entry: u64, level: usize) -> bool {
+        level == 0 || !is_huge(entry)
+    }
+
+    fn table_address(entry: u64) -> PhysAddr {
+        PhysAddr::new(entry & OUTPUT_ADDRESS)
+    }
+
+    fn decode_leaf(entry: u64, large: bool) -> (PhysAddr, PageFlags) {
+        decode_leaf(entry, large)
+    }
+
+    fn restrict(writable: bool, no_execute: bool, entry: u64) -> (bool, bool) {
+        restrict(writable, no_execute, entry)
+    }
+
+    fn canonical(virt: u64) -> u64 {
+        canonical(virt)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn indexes_follow_the_48_bit_split() {
-        let virt = VirtAddr::new(0xffff_ff80_4020_3000);
-        assert_eq!(table_index(virt, 0), 511);
-        assert_eq!(table_index(virt, 1), 1);
-        assert_eq!(table_index(virt, 2), 1);
-        assert_eq!(table_index(virt, 3), 3);
-    }
-
-    #[test]
-    fn window_entries_match_the_kernel_layout() {
-        assert_eq!(table_index(VirtAddr::new(0xffff_ff00_0000_0000), 0), 510);
-        assert_eq!(table_index(VirtAddr::new(0xffff_fe80_0000_0000), 0), 509);
-    }
 
     #[test]
     fn device_page_is_uncached_non_executable_and_writable() {
@@ -275,5 +281,18 @@ mod tests {
         assert_eq!(entry, 0x2000 | PRESENT | WRITABLE);
         assert!(!is_huge(entry));
         assert!(is_huge(HUGE | PRESENT));
+    }
+
+    #[test]
+    fn the_format_port_tells_tables_from_huge_leaves_and_empty_entries() {
+        let table = X86Format::table_entry(PhysAddr::new(0x2000));
+        let large = X86Format::large_entry(PhysAddr::new(0x4020_0000), PageFlags::DATA);
+        let small = X86Format::page_entry(PhysAddr::new(0x1000), PageFlags::DATA);
+        assert!(X86Format::is_valid(table) && X86Format::is_valid(small));
+        assert!(!X86Format::is_valid(0));
+        assert!(X86Format::is_table(table, 1) && X86Format::is_table(table, 2));
+        assert!(!X86Format::is_table(large, 2));
+        assert!(!X86Format::is_table(HUGE | PRESENT, 1));
+        assert_eq!(X86Format::table_address(table), PhysAddr::new(0x2000));
     }
 }
