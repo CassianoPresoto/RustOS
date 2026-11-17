@@ -33,3 +33,4 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0012](0012-excecao-de-usuario-so-para-a-cpu.md) | Exceção vinda de código de usuário só para a CPU | Open | O primeiro código em anel 3 ou EL0, na fase 4 |
 | [0013](0013-caminhada-de-tabela-duplicada.md) | Caminhada de tabela de página duplicada entre as ISAs | Open | A terceira ISA, ou a primeira mudança no algoritmo de caminhada de uma delas |
 | [0014](0014-x86-sem-salvaguardas-de-metal.md) | x86_64 sem as salvaguardas que só o metal pede | Open | O primeiro boot do x86_64 em metal |
+| [0015](0015-cripto-sem-medida-no-alvo.md) | Criptografia do núcleo medida só no host | Open | O kernel ligar o `Rng` de `core/crypto`, na fase 2 |

@@ -22,6 +22,7 @@
 ├── core/                       # o centro do hexágono: no_std, forbid(unsafe_code), testado no host
 │   ├── hal/                    # rustos-hal: as portas (traits) e os tipos de fronteira
 │   ├── mm/                     # rustos-mm: BitmapFrameAllocator, summarize/find_free_block, AddressWindow
+│   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) e Rng (fast key erasure); ainda não ligado ao kernel
 │   ├── sched/                  # rustos-sched: TaskId, RunQueue, RoundRobin (ainda não ligado ao kernel)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16
 │   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células), Cell, Key, Keyboard (layouts)
@@ -53,6 +54,7 @@
 | --- | --- |
 | `rustos-hal` | nada |
 | `rustos-mm` | `rustos-hal` |
+| `rustos-crypto` | nada |
 | `rustos-sched` | nada |
 | `rustos-gfx` | nada |
 | `rustos-term` | `rustos-hal` |
@@ -65,6 +67,10 @@
 | `rustos-kernel` | `hal`, `mm`, `gfx`, `term`, `shell`, `sync`, `boot-limine`; por ISA, `arch-*` e os drivers (x86_64: `uart16550`, `i8042`; aarch64: `pl011`, `gicv3`) |
 | `xtask` | nada (só `std`) |
 
+O `rustos-crypto` também ainda não é usado pelo kernel: entra com o aleatório da
+fase 2 ([SDD 09](09_seguranca.md)), com a semente de hardware vinda por uma porta do
+`hal`. Está em `[workspace.dependencies]` desde já, e o cargo avisa por isso.
+
 O `rustos-sched` existe com fila e política testadas, mas o kernel ainda não o usa:
 ele entra com a troca de contexto, na fase 3 do [roadmap](08_roadmap.md). Por isso
 também não está em `[workspace.dependencies]` (o cargo avisa dependência declarada
@@ -75,6 +81,7 @@ e não usada).
 | Código novo | Lugar |
 | --- | --- |
 | Algoritmo ou política (alocador, escalonador, cache, fila) | crate de `core/` do assunto |
+| Cifra, hash ou gerador de números aleatórios | `core/crypto/`; a semente do hardware vem por porta do `hal` |
 | Desenho de pixel, glifo da fonte | `core/gfx/` |
 | Sequência de terminal, codificação de tecla, layout de teclado | `core/term/` |
 | Comando do shell embutido | `core/shell/`; o dado do sistema chega pela porta `Host` |

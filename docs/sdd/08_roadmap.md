@@ -66,7 +66,8 @@ quando houver medição para decidir.
 - **Heap:** buddy allocator com cache por CPU e `GlobalAlloc` para `alloc`.
 - **Memória do bootloader recuperada** (DEBT-0006).
 - **Aleatório do kernel:** semente de RDSEED/RNDR, gerador ChaCha20, e reposição da
-  semente. É a base de KASLR, ASLR e canários.
+  semente. É a base de KASLR, ASLR e canários. O gerador está pronto em
+  `core/crypto` ([SDD 09](09_seguranca.md)); falta a semente e a ligação.
 - **KASLR:** exige kernel relocável. Entra com o custo de tamanho e de boot medido.
 - **Zerar ao liberar:** política de zerar memória devolvida, com o custo medido.
 

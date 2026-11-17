@@ -15,7 +15,30 @@
 | Boot até o kernel | linha `boot timeline` (pedido *bootloader performance* do Limine) | Limine: 52 ms (aarch64, HVF) / 350 ms (x86_64, TCG) |
 | Pilha de exceção (aarch64) | `Memory::map_stack`: 4 páginas mapeadas e uma de guarda, por CPU | 16 384 bytes de RAM, mais as tabelas de página que faltarem |
 | Timer (aarch64) | linha `timer:` do boot; `CNTV` com `CVAL` absoluto, 100 Hz | 50 tiques em 497 ms (HVF) e 488 ms (TCG); núcleo ocioso em `wfi` usa 0,3% de CPU do host (HVF) |
+| Estado do gerador aleatório | `size_of::<Rng>()` (teste em `core/crypto/src/rng.rs`) | 40 bytes: chave de 32 e contador de 8 |
+| Código de `core/crypto` | `.text` do crate sem LTO, com todas as funções públicas (`llvm-size`); no kernel, com LTO, só entra o que se usa | `release`: 8 202 (x86_64) e 7 866 (aarch64) bytes · `release-small`: 6 216 e 7 349 bytes |
+| Vazão de ChaCha20, BLAKE2b e do gerador | `cargo run --release -p rustos-crypto --example bench`, no host (Apple M5, `rustc` 1.100.0), melhor de 15 rodadas, sem SIMD (o compilador não vetorizou: o resultado com `-vectorize-loops=false -vectorize-slp=false` é o mesmo) | Ver tabela abaixo. **Números do host, não do alvo**: o alvo bare-metal é soft-float e sem SIMD, e o crate ainda não roda no kernel |
 | Boot de parede | `make smoke` | inclui firmware EDK2: ~2–5 s, dominado pelo firmware |
+
+### Criptografia do núcleo (host)
+
+Saída do `bench` (o comando está na tabela acima). Não há comparação com outras
+implementações: o número serve para o RustOS comparar consigo mesmo.
+
+| Operação | Resultado |
+| --- | --- |
+| ChaCha20, `xor_keystream` de 4 MiB | ~910 MB/s |
+| ChaCha20, um bloco de 64 bytes | ~58 ns |
+| BLAKE2b-512 de 4 MiB | ~1 625 MB/s |
+| BLAKE2b-256 com chave, 32 bytes de entrada (2 compressões) | ~189 ns |
+| `Rng::next_u64` (um bloco por chamada) | ~67 ns |
+| `Rng::fill_bytes` de 4 KiB | ~965 MB/s |
+| `Rng::reseed` com 32 bytes | ~162 ns |
+
+O BLAKE2b depende de a função G ser inlinada: sem `#[inline(always)]` ela cai de
+1 584 para 507 MB/s (a exceção ao `clippy::inline_always` tem esse número como
+motivo). O ChaCha20 não precisa. O número no alvo entra quando o kernel ligar o
+gerador (fase 2): [DEBT-0015](../tech-debt/0015-cripto-sem-medida-no-alvo.md).
 
 ### Para onde foi o tamanho do kernel
 

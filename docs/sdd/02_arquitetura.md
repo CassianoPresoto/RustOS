@@ -8,7 +8,7 @@
 | Anel | Pasta | O que tem | `unsafe` |
 | --- | --- | --- | --- |
 | **Portas** | `core/hal` | Traits e tipos de fronteira: `BootInfo`, `Console`, `ByteSource`, `Cpu`, `RegisterBus`, `PageMapper`, `FrameSource`, `FramebufferInfo`, `PhysAddr`, `VirtAddr`, `MemoryRegion` | proibido |
-| **Centro** | `core/mm`, `core/sched`, `core/gfx`, `core/term`, `core/shell` | Política pura: alocador de frames, leitura do mapa de memória, janela de endereços, fila de execução, rodízio; desenho de pixels e a fonte própria; emulador de terminal VT/xterm; shell embutido | proibido |
+| **Centro** | `core/mm`, `core/crypto`, `core/sched`, `core/gfx`, `core/term`, `core/shell` | Política pura: alocador de frames, leitura do mapa de memória, janela de endereços, fila de execução, rodízio; ChaCha20, BLAKE2b e o gerador de números aleatórios; desenho de pixels e a fonte própria; emulador de terminal VT/xterm; shell embutido | proibido |
 | **Suporte** | `lib/sync` | Primitivas sem domínio (`SpinLock`) que precisam de `unsafe` para existir | permitido |
 | **Adaptadores** | `arch/*`, `boot/*`, `drivers/*` | Implementam as portas para uma ISA, um bootloader ou um dispositivo | permitido em `arch/` e `boot/`; proibido em `drivers/` |
 | **Raiz de composição** | `kernel/` | Entrada, pânico, console global, e a escolha de qual adaptador atende cada porta | permitido |
@@ -87,6 +87,9 @@ desenha mal as linhas longas editadas; a tela é o alvo.
 O `Sink` só atualiza a grade; `console::flush` desenha uma vez por mensagem do
 `kprintln!` e uma vez por tecla do shell, porque cada desenho repinta linhas
 inteiras.
+
+O `crypto` também não conhece o hardware: a semente (RDSEED, RNDR) entra pelo
+`kernel/`, e o estado do gerador mora lá, atrás de um lock.
 
 `gfx`, `term` e `shell` não se conhecem (guidelines 03, regra 2): `term` não sabe
 de pixels, `gfx` não sabe de terminal, e o `shell` só escreve texto em
