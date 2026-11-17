@@ -15,6 +15,7 @@ members = [
     "drivers/uart16550",
     "drivers/pl011",
     "drivers/i8042",
+    "drivers/gicv3",
     "xtask",
 ]
 # `cargo build`/`test` sem `-p` rodam no host; o kernel só compila para os alvos
@@ -33,6 +34,7 @@ default-members = [
     "drivers/uart16550",
     "drivers/pl011",
     "drivers/i8042",
+    "drivers/gicv3",
     "xtask",
 ]
 
@@ -58,6 +60,7 @@ rustos-boot-limine = { path = "boot/limine" }
 rustos-driver-uart16550 = { path = "drivers/uart16550" }
 rustos-driver-pl011 = { path = "drivers/pl011" }
 rustos-driver-i8042 = { path = "drivers/i8042" }
+rustos-driver-gicv3 = { path = "drivers/gicv3" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
