@@ -2,7 +2,9 @@
 //! corrente roda até bloquear, ceder ou ser preemptada por prioridade maior.
 
 use crate::TaskId;
-use crate::scheduler::{MAX_FIFO_PRIORITY, MIN_FIFO_PRIORITY, SchedError, SchedParams, Scheduler};
+use crate::scheduler::{
+    Detached, MAX_FIFO_PRIORITY, MIN_FIFO_PRIORITY, SchedError, SchedParams, Scheduler,
+};
 use crate::table::{IdTable, NIL, slot_u16};
 
 const LEVELS: usize = MAX_FIFO_PRIORITY as usize + 1;
@@ -137,6 +139,31 @@ impl<const N: usize> Fifo<N> {
             self.curr = NIL;
             self.push(slot, true);
         }
+    }
+
+    /// Tarefas prontas ou correndo.
+    pub fn runnable(&self) -> usize {
+        (0..N)
+            .filter(|&slot| {
+                self.table.get(slot).is_some() && self.tasks[slot].state != State::Sleeping
+            })
+            .count()
+    }
+
+    /// Tira uma tarefa pronta ou dormindo da fila, para `add` em outra. A corrente não sai
+    /// por aqui: `None`.
+    pub fn detach(&mut self, task: TaskId) -> Option<Detached> {
+        let slot = slot_u16(self.table.find(task)?);
+        if self.task(slot).state == State::Running {
+            return None;
+        }
+        self.leave(slot);
+        let priority = self.task(slot).priority;
+        self.table.release(usize::from(slot));
+        Some(Detached {
+            params: SchedParams::Fifo { priority },
+            lag_ns: 0,
+        })
     }
 
     fn leave(&mut self, slot: u16) {

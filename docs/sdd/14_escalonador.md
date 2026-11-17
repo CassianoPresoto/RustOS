@@ -200,6 +200,30 @@ corrente à disputa e cobra o tempo).
   então o estouro é exato com timer de um tiro e, com tique de 1 ms, passa no máximo
   um tique.
 
+## Migração entre filas
+
+Uma instância de `Composite` por CPU, e a tarefa muda de instância sem a política saber
+de CPU nenhuma. Os métodos abaixo são do `Composite`, do `Eevdf` e do `Fifo`, fora do
+trait `Scheduler` (só o kernel multi-CPU os usa):
+
+| Método | O que faz |
+| --- | --- |
+| `detach(task)` | Tira a tarefa **pronta ou dormindo** da fila e devolve `Detached { params, lag_ns }`. A corrente não sai por aqui (`None`): quem a tira é `sleep` ou `remove` |
+| `add_with_lag(task, detached, now)` | Entra na fila nova como `place_entity` com `PLACE_LAG`: o lag que levava (compensado pelo peso que ela soma à média), prazo de uma fatia inteira, sem a meia fatia de brinde da tarefa nova |
+| `pull_candidate(accept)` | Uma tarefa justa pronta que `accept` aceita, a de **prazo mais distante** (a que menos espera perder ao trocar de fila); nunca a corrente |
+| `runnable()` | Prontas e correndo nas duas classes: a carga que o kernel compara entre CPUs |
+
+O lag é `V - v` em ns virtuais, e o `Eevdf` o guarda preso a duas fatias (`lag_limit`).
+Tarefa que dormia tem o lag negativo queimado pelo tempo virtual que passou (`decay_lag`)
+antes de sair, como se acordasse aqui. O `Entity` ganhou o `nice` para `detach` refazer
+os `SchedParams` (cabe no preenchimento: ainda 56 bytes). O tempo real migra por
+`detach`/`add_with_lag` (lag zero) mas não é candidato de `pull_candidate`: puxar FIFO por
+prioridade entre CPUs é decisão do `rt.c` do Linux (push/pull de RT) que o kernel ainda não tem
+([DEBT-0049](../tech-debt/0049-tempo-real-nao-migra-por-balanceamento.md)).
+
+A política não trava nada nem enxerga outra fila: quem garante que a tarefa em trânsito
+não está em duas filas é o kernel ([SDD 15](15_tarefas_e_preempcao.md), regra de lock).
+
 ## `RoundRobin`
 
 A referência e o fallback (o kernel o usou até ligar o `Composite`): fila circular (`RunQueue`) e fatia fixa de 4 ms
@@ -217,6 +241,7 @@ Todos no host (`make test`), em `core/sched/src`:
 | Justiça | `scenarios.rs` | 2 a 8 tarefas com nices de -20 a 19 por 4 s simulados: a fatia de CPU segue o peso (0,1% a 0,3% de tolerância) |
 | Latência | `scenarios.rs` | com 4 tarefas sempre prontas e timer de um tiro, a que dorme e pede fatia de 0,1 ms espera 2,5 µs em média contra 863 µs da de lote (fatia de 6 ms); com fatias iguais e tique de 1 ms, a mesma tarefa espera 0,8 ms no EEVDF contra 15,8 ms no rodízio |
 | Tempo real | `scenarios.rs` | FIFO preempta a justa; teto de 95% com justa esperando (0,9500/0,0500 em 10 s); sem justa, 100% |
+| Migração | `migration.rs` | Duas filas, 200 sementes de 500 eventos (add, remove, sleep, wake, `detach` e `add_with_lag`, `pull_candidate`, tick, pick): a tarefa está em exatamente uma fila, os invariantes do EEVDF valem nas duas, a corrente recusa `detach`, o lag viaja (tolerância de um quarto), o tempo real migra por `detach` e não é candidato de pull |
 | Propriedade | `property.rs` | 300 sementes de 400 eventos aleatórios (add, remove, wake, sleep, tick, yield, pick) contra um modelo: nunca escolhe quem dorme; a árvore bate com a varredura; as somas incrementais batem com a recontagem; a soma dos lags fica em `(-W, 0]`; sempre há um elegível |
 | Benchmark | `bench.rs` (`#[ignore]`) | ns por `tick`, `pick_next` e `sleep`+`wake` com 8, 64 e 512 tarefas; árvore contra varredura |
 

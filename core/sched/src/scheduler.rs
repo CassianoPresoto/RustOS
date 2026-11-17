@@ -48,6 +48,14 @@ pub enum SchedError {
     InvalidPriority,
 }
 
+/// A tarefa que saiu de uma fila para entrar em outra: a classe e o lag que ela leva.
+/// O lag é `V - v` em ns virtuais; no tempo real é sempre zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Detached {
+    pub params: SchedParams,
+    pub lag_ns: i64,
+}
+
 /// Política de escalonamento de uma CPU. Nenhum método aloca.
 ///
 /// Tarefa nova entra pronta. `TaskId` desconhecido é ignorado em `remove`, `wake`

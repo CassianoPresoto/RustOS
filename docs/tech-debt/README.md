@@ -60,5 +60,6 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0046](0046-teste-de-simd-sem-os-caminhos-de-xsave.md) | Autoteste de SIMD sem os caminhos de XSAVE e sem a metade alta | Open | A primeira CPU sem `XSAVEOPT`, ou o primeiro boot em metal |
 | [0047](0047-timer-e-pilha-de-falha-sem-teste.md) | `arm_timer`, `next_timer_ns` e a pilha de falha sem teste | Open | O primeiro boot em metal, ou o primeiro defeito de timer ou de pilha de falha |
 | [0048](0048-dec-sem-simbolos-de-controle-nem-nrcs.md) | DEC Special Graphics sem os símbolos de controle, e sem NRCS, G2 nem G3 | Open | O primeiro programa curses da fase 5 que desenhe ACS fora das caixas e dos blocos |
+| [0049](0049-tempo-real-nao-migra-por-balanceamento.md) | Tempo real não migra por balanceamento entre CPUs | Open | A primeira tarefa de tempo real do kernel (a classe FIFO hoje não tem uso), ou o primeiro RT que espere atrás de outro numa CPU com outra ociosa |
 | [0050](0050-historico-sem-rolagem-no-aarch64.md) | Histórico de rolagem desligado no aarch64 | Open | O primeiro teclado no aarch64 (virtio-input, fase 8) ou um atalho de rolagem pela serial |
 | [0051](0051-redesenho-da-tela-com-irq-mascarada.md) | Redesenho da tela com a IRQ mascarada | Open | O primeiro benchmark de latência de IRQ ou de wakeup com a tela ligada, ou o primeiro código de tempo real que divida a CPU com o shell |
