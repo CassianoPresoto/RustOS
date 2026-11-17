@@ -391,19 +391,26 @@ medida por nós.
 
 | Passo | O que se faz | Resultado |
 | --- | --- | --- |
-| 1. Linha de base | Linux mínimo (Alpine virt, ou `tinyconfig` com BusyBox e init) na **mesma** QEMU, mesma RAM e mesmo host que o RustOS. Espera N segundos sem carga e lê `MemAvailable` e `MemTotal`. Três boots frios, mediana | `X MB` ocupados de `N MB`, com versões anotadas |
+| 1. Linha de base | Linux mínimo (Alpine virt, ou `tinyconfig` com BusyBox e init) na **mesma** QEMU, mesma RAM e mesmo host que o RustOS. Espera N segundos sem carga e lê `MemAvailable` e `MemTotal`. Três boots frios, mediana | `X MB` ocupados de `N MB`, com versões anotadas. **Feito:** 72,2 MiB (x86_64) e 61,7 MiB (aarch64) de 256, com `-smp 1`, base mínima |
 | 2. RustOS | Mesma RAM, mesmo tempo de espera. O equivalente de `MemAvailable` é a memória livre do buddy mais o que o cache pode devolver. Kernel e espaço de usuário separados | `Y MB` ocupados de `N MB` |
 | 3. Alvo | Fixado no [SDD 07](07_desempenho_e_recursos.md) como fração da linha de base, no formato "X MB de memória disponível ociosa com N MB de RAM, mediana de 3 boots" | Meta com número |
 
-- **Quando:** o passo 1 não depende do RustOS e pode rodar já; o 2 e o 3 fecham a
-  fase 5, quando há espaço de usuário para comparar
-  ([DEBT-0031](../tech-debt/0031-memoria-ociosa-sem-linha-de-base.md)).
+- **Quando:** o passo 1 não depende do RustOS e foi feito em 2026-11-17: Alpine 3.24.4
+  (kernel 6.18.60-0-virt), mesma QEMU 11.1.3, 256 MiB, EDK2, três boots frios por ISA
+  e `-smp`. A tabela, o método e as limitações estão no
+  [SDD 07](07_desempenho_e_recursos.md#linha-de-base-de-memória-ociosa-linux-mínimo-na-mesma-qemu).
+  Os passos 2 e 3 fecham a fase 5, quando há espaço de usuário para comparar: o
+  critério de saída da fase 5 cobra a repetição da medida (não é dívida, é entrega da fase).
+- **O passo 3 já tem uma hipótese** no SDD 07 (usado ≤ metade da base mínima: 36 MiB no
+  x86_64 e 31 MiB no aarch64), que a fase 5 confirma ou troca por um número medido.
 - **O Linux da linha de base é só instrumento de medida**, fora do produto: o
   RustOS não o embute nem o distribui. Não é o caso 2 do `AGENTS.md`.
 - **Não usar `free` do BusyBox** como medida: a fórmula antiga subestima o ocupado.
 - **Hoje** o RustOS só tem a medida do kernel: 249,3 MiB livres de 256 (x86_64) e
-  247,0 MiB (aarch64) depois do boot (SDD 07). Não é comparável: sem espaço de
-  usuário.
+  247,0 MiB (aarch64) depois do boot (SDD 07); em `release`, 249,1 e 246,9 MiB, ou
+  6,9 e 9,1 MiB usados. A base mínima do Linux usa 72,2 e 61,7 MiB. Não é comparável como
+  ganho: o RustOS não tem espaço de usuário, cache de página nem drivers (o SDD 07 lista o
+  que a diferença não prova).
 
 ## Decisões futuras (casos do `AGENTS.md`)
 
