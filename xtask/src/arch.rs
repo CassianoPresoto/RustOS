@@ -116,10 +116,12 @@ impl Arch {
                     "-drive",
                     &format!("if=none,id=esp,format=raw,file=fat:rw:{esp}"),
                 ]);
-                // Sem option ROM: o EDK2 tem driver virtio, e o Ubuntu não traz a do iPXE.
-                push(&["-device", "virtio-blk-pci,drive=esp,romfile="]);
+                push(&["-device", "virtio-blk-pci,drive=esp"]);
             }
         }
+        // Sem a placa de rede padrão: a da `virt` pede o efi-virtio.rom do iPXE,
+        // que o Ubuntu só instala com o pacote ipxe-qemu.
+        push(&["-nic", "none"]);
         for accel in self.accelerators() {
             push(&["-accel", accel]);
         }
