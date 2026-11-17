@@ -4,12 +4,12 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use rustos_hal::{PhysAddr, RegisterBus, VirtAddr};
+use rustos_hal::{Ipi, IpiKind, PhysAddr, RegisterBus, VirtAddr};
 
 use crate::features::Features;
 use crate::lapic::{
-    APIC_BASE_ADDRESS, APIC_BASE_ENABLE, APIC_BASE_X2APIC, ApicRegisters, LocalApic, MSR_APIC_BASE,
-    x2apic_msr,
+    APIC_BASE_ADDRESS, APIC_BASE_ENABLE, APIC_BASE_X2APIC, ApicRegisters, ICR_HIGH, ICR_LOW,
+    LocalApic, MSR_APIC_BASE, VECTOR_RESCHEDULE, VECTOR_STOP, x2apic_msr,
 };
 use crate::mmio::MmioBus;
 use crate::sysreg::{MSR_TSC_DEADLINE, rdmsr, wrmsr};
@@ -111,6 +111,27 @@ impl ApicRegisters for ApicAccess {
             Some(bus) => bus.write32(offset, value),
         }
     }
+
+    fn write_icr(&self, destination: u32, low: u32) {
+        match self.mmio {
+            // SAFETY: o x2APIC está ligado; o ICR é o MSR 0x830, de 64 bits, com o destino em 63:32.
+            None => unsafe {
+                wrmsr(
+                    x2apic_msr(ICR_LOW),
+                    u64::from(destination) << 32 | u64::from(low),
+                );
+            },
+            Some(bus) => {
+                bus.write32(ICR_HIGH, destination << 24);
+                bus.write32(ICR_LOW, low);
+            }
+        }
+    }
+
+    fn icr_pending(&self) -> bool {
+        self.mmio
+            .is_some_and(|bus| bus.read32(ICR_LOW) & (1 << 12) != 0)
+    }
 }
 
 static ACTIVE_X2APIC: AtomicBool = AtomicBool::new(false);
@@ -199,4 +220,39 @@ pub fn arm_oneshot(count: u32) {
 pub unsafe fn arm_tsc_deadline(tsc: u64) {
     // SAFETY: o contrato da função garante o modo e o MSR.
     unsafe { wrmsr(MSR_TSC_DEADLINE, tsc) };
+}
+
+/// `hal::Ipi` sobre o ICR do Local APIC desta CPU, no modo que `publish` guardou.
+#[derive(Clone, Copy, Debug)]
+pub struct X86Ipi {
+    _published: (),
+}
+
+impl X86Ipi {
+    /// # Safety
+    /// `publish` já rodou: antes dele não há APIC para escrever o ICR.
+    pub const unsafe fn new() -> Self {
+        Self { _published: () }
+    }
+}
+
+const fn vector_of(kind: IpiKind) -> u8 {
+    match kind {
+        IpiKind::Reschedule => VECTOR_RESCHEDULE,
+        IpiKind::Stop => VECTOR_STOP,
+    }
+}
+
+impl Ipi for X86Ipi {
+    fn send(&self, hw_id: u64, kind: IpiKind) {
+        if let Some(local) = published() {
+            local.send_ipi(u32::try_from(hw_id).unwrap_or(u32::MAX), vector_of(kind));
+        }
+    }
+
+    fn send_all_but_self(&self, kind: IpiKind) {
+        if let Some(local) = published() {
+            local.send_ipi_all_but_self(vector_of(kind));
+        }
+    }
 }

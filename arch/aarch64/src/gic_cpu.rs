@@ -3,7 +3,10 @@
 
 use core::arch::asm;
 
+use rustos_hal::{Ipi, IpiKind};
+
 use crate::intid::{intid_from_iar, needs_end_of_interrupt};
+use crate::sgi::{SGI_RESCHEDULE, SGI_STOP, sgi_all_but_self, sgi_to};
 
 const ICC_SRE_SRE: u64 = 1 << 0;
 /// `ICC_CTLR_EL1.EOImode`: com zero, `EOIR` faz a queda de prioridade e a desativação juntas.
@@ -81,5 +84,46 @@ pub(crate) fn end_of_interrupt(intid: u32) {
         unsafe {
             asm!("msr icc_eoir1_el1, {}", "isb", in(reg) u64::from(intid), options(nostack, preserves_flags));
         };
+    }
+}
+
+const fn sgi_of(kind: IpiKind) -> u32 {
+    match kind {
+        IpiKind::Reschedule => SGI_RESCHEDULE,
+        IpiKind::Stop => SGI_STOP,
+    }
+}
+
+fn write_sgi1r(value: u64) {
+    // SAFETY: `ICC_SGI1R_EL1` só gera a SGI; `Aarch64Ipi::new` exige a interface ligada. O
+    // `isb` a faz valer antes do que vem a seguir.
+    unsafe {
+        asm!("msr icc_sgi1r_el1, {}", "isb", in(reg) value, options(nostack, preserves_flags));
+    }
+}
+
+/// `hal::Ipi` sobre `ICC_SGI1R_EL1`: SGI do grupo 1 para a afinidade da CPU destino.
+#[derive(Clone, Copy, Debug)]
+pub struct Aarch64Ipi {
+    _enabled: (),
+}
+
+impl Aarch64Ipi {
+    /// # Safety
+    /// A interface desta CPU está ligada (`enable`) e as SGIs 0 e 1 estão habilitadas
+    /// no redistribuidor das CPUs destino.
+    pub const unsafe fn new() -> Self {
+        Self { _enabled: () }
+    }
+}
+
+impl Ipi for Aarch64Ipi {
+    #[allow(clippy::cast_possible_truncation, reason = "afinidade tem 32 bits")]
+    fn send(&self, hw_id: u64, kind: IpiKind) {
+        write_sgi1r(sgi_to(sgi_of(kind), hw_id as u32));
+    }
+
+    fn send_all_but_self(&self, kind: IpiKind) {
+        write_sgi1r(sgi_all_but_self(sgi_of(kind)));
     }
 }

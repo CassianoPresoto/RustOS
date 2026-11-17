@@ -17,6 +17,7 @@ use crate::segments::{
     GDT_LEN, GDT_LIMIT, IDT_LEN, IDT_LIMIT, IdtEntry, KERNEL_CODE, KERNEL_DATA, TSS_SELECTOR,
     TablePointer, Tss, build_gdt,
 };
+use crate::sysreg::{MSR_GS_BASE, rdmsr, wrmsr};
 
 /// Topos das pilhas de #DF, NMI e #MC (IST1 a IST3), com página de guarda abaixo.
 #[derive(Clone, Copy, Debug)]
@@ -61,8 +62,30 @@ struct Table<T>(UnsafeCell<T>);
 // SAFETY: a escrita é única, em `install`, com interrupções mascaradas.
 unsafe impl<T> Sync for Table<T> {}
 
-static GDT: Table<[u64; GDT_LEN]> = Table(UnsafeCell::new([0; GDT_LEN]));
-static TSS: Table<Tss> = Table(UnsafeCell::new(Tss::new()));
+/// GDT e TSS de uma CPU. Cada CPU tem as suas: `ltr` marca a TSS como ocupada na GDT, e
+/// as pilhas IST são por CPU. A IDT é uma só, de todas.
+#[derive(Debug)]
+#[repr(C, align(16))]
+pub struct CpuTables {
+    gdt: [u64; GDT_LEN],
+    tss: Tss,
+}
+
+impl CpuTables {
+    pub const fn new() -> Self {
+        Self {
+            gdt: [0; GDT_LEN],
+            tss: Tss::new(),
+        }
+    }
+}
+
+impl Default for CpuTables {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 static IDT: Table<[IdtEntry; IDT_LEN]> = Table(UnsafeCell::new([IdtEntry::MISSING; IDT_LEN]));
 static HANDLERS: AtomicPtr<Handlers> = AtomicPtr::new(ptr::null_mut());
 
@@ -178,41 +201,49 @@ const fn ist_for(vector: u8) -> u8 {
     }
 }
 
-/// Carrega a GDT, a TSS e a IDT e despacha para `handlers`.
+/// Monta a IDT de todas as CPUs, carrega as tabelas desta e despacha para `handlers`.
 ///
 /// # Safety
-/// Ring 0, uma vez, com IF zerado; os topos de `ist` são de pilhas mapeadas e só das exceções.
-pub unsafe fn install(ist: IstStacks, handlers: &'static Handlers) {
+/// Ring 0, uma vez, com IF zerado, antes de liberar outra CPU. Contrato de `load_cpu`.
+pub unsafe fn install(ist: IstStacks, handlers: &'static Handlers, tables: &'static mut CpuTables) {
     HANDLERS.store(ptr::from_ref(handlers).cast_mut(), Ordering::Release);
-    let tss_base = ptr::from_ref(&TSS).addr() as u64;
-    // SAFETY: única escrita, ainda sem a TSS carregada (contrato de `install`).
-    unsafe {
-        let tss = &mut *TSS.0.get();
-        tss.ist[0] = ist.double_fault.as_u64();
-        tss.ist[1] = ist.nmi.as_u64();
-        tss.ist[2] = ist.machine_check.as_u64();
-    }
-    // SAFETY: única escrita, antes do `lgdt` (contrato de `install`).
-    unsafe { GDT.0.get().write(build_gdt(tss_base)) };
     let stubs = ptr::addr_of!(rustos_isr_stubs).addr() as u64;
     let mut idt = [IdtEntry::MISSING; IDT_LEN];
     for (vector, entry) in (0..=u8::MAX).zip(idt.iter_mut()) {
         *entry = IdtEntry::interrupt(stubs + 16 * u64::from(vector), ist_for(vector));
     }
-    // SAFETY: única escrita, antes do `lidt` (contrato de `install`).
+    // SAFETY: única escrita, antes de qualquer `lidt` (contrato de `install`).
     unsafe { IDT.0.get().write(idt) };
-    // SAFETY: GDT e TSS completas e estáticas, ring 0 (contrato de `install`).
-    unsafe { load_gdt() };
+    // SAFETY: o contrato de `install` vale para esta CPU.
+    unsafe { load_cpu(ist, tables) };
+}
+
+/// Carrega a GDT, a TSS e a IDT (já montada por `install`) numa CPU secundária.
+///
+/// # Safety
+/// Ring 0 com IF zerado, depois de `install`. Os topos de `ist` e `tables` são só desta CPU.
+pub unsafe fn load_cpu(ist: IstStacks, tables: &'static mut CpuTables) {
+    tables.tss.ist[0] = ist.double_fault.as_u64();
+    tables.tss.ist[1] = ist.nmi.as_u64();
+    tables.tss.ist[2] = ist.machine_check.as_u64();
+    let tss_base = ptr::from_ref(&tables.tss).addr() as u64;
+    tables.gdt = build_gdt(tss_base);
+    // SAFETY: ring 0; `IA32_GS_BASE` existe em todo x86_64.
+    let gs_base = unsafe { rdmsr(MSR_GS_BASE) };
+    // SAFETY: GDT e TSS completas e estáticas, ring 0 (contrato de `load_cpu`).
+    unsafe { load_gdt(ptr::from_ref(&tables.gdt).addr() as u64) };
+    // SAFETY: carregar o seletor nulo em `GS` pode zerar a base; devolve a do bloco por CPU.
+    unsafe { wrmsr(MSR_GS_BASE, gs_base) };
     // SAFETY: IDT completa e estática, com a GDT nova já carregada.
     unsafe { load_idt() };
 }
 
 /// # Safety
-/// `GDT` está completa e a TSS que ela descreve é válida.
-unsafe fn load_gdt() {
+/// `base` é a GDT completa e estática desta CPU, e a TSS que ela descreve é válida.
+unsafe fn load_gdt(base: u64) {
     let pointer = TablePointer {
         limit: GDT_LIMIT,
-        base: GDT.0.get().addr() as u64,
+        base,
     };
     // SAFETY: o ponteiro descreve a GDT estática, pelo contrato da função.
     unsafe {
