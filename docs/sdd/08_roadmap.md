@@ -215,8 +215,10 @@ código de terceiros que ela exige (SDL e Mesa) são decisões futuras, listadas
 - **Descarte de página:** LRU de gerações, com refault como sinal. O MGLRU do
   Linux é a referência, não a cópia.
 - **Entrada e som virtuais** (precisam de PCI): virtio-input para teclado, mouse e
-  gamepad na QEMU, e virtio-snd para áudio. A especificação do virtio-snd (seção
-  5.14 do virtio 1.3) não foi lida ([DEBT-0028](../tech-debt/0028-virtio-snd-sem-a-leitura-da-spec.md)).
+  gamepad na QEMU, e virtio-snd para áudio. As especificações do virtio-snd (seção
+  5.14 do virtio 1.3) e do virtio-input não foram lidas
+  ([DEBT-0027](../tech-debt/0027-virtio-snd-sem-a-leitura-da-spec.md),
+  [DEBT-0032](../tech-debt/0032-virtio-input-sem-a-leitura-da-spec.md)).
 
 Decisão aberta desta fase (caso 6 do `AGENTS.md`, porque o formato em disco é
 contrato com o mundo de fora), a tomar antes de a fase 6 começar:
@@ -262,7 +264,7 @@ e o sistema vai para o disco.
    O xHCI também faz DMA, sob o IOMMU da fase 6.
 6. **Gamepad USB HID:** o mesmo driver HID entrega botões e eixos, no modelo de
    eventos do Linux (`BTN_GAMEPAD`, `ABS_*`). É o marco 3 dos jogos. A
-   especificação de USB HID não foi lida ([DEBT-0030](../tech-debt/0030-usb-hid-sem-a-leitura-da-spec.md)).
+   especificação de USB HID não foi lida ([DEBT-0029](../tech-debt/0029-usb-hid-sem-a-leitura-da-spec.md)).
 
 Decisão aberta desta fase (caso 6 do `AGENTS.md`):
 
@@ -301,7 +303,7 @@ Decisão aberta desta fase (caso 6 do `AGENTS.md`):
   teclado por evento.
 - **Vídeo e aplicativos:** virtio-gpu 2D e aplicativos gráficos.
   - Page flip e vsync (marco 5 dos jogos). A especificação do virtio-gpu 2D não
-    foi lida ([DEBT-0029](../tech-debt/0029-virtio-gpu-2d-sem-a-leitura-da-spec.md)).
+    foi lida ([DEBT-0028](../tech-debt/0028-virtio-gpu-2d-sem-a-leitura-da-spec.md)).
   - Damage explícito por região, nunca a tela inteira.
   - Buffer do cliente em memória compartilhada com contagem de referência, sem
     cópia no caminho feliz.
@@ -362,7 +364,7 @@ interface com que o programa de usuário acessa o framebuffer e os eventos de en
 | Venus no macOS/HVF não está no QEMU upstream: RFC de dez/2025, v3 de mar/2026 no patchew | patchew (lista de patches) | **Secundária**: não conferida no repositório do QEMU |
 | O Redox faz isso com Orbital e QuakeSpasm | cookbook do Redox | **Secundária** |
 | Proton e Wine pedem mais que SDL estático (`futex_waitv`, ABI Linux inteira) | pesquisa | **Sem fonte lida**: citado como risco pela pesquisa |
-| virtio 1.3, seção 5.14 (som), virtio-gpu 2D (page flip, vsync), Intel HDA (CORB/RIRB), USB HID | [virtio 1.3](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html) | **Não lidos**: [DEBT-0028](../tech-debt/0028-virtio-snd-sem-a-leitura-da-spec.md), [0029](../tech-debt/0029-virtio-gpu-2d-sem-a-leitura-da-spec.md), [0030](../tech-debt/0030-usb-hid-sem-a-leitura-da-spec.md) e [0031](../tech-debt/0031-intel-hda-sem-a-leitura-da-spec.md) |
+| virtio 1.3, seção 5.14 (som), virtio-input, virtio-gpu 2D (page flip, vsync), Intel HDA (CORB/RIRB), USB HID | [virtio 1.3](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html) | **Não lidos**: [DEBT-0027](../tech-debt/0027-virtio-snd-sem-a-leitura-da-spec.md), [0032](../tech-debt/0032-virtio-input-sem-a-leitura-da-spec.md), [0028](../tech-debt/0028-virtio-gpu-2d-sem-a-leitura-da-spec.md), [0029](../tech-debt/0029-usb-hid-sem-a-leitura-da-spec.md) e [0030](../tech-debt/0030-intel-hda-sem-a-leitura-da-spec.md) |
 | Lista de syscalls que um jogo usa | — | **Lacuna**: sai de rodar o marco 1 com `strace` equivalente |
 
 ## Memória ociosa: o alvo vem de uma medida
@@ -382,7 +384,7 @@ medida por nós.
 
 - **Quando:** o passo 1 não depende do RustOS e pode rodar já; o 2 e o 3 fecham a
   fase 5, quando há espaço de usuário para comparar
-  ([DEBT-0032](../tech-debt/0032-memoria-ociosa-sem-linha-de-base.md)).
+  ([DEBT-0031](../tech-debt/0031-memoria-ociosa-sem-linha-de-base.md)).
 - **O Linux da linha de base é só instrumento de medida**, fora do produto: o
   RustOS não o embute nem o distribui. Não é o caso 2 do `AGENTS.md`.
 - **Não usar `free` do BusyBox** como medida: a fórmula antiga subestima o ocupado.

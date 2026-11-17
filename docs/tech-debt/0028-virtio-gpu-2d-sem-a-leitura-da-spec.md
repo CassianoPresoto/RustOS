@@ -1,5 +1,5 @@
 ---
-id: DEBT-0029
+id: DEBT-0028
 title: Driver de virtio-gpu 2D sem a leitura da especificação
 status: Open
 date: 2026-11-17
@@ -7,7 +7,7 @@ trigger: Antes de escrever o driver de virtio-gpu 2D (fase 11)
 paid_date:
 ---
 
-# DEBT 0029 — Driver de virtio-gpu 2D sem a leitura da especificação
+# DEBT 0028 — Driver de virtio-gpu 2D sem a leitura da especificação
 
 ## O que falta
 

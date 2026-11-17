@@ -1,5 +1,5 @@
 ---
-id: DEBT-0032
+id: DEBT-0031
 title: Alvo de memória ociosa sem linha de base medida
 status: Open
 date: 2026-11-17
@@ -7,7 +7,7 @@ trigger: Antes de fechar a fase 5
 paid_date:
 ---
 
-# DEBT 0032 — Alvo de memória ociosa sem linha de base medida
+# DEBT 0031 — Alvo de memória ociosa sem linha de base medida
 
 ## O que falta
 

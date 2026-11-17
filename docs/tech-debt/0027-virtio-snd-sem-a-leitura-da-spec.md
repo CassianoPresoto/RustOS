@@ -1,5 +1,5 @@
 ---
-id: DEBT-0028
+id: DEBT-0027
 title: Driver de virtio-snd sem a leitura da especificação
 status: Open
 date: 2026-11-17
@@ -7,7 +7,7 @@ trigger: Antes de escrever o driver de virtio-snd (fase 6)
 paid_date:
 ---
 
-# DEBT 0028 — Driver de virtio-snd sem a leitura da especificação
+# DEBT 0027 — Driver de virtio-snd sem a leitura da especificação
 
 ## O que falta
 

@@ -1,5 +1,5 @@
 ---
-id: DEBT-0031
+id: DEBT-0030
 title: Driver de Intel HDA sem a leitura da especificação
 status: Open
 date: 2026-11-17
@@ -7,7 +7,7 @@ trigger: Antes de escrever o driver de Intel HDA, o que só acontece se o primei
 paid_date:
 ---
 
-# DEBT 0031 — Driver de Intel HDA sem a leitura da especificação
+# DEBT 0030 — Driver de Intel HDA sem a leitura da especificação
 
 ## O que falta
 

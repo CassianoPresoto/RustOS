@@ -1,5 +1,5 @@
 ---
-id: DEBT-0030
+id: DEBT-0029
 title: Driver de USB HID sem a leitura da especificação
 status: Open
 date: 2026-11-17
@@ -7,7 +7,7 @@ trigger: Antes de escrever o driver de USB HID (fase 8)
 paid_date:
 ---
 
-# DEBT 0030 — Driver de USB HID sem a leitura da especificação
+# DEBT 0029 — Driver de USB HID sem a leitura da especificação
 
 ## O que falta
 
