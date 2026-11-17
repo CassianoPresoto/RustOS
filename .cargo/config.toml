@@ -1,0 +1,9 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+# Kernel ligado num endereço fixo da metade alta (ver kernel/linker/): sem PIE.
+[target.x86_64-unknown-none]
+rustflags = ["-C", "relocation-model=static"]
+
+[target.aarch64-unknown-none-softfloat]
+rustflags = ["-C", "relocation-model=static"]

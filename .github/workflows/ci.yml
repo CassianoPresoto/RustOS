@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: gates e testes
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain do rust-toolchain.toml
+        run: rustup toolchain install
+      - run: make check
+      - run: make test
+
+  smoke:
+    name: smoke (${{ matrix.arch }})
+    needs: check
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            packages: qemu-system-x86 ovmf
+          - arch: aarch64
+            packages: qemu-system-arm qemu-efi-aarch64
+    steps:
+      - uses: actions/checkout@v7
+      - name: QEMU e firmware EDK2
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ${{ matrix.packages }}
+      - name: Toolchain do rust-toolchain.toml
+        run: rustup toolchain install
+      - run: make smoke ARCH=${{ matrix.arch }} PROFILE=release
+      - run: make size ARCH=${{ matrix.arch }} PROFILE=release

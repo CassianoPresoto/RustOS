@@ -1,0 +1,17 @@
+[package]
+name = "rustos-driver-uart16550"
+description = "Driver da UART 16550 sobre qualquer barramento de registradores."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-hal.workspace = true

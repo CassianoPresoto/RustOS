@@ -1,0 +1,18 @@
+[package]
+name = "rustos-arch-x86_64"
+description = "Adaptador da ISA x86_64: CPU, E/S por porta e paginação."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+# No host o crate fica vazio: só o alvo bare-metal usa o hal.
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-hal.workspace = true

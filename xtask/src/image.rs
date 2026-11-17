@@ -1,0 +1,47 @@
+//! Partição EFI em diretório: a QEMU a expõe como disco FAT (vvfat), sem gerar ISO.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::arch::Arch;
+use crate::cargo::{self, Profile};
+use crate::limine;
+
+const LIMINE_CONF: &str = "\
+timeout: 0
+serial: yes
+
+/RustOS
+    protocol: limine
+    path: boot():/boot/rustos
+";
+
+pub fn esp_dir(root: &Path, arch: Arch) -> PathBuf {
+    root.join("target").join("esp").join(arch.name())
+}
+
+/// `EFI/BOOT/<loader>` e `limine.conf` ao lado dele, onde o Limine procura primeiro.
+pub fn assemble(root: &Path, arch: Arch, profile: Profile) -> Result<PathBuf, String> {
+    let kernel = cargo::build_kernel(root, arch, profile)?;
+    let limine = limine::ensure(root)?;
+    let esp = esp_dir(root, arch);
+    let boot_dir = esp.join("EFI").join("BOOT");
+    let kernel_dir = esp.join("boot");
+    for dir in [&boot_dir, &kernel_dir] {
+        fs::create_dir_all(dir).map_err(|error| format!("criar {}: {error}", dir.display()))?;
+    }
+    copy(
+        &limine.join(arch.efi_loader()),
+        &boot_dir.join(arch.efi_loader()),
+    )?;
+    copy(&kernel, &kernel_dir.join("rustos"))?;
+    fs::write(boot_dir.join("limine.conf"), LIMINE_CONF)
+        .map_err(|error| format!("gravar limine.conf: {error}"))?;
+    Ok(esp)
+}
+
+fn copy(from: &Path, to: &Path) -> Result<(), String> {
+    fs::copy(from, to)
+        .map(drop)
+        .map_err(|error| format!("copiar {} para {}: {error}", from.display(), to.display()))
+}

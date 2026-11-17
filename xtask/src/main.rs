@@ -1,0 +1,106 @@
+//! Ferramenta de host do RustOS: compila, monta a imagem, sobe no QEMU, mede e
+//! roda os gates de arquitetura. Só `std`: nenhum crate externo.
+
+#![allow(clippy::std_instead_of_core, reason = "ferramenta de host, com std")]
+
+mod arch;
+mod cargo;
+mod checks;
+mod image;
+mod limine;
+mod manifest;
+mod qemu;
+mod size;
+mod workspace;
+
+use std::process::ExitCode;
+
+use arch::Arch;
+use cargo::Profile;
+
+const USAGE: &str = "\
+uso: cargo xtask <comando> [--arch A] [--profile P]
+
+comandos:
+  build           compila o kernel
+  image           monta a partição EFI (Limine + kernel) em target/esp/<arch>
+  run             sobe no QEMU com a serial no terminal (Ctrl-A X sai)
+  smoke           sobe no QEMU, espera o marcador de boot e sai com o resultado
+  size            tamanho das seções do kernel (o que ocupa memória)
+  check-layers    dependências entre camadas e onde `unsafe`/`asm!` podem morar
+  check-comments  política de comentários e referências a DEBT-NNNN
+  check-docs      índices, frontmatter das dívidas e links de docs/
+  check           os três check-*
+
+  A = x86_64 | aarch64 | all  (padrão: x86_64)
+  P = dev | release | release-small  (padrão: dev)";
+
+fn main() -> ExitCode {
+    match run(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("xtask: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+struct Options {
+    arches: Vec<Arch>,
+    profile: Profile,
+}
+
+fn run(args: &[String]) -> Result<(), String> {
+    let Some((command, rest)) = args.split_first() else {
+        println!("{USAGE}");
+        return Ok(());
+    };
+    let options = parse_options(rest)?;
+    let root = workspace::root();
+    match command.as_str() {
+        "build" => each_arch(&options, |arch| {
+            cargo::build_kernel(&root, arch, options.profile).map(drop)
+        }),
+        "image" => each_arch(&options, |arch| {
+            image::assemble(&root, arch, options.profile).map(drop)
+        }),
+        "run" => each_arch(&options, |arch| qemu::run(&root, arch, options.profile)),
+        "smoke" => each_arch(&options, |arch| qemu::smoke(&root, arch, options.profile)),
+        "size" => each_arch(&options, |arch| size::report(&root, arch, options.profile)),
+        "check-layers" => checks::layers(&root),
+        "check-comments" => checks::comments(&root),
+        "check-docs" => checks::docs(&root),
+        "check" => checks::all(&root),
+        "help" | "--help" | "-h" => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        other => Err(format!("comando desconhecido `{other}`\n\n{USAGE}")),
+    }
+}
+
+fn parse_options(args: &[String]) -> Result<Options, String> {
+    let mut options = Options {
+        arches: vec![Arch::X86_64],
+        profile: Profile::Dev,
+    };
+    let mut args = args.iter();
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| format!("`{flag}` precisa de valor"))?;
+        match flag.as_str() {
+            "--arch" => options.arches = Arch::parse(value)?,
+            "--profile" => options.profile = Profile::parse(value)?,
+            _ => return Err(format!("opção desconhecida `{flag}`")),
+        }
+    }
+    Ok(options)
+}
+
+fn each_arch(
+    options: &Options,
+    mut task: impl FnMut(Arch) -> Result<(), String>,
+) -> Result<(), String> {
+    options.arches.iter().try_for_each(|&arch| task(arch))
+}

@@ -1,0 +1,84 @@
+[workspace]
+resolver = "3"
+members = [
+    "kernel",
+    "core/hal",
+    "core/mm",
+    "core/sched",
+    "lib/sync",
+    "arch/x86_64",
+    "arch/aarch64",
+    "boot/limine",
+    "drivers/uart16550",
+    "drivers/pl011",
+    "xtask",
+]
+# `cargo build`/`test` sem `-p` rodam no host; o kernel só compila para os alvos
+# bare-metal, pelo `cargo xtask build`.
+default-members = [
+    "core/hal",
+    "core/mm",
+    "core/sched",
+    "lib/sync",
+    "arch/x86_64",
+    "arch/aarch64",
+    "boot/limine",
+    "drivers/uart16550",
+    "drivers/pl011",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+repository = "https://github.com/CassianoPresoto/RustOS"
+publish = false
+
+# Toda dependência interna é declarada aqui; o `cargo xtask check-layers` lê esta
+# tabela para saber a camada de cada crate. Crate externo não entra sem aprovação.
+[workspace.dependencies]
+rustos-hal = { path = "core/hal" }
+rustos-mm = { path = "core/mm" }
+rustos-sync = { path = "lib/sync" }
+rustos-arch-x86_64 = { path = "arch/x86_64" }
+rustos-arch-aarch64 = { path = "arch/aarch64" }
+rustos-boot-limine = { path = "boot/limine" }
+rustos-driver-uart16550 = { path = "drivers/uart16550" }
+rustos-driver-pl011 = { path = "drivers/pl011" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+missing_safety_doc = "deny"
+std_instead_of_core = "warn"
+alloc_instead_of_core = "warn"
+# Ruído do pedantic sem ganho para o kernel.
+must_use_candidate = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+# Prosa em português cita ISA e registrador (x86_64, MAIR_EL1) sem crase.
+doc_markdown = "allow"
+
+[profile.dev]
+opt-level = 1
+
+# Desempenho máximo: um codegen unit e LTO completo.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = false
+incremental = false
+
+# Hardware pequeno: mesmo perfil, otimizado para tamanho.
+[profile.release-small]
+inherits = "release"
+opt-level = "z"

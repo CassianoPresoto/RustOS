@@ -1,0 +1,17 @@
+[package]
+name = "rustos-mm"
+description = "Gerência de memória: política pura de frames e janelas de endereço."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-hal.workspace = true

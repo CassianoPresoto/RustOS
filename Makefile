@@ -1,0 +1,61 @@
+# Atalhos para o cargo e o `cargo xtask`. `make help` lista tudo.
+
+ARCH ?= x86_64
+PROFILE ?= dev
+TARGETS := x86_64-unknown-none aarch64-unknown-none-softfloat
+XTASK := cargo xtask
+
+.DEFAULT_GOAL := help
+.PHONY: help fmt fmt-check clippy layers-check comments-check docs-check check test \
+        build image run smoke size pr clean
+
+help: ## lista os alvos
+	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-15s %s\n", $$1, $$2}'
+	@echo "  variáveis: ARCH=x86_64|aarch64|all  PROFILE=dev|release|release-small"
+
+fmt: ## formata o código
+	cargo fmt --all
+
+fmt-check: ## confere a formatação
+	cargo fmt --all --check
+
+clippy: ## lint no host e nos dois alvos bare-metal; aviso é erro
+	cargo clippy --all-targets -- -D warnings
+	@for target in $(TARGETS); do \
+		cargo clippy --package rustos-kernel --target $$target -- -D warnings || exit 1; \
+	done
+
+layers-check: ## dependências entre camadas, crates externos, unsafe e asm no lugar certo
+	$(XTASK) check-layers
+
+comments-check: ## comentários de no máximo 4 linhas e DEBT-NNNN que existe
+	$(XTASK) check-comments
+
+docs-check: ## índices, frontmatter das dívidas e links de docs/
+	$(XTASK) check-docs
+
+check: fmt-check clippy layers-check comments-check docs-check ## todos os gates (não sobe a QEMU)
+
+test: ## testes de unidade no host (todos os crates menos o kernel)
+	cargo test
+
+build: ## compila o kernel
+	$(XTASK) build --arch $(ARCH) --profile $(PROFILE)
+
+image: ## monta a partição EFI em target/esp/<arch>
+	$(XTASK) image --arch $(ARCH) --profile $(PROFILE)
+
+run: ## sobe na QEMU com a serial no terminal (Ctrl-A X sai)
+	$(XTASK) run --arch $(ARCH) --profile $(PROFILE)
+
+smoke: ## sobe na QEMU, espera "[rustos] boot ok" e sai
+	$(XTASK) smoke --arch $(ARCH) --profile $(PROFILE)
+
+size: ## tamanho das seções do kernel
+	$(XTASK) size --arch $(ARCH) --profile $(PROFILE)
+
+pr: check test ## checklist antes do PR: gates, testes e smoke nas duas ISAs
+	$(XTASK) smoke --arch all --profile $(PROFILE)
+
+clean: ## apaga target/ (inclusive o Limine baixado)
+	cargo clean
