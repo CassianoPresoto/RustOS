@@ -1,6 +1,6 @@
 //! Leitura do mapa de memória: totais e onde cabe uma estrutura do kernel.
 
-use rustos_hal::{MemoryRegion, PhysAddr, addr::align_up};
+use rustos_hal::{MemoryRegion, PhysAddr, RegionKind, addr::align_up};
 
 use crate::FRAME_SIZE;
 
@@ -8,14 +8,17 @@ use crate::FRAME_SIZE;
 pub struct MemorySummary {
     pub regions: usize,
     pub usable_bytes: u64,
+    /// Memória do bootloader que o kernel devolve ao alocador depois de copiar o que lê.
+    pub reclaimable_bytes: u64,
     pub other_bytes: u64,
-    /// Do início da primeira região utilizável ao fim da última: o que o bitmap cobre.
-    pub usable_span: Option<(PhysAddr, PhysAddr)>,
+    /// Do início da primeira região utilizável ou recuperável ao fim da última: o que
+    /// o buddy cobre, para poder receber a memória do bootloader depois.
+    pub managed_span: Option<(PhysAddr, PhysAddr)>,
 }
 
 impl MemorySummary {
     pub fn span_frames(&self) -> u64 {
-        self.usable_span.map_or(0, |(start, end)| {
+        self.managed_span.map_or(0, |(start, end)| {
             (end.as_u64() - start.as_u64()) / FRAME_SIZE
         })
     }
@@ -25,14 +28,18 @@ pub fn summarize(regions: impl IntoIterator<Item = MemoryRegion>) -> MemorySumma
     let mut summary = MemorySummary::default();
     for region in regions {
         summary.regions += 1;
-        if !region.is_usable() {
-            summary.other_bytes = summary.other_bytes.saturating_add(region.len);
-            continue;
-        }
-        summary.usable_bytes = summary.usable_bytes.saturating_add(region.len);
+        let total = match region.kind {
+            RegionKind::Usable => &mut summary.usable_bytes,
+            RegionKind::BootloaderReclaimable => &mut summary.reclaimable_bytes,
+            _ => {
+                summary.other_bytes = summary.other_bytes.saturating_add(region.len);
+                continue;
+            }
+        };
+        *total = total.saturating_add(region.len);
         let start = region.start.align_down(FRAME_SIZE);
         let end = PhysAddr::new(region.end());
-        summary.usable_span = Some(match summary.usable_span {
+        summary.managed_span = Some(match summary.managed_span {
             None => (start, end),
             Some((low, high)) => (low.min(start), high.max(end)),
         });
@@ -57,8 +64,6 @@ pub fn find_free_block(
 
 #[cfg(test)]
 mod tests {
-    use rustos_hal::RegionKind;
-
     use super::*;
 
     fn map() -> [MemoryRegion; 4] {
@@ -82,16 +87,33 @@ mod tests {
     fn summary_span_goes_from_first_to_last_usable() {
         let summary = summarize(map());
         assert_eq!(
-            summary.usable_span,
+            summary.managed_span,
             Some((PhysAddr::new(0x1000), PhysAddr::new(0x20_0000)))
         );
         assert_eq!(summary.span_frames(), 0x1ff);
     }
 
     #[test]
+    fn reclaimable_regions_count_apart_and_extend_the_span() {
+        let regions = [
+            MemoryRegion::new(0x1000, 0x1000, RegionKind::Usable),
+            MemoryRegion::new(0x4000, 0x2000, RegionKind::BootloaderReclaimable),
+            MemoryRegion::new(0x8000, 0x1000, RegionKind::Reserved),
+        ];
+        let summary = summarize(regions);
+        assert_eq!(summary.usable_bytes, 0x1000);
+        assert_eq!(summary.reclaimable_bytes, 0x2000);
+        assert_eq!(summary.other_bytes, 0x1000);
+        assert_eq!(
+            summary.managed_span,
+            Some((PhysAddr::new(0x1000), PhysAddr::new(0x6000)))
+        );
+    }
+
+    #[test]
     fn empty_map_has_no_span() {
         let summary = summarize([]);
-        assert_eq!(summary.usable_span, None);
+        assert_eq!(summary.managed_span, None);
         assert_eq!(summary.span_frames(), 0);
     }
 

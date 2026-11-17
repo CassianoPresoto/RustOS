@@ -153,8 +153,10 @@ ponteiro, e o subtrai em `dealloc`. `deallocate` recebe o mesmo `Layout` de
 | Heap | `kernel/src/heap.rs` | `static HEAP: IrqLock<Option<State>>` com `KernelHeap<DirectMap>`, o `Frames` e a conta de bytes; `#[global_allocator]` |
 
 `Memory::init` faz, na ordem de hoje: `BuddyAllocator::new` sobre o bloco que
-`find_free_block` achou, `release_range` das regiões utilizáveis, `reserve_range` do
-próprio metadado, `frames::install` e `heap::install`.
+`find_free_block` achou (o intervalo coberto é o `managed_span` de `summarize`, que inclui
+as regiões `BootloaderReclaimable`), `release_range` das regiões utilizáveis,
+`reserve_range` do próprio metadado, `frames::install` e `heap::install`. As regiões
+recuperáveis entram depois, em `Memory::reclaim_bootloader` ([SDD 13](13_memoria_virtual.md)).
 
 **Ordem de lock: `HEAP`, depois `FRAMES`.** Só o heap trava os dois, nessa ordem,
 e quem segura `FRAMES` (só dentro de um método de `Frames`) nunca chama o heap. Os

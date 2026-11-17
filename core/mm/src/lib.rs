@@ -18,6 +18,7 @@ pub mod memory;
 #[cfg(test)]
 mod testing;
 pub mod window;
+pub mod wx;
 
 pub use buddy::{BuddyAllocator, FrameAllocator, MAX_ORDER};
 pub use cache::{Cached, FrameCache, FrameCaches};
@@ -25,4 +26,5 @@ pub use frame::{FRAME_SIZE, FrameError, PhysFrame};
 pub use heap::{HeapError, KernelHeap};
 pub use layout::{MemorySummary, find_free_block, summarize};
 pub use memory::FrameMemory;
-pub use window::AddressWindow;
+pub use window::{AddressWindow, free_top_level_slot};
+pub use wx::{Section, Violation, WxChecker};
