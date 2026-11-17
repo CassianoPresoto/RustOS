@@ -7,7 +7,7 @@
 
 | Métrica | Como | Valor hoje (QEMU, 256 MiB) |
 | --- | --- | --- |
-| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 100 541 / 61 725 bytes · aarch64: 101 044 / 70 340 bytes (fase 1: vetores, GICv3, timer; eram 89 772 / 62 240 na base) |
+| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 132 200 / 88 447 bytes · aarch64: 105 128 / 71 220 bytes (fase 1: vetores, controlador de interrupção, timer, teclado; na fase 0.5 eram 100 541 / 61 725 e 86 500 / 59 952) |
 | Grade do terminal | 8 bytes por célula (`size_of::<Cell>()`), em frames contíguos | x86_64 1280x800: 158x47 células, 59 408 bytes (15 frames) · aarch64 1024x768: 126x45, 45 360 bytes (12 frames) |
 | Fonte própria | tabelas em `.rodata` (teste em `core/gfx/src/font`) | 3 884 bytes para 237 glifos 8x16 |
 | Shell | `size_of::<Shell<256, 32>>()`, na pilha do `kmain` | 8 880 bytes |

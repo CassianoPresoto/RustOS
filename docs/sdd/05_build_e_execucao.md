@@ -32,7 +32,7 @@ Os dois alvos são Tier 2 com `core` pré-compilado: não há `build-std` nem ni
 | `make image` | `image` | Monta `target/esp/<isa>/`: `EFI/BOOT/<loader>`, `EFI/BOOT/limine.conf`, `boot/rustos` |
 | `make run` | `run` | Sobe na QEMU: a tela numa janela, o shell e a serial no terminal (`-serial mon:stdio`); Ctrl-A X sai |
 | `make smoke` | `smoke` | Sobe sem tela, lê a serial até `[rustos] boot ok`, pânico ou 120 s; imprime as linhas do kernel e o tempo de parede |
-| `make screenshot CMDS="fetch;mem"` | `screenshot -- fetch mem` | Sobe sem janela, digita cada comando no shell pela serial, captura a tela pelo `screendump` do monitor da QEMU e grava `target/screenshots/<isa>.png` |
+| `make screenshot CMDS="fetch;mem"` | `screenshot -- fetch mem` | Sobe sem janela, digita cada comando no shell pela serial, captura a tela pelo `screendump` do monitor da QEMU e grava `target/screenshots/<isa>.png`. Comando que começa com `keys:` vai pelo teclado da máquina (`sendkey`), em qcodes da QEMU: `keys: e c h o spc semicolon ret` |
 | `make font-preview` | `font-preview` | Desenha todos os glifos da fonte própria em `target/font-preview.png` |
 | `make size` | `size` | Lê o ELF e soma `text`, `rodata`, `data`, `bss` |
 | `make check` | `check-layers`, `check-comments`, `check-docs` | Mais `cargo fmt --check` e `cargo clippy -D warnings` no host e nos dois alvos |

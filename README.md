@@ -9,19 +9,23 @@ externo: só `core`, `alloc` e o que está neste repositório.
 
 ## Estado
 
-Fase 0.5 — tela e terminal. O kernel sobe pelo Limine em **x86_64** e **aarch64**
-(QEMU), monta o alocador de frames, desenha na tela com uma **fonte própria** e um
-**emulador de terminal VT/xterm** escritos aqui, e abre um **shell embutido**
-(`help`, `fetch`, `mem`, `colors`, `uname`, histórico, Tab, edição de linha). Nada
-da interface vem de biblioteca: fonte, terminal, desenho e shell são deste
-repositório.
+Fase 1 — exceções, interrupções e tempo. O kernel sobe pelo Limine em **x86_64**
+e **aarch64** (QEMU) e monta o alocador de frames. Desenha na tela com uma **fonte
+própria** e um **emulador de terminal VT/xterm** escritos aqui, e abre um **shell
+embutido** (`help`, `fetch`, `mem`, `colors`, `uptime`, `keymap`, histórico, Tab,
+edição de linha). Exceções, controlador de interrupção (APIC ou GICv3), timer e
+relógio são próprios. O shell dorme até chegar tecla, pela serial ou pelo teclado
+PS/2 com layout US ou ABNT2. As proteções de hardware ficam ligadas: WP, NX,
+SMEP, SMAP e UMIP no x86_64, e PAN no aarch64. Nada da interface vem de
+biblioteca.
 
 ```sh
-make run ARCH=aarch64          # janela com a tela; o shell lê o teclado do terminal
+make run ARCH=x86_64           # janela com a tela; digite nela ou no terminal
 make screenshot ARCH=all CMDS="fetch;mem"   # grava target/screenshots/<isa>.png
 ```
 
-O kernel carregado ocupa ~98 KiB em `release` e ~60 KiB em `release-small`
+O kernel carregado ocupa ~129 KiB (x86_64) e ~103 KiB (aarch64) em `release`, e
+~86 KiB e ~70 KiB em `release-small`
 (medição no [SDD 07](docs/sdd/07_desempenho_e_recursos.md)). O que vem depois está
 no [roadmap](docs/sdd/08_roadmap.md).
 
