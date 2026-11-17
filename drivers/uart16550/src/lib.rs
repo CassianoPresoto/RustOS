@@ -1,5 +1,5 @@
 //! UART 16550: COM1 do PC por porta de E/S, ou MMIO em placas RISC-V e ARM.
-//! Transmissão por espera ativa e recepção por consulta; interrupção entra na fase 1.
+//! Transmissão por espera ativa; recepção por consulta ou por interrupção.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -21,6 +21,11 @@ const LINE_DLAB: u8 = 1 << 7;
 const LINE_8N1: u8 = 0b11;
 const FIFO_ENABLE_AND_CLEAR: u8 = 0xC7;
 const MODEM_DTR_RTS: u8 = 0b11;
+/// No PC o OUT2 do MCR é o que liga a linha de IRQ da UART ao controlador.
+const MODEM_OUT2: u8 = 1 << 3;
+/// FIFO ligada com gatilho de 1 byte, sem limpar o que já chegou.
+const FIFO_ENABLE_TRIGGER_1: u8 = 0x01;
+const INTERRUPT_RECEIVE_DATA: u8 = 1 << 0;
 const STATUS_DATA_READY: u8 = 1 << 0;
 const STATUS_TX_EMPTY: u8 = 1 << 5;
 
@@ -47,6 +52,14 @@ impl<B: RegisterBus> Uart16550<B> {
         self.bus.write8(LINE_CONTROL, LINE_8N1);
         self.bus.write8(FIFO_CONTROL, FIFO_ENABLE_AND_CLEAR);
         self.bus.write8(MODEM_CONTROL, MODEM_DTR_RTS);
+    }
+
+    /// Liga a interrupção de recepção (`IER` bit 0) e a linha de IRQ (`OUT2`).
+    /// Ler o `DATA` até esvaziar a FIFO é o que baixa a linha.
+    pub fn enable_receive_interrupt(&mut self) {
+        self.bus.write8(FIFO_CONTROL, FIFO_ENABLE_TRIGGER_1);
+        self.bus.write8(INTERRUPT_ENABLE, INTERRUPT_RECEIVE_DATA);
+        self.bus.write8(MODEM_CONTROL, MODEM_DTR_RTS | MODEM_OUT2);
     }
 
     pub fn write_byte(&mut self, byte: u8) {
@@ -141,6 +154,29 @@ mod tests {
         assert_eq!(writes[2], (DIVISOR_LOW, 0x02));
         assert_eq!(writes[3], (DIVISOR_HIGH, 0x01));
         assert_eq!(writes[4], (LINE_CONTROL, LINE_8N1));
+    }
+
+    #[test]
+    fn receive_interrupt_enables_ier_before_the_irq_line() {
+        let mut uart = Uart16550::new(FakeBus::default());
+        uart.enable_receive_interrupt();
+        assert_eq!(
+            *uart.bus.writes.borrow(),
+            [
+                (FIFO_CONTROL, 0x01),
+                (INTERRUPT_ENABLE, 0x01),
+                (MODEM_CONTROL, 0x0B),
+            ]
+        );
+    }
+
+    #[test]
+    fn init_leaves_interrupts_and_the_irq_line_off() {
+        let mut uart = Uart16550::new(FakeBus::default());
+        uart.init(1);
+        let writes = uart.bus.writes.borrow();
+        assert_eq!(writes[0], (INTERRUPT_ENABLE, 0));
+        assert_eq!(writes.last(), Some(&(MODEM_CONTROL, 0x03)));
     }
 
     #[test]
