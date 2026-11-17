@@ -13,11 +13,15 @@ use crate::{console, platform};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
     target_arch = "aarch64",
-    allow(dead_code, reason = "BASE: o adaptador do aarch64 ainda não constrói")
+    allow(dead_code, reason = "a `virt` não tem teclado nesta fase")
 )]
 pub enum IrqSource {
     Timer,
     Serial,
+    #[cfg_attr(
+        target_arch = "aarch64",
+        allow(dead_code, reason = "a `virt` não tem teclado")
+    )]
     Keyboard,
     Spurious,
     Unknown,
@@ -94,10 +98,10 @@ fn on_irq(irq: Irq) {
             platform::timer_tick();
         }
         IrqSource::Serial => {
+            platform::serial_irq_done();
             while let Some(byte) = console::read_byte() {
                 push_input(byte);
             }
-            platform::serial_irq_done();
         }
         IrqSource::Keyboard => {
             while let Some(event) = platform::keyboard_event() {

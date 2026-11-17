@@ -75,9 +75,9 @@ impl Memory {
 
     /// Pilha de `pages` páginas com uma página sem mapeamento logo abaixo: estouro
     /// vira page fault em vez de corromper memória. Devolve o topo (fim exclusivo).
-    #[allow(
-        dead_code,
-        reason = "os adaptadores de interrupção usam nas pilhas de exceção"
+    #[cfg_attr(
+        target_arch = "x86_64",
+        allow(dead_code, reason = "o caminho de interrupção do x86_64 ainda não usa")
     )]
     pub fn map_stack(
         &mut self,

@@ -30,6 +30,7 @@ rustos-driver-i8042.workspace = true
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 rustos-arch-aarch64.workspace = true
 rustos-driver-pl011.workspace = true
+rustos-driver-gicv3.workspace = true
 
 [lints]
 workspace = true
