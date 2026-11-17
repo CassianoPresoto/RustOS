@@ -116,7 +116,8 @@ impl Arch {
                     "-drive",
                     &format!("if=none,id=esp,format=raw,file=fat:rw:{esp}"),
                 ]);
-                push(&["-device", "virtio-blk-pci,drive=esp"]);
+                // Sem option ROM: o EDK2 tem driver virtio, e o Ubuntu não traz a do iPXE.
+                push(&["-device", "virtio-blk-pci,drive=esp,romfile="]);
             }
         }
         for accel in self.accelerators() {

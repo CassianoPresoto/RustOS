@@ -53,7 +53,7 @@ não há ISO nem `xorriso`.
 | --- | --- | --- |
 | Máquina | `-machine q35 -cpu max -m 256M` | `-machine virt -cpu max -m 256M` |
 | Firmware | EDK2 em `-drive if=pflash,readonly=on` | EDK2 em `-bios` |
-| Disco | AHCI (padrão da q35) | `virtio-blk-pci` |
+| Disco | AHCI (padrão da q35) | `virtio-blk-pci` sem option ROM (`romfile=`): o EDK2 já tem driver virtio, e o Ubuntu só traz a ROM do iPXE no pacote `ipxe-qemu` |
 | Aceleração | `kvm` em host Linux x86_64 | `hvf` em Mac Apple Silicon, `kvm` em host Linux aarch64 |
 
 TCG é sempre a reserva (`-accel <nativo> -accel tcg`). O firmware é procurado nos
