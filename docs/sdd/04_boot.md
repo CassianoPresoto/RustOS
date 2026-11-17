@@ -64,10 +64,12 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores.
 4. Se há framebuffer, `Screen::new` aloca a grade do terminal em frames contíguos
    (8 bytes por célula), pinta o fundo e a barra do topo, e passa a receber tudo o
    que vai para a serial.
-5. Relatório, autoteste de um frame (escreve e relê pelo mapa direto) e
-   `[rustos] boot ok`.
-6. `system::run_shell`: o shell embutido lê a serial e escreve na serial e na tela.
-   Sem interrupções, a leitura é por consulta (DEBT-0007).
+5. `interrupts::init` liga exceções, controlador, timer e a IRQ da serial (no
+   x86_64, [SDD 10](10_interrupcoes_x86_64.md)) e destrava o `IF`.
+6. Relatório (inclui `protections`), autoteste de um frame (escreve e relê pelo
+   mapa direto), autoteste de exceção e de timer, e `[rustos] boot ok`.
+7. `system::run_shell`: o shell embutido lê a fila que a IRQ da serial enche e dorme
+   em `hlt` quando está vazia. Sem interrupções, a leitura é por consulta (DEBT-0007).
 
 Pânico antes do passo 3 não aparece em lugar nenhum (DEBT-0005).
 

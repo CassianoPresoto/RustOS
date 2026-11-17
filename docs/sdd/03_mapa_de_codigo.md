@@ -29,12 +29,12 @@
 ├── lib/
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set)
 ├── arch/                       # adaptadores de ISA: o único lugar com asm!
-│   ├── x86_64/                 # X86Cpu, PortBus (in/out)
+│   ├── x86_64/                 # X86Cpu, PortBus, X86PageMapper, GDT/TSS/IDT, APIC, PIT; módulos puros (pte, walk, segments, fault, lapic, ioapic, pit, clock) testados no host
 │   └── aarch64/                # Aarch64Cpu, MmioBus, descriptor + walk (puros), Aarch64PageMapper (TTBR1)
 ├── boot/
 │   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 escrito aqui → hal::BootInfo
 ├── drivers/                    # adaptadores de dispositivo: genéricos sobre hal::RegisterBus, sem unsafe
-│   ├── uart16550/              # COM1 do PC (porta) ou 16550 em MMIO
+│   ├── uart16550/              # COM1 do PC (porta) ou 16550 em MMIO; recepção por consulta ou interrupção
 │   └── pl011/                  # serial da QEMU virt e de placas ARM
 ├── xtask/                      # ferramenta de host (só std): build, image, run, smoke, screenshot, size, font-preview, check-*
 ├── docs/                       # sdd/, guidelines/, tech-debt/
