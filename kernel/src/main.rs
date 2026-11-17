@@ -18,6 +18,7 @@ mod interrupts;
 mod memory;
 mod panic;
 mod platform;
+mod random;
 mod screen;
 mod sync;
 mod system;
@@ -31,6 +32,7 @@ pub const BOOT_OK_MARKER: &str = "[rustos] boot ok";
 
 #[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
+    let entry_cycles = platform::cycles();
     // Até o console existir, pânico não aparece em lugar nenhum (DEBT-0005).
     // SAFETY: primeira coisa na entrada; nada reaproveitou a memória do bootloader.
     let boot = match unsafe { LimineBoot::from_bootloader() } {
@@ -63,7 +65,9 @@ extern "C" fn kmain() -> ! {
     });
 
     let interrupts_on = interrupts::init(&boot, &mut memory);
+    let source = random::init(&boot_marks(&boot, &memory, entry_cycles));
     report(&boot, &memory, display);
+    report_random(source);
     // SAFETY: o mapa direto cobre todo frame utilizável, de onde vem o frame do teste.
     let frames_ok = unsafe { memory.self_test(boot.direct_map_offset()) };
     kprintln!(
@@ -82,6 +86,35 @@ extern "C" fn kmain() -> ! {
     kprintln!("{BOOT_OK_MARKER}");
     let mut system = system::System::new(&boot, &memory, display);
     system::run_shell(&mut system)
+}
+
+/// O que o boot tem de impredizível: contadores de ciclo e os tempos do bootloader.
+fn boot_marks(boot: &impl BootInfo, memory: &memory::Memory, entry_cycles: u64) -> [u64; 7] {
+    let timeline = boot.timeline();
+    let field = |read: fn(&rustos_hal::BootTimeline) -> u64| timeline.as_ref().map_or(0, read);
+    [
+        entry_cycles,
+        platform::cycles(),
+        field(|t| t.reset_us),
+        field(|t| t.loader_start_us),
+        field(|t| t.kernel_handoff_us),
+        platform::now_ns().unwrap_or(0),
+        memory.frames.free_frames() as u64,
+    ]
+}
+
+fn report_random(source: random::Source) {
+    match source {
+        random::Source::Hardware(name) => kprintln!("[rustos] random: {name}"),
+        random::Source::Jitter => kprintln!("[rustos] random: jitter (weak)"),
+    }
+    if let Some(bench) = random::benchmark() {
+        kprintln!(
+            "[rustos] random bench: chacha20 {} MB/s, reseed {} us",
+            bench.mb_per_s,
+            bench.reseed_ns / 1000
+        );
+    }
 }
 
 fn display_info(screen: &screen::Screen) -> DisplayInfo {

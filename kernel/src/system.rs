@@ -10,6 +10,7 @@ use crate::heap;
 use crate::interrupts;
 use crate::memory::Memory;
 use crate::platform;
+use crate::random;
 
 /// Layout em uso; só o laço do shell lê e escreve, numa CPU.
 static KEYMAP: KeymapCell = KeymapCell(core::cell::Cell::new(Some("us")));
@@ -96,6 +97,10 @@ impl<B: BootInfo> Host for System<'_, B> {
 
     fn uptime_ns(&self) -> Option<u64> {
         platform::now_ns()
+    }
+
+    fn random_u64(&self) -> Option<u64> {
+        random::next_u64()
     }
 
     fn keymap(&self) -> Option<&'static str> {

@@ -5,8 +5,8 @@ use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use rustos_arch_aarch64::intid::{QEMU_VIRT_PL011_INTID, VIRTUAL_TIMER_INTID};
 use rustos_arch_aarch64::{
-    Aarch64Cpu, Aarch64PageMapper, MmioBus, QEMU_VIRT_GICD, QEMU_VIRT_GICR, QEMU_VIRT_PL011,
-    exception, gic_cpu, intid, protection, timer,
+    Aarch64Cpu, Aarch64Entropy, Aarch64PageMapper, MmioBus, QEMU_VIRT_GICD, QEMU_VIRT_GICR,
+    QEMU_VIRT_PL011, exception, gic_cpu, intid, protection, timer,
 };
 use rustos_driver_gicv3::{GicError, GicV3, affinity_from_mpidr, router_for};
 use rustos_driver_pl011::Pl011;
@@ -21,6 +21,7 @@ use crate::memory::{Memory, map_device};
 pub const ARCH: &str = "aarch64";
 
 pub type PlatformConsole = Pl011<MmioBus>;
+pub type PlatformEntropy = Aarch64Entropy;
 
 /// Frequência do tique do timer.
 pub const TIMER_HZ: u32 = 100;
@@ -178,6 +179,16 @@ pub fn keyboard_event() -> Option<KeyEvent> {
 /// Nanossegundos desde que `init_interrupts` ligou o relógio; `None` antes.
 pub fn now_ns() -> Option<u64> {
     timer::now_ns()
+}
+
+/// Contador virtual (`CNTVCT_EL0`): o relógio da semente de reserva.
+pub fn cycles() -> u64 {
+    timer::counter()
+}
+
+/// `RNDRRS` ou `RNDR`, se `ID_AA64ISAR0_EL1.RNDR` anunciar.
+pub fn hardware_entropy() -> Option<PlatformEntropy> {
+    Aarch64Entropy::detect()
 }
 
 /// As proteções de hardware desta ISA e se ficaram ligadas.

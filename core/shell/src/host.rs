@@ -15,6 +15,10 @@ pub trait Host {
     fn fault_test(&self, _kind: FaultTest) -> bool {
         false
     }
+    /// Um número aleatório de 64 bits do gerador do kernel; `None` sem gerador.
+    fn random_u64(&self) -> Option<u64> {
+        None
+    }
     /// Layout do teclado em uso; `None` quando não há teclado.
     fn keymap(&self) -> Option<&'static str> {
         None

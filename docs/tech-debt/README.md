@@ -33,7 +33,8 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0012](0012-excecao-de-usuario-so-para-a-cpu.md) | Exceção vinda de código de usuário só para a CPU | Open | O primeiro código em anel 3 ou EL0, na fase 4 |
 | [0013](0013-caminhada-de-tabela-duplicada.md) | Caminhada de tabela de página duplicada entre as ISAs | Open | A terceira ISA, ou a primeira mudança no algoritmo de caminhada de uma delas |
 | [0014](0014-x86-sem-salvaguardas-de-metal.md) | x86_64 sem as salvaguardas que só o metal pede | Open | O primeiro boot do x86_64 em metal |
-| [0015](0015-cripto-sem-medida-no-alvo.md) | Criptografia do núcleo medida só no host | Open | O kernel ligar o `Rng` de `core/crypto`, na fase 2 |
+| [0015](0015-cripto-sem-medida-no-x86-acelerado.md) | Criptografia do núcleo sem medida do x86_64 com aceleração | Open | O primeiro boot do x86_64 com KVM ou em metal |
 | [0017](0017-dupla-liberacao-escondida-no-cache-de-frames.md) | Dupla liberação de frame no cache por CPU só aparece ao esvaziar o cache | Open | O primeiro defeito de dupla liberação de frame que o cache esconder, ou o modo de depuração do kernel |
 | [0018](0018-frames-sem-cache-por-cpu.md) | Alocador de frames sem o cache por CPU | Open | O primeiro núcleo secundário subir, na fase 3 |
+| [0019](0019-aleatorio-sem-fonte-de-hardware-fraco.md) | Aleatório só com jitter do contador em CPU sem gerador de hardware | Open | O primeiro consumidor de segurança do aleatório (KASLR, canário, ASLR de usuário) rodando em CPU sem RDSEED, RDRAND nem RNDR |
 | [0020](0020-zerar-pagina-pelo-memset-generico.md) | Zerar memória ao liberar usa o memset genérico, 5x mais lento que o do host | Open | O primeiro caminho quente que zere página inteira (page fault de usuário, na fase 4), ou o primeiro benchmark de fork, exec ou mmap contra o Linux |

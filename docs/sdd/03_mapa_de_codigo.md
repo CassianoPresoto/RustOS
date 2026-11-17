@@ -12,7 +12,10 @@
 │   ├── linker/                 # x86_64.ld, aarch64.ld: metade alta, um segmento por permissão
 │   └── src/
 │       ├── main.rs             # kmain: boot → memória → serial → tela → relatório → boot ok → shell
-│       ├── memory.rs           # liga core/mm à memória real pelo mapa direto; janela de dispositivos
+│       ├── memory.rs           # Memory::init: buddy, heap e janelas de dispositivos e de pilhas
+│       ├── frames.rs           # alocador de frames global (IrqLock) e o handle Frames
+│       ├── heap.rs             # GlobalAlloc sobre KernelHeap, DirectMap (FrameMemory) e o autoteste
+│       ├── random.rs           # gerador global: semente de hardware ou jitter, reposição
 │       ├── console.rs          # console global e kprintln!: serial e tela
 │       ├── screen.rs           # tela: framebuffer + grade do term + desenho do gfx, tema e barra
 │       ├── system.rs           # porta Host do shell e o laço de entrada
@@ -21,8 +24,8 @@
 │       └── platform/           # um módulo por ISA: ARCH, PlatformConsole, cpu(), console()
 ├── core/                       # o centro do hexágono: no_std, forbid(unsafe_code), testado no host
 │   ├── hal/                    # rustos-hal: as portas (traits) e os tipos de fronteira
-│   ├── mm/                     # rustos-mm: BitmapFrameAllocator, BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow; portas FrameMemory e FrameAllocator (SDD 12)
-│   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) e Rng (fast key erasure); ainda não ligado ao kernel
+│   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow; portas FrameMemory e FrameAllocator (SDD 12)
+│   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) Rng (fast key erasure) e a semente de reserva por jitter
 │   ├── sched/                  # rustos-sched: TaskId, RunQueue, RoundRobin (ainda não ligado ao kernel)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16
 │   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células), Cell, Key, Keyboard (layouts)
@@ -30,8 +33,8 @@
 ├── lib/
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set)
 ├── arch/                       # adaptadores de ISA: o único lugar com asm!
-│   ├── x86_64/                 # X86Cpu, PortBus, X86PageMapper, GDT/TSS/IDT, APIC, PIT; módulos puros (pte, walk, segments, fault, lapic, ioapic, pit, clock) testados no host
-│   └── aarch64/                # Aarch64Cpu, MmioBus, Aarch64PageMapper (TTBR1); vetores, ICC_*, CNTV e PAN;
+│   ├── x86_64/                 # X86Cpu, PortBus, X86PageMapper, X86Entropy, GDT/TSS/IDT, APIC, PIT; módulos puros (pte, walk, segments, fault, lapic, ioapic, pit, clock) testados no host
+│   └── aarch64/                # Aarch64Cpu, MmioBus, Aarch64PageMapper (TTBR1), Aarch64Entropy; vetores, ICC_*, CNTV e PAN;
 │                               # puros: descriptor, walk, esr, time, intid, features
 ├── boot/
 │   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 escrito aqui → hal::BootInfo
@@ -64,12 +67,8 @@
 | `rustos-arch-aarch64` | `rustos-hal` |
 | `rustos-boot-limine` | `rustos-hal` |
 | `rustos-driver-uart16550`, `rustos-driver-pl011`, `rustos-driver-i8042`, `rustos-driver-gicv3` | `rustos-hal` |
-| `rustos-kernel` | `hal`, `mm`, `gfx`, `term`, `shell`, `sync`, `boot-limine`; por ISA, `arch-*` e os drivers (x86_64: `uart16550`, `i8042`; aarch64: `pl011`, `gicv3`) |
+| `rustos-kernel` | `hal`, `mm`, `crypto`, `gfx`, `term`, `shell`, `sync`, `boot-limine`; por ISA, `arch-*` e os drivers (x86_64: `uart16550`, `i8042`; aarch64: `pl011`, `gicv3`) |
 | `xtask` | nada (só `std`) |
-
-O `rustos-crypto` também ainda não é usado pelo kernel: entra com o aleatório da
-fase 2 ([SDD 09](09_seguranca.md)), com a semente de hardware vinda por uma porta do
-`hal`. Está em `[workspace.dependencies]` desde já, e o cargo avisa por isso.
 
 O `rustos-sched` existe com fila e política testadas, mas o kernel ainda não o usa:
 ele entra com a troca de contexto, na fase 3 do [roadmap](08_roadmap.md). Por isso

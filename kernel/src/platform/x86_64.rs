@@ -12,8 +12,8 @@ use rustos_arch_x86_64::pic;
 use rustos_arch_x86_64::pit::{self, Pit, Reading};
 use rustos_arch_x86_64::{
     ApicAccess, ApicMode, COM1, IstStacks, MmioBus, PIC_MASTER, PIC_SLAVE, PIT_PORTS, PortBus,
-    Protections, X86Cpu, X86PageMapper, breakpoint, cpu_features, detect_apic, enable_protections,
-    install_traps, publish_apic, rdtsc,
+    Protections, X86Cpu, X86Entropy, X86PageMapper, breakpoint, cpu_features, detect_apic,
+    enable_protections, install_traps, publish_apic, rdtsc,
 };
 use rustos_driver_i8042::I8042;
 use rustos_driver_uart16550::{DIVISOR_115200, Uart16550};
@@ -29,6 +29,7 @@ use crate::memory::{Memory, map_device};
 pub const ARCH: &str = "x86_64";
 
 pub type PlatformConsole = Uart16550<PortBus>;
+pub type PlatformEntropy = X86Entropy;
 
 /// Frequência do tique do timer.
 pub const TIMER_HZ: u32 = 100;
@@ -280,6 +281,16 @@ pub fn keyboard_event() -> Option<KeyEvent> {
 pub fn now_ns() -> Option<u64> {
     let hz = TSC_HZ.load(Ordering::Relaxed);
     (hz != 0).then(|| elapsed_ns(rdtsc(), TSC_ORIGIN.load(Ordering::Relaxed), hz))
+}
+
+/// Contador de ciclos (TSC): o relógio da semente de reserva.
+pub fn cycles() -> u64 {
+    rdtsc()
+}
+
+/// `RDSEED` ou `RDRAND`, se o CPUID anunciar.
+pub fn hardware_entropy() -> Option<PlatformEntropy> {
+    X86Entropy::detect(cpu_features())
 }
 
 /// As proteções de hardware desta ISA e se ficaram ligadas.

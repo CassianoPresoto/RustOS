@@ -45,9 +45,9 @@ código.
 | Pilhas de exceção separadas | Exceção com a pilha corrompida derrubar a máquina sem relatório | 1 | 1 página por pilha, mais 1 de guarda | x86_64: IST, em [Linux kernel stacks](https://docs.kernel.org/arch/x86/kernel-stacks.html). aarch64: o kernel roda em EL1t, com `SP_EL0`, e a exceção troca para `SP_EL1`, que aponta para uma pilha só de exceção (desenho do RustOS; Arm ARM não lido nesta rodada). A página de guarda abaixo de cada pilha é desenho do RustOS, a criar na fase 1 |
 | PXN/UXN nas tabelas próprias (aarch64) | Kernel executar página de usuário; usuário executar página do kernel | 2 | Desprezível (não lido nesta rodada) | Arm ARM (não lido nesta rodada) |
 | W^X no kernel, NX em dado | Injetar e executar código no kernel | 2 | A medir: pode exigir quebrar página grande e custar TLB | [kernel self-protection](https://docs.kernel.org/security/self-protection.html) |
-| Aleatório do kernel: semente de RDSEED (x86_64) ou RNDR (aarch64), gerador ChaCha20 com *fast key erasure* (`core/crypto`) | Previsibilidade de endereço, chave e canário | 2 | Estado de 40 bytes; `next_u64` 67 ns e bloco de 4 KiB a 960 MB/s no host, escalar (Apple M5); no alvo, a medir ([SDD 07](07_desempenho_e_recursos.md)) | [RFC 8439](https://www.rfc-editor.org/rfc/rfc8439.html) (ChaCha20), [RFC 7693](https://www.rfc-editor.org/rfc/rfc7693.html) (BLAKE2b), [Bernstein, 2017](https://blog.cr.yp.to/20170723-random.html) (fast key erasure), [`random.c` do Linux](https://github.com/torvalds/linux/blob/master/drivers/char/random.c) (referência); RDSEED e RNDR não lidos nesta rodada. CPU sem os dois (RNDR é ARMv8.5) precisa de outra semente: decisão da fase 2 |
+| Aleatório do kernel: semente de RDSEED (x86_64) ou RNDR (aarch64), gerador ChaCha20 com *fast key erasure* (`core/crypto`) | Previsibilidade de endereço, chave e canário | 2 | Estado de 40 bytes; `next_u64` 67 ns e bloco de 4 KiB a 960 MB/s no host, escalar (Apple M5); no alvo (aarch64, HVF, `release`) 636 a 694 MB/s e 37 us por reposição ([SDD 07](07_desempenho_e_recursos.md)) | [RFC 8439](https://www.rfc-editor.org/rfc/rfc8439.html) (ChaCha20), [RFC 7693](https://www.rfc-editor.org/rfc/rfc7693.html) (BLAKE2b), [Bernstein, 2017](https://blog.cr.yp.to/20170723-random.html) (fast key erasure), [`random.c` do Linux](https://github.com/torvalds/linux/blob/master/drivers/char/random.c) (referência); RDSEED e RNDR conforme o Linux e a QEMU (seção abaixo; o Intel SDM e o Arm ARM não foram lidos). CPU sem os dois: jitter do contador, fraco ([DEBT-0019](../tech-debt/0019-aleatorio-sem-fonte-de-hardware-fraco.md)) |
 | KASLR | Endereço fixo do kernel facilitando ROP | 2 | Kernel relocável (tamanho a medir) | [x86_64 mm](https://docs.kernel.org/arch/x86/x86_64/mm.html) |
-| Zerar memória ao liberar | Vazar dado de um processo para outro | 2 | Host, cache quente: cerca de 7 ns por KiB (16 B: +1 ns; 1 KiB: +9 ns; página: +27 ns); metal ou HVF ainda não medido (SDD 07). Política `KernelHeap::set_zero_on_free` | [kernel-parameters](https://www.kernel.org/doc/html/latest/admin-guide/kernel-parameters.html) (`init_on_free`) |
+| Zerar memória ao liberar | Vazar dado de um processo para outro | 2 | Ligado por padrão. Host, cache quente: cerca de 7 ns por KiB. No alvo (aarch64, HVF, `release`): +2 ns até 64 B, +38 a 40 ns em 1 KiB, +160 ns na página, cerca de 39 ns por KiB (SDD 07, [DEBT-0020](../tech-debt/0020-zerar-pagina-pelo-memset-generico.md)). Política `KernelHeap::set_zero_on_free` | [kernel-parameters](https://www.kernel.org/doc/html/latest/admin-guide/kernel-parameters.html) (`init_on_free`) |
 | Espaço de endereçamento por processo | Um processo ler outro | 4 | A medir: troca de tabela a cada troca de contexto | Desenho do RustOS (SDD 08, fase 4) |
 | ASLR de usuário | Endereço fixo de pilha, heap e bibliotecas facilitando ROP | 4 | A medir | [sysctl kernel](https://docs.kernel.org/admin-guide/sysctl/kernel.html) (`randomize_va_space`) |
 | Handles com direitos | Autoridade ambiente | 4 | A medir | [Fuchsia handles](https://fuchsia.dev/fuchsia-src/concepts/kernel/handles) |
@@ -74,14 +74,15 @@ Levantamento de novembro de 2026.
 ## Aleatório do kernel
 
 O gerador mora em `core/crypto` (`rustos-crypto`), um crate puro: não sabe de
-hardware. A semente (RDSEED, RNDR) e o estado global são do `kernel/`, que liga os
-dois na fase 2. Três módulos, sem alocação, ponto flutuante nem crate externo:
+hardware. A semente (RDSEED, RNDR) e o estado global são do `kernel/`, que os liga
+(seção abaixo). Quatro módulos, sem alocação, ponto flutuante nem crate externo:
 
 | Módulo | O que é | Spec |
 | --- | --- | --- |
 | `chacha20` | Bloco de 64 bytes (chave de 32, contador `u32`, nonce de 12) e keystream com XOR | RFC 8439, seções 2.3 e 2.4 |
 | `blake2b` | Hash de 1 a 64 bytes, chave opcional de até 64, entrada em pedaços | RFC 7693 |
 | `rng` | `Rng`: o gerador, com `new`, `reseed`, `fill_bytes`, `next_u64` e `bytes_since_seed` | este capítulo |
+| `seed` | `gather_jitter` (semente de reserva pelo contador) e `hardware_output_plausible` | este capítulo |
 
 `blake2b` existe também para o Argon2id da fase 7, que usa BLAKE2b como função
 interna (RFC 9106, não lido nesta rodada).
@@ -121,23 +122,44 @@ Duas propriedades que o desenho dá e os testes conferem:
 | **Zerar usa `core::hint::black_box`**, sem `unsafe` | Melhor esforço: o Rust não garante que escrita sem leitura sobreviva à otimização, e `write_volatile` exige `unsafe`, proibido em `core/` |
 | **ARX puro, sem tabela indexada por segredo**: o ChaCha20 e o BLAKE2b só somam, rodam e fazem XOR. O índice da `SIGMA` do BLAKE2b é público | Sem acesso à memória nem desvio que dependam da chave |
 
-### O que o kernel faz (fase 2)
+### O que o kernel faz
 
-Nada disto está no kernel ainda:
+Está em `kernel/src/random.rs`, ligado no `kmain` depois das interrupções (o relógio
+precisa estar de pé para a linha `random bench:`).
 
-1. **Semente:** pelo menos 32 bytes de RDSEED (x86_64) ou RNDR (aarch64), por uma
-   porta no `hal` que o `arch/` implementa. As duas instruções podem falhar e
-   pedir nova tentativa (não lido nesta rodada); o que fazer sem elas é decisão da
-   fase 2.
-2. **Mistura:** além do hardware, o que o boot tiver de impredizível (contadores de
-   ciclo, tempos de dispositivo) entra por `reseed`. Mais fonte não atrapalha.
-3. **Estado:** um `SpinLock<Option<Rng>>` no `kernel/`. Quem chama de tratador de
-   interrupção usa o lock com interrupções mascaradas.
-4. **Reposição:** quando `bytes_since_seed` passar de um limite, ou de tempos em
-   tempos, o kernel faz `reseed` com semente nova de hardware. O limite sai da
-   medição, não de palpite.
-5. **Higiene:** o buffer da semente é zerado com `rustos_crypto::wipe` depois do
-   `new`.
+1. **Hardware, por uma porta do `hal`** (`HardwareEntropy`: `name` e `fill`), que o
+   `arch/` implementa. `fill_from_words` (no `hal`, com teste) cuida da repetição
+   limitada por palavra e da ordem little-endian.
+   - **x86_64** (`X86Entropy`): o CPUID diz o que há (`RDRAND` é `CPUID.1:ECX[30]`, `RDSEED`
+     é `CPUID.7.0:EBX[18]`). Usa `RDSEED`, com 64 tentativas por palavra (`pause` entre elas),
+     e `RDRAND`, com 10 (as do Linux), se `RDSEED` esgotar ou não existir. Sucesso é `CF = 1`.
+   - **aarch64** (`Aarch64Entropy`): `ID_AA64ISAR0_EL1.RNDR` (bits 63:60) diferente de zero
+     anuncia as duas. Usa `RNDRRS` (semeado de novo a cada leitura) e `RNDR`, com 16
+     tentativas por palavra. Sucesso deixa `NZCV = 0b0000`; falha, `0b0100`.
+   - **Conferência:** 64 bytes de hardware passam por `hardware_output_plausible`
+     (5 mudanças em 7 palavras seguidas, o teste do `x86_init_rdrand` do Linux); saída
+     travada vale como "sem hardware".
+2. **Jitter e marcos, sempre**, mesmo com hardware ("mais fonte não atrapalha"):
+   `gather_jitter` (`core/crypto/src/seed.rs`, puro, testado com contador falso) lê o
+   contador (`rdtsc`, `CNTVCT_EL0`) 512 vezes com um trabalho curto entre as leituras e
+   devolve o BLAKE2b-256 delas. Os marcos do boot (ciclos na entrada do `kmain` e agora,
+   os três tempos do bootloader, o relógio e os frames livres) entram por outro `reseed`.
+3. **Fonte relatada:** `[rustos] random: rdseed` (ou `rdrand`, `rndrrs`) ou
+   `[rustos] random: jitter (weak)`. Fraco porque nada mede quantos bits o jitter vale;
+   no aarch64 sob HVF o contador anda a 24 MHz e cada amostra traz pouco ruído. A
+   fraqueza é a [DEBT-0019](../tech-debt/0019-aleatorio-sem-fonte-de-hardware-fraco.md).
+4. **Estado:** `static RNG: IrqLock<Option<Rng>>`. O comando `random` do shell chama
+   `random::next_u64` e imprime em hexadecimal.
+5. **Reposição:** quando `bytes_since_seed` passa de `RESEED_BYTES` (4 MiB), o
+   `next_u64` repete a mistura do item 1 e 2. O número vem da medição (SDD 07). Não há
+   reposição por tempo.
+6. **Higiene:** o buffer de 64 bytes do hardware e os 32 do jitter são zerados com
+   `rustos_crypto::wipe` ao sair de `replenish`.
+
+O que se observou rodando, com `-cpu max` salvo nota: x86_64 em TCG, `rdseed`; x86_64
+com `-cpu Haswell` (sem `RDSEED`), `rdrand`; x86_64 com `-cpu qemu64` (sem os dois),
+`jitter (weak)`; aarch64 em TCG, `rndrrs`; aarch64 sob HVF no Apple M5, `jitter (weak)`,
+ou seja, a CPU não anuncia `RNDR`.
 
 ### Vetores de teste
 
@@ -164,6 +186,15 @@ estatística é sanidade, **não prova de qualidade**.
 | [RFC 7693](https://www.rfc-editor.org/rfc/rfc7693.html) | texto inteiro baixado | IV, `SIGMA`, função G, bloco de parâmetros, chave no primeiro bloco, vetor do apêndice A |
 | [Bernstein, *Fast-key-erasure random-number generators*](https://blog.cr.yp.to/20170723-random.html), 2017-07-23 | página baixada | "Immediately overwrite the key k with the first two blocks B0, B1. Use the other blocks B2, ..., B47 as 736 bytes of RNG output [...] Start over with the new key" |
 | [`drivers/char/random.c`](https://github.com/torvalds/linux/blob/master/drivers/char/random.c), Linux | `master` lido por ferramenta de busca que resume a página, não o arquivo cru | Só referência: BLAKE2s acumula e deriva a chave (`extract_entropy`), ChaCha20 expande, `crng_fast_key_erasure` troca a chave por metade do bloco |
+| [`arch/x86/include/asm/archrandom.h`](https://github.com/torvalds/linux/blob/master/arch/x86/include/asm/archrandom.h), Linux | arquivo cru baixado | `RDRAND_RETRY_LOOPS` = 10; `RDRAND` e `RDSEED` devolvem sucesso na flag `CF` (`"=@ccc"`) |
+| [`arch/x86/include/asm/cpufeatures.h`](https://github.com/torvalds/linux/blob/master/arch/x86/include/asm/cpufeatures.h), Linux | arquivo cru baixado | `X86_FEATURE_RDRAND` = palavra 4, bit 30 (`CPUID.1:ECX[30]`); `X86_FEATURE_RDSEED` = palavra 9, bit 18 (`CPUID.7.0:EBX[18]`) |
+| [`arch/x86/kernel/cpu/rdrand.c`](https://github.com/torvalds/linux/blob/master/arch/x86/kernel/cpu/rdrand.c), Linux | arquivo cru baixado | Teste de sanidade: 8 amostras, no mínimo 5 mudanças (defeitos de CPU já devolveram o mesmo valor sempre) |
+| [`arch/arm64/include/asm/archrandom.h`](https://github.com/torvalds/linux/blob/master/arch/arm64/include/asm/archrandom.h) e [`sysreg.h`](https://github.com/torvalds/linux/blob/master/arch/arm64/include/asm/sysreg.h), Linux | arquivos crus baixados | `RNDR` = `S3_3_C2_C4_0`, `RNDRRS` = `S3_3_C2_C4_1`; `NZCV` = `0b0000` em sucesso e `0b0100` em falha; o campo `RNDR` de `ID_AA64ISAR0_EL1` está nos bits 63:60 |
+| [`arch/arm64/tools/sysreg`](https://github.com/torvalds/linux/blob/master/arch/arm64/tools/sysreg), Linux | arquivo cru baixado | `ID_AA64ISAR0_EL1`: `63:60 RNDR`, `0b0000 NI`, `0b0001 IMP` |
+| [`target/arm/helper.c`](https://github.com/qemu/qemu/blob/master/target/arm/helper.c) (`rndr_readfn`), QEMU | arquivo cru baixado | Sucesso deixa `NZCV = 0000`; falha, `0100` |
+
+O Intel SDM, o Arm ARM e o guia de DRNG da Intel não foram lidos: as tentativas por palavra do `RDSEED` (64) e do `RNDRRS` (16) são escolha do RustOS, sem fonte, e os testes rodam em QEMU, não em metal. O que cada
+instrução faz ao falhar vem do Linux e da QEMU.
 
 Não há dependência de nenhum desses: o código é do RustOS.
 

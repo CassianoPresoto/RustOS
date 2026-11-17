@@ -55,9 +55,10 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
 ## Sequência do `kmain`
 
 1. `LimineBoot::from_bootloader()` confere a revisão e lê memory map e HHDM.
-2. `Memory::init` resume o mapa (`core/mm::summarize`), calcula o bitmap (1 bit por
-   frame do intervalo utilizável), acha onde ele cabe (`find_free_block`), libera
-   as regiões utilizáveis e reserva o próprio bitmap.
+2. `Memory::init` resume o mapa (`core/mm::summarize`), calcula o metadado do buddy
+   (`BuddyAllocator::words_needed`, 2 bits por frame do intervalo utilizável), acha onde
+   ele cabe (`find_free_block`), libera as regiões utilizáveis, reserva o próprio
+   metadado e instala o alocador de frames e o heap globais ([SDD 12](12_memoria_fisica_e_heap.md)).
 3. `platform::console` monta a serial. No aarch64 isso mapeia a PL011: o
    `Aarch64PageMapper` lê `TTBR1_EL1`, grava Device-nGnRnE no índice 7 do
    `MAIR_EL1`, aloca as tabelas que faltam do alocador de frames e mapeia a página
@@ -67,9 +68,11 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
    que vai para a serial.
 5. `interrupts::init` liga exceções, controlador de interrupção, timer e a IRQ da
    serial ([SDD 10](10_interrupcoes.md)) e destrava as interrupções da CPU no fim.
-6. Relatório (com `protections:`), autoteste de um frame (escreve e relê pelo mapa
-   direto), autoteste de exceção e de timer, e `[rustos] boot ok`.
-7. `system::run_shell`: o shell embutido lê a fila que a IRQ da serial (e, no
+6. `random::init` semeia o gerador ([SDD 09](09_seguranca.md)).
+7. Relatório (com `protections:`, `random:` e `random bench:`), autoteste de um frame
+   (escreve e relê pelo mapa direto), autoteste do heap, autoteste de exceção e de
+   timer, e `[rustos] boot ok`.
+8. `system::run_shell`: o shell embutido lê a fila que a IRQ da serial (e, no
    x86_64, a do teclado) enche, e dorme em `hlt`/`wfi` quando ela está vazia.
 
 Pânico antes do passo 3 não aparece em lugar nenhum (DEBT-0005).
@@ -101,8 +104,11 @@ QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB, perfil `dev`:
 [rustos] bootloader: Limine 12.10.0
 [rustos] boot timeline: firmware 2634227 us, bootloader 350321 us
 [rustos] memory: 209232 KiB usable, 12901584 KiB other, 35 regions
-[rustos] frames: 52306 free of 65094 tracked, bitmap 8144 bytes
+[rustos] frames: 52321 free of 65094 tracked, metadata 16704 bytes
+[rustos] random: rdseed
+[rustos] random bench: chacha20 40 MB/s, reseed 282 us
 [rustos] frame self-test: ok
+[rustos] heap self-test: ok
 [rustos] boot ok
 ```
 

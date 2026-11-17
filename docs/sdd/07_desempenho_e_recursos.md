@@ -7,18 +7,19 @@
 
 | Métrica | Como | Valor hoje (QEMU, 256 MiB) |
 | --- | --- | --- |
-| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 132 200 / 88 447 bytes · aarch64: 105 128 / 71 220 bytes (fase 1: vetores, controlador de interrupção, timer, teclado; na fase 0.5 eram 100 541 / 61 725 e 86 500 / 59 952) |
+| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 166 544 / 106 095 bytes · aarch64: 136 292 / 88 364 bytes (fase 2: buddy, heap e gerador; antes da fase 2 eram 133 304 / 88 735 e 105 448 / 71 508, e na fase 0.5, 100 541 / 61 725 e 86 500 / 59 952) |
 | Grade do terminal | 8 bytes por célula (`size_of::<Cell>()`), em frames contíguos | x86_64 1280x800: 158x47 células, 59 408 bytes (15 frames) · aarch64 1024x768: 126x45, 45 360 bytes (12 frames) |
 | Fonte própria | tabelas em `.rodata` (teste em `core/gfx/src/font`) | 3 884 bytes para 237 glifos 8x16 |
 | Shell | `size_of::<Shell<256, 32>>()`, na pilha do `kmain` | 8 880 bytes |
-| Metadado de memória física | bitmap do `BitmapFrameAllocator`: 1 bit por frame de 4 KiB | 8 144 bytes para 254 MiB rastreados (0,003%) |
-| Metadado do `BuddyAllocator` | bitmap por ordem com resumo hierárquico (SDD 12), `BuddyAllocator::words_needed` | 16 720 bytes para 254 MiB (2,05 bits por frame, 0,008%); 2,03 bits por frame em 4 GiB ou mais. O bitmap de hoje: 8 144 bytes (1 bit) |
+| Metadado de memória física | `BuddyAllocator::words_needed` (SDD 12): um bitmap por ordem com resumo hierárquico; é o `metadata` da linha `frames:` do boot e o `frame meta` do `mem` | 16 704 bytes para 65 094 frames (x86_64) e 16 504 para 64 396 (aarch64): 2,05 bits por frame, 0,008% da RAM; 2,03 bits por frame em 4 GiB ou mais. O bitmap de antes, que saiu do kernel: 8 144 e 8 056 bytes |
+| Heap do kernel | `heap::self_test` e a linha `heap` do `mem` | Metadado de 32 bytes por slab, dentro da página (SDD 12). Zerar ao liberar ligado: custo abaixo |
+| Aleatório no kernel | linha `random bench:` do boot (`random::benchmark`): 32 blocos de 4 KiB com `Rng::fill_bytes` e uma reposição completa, com o relógio da fase 1 | aarch64 sob HVF, `release`: 636 a 694 MB/s e 36 a 38 us por reposição (tabela abaixo) |
 | Boot até o kernel | linha `boot timeline` (pedido *bootloader performance* do Limine) | Limine: 52 ms (aarch64, HVF) / 350 ms (x86_64, TCG) |
 | Pilha de exceção (aarch64) | `Memory::map_stack`: 4 páginas mapeadas e uma de guarda, por CPU | 16 384 bytes de RAM, mais as tabelas de página que faltarem |
 | Timer (aarch64) | linha `timer:` do boot; `CNTV` com `CVAL` absoluto, 100 Hz | 50 tiques em 497 ms (HVF) e 488 ms (TCG); núcleo ocioso em `wfi` usa 0,3% de CPU do host (HVF) |
 | Estado do gerador aleatório | `size_of::<Rng>()` (teste em `core/crypto/src/rng.rs`) | 40 bytes: chave de 32 e contador de 8 |
 | Código de `core/crypto` | `.text` do crate sem LTO, com todas as funções públicas (`llvm-size`); no kernel, com LTO, só entra o que se usa | `release`: 8 202 (x86_64) e 7 866 (aarch64) bytes · `release-small`: 6 216 e 7 349 bytes |
-| Vazão de ChaCha20, BLAKE2b e do gerador | `cargo run --release -p rustos-crypto --example bench`, no host (Apple M5, `rustc` 1.100.0), melhor de 15 rodadas, sem SIMD (o compilador não vetorizou: o resultado com `-vectorize-loops=false -vectorize-slp=false` é o mesmo) | Ver tabela abaixo. **Números do host, não do alvo**: o alvo bare-metal é soft-float e sem SIMD, e o crate ainda não roda no kernel |
+| Vazão de ChaCha20, BLAKE2b e do gerador | `cargo run --release -p rustos-crypto --example bench`, no host (Apple M5, `rustc` 1.100.0), melhor de 15 rodadas, sem SIMD (o compilador não vetorizou: o resultado com `-vectorize-loops=false -vectorize-slp=false` é o mesmo) | Ver tabela abaixo. **Números do host**; os do alvo estão abaixo |
 | Boot de parede | `make smoke` | inclui firmware EDK2: ~2–5 s, dominado pelo firmware |
 
 ### Criptografia do núcleo (host)
@@ -38,8 +39,33 @@ implementações: o número serve para o RustOS comparar consigo mesmo.
 
 O BLAKE2b depende de a função G ser inlinada: sem `#[inline(always)]` ela cai de
 1 584 para 507 MB/s (a exceção ao `clippy::inline_always` tem esse número como
-motivo). O ChaCha20 não precisa. O número no alvo entra quando o kernel ligar o
-gerador (fase 2): [DEBT-0015](../tech-debt/0015-cripto-sem-medida-no-alvo.md).
+motivo). O ChaCha20 não precisa.
+
+### Criptografia do núcleo (alvo)
+
+A linha `[rustos] random bench: chacha20 N MB/s, reseed N us` do boot. Mede
+`Rng::fill_bytes` em 32 blocos de 4 KiB (128 KiB) e uma reposição inteira
+(`random::replenish`: 64 bytes de hardware, se houver, 512 amostras de jitter e os
+marcos do boot, com BLAKE2b). QEMU 11.1.3 no Apple M5, 3 rodadas por perfil, variação
+dentro da faixa:
+
+| Alvo | Perfil | ChaCha20 | Reposição | Vale? |
+| --- | --- | --- | --- | --- |
+| aarch64, HVF (sem RNDR: jitter) | `dev` | 421 a 470 MB/s | 37 a 40 us | sim |
+| aarch64, HVF | `release` | 636 a 694 MB/s | 36 a 38 us | sim |
+| aarch64, HVF | `release-small` | 317 MB/s | 40 a 42 us | sim |
+| aarch64, TCG (`rndrrs`) | `dev` | 79 MB/s | 170 us | não: TCG |
+| x86_64, TCG (`rdseed`) | `dev` | 39 a 40 MB/s | 278 a 291 us | não: TCG |
+
+O `release` do alvo faz 70% do host (965 MB/s). A reposição de 37 us é quase toda o
+jitter (inferência: o `reseed` de 32 bytes custa 162 ns no host).
+
+**Limite de reposição: `RESEED_BYTES` = 4 MiB.** O `release` gera 4 MiB em 6,1 ms
+(a 690 MB/s) e a reposição custa 37 us: 0,6% (0,3% no `release-small`). Com 1 MiB
+seriam 2,4%. O limite é de volume entregue; reposição por tempo fica para a fase 3
+([DEBT-0019](../tech-debt/0019-aleatorio-sem-fonte-de-hardware-fraco.md)). O x86_64
+sem aceleração não tem número que valha:
+[DEBT-0015](../tech-debt/0015-cripto-sem-medida-no-x86-acelerado.md).
 
 ### Alocadores de memória (fase 2, medido no host)
 
@@ -80,7 +106,23 @@ Heap (`KernelHeap`), 1000 objetos vivos, par alocar+liberar, mesma máquina:
 
 Zerar custa cerca de 7 ns por KiB com o dado no cache: o piso. Com a memória fria
 (página recém-devolvida por outro núcleo) o custo é o da banda da DRAM, e só vale
-medir em metal ou com KVM/HVF. O número a escrever no SDD 09 vem daqui.
+medir em metal ou com KVM/HVF.
+
+**No alvo** (aarch64 sob HVF, `release`, par `alloc`+`dealloc` do `GlobalAlloc` com
+1000 objetos vivos, 20 000 pares, relógio `platform::now_ns`, 3 rodadas):
+
+| Pedido | Sem zerar | Zerando ao liberar | Custo de zerar |
+| --- | --- | --- | --- |
+| 16 B | 16 a 18 ns | 17 a 20 ns | +2 ns |
+| 64 B | 16 a 18 ns | 18 a 20 ns | +2 a 3 ns |
+| 1024 B | 15 a 18 ns | 53 a 57 ns | +38 a 40 ns |
+| 4096 B (1 página) | 45 a 49 ns | 205 a 210 ns | +160 ns |
+| 8192 B (2 páginas) | 35 a 38 ns | 323 a 330 ns | +290 ns |
+
+São cerca de 39 ns por KiB, 5x o piso do host: o `memset` do alvo é o suspeito
+([DEBT-0020](../tech-debt/0020-zerar-pagina-pelo-memset-generico.md)). Para objetos
+até 64 bytes o custo é de 2 a 3 ns, e a política fica ligada (SDD 09). A medida usou um
+patch temporário no autoteste do heap, que não entrou no código. O x86_64 só roda em TCG aqui, sem número que valha.
 
 ### Para onde foi o tamanho do kernel
 

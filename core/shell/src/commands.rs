@@ -72,6 +72,11 @@ pub(crate) const COMMANDS: &[Command] = &[
         run: mem,
     },
     Command {
+        name: "random",
+        summary: "print a random 64-bit number in hex",
+        run: random,
+    },
+    Command {
         name: "uname",
         summary: "print system information (-a -s -r -m)",
         run: uname,
@@ -265,6 +270,13 @@ fn mem(ctx: &mut Ctx<'_>) -> fmt::Result {
         "kernel",
         Bytes(memory.kernel_bytes)
     )
+}
+
+fn random(ctx: &mut Ctx<'_>) -> fmt::Result {
+    match ctx.host.random_u64() {
+        Some(value) => write!(ctx.out, "0x{value:016x}\r\n"),
+        None => write!(ctx.out, "random: no generator\r\n"),
+    }
 }
 
 fn blocks(out: &mut dyn fmt::Write, from: u16, to: u16) -> fmt::Result {
@@ -577,6 +589,24 @@ mod tests {
         assert!(text.contains("heap"), "{text}");
         assert!(text.contains("4.8 KiB"), "{text}");
         assert!(text.contains("12 pages, 48.0 KiB held"), "{text}");
+    }
+
+    #[test]
+    fn random_prints_the_host_number_as_16_hex_digits() {
+        assert_eq!(
+            run("random", &[], &FakeHost::new()),
+            "0x0123456789abcdef\r\n"
+        );
+        let mut host = FakeHost::new();
+        host.random = Some(0xff);
+        assert_eq!(run("random", &[], &host), "0x00000000000000ff\r\n");
+    }
+
+    #[test]
+    fn random_without_a_generator_says_so() {
+        let mut host = FakeHost::new();
+        host.random = None;
+        assert_eq!(run("random", &[], &host), "random: no generator\r\n");
     }
 
     #[test]

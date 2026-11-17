@@ -48,8 +48,8 @@ mora separada do `mmu.rs`.
 `cargo xtask smoke` monta a ESP, sobe a QEMU sem tela e lê a serial. Passa ao ver
 `[rustos] boot ok`; falha com pânico (`[rustos] panic`), com a QEMU saindo antes,
 ou em 120 s. O marcador é a constante `BOOT_OK_MARKER` do kernel e `BOOT_OK` do
-xtask: os dois mudam juntos. O kernel só imprime o marcador se o autoteste de
-frame passar.
+xtask: os dois mudam juntos. O kernel só imprime o marcador se os autotestes de
+frame, de heap (`heap self-test`) e de interrupção passarem.
 
 ## Andar 3b — tela
 

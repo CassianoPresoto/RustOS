@@ -63,14 +63,16 @@ quando houver medição para decidir.
 - **Tabelas próprias do kernel:**
   - `.text` só leitura e execução, `.rodata` só leitura, dados com NX;
   - página de guarda abaixo de toda pilha do kernel.
-- **Heap:** buddy allocator com cache por CPU e `GlobalAlloc` para `alloc`. O núcleo
-  puro (buddy, cache, slabs) está em `core/mm`; falta ligá-lo ao kernel ([SDD 12](12_memoria_fisica_e_heap.md)).
+- **Heap:** buddy allocator e `GlobalAlloc` para `alloc`, **ligados**: o buddy entrega
+  os frames e o heap de slabs é o alocador global ([SDD 12](12_memoria_fisica_e_heap.md)).
+  O cache por CPU espera a fase 3 (DEBT-0018).
 - **Memória do bootloader recuperada** (DEBT-0006).
-- **Aleatório do kernel:** semente de RDSEED/RNDR, gerador ChaCha20, e reposição da
-  semente. É a base de KASLR, ASLR e canários. O gerador está pronto em
-  `core/crypto` ([SDD 09](09_seguranca.md)); falta a semente e a ligação.
+- **Aleatório do kernel:** semente de RDSEED/RNDR (jitter do contador quando a CPU não
+  tem, DEBT-0019), gerador ChaCha20 e reposição por volume, **ligados**. É a base de
+  KASLR, ASLR e canários ([SDD 09](09_seguranca.md)).
 - **KASLR:** exige kernel relocável. Entra com o custo de tamanho e de boot medido.
-- **Zerar ao liberar:** política de zerar memória devolvida, com o custo medido.
+- **Zerar ao liberar:** política de zerar memória devolvida, **ligada** no heap, com o
+  custo medido ([SDD 07](07_desempenho_e_recursos.md)).
 
 ### 3 — Tarefas, SMP e escalonador
 
