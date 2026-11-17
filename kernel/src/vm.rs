@@ -19,7 +19,13 @@ unsafe extern "C" {
     static __rodata_end: u8;
     static __data_start: u8;
     static __data_end: u8;
+    static __relro_start: u8;
+    static __relro_end: u8;
 }
+
+static RELRO_MARK: u8 = 0;
+/// Tabela de ponteiros relocados: o linker tem de pô-la em `.data.rel.ro`.
+static RELRO_CANARY: [&u8; 1] = [&RELRO_MARK];
 
 #[derive(Debug)]
 pub enum VmError {
@@ -208,9 +214,22 @@ impl Vm {
     /// Percorre as tabelas: nenhuma página gravável e executável, cada seção com a
     /// permissão do linker script. Devolve as páginas de 4 KiB conferidas.
     pub fn check_wx(&self) -> Result<u64, Violation> {
-        let mut checker = WxChecker::new(&self.sections, self.image_phys);
+        let relro = Section {
+            name: ".data.rel.ro",
+            start: symbol(&raw const __relro_start),
+            end: symbol(&raw const __relro_end),
+            flags: PageFlags::RODATA,
+        };
+        let [requests, text, rodata, data] = self.sections;
+        let sections = [requests, text, rodata, data, relro];
+        let mut checker = WxChecker::new(&sections, self.image_phys);
         self.space.walk(&mut |mapping| checker.visit(mapping));
-        checker.finish()
+        let pages = checker.finish()?;
+        let canary = core::hint::black_box(&raw const RELRO_CANARY).addr() as u64;
+        if canary < sections[4].start || canary >= sections[4].end {
+            return Err(Violation::RelroMissing);
+        }
+        Ok(pages)
     }
 }
 

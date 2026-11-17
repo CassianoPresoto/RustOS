@@ -33,7 +33,7 @@ Pânico antes do console continua mudo (DEBT-0005): falha em `Vm::build` não ap
 | Metade baixa | Nada | — | x86_64: raiz com as 256 entradas de baixo vazias. aarch64: `TCR_EL1.EPD0` desliga o `TTBR0_EL1` |
 | `[__image_start, __requests_end)` | `.requests`, `.dynamic`, `.got` | leitura, NX | Limine (KASLR), tamanho pelo linker script |
 | `[__text_start, __text_end)` | `.text` | leitura e execução | idem |
-| `[__rodata_start, __rodata_end)` | `.rodata`, `.dynsym`, `.rela.dyn` | leitura, NX | idem |
+| `[__rodata_start, __rodata_end)` | `.rodata`, `.dynsym`, `.rela.dyn`, `.data.rel.ro` | leitura, NX | idem |
 | `[__data_start, __data_end)` | `.data`, `.bss` | leitura e escrita, NX | idem |
 | `hhdm + [início, fim)` | RAM: `Usable` e `BootloaderReclaimable` | leitura e escrita, NX, write-back | Limine sorteia o deslocamento |
 | `hhdm +` framebuffer | O framebuffer da resposta, páginas inteiras | leitura e escrita, NX, write-combining | idem |
@@ -132,6 +132,16 @@ pilha). O que o Linux devolve não foi medido aqui.
   qualquer outro mapeamento (o mapa direto) que aponte para a memória física da imagem.
   Imprime `[rustos] w^x: ok (N pages)`, com N em páginas de 4 KiB, ou `FAILED`.
   O `make smoke` exige a linha `ok`.
+- **RELRO.** Com PIE, vtables e tabelas de ponteiros (`interrupts::HANDLERS`, a tabela de
+  comandos do shell) saem em `.data.rel.ro`, que o `*(.data .data.*)` engolia: ficavam
+  graváveis depois do boot. O linker script põe `.data.rel.ro` dentro de `.rodata`, entre
+  `__relro_start` e `__relro_end`; o Limine relocou antes de entregar o controle. O
+  `check_wx` confere a faixa como seção só leitura e que uma tabela de ponteiros plantada
+  pelo kernel (`RELRO_CANARY`) caiu nela; sem isso, `Violation::RelroMissing`. Medido no
+  `dev`: `HANDLERS` foi de `.data` para a faixa RELRO; sobraram em `.data` só 6
+  relocações no x86_64 e 1 no aarch64, todas de `static` mutável (`SCREEN`, `KEYMAP`, `HEAP`...).
+- **Executável só em `.text`.** O `WxChecker` recusa página executável que não caiba
+  inteira numa seção executável (`Violation::ExecuteOutsideText`).
 - **No shell.** `fault text` lê o primeiro byte de `probe_write_text` (em `.text`) e o
   regrava: com a proteção, é page fault de proteção e não volta; sem ela, não altera
   nada e o shell avisa `no fault was raised`. Saída medida (x86_64):
@@ -183,7 +193,7 @@ Custo medido (`make size`, soma das seções carregadas; mesma árvore, só o PI
 | PIE | 182 897 (+3 289, 1,8%) | 119 324 (+5 581, 4,9%) | 155 137 (+5 361, 3,6%) | 101 445 (+6 265, 6,6%) |
 
 O ganho está em `.rela.dyn` (24 bytes por relocação) e `.got`, e em vtables e tabelas
-de ponteiros que saem de `.rodata` para dados relocados. O tempo do Limine
+de ponteiros que saem de `.rodata` para `.data.rel.ro` (só leitura, ver *RELRO*). O tempo do Limine
 (`bootloader N us`) ficou no ruído: aarch64 sob HVF, 43 a 52 ms com e sem PIE.
 Decisão: **KASLR ligado**, porque o custo é de 3 a 6 KiB e a base muda mesmo.
 

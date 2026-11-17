@@ -43,6 +43,12 @@ SECTIONS
     .hash : { *(.hash) } :rodata
     .dynstr : { *(.dynstr) } :rodata
     .rela.dyn : { *(.rela.dyn) } :rodata
+    /* Tabelas de ponteiros relocados (vtables, handlers): só leitura depois do Limine relocar. */
+    .data.rel.ro : {
+        __relro_start = .;
+        *(.data.rel.ro .data.rel.ro.*)
+        __relro_end = .;
+    } :rodata
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
     __rodata_end = .;
