@@ -7,14 +7,35 @@ mod protocol;
 mod requests;
 
 use core::ffi::{CStr, c_char};
+use core::ptr;
+use core::sync::atomic::Ordering;
 
 use rustos_hal::{
-    BootInfo, BootTimeline, BootloaderId, Channel, FramebufferInfo, KernelImage, MemoryRegion,
-    PhysAddr, RegionKind, VirtAddr,
+    BootInfo, BootTimeline, BootloaderId, Channel, CpuDescriptor, FramebufferInfo, KernelImage,
+    MemoryRegion, PhysAddr, RegionKind, VirtAddr,
 };
 
-pub use protocol::BASE_REVISION;
+pub use protocol::{BASE_REVISION, MpInfo};
 use protocol::{Framebuffer, MemmapEntry};
+
+/// Entrada de um núcleo secundário: recebe o `MpInfo` do próprio núcleo (`RDI` ou `X0`).
+pub type CpuEntry = unsafe extern "C" fn(info: *const MpInfo) -> !;
+
+/// Solta o núcleo secundário `token`: grava o argumento e o `goto_address`, com release.
+/// # Safety
+/// `token` é de `CpuDescriptor` de um núcleo que não é o de boot, solto uma vez, com a
+/// memória do bootloader intacta.
+pub unsafe fn start_cpu(token: usize, argument: u64, entry: CpuEntry) {
+    let info = ptr::with_exposed_provenance_mut::<MpInfo>(token);
+    // SAFETY: `token` aponta para o `MpInfo` do núcleo, pelo contrato da função.
+    let argument_field = unsafe { &raw mut (*info).extra_argument };
+    // SAFETY: o campo está dentro do `MpInfo`, e o núcleo só o lê depois do `goto_address`.
+    unsafe { argument_field.write_volatile(argument) };
+    // SAFETY: `token` aponta para o `MpInfo` do núcleo; `goto_address` é atômico.
+    let goto = unsafe { &(*info).goto_address };
+    // O release publica o argumento antes do salto.
+    goto.store(entry as *mut (), Ordering::Release);
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BootError {
@@ -28,6 +49,8 @@ pub enum BootError {
 #[derive(Debug)]
 pub struct LimineBoot {
     entries: &'static [&'static MemmapEntry],
+    cpus: &'static [&'static MpInfo],
+    bsp_hw_id: u64,
     direct_map_offset: u64,
     kernel_image: KernelImage,
 }
@@ -49,14 +72,29 @@ impl LimineBoot {
             unsafe { requests::executable_address() }.ok_or(BootError::MissingKernelAddress)?;
         // SAFETY: o Limine garante `entry_count` ponteiros válidos em `entries`.
         let entries = unsafe { memmap.entries() };
+        // SAFETY: as respostas ainda estão intactas; sem resposta de MP o kernel roda numa CPU.
+        let mp = unsafe { requests::mp() };
+        // SAFETY: o Limine garante `cpu_count` ponteiros válidos em `cpus`.
+        let cpus = mp.map_or(&[][..], |mp| unsafe { mp.cpus() });
         Ok(Self {
             entries,
+            cpus,
+            bsp_hw_id: mp.map_or(0, protocol::MpResponse::bsp_hw_id),
             direct_map_offset: hhdm.offset,
             kernel_image: KernelImage {
                 physical_base: PhysAddr::new(address.physical_base),
                 virtual_base: VirtAddr::new(address.virtual_base),
             },
         })
+    }
+}
+
+/// `is_boot` de um núcleo: o que tem o identificador do BSP que a resposta informou.
+fn cpu_descriptor(info: &MpInfo, bsp_hw_id: u64) -> CpuDescriptor {
+    CpuDescriptor {
+        hw_id: info.hw_id(),
+        is_boot: info.hw_id() == bsp_hw_id,
+        token: ptr::from_ref(info).addr(),
     }
 }
 
@@ -95,6 +133,11 @@ impl BootInfo for LimineBoot {
 
     fn kernel_image(&self) -> Option<KernelImage> {
         Some(self.kernel_image)
+    }
+
+    fn cpus(&self) -> impl Iterator<Item = CpuDescriptor> + '_ {
+        let bsp = self.bsp_hw_id;
+        self.cpus.iter().map(move |info| cpu_descriptor(info, bsp))
     }
 
     fn framebuffer(&self) -> Option<FramebufferInfo> {
@@ -215,6 +258,19 @@ mod tests {
         let mut fb = limine_fb(32, 1280 * 4);
         fb.green_mask_size = 6;
         assert!(framebuffer_info(&fb).is_none());
+    }
+
+    #[test]
+    fn marks_only_the_cpu_with_the_bsp_id_as_boot() {
+        let boot = protocol::test_info(3);
+        let other = protocol::test_info(5);
+        assert!(cpu_descriptor(&boot, 3).is_boot);
+        assert!(!cpu_descriptor(&other, 3).is_boot);
+        assert_eq!(cpu_descriptor(&other, 3).hw_id, 5);
+        assert_eq!(
+            cpu_descriptor(&other, 3).token,
+            ptr::from_ref(&other).addr()
+        );
     }
 
     #[test]
