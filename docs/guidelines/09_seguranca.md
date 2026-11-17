@@ -21,14 +21,21 @@
 
 ## Como se verifica
 
-- **Tradução de dado externo:** em review. Toda função que recebe ponteiro,
-  registrador ou bytes de fora tem teste com entrada inválida no mesmo PR.
-- **Segredo:**
+- **Tradução de dado externo:** em review, sem comando automático. Toda função que
+  recebe ponteiro, registrador ou bytes de fora tem teste com entrada inválida no
+  mesmo PR.
+- **Segredo:** heurística, que acha `derive(Debug)` em tipo com nome de segredo
+  (até 4 linhas entre o `derive` e o tipo). O review confere o resto, como
+  `impl Debug` à mão que não escreva `<redacted>`.
 
   ```sh
-  grep -rn -A2 'derive(.*Debug' --include='*.rs' core lib arch boot drivers kernel \
-    | grep -iE '(struct|enum) \w*(secret|password|seed)'
+  grep -rn -A4 'derive(.*Debug' --include='*.rs' core lib arch boot drivers kernel \
+    | grep -iE '(struct|enum) \w*(secret|password|seed|token)'
   ```
 
-- **Proteção ligada:** pelo relatório de boot no log do `make smoke`, a partir da
-  fase 1.
+- **Proteção ligada:** o `make smoke` falha sem a linha `[rustos] protections:`,
+  a partir da fase 1.
+- **Segurança desligada por desempenho:** em review. O PR que desliga um mecanismo
+  traz o número de antes e depois, como no guidelines 05.
+- **W^X:** o teste dentro do kernel da fase 2, quando ele existir, confere as
+  permissões de cada página do kernel.

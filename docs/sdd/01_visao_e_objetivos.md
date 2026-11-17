@@ -25,13 +25,12 @@ bootloader Limine, um binário à parte (DEBT-0001).
 - Escrever bootloader próprio: o Limine resolve o boot nas duas ISAs (DEBT-0001).
 - Rodar binário Windows: a comparação com Windows é por carga equivalente, não
   por compatibilidade de binário.
-- Interface gráfica: o console é a serial; framebuffer entra quando houver o que
-  mostrar.
+- Interface gráfica antes da fase 11: até lá, a tela é o terminal da fase 0.5.
 - Suporte a 32 bits: as duas ISAs de hoje são de 64 bits; hardware pequeno de 32
   bits (Cortex-M, RV32) é decisão futura, pelo caminho de *Decisões* do `AGENTS.md`.
 
 ## Estado atual
 
-Fase 0 do [roadmap](08_roadmap.md): o esqueleto sobe nas duas ISAs pela QEMU, com
-alocador de frames, mapeamento de dispositivo (aarch64) e console serial. Não há
+Fase 0.5 do [roadmap](08_roadmap.md): o kernel sobe nas duas ISAs pela QEMU, com
+alocador de frames, tela com fonte própria, terminal VT e shell embutido. Não há
 interrupções, escalonamento ligado, heap nem espaço de usuário.

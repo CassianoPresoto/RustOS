@@ -7,7 +7,8 @@
 Cada fase termina com `make pr` verde e um número novo no
 [SDD 07](07_desempenho_e_recursos.md). A ordem segue dependência técnica: não há
 escalonador sem interrupção de timer, nem espaço de usuário sem memória virtual,
-nem usuário sem sistema de arquivos.
+nem programa sem um sistema de arquivos de onde carregá-lo, nem conta de usuário
+sem disco onde guardá-la.
 
 **Segurança não é uma fase.** Cada fase entrega os mecanismos que a tornam segura,
 e o que é barato e difícil de pôr depois entra cedo (W^X, NX, SMEP/SMAP, PAN). O
@@ -22,15 +23,15 @@ modelo de ameaça e o porquê de cada mecanismo estão no [SDD 09](09_seguranca.
 | **1 — Exceções, interrupções e tempo** | Vetores de exceção, controlador de interrupção, timer, relógio, entrada por interrupção, proteções de hardware ligadas | Page fault proposital vira relatório; tique contado; shell dorme em `hlt`/`wfi` |
 | **2 — Memória virtual e heap** | Tabelas próprias com W^X, heap do kernel, aleatório do kernel, memória do bootloader recuperada | Escrita em `.text` falha; memória livre depois do boot medida |
 | **3 — Tarefas, SMP e escalonador** | Troca de contexto, threads do kernel, fila por CPU, escalonador atrás de trait, idle sem tique | Latência de troca medida em N núcleos |
-| **4 — Processos e isolamento** | Anel 3/EL0, syscall, carregador ELF, espaço de endereçamento por processo, handles com direitos | Syscall nula medida; processo que toca o kernel morre sem derrubar nada |
+| **4 — Processos e isolamento** | Anel 3/EL0, syscall, carregador ELF, VFS em memória (initramfs, tmpfs), espaço de endereçamento por processo, handles com direitos, mitigações de CPU | Syscall nula medida; processo que toca o kernel morre sem derrubar nada |
 | **5 — ABI Linux e primeiros aplicativos** | Syscalls Linux traduzidas, credenciais Linux, musl estático, BusyBox | BusyBox roda sem recompilar e é medido contra o Linux |
-| **6 — Arquivos e armazenamento** | VFS, page cache, initramfs, tmpfs, virtio-blk, NVMe, AHCI, sistema de arquivos com escrita, permissões, ACPI/DTB | Benchmark de E/S ao lado do Linux |
+| **6 — Armazenamento persistente** | PCI Express, virtio-blk, NVMe, AHCI, page cache, sistema de arquivos da raiz com escrita, permissões em disco, ACPI/DTB | Benchmark de E/S ao lado do Linux |
 | **7 — Usuários e sessões** | Contas e grupos, login, Argon2id, elevação de privilégio por capacidade, auditoria | Dois usuários sem acesso aos arquivos um do outro |
-| **8 — Instalação** | Imagem live de pendrive, teclado USB (xHCI), instalador em modo texto, GPT, partição EFI, entrada de boot UEFI | Instalar num disco vazio da QEMU e subir dele sem a mídia live |
+| **8 — Instalação** | Imagem live de pendrive, teclado e mouse USB (xHCI), IOMMU, instalador em modo texto, GPT, partição EFI, entrada de boot UEFI | Instalar num disco vazio da QEMU e subir dele sem a mídia live |
 | **9 — Gerência de recursos e energia** | Grupos de recursos (CPU, memória, processos, E/S), limites por processo, falta de memória, contabilidade, idle states | Grupo limitado respeita o limite sob carga |
 | **10 — Rede** | virtio-net, pilha TCP/IP própria, sockets da ABI Linux, DNS, filtro de pacotes | Vazão e latência TCP ao lado do Linux |
 | **11 — Interface gráfica** | Compositor, janelas, mouse, virtio-gpu 2D, aplicativos gráficos | Um aplicativo gráfico com tempo de quadro medido |
-| **12 — Endurecimento avançado** | Mitigações de CPU por necessidade, CET, PAC/BTI, MTE, CFI, filtro de syscalls, MAC, boot verificado | Cada mecanismo com custo medido no SDD 07 |
+| **12 — Endurecimento avançado** | CET, PAC/BTI, MTE, CFI, filtro de syscalls, MAC, boot verificado | Cada mecanismo com custo medido no SDD 07 |
 
 Jogos com aceleração 3D dependem de driver de GPU e entram depois da fase 11,
 quando houver medição para decidir.
@@ -82,11 +83,21 @@ quando houver medição para decidir.
 ### 4 — Processos e isolamento
 
 - **Execução de usuário:** anel 3/EL0, entrada de syscall e carregador ELF.
-- **Isolamento de memória:** espaço de endereçamento por processo, sem kernel
-  gravável mapeado.
+- **Arquivos em memória:** VFS mínimo, initramfs (os módulos que o Limine
+  carrega) e tmpfs. É de onde sai o primeiro programa; o disco vem na fase 6.
+- **Isolamento de memória:** espaço de endereçamento por processo.
+  - O kernel fica mapeado em todos eles, mas só com permissão de supervisor: o
+    código de usuário não lê nem escreve nada dele (U/S no x86_64, AP no
+    aarch64).
   - ASLR de usuário;
   - NX em pilha e heap;
   - cópia usuário↔kernel só por rotina que respeita SMAP/PAN.
+- **Mitigações de CPU:** chegam junto com o primeiro código de usuário, porque
+  mexem na entrada e na saída de syscall que esta fase desenha.
+  - Relatório no boot do que a CPU tem de vulnerável e do que ficou ligado.
+  - KPTI só em CPU vulnerável a Meltdown: o espaço do usuário mapeia só o
+    trampolim de entrada.
+  - Spectre v2 e MDS onde a CPU precisa, com custo medido.
 - **Controle de acesso interno:** handles com direitos que só diminuem, no modelo
   Fuchsia/seL4. Nenhuma autoridade ambiente: um processo só acessa o que recebeu.
 - **Ciclo de vida:** criar, terminar, esperar e sinais mínimos.
@@ -97,19 +108,27 @@ quando houver medição para decidir.
   modelo do Asterinas.
 - **Credenciais Linux:** uid, gid, grupos e capabilities(7), traduzidos para os
   direitos internos (modelo A, decidido no SDD 09).
-- **Primeiros aplicativos:** musl estático, BusyBox (`sh`, coreutils, `vi`, `top`),
-  pipes, tabela de descritores e `/proc` mínimo.
+- **Primeiros aplicativos:** musl estático, BusyBox (`sh`, coreutils, `vi`, `top`)
+  carregado do initramfs, pipes, tabela de descritores e `/proc` mínimo.
 - **Shell embutido:** vira console de recuperação.
 
-### 6 — Arquivos e armazenamento
+### 6 — Armazenamento persistente
 
-- **Camada de arquivos:** VFS, page cache, initramfs (módulos do Limine) e tmpfs.
-- **Disco:** virtio-blk na QEMU, NVMe para SSD e AHCI para SATA; a QEMU emula os
+- **Descoberta de hardware:**
+  - PCI Express pelo ECAM, lido do ACPI (MCFG) ou do DTB;
+  - endereços de dispositivo também por ACPI e DTB, no lugar de endereço fixo
+    (DEBT-0002).
+- **Disco:** virtio-blk na QEMU, NVMe para SSD e AHCI para SATA. A QEMU emula os
   três, e o mesmo driver roda em metal.
-- **Sistema de arquivos:** leitura e escrita; o formato da raiz é decisão aberta
-  (abaixo).
-- **Permissões:** dono, grupo e modo, com ACL depois.
-- **Descoberta de hardware:** por ACPI e DTB, no lugar de endereço fixo (DEBT-0002).
+- **Camada de arquivos:** page cache sobre o VFS da fase 4.
+- **Sistema de arquivos da raiz:** leitura e escrita.
+- **Permissões em disco:** dono, grupo e modo, com ACL depois.
+
+Decisão aberta desta fase (caso 6 do `AGENTS.md`, porque o formato em disco é
+contrato com o mundo de fora), a tomar antes de a fase 6 começar:
+
+- **Formato da raiz:** compatível com ext4 (o Linux lê o disco, e há ferramentas
+  para depurar) ou próprio (desenhado para a meta de memória e CPU).
 
 ### 7 — Usuários e sessões
 
@@ -137,21 +156,23 @@ e o sistema vai para o disco.
    - Criar a conta e a senha (Argon2id, fase 7).
    - Escolher o layout do teclado.
 4. **Gravação:**
-   - GPT com partição EFI e raiz, formatação, cópia de Limine, kernel e sistema;
+   - GPT com partição EFI e raiz;
+   - formatação: FAT32 na partição EFI (escritor no sistema, além do do xtask) e
+     a raiz no formato decidido na fase 6;
+   - cópia de Limine, kernel e sistema;
    - entrada de boot no firmware pelos serviços de runtime do UEFI, para subir sem
      a mídia;
    - tudo com verificação de leitura depois de escrever.
 5. **Entrada em PC real:** teclado e mouse USB por xHCI e HID, porque PS/2 quase
    não existe mais em máquina nova.
+6. **IOMMU (VT-d, SMMU):** liga antes de NVMe e xHCI rodarem em metal: um
+   dispositivo só faz DMA na memória que o driver entregou a ele.
 
-Decisões abertas desta fase (caso 6 do `AGENTS.md`, porque o formato em disco é
-contrato com o mundo de fora):
+Decisão aberta desta fase (caso 6 do `AGENTS.md`):
 
-- **Sistema de arquivos da raiz:** compatível com ext4 (o Linux lê o disco, e há
-  ferramentas para depurar) ou formato próprio (desenhado para a meta de memória
-  e CPU).
 - **Criptografia de disco:** opcional no instalador, sim ou não, e com que
-  algoritmo.
+  algoritmo. Fica numa camada de bloco abaixo do sistema de arquivos e não muda o
+  formato decidido na fase 6.
 
 ### 9 — Gerência de recursos e energia
 
@@ -182,11 +203,9 @@ contrato com o mundo de fora):
 Cada item entra com o custo medido no SDD 07 e pode ser desligado só por regra
 escrita.
 
-- **Mitigações de CPU:** só onde a CPU precisa (KPTI, Spectre v2, MDS), e relatadas
-  no boot.
 - **Fluxo de controle:** CET (shadow stack e IBT) no x86_64; PAC, BTI e MTE no
   aarch64; CFI.
 - **Políticas:** filtro de syscalls por processo (modelo seccomp/pledge) e controle
   de acesso obrigatório (MAC).
 - **Boot verificado:** Secure Boot e measured boot com TPM 2.0, com a chave
-  registrada pelo instalador. É decisão de plataforma (SDD 09).
+  registrada pelo instalador. É decisão aberta (SDD 09).
