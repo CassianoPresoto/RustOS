@@ -42,4 +42,8 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0024](0024-aarch64-pie-com-textrel.md) | Kernel aarch64 relocável só com `-z notext` (TEXTREL) | Open | A `core` pré-compilada do alvo aarch64 passar a vir com relocação PIC, ou o primeiro build com build-std |
 | [0025](0025-residuo-de-chave-na-pilha.md) | Cópias do estado do ChaCha20 e do gerador antigo ficam na pilha | Open | O primeiro código de usuário (fase 4) |
 | [0026](0026-troca-de-tabela-do-aarch64-sem-conferencia.md) | Troca de tabela do aarch64 sem a leitura do Arm ARM nem a conferência do MAIR | Open | O primeiro boot em metal aarch64, ou a leitura do Arm ARM nas seções de TLB e de MAIR |
-
+| [0028](0028-virtio-snd-sem-a-leitura-da-spec.md) | Driver de virtio-snd sem a leitura da especificação | Open | Antes de escrever o driver de virtio-snd (fase 6) |
+| [0029](0029-virtio-gpu-2d-sem-a-leitura-da-spec.md) | Driver de virtio-gpu 2D sem a leitura da especificação | Open | Antes de escrever o driver de virtio-gpu 2D (fase 11) |
+| [0030](0030-usb-hid-sem-a-leitura-da-spec.md) | Driver de USB HID sem a leitura da especificação | Open | Antes de escrever o driver de USB HID (fase 8) |
+| [0031](0031-intel-hda-sem-a-leitura-da-spec.md) | Driver de Intel HDA sem a leitura da especificação | Open | Antes de escrever o driver de Intel HDA, o que só acontece se o primeiro boot de áudio em metal precisar dele |
+| [0032](0032-memoria-ociosa-sem-linha-de-base.md) | Alvo de memória ociosa sem linha de base medida | Open | Antes de fechar a fase 5 |
