@@ -1,4 +1,6 @@
 //! Troca de pilha: o Limine entrega a pilha em memória que ele mesmo reaproveita.
+//! A pilha nova é a de `SP_EL1`: dali em diante o kernel roda em EL1h, e cada
+//! thread tem a sua (o `SP_EL0` fica com a pilha de falhas, ver `exception`).
 
 use core::arch::asm;
 
@@ -16,6 +18,7 @@ pub unsafe fn call_on_stack(top: VirtAddr, entry: Continuation, arg: *mut ()) ->
     // `brk` só existe para o caso de `entry` violar esse contrato.
     unsafe {
         asm!(
+            "msr spsel, #1",
             "mov sp, {top}",
             "mov x29, xzr",
             "blr {entry}",

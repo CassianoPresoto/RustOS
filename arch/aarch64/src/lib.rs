@@ -10,11 +10,15 @@ pub mod intid;
 pub mod time;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+mod context;
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod cpu;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod entropy;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod exception;
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub mod fpu;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod gic_cpu;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -28,6 +32,8 @@ mod stack;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod timer;
 
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub use context::{Context, switch};
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use cpu::Aarch64Cpu;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
