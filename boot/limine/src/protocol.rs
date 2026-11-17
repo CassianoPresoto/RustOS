@@ -2,6 +2,7 @@
 
 use core::cell::UnsafeCell;
 use core::ffi::c_char;
+use core::sync::atomic::AtomicPtr;
 use core::{ptr, slice};
 
 pub const BASE_REVISION: u64 = 6;
@@ -23,6 +24,10 @@ pub const MEMMAP_ID: [u64; 4] = id(0x67cf_3d9d_378a_806f, 0xe304_acdf_c50c_3c62)
 pub const PERFORMANCE_ID: [u64; 4] = id(0x6b50_ad9b_f36d_13ad, 0xdc4c_7e88_fc75_9e17);
 pub const FRAMEBUFFER_ID: [u64; 4] = id(0x9d58_27dc_d881_dd75, 0xa314_8604_f6fa_b11b);
 pub const EXECUTABLE_ADDRESS_ID: [u64; 4] = id(0x71ba_7686_3cc5_5f63, 0xb264_4a48_c516_a487);
+
+pub const MP_ID: [u64; 4] = id(0x95a6_7b81_9a1b_857e, 0xa0b6_1b72_3b6a_73e0);
+/// `LIMINE_MP_REQUEST_X86_64_X2APIC`: pede ao bootloader o x2APIC ligado, se a CPU o tem.
+pub const MP_REQUEST_X2APIC: u64 = 1;
 
 pub const FRAMEBUFFER_RGB: u8 = 1;
 
@@ -97,6 +102,128 @@ impl<R> Request<R> {
         let response = unsafe { ptr::read_volatile(self.response.get()) };
         // SAFETY: não nulo é um ponteiro válido do bootloader, pelo contrato da função.
         unsafe { response.as_ref() }
+    }
+}
+
+/// Pedido de MP: o de sempre mais `flags`, depois da resposta (`struct limine_mp_request`).
+#[repr(C, align(8))]
+pub struct MpRequest {
+    id: [u64; 4],
+    revision: u64,
+    response: UnsafeCell<*const MpResponse>,
+    flags: u64,
+}
+
+// SAFETY: só o bootloader escreve `response`, antes de o kernel rodar; depois é só leitura.
+unsafe impl Sync for MpRequest {}
+
+impl MpRequest {
+    pub const fn new(flags: u64) -> Self {
+        Self {
+            id: MP_ID,
+            revision: 0,
+            response: UnsafeCell::new(ptr::null()),
+            flags,
+        }
+    }
+
+    /// # Safety
+    /// A memória das respostas (`BootloaderReclaimable`) ainda não foi reaproveitada.
+    pub unsafe fn response(&self) -> Option<&'static MpResponse> {
+        // SAFETY: leitura volátil: o valor foi escrito pelo bootloader, fora da visão do compilador.
+        let response = unsafe { ptr::read_volatile(self.response.get()) };
+        // SAFETY: não nulo é um ponteiro válido do bootloader, pelo contrato da função.
+        unsafe { response.as_ref() }
+    }
+}
+
+/// `struct limine_mp_info` do x86_64.
+#[derive(Debug)]
+#[allow(dead_code, reason = "o layout da outra ISA só entra no teste do host")]
+#[repr(C)]
+pub struct MpInfoX86 {
+    pub processor_id: u32,
+    pub lapic_id: u32,
+    reserved: u64,
+    pub goto_address: AtomicPtr<()>,
+    pub extra_argument: u64,
+}
+
+/// `struct limine_mp_info` do aarch64.
+#[derive(Debug)]
+#[allow(dead_code, reason = "o layout da outra ISA só entra no teste do host")]
+#[repr(C)]
+pub struct MpInfoAarch64 {
+    pub processor_id: u32,
+    reserved1: u32,
+    pub mpidr: u64,
+    reserved: u64,
+    pub goto_address: AtomicPtr<()>,
+    pub extra_argument: u64,
+}
+
+/// `struct limine_mp_response` do x86_64.
+#[allow(dead_code, reason = "o layout da outra ISA só entra no teste do host")]
+#[repr(C)]
+pub struct MpResponseX86 {
+    pub revision: u64,
+    pub flags: u32,
+    pub bsp_lapic_id: u32,
+    cpu_count: u64,
+    cpus: *const *const MpInfoX86,
+}
+
+/// `struct limine_mp_response` do aarch64.
+#[allow(dead_code, reason = "o layout da outra ISA só entra no teste do host")]
+#[repr(C)]
+pub struct MpResponseAarch64 {
+    pub revision: u64,
+    pub flags: u64,
+    pub bsp_mpidr: u64,
+    cpu_count: u64,
+    cpus: *const *const MpInfoAarch64,
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub use {MpInfoAarch64 as MpInfo, MpResponseAarch64 as MpResponse};
+#[cfg(target_arch = "x86_64")]
+pub use {MpInfoX86 as MpInfo, MpResponseX86 as MpResponse};
+
+impl MpInfo {
+    /// O `extra_argument` que o BSP gravou antes de soltar este núcleo.
+    pub fn argument(&self) -> u64 {
+        // SAFETY: o campo está dentro de `self`; o BSP o escreveu antes do `goto_address`.
+        unsafe { ptr::read_volatile(&raw const self.extra_argument) }
+    }
+
+    /// Identificador de hardware: LAPIC ID ou afinidade do `MPIDR`.
+    pub fn hw_id(&self) -> u64 {
+        #[cfg(target_arch = "x86_64")]
+        return u64::from(self.lapic_id);
+        #[cfg(not(target_arch = "x86_64"))]
+        return self.mpidr;
+    }
+}
+
+impl MpResponse {
+    /// Quem é o núcleo de boot, no mesmo formato de `MpInfo::hw_id`.
+    pub fn bsp_hw_id(&self) -> u64 {
+        #[cfg(target_arch = "x86_64")]
+        return u64::from(self.bsp_lapic_id);
+        #[cfg(not(target_arch = "x86_64"))]
+        return self.bsp_mpidr;
+    }
+
+    /// # Safety
+    /// `cpus` aponta para `cpu_count` ponteiros válidos, como o Limine garante.
+    pub unsafe fn cpus(&self) -> &'static [&'static MpInfo] {
+        let len = usize::try_from(self.cpu_count).expect("contagem cabe em usize");
+        if self.cpus.is_null() || len == 0 {
+            return &[];
+        }
+        // SAFETY: ponteiro e tamanho vêm do bootloader, pelo contrato da função; `&T` e
+        // `*const T` têm a mesma representação.
+        unsafe { slice::from_raw_parts(self.cpus.cast::<&'static MpInfo>(), len) }
     }
 }
 
@@ -197,6 +324,28 @@ impl FramebufferResponse {
     }
 }
 
+/// Um `MpInfo` com o identificador de hardware dado, para os testes do adaptador.
+#[cfg(test)]
+pub(crate) fn test_info(hw_id: u64) -> MpInfo {
+    #[cfg(target_arch = "x86_64")]
+    return MpInfo {
+        processor_id: 0,
+        lapic_id: u32::try_from(hw_id).unwrap(),
+        reserved: 0,
+        goto_address: AtomicPtr::new(ptr::null_mut()),
+        extra_argument: 0,
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    return MpInfo {
+        processor_id: 0,
+        reserved1: 0,
+        mpidr: hw_id,
+        reserved: 0,
+        goto_address: AtomicPtr::new(ptr::null_mut()),
+        extra_argument: 0,
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +365,7 @@ mod tests {
             PERFORMANCE_ID,
             FRAMEBUFFER_ID,
             EXECUTABLE_ADDRESS_ID,
+            MP_ID,
         ] {
             assert_eq!(id[..2], COMMON_MAGIC);
         }
@@ -254,6 +404,53 @@ mod tests {
         assert_eq!(core::mem::offset_of!(Framebuffer, edid_size), 48);
         assert_eq!(size_of::<Framebuffer>(), 64);
         assert_eq!(size_of::<FramebufferResponse>(), 24);
+    }
+
+    #[test]
+    fn mp_request_layout_matches_limine_h() {
+        assert_eq!(size_of::<MpRequest>(), 56);
+        assert_eq!(core::mem::offset_of!(MpRequest, response), 40);
+        assert_eq!(core::mem::offset_of!(MpRequest, flags), 48);
+    }
+
+    #[test]
+    #[allow(clippy::unreadable_literal, reason = "cópia literal do limine.h")]
+    fn mp_id_matches_limine_h() {
+        assert_eq!(MP_ID[2], 0x95a67b819a1b857e);
+        assert_eq!(MP_ID[3], 0xa0b61b723b6a73e0);
+        assert_eq!(MP_REQUEST_X2APIC, 1 << 0);
+    }
+
+    #[test]
+    fn mp_x86_layout_matches_limine_h() {
+        assert_eq!(size_of::<MpInfoX86>(), 32);
+        assert_eq!(core::mem::offset_of!(MpInfoX86, lapic_id), 4);
+        assert_eq!(core::mem::offset_of!(MpInfoX86, goto_address), 16);
+        assert_eq!(core::mem::offset_of!(MpInfoX86, extra_argument), 24);
+        assert_eq!(size_of::<MpResponseX86>(), 32);
+        assert_eq!(core::mem::offset_of!(MpResponseX86, flags), 8);
+        assert_eq!(core::mem::offset_of!(MpResponseX86, bsp_lapic_id), 12);
+        assert_eq!(core::mem::offset_of!(MpResponseX86, cpu_count), 16);
+        assert_eq!(core::mem::offset_of!(MpResponseX86, cpus), 24);
+    }
+
+    #[test]
+    fn mp_aarch64_layout_matches_limine_h() {
+        assert_eq!(size_of::<MpInfoAarch64>(), 40);
+        assert_eq!(core::mem::offset_of!(MpInfoAarch64, mpidr), 8);
+        assert_eq!(core::mem::offset_of!(MpInfoAarch64, goto_address), 24);
+        assert_eq!(core::mem::offset_of!(MpInfoAarch64, extra_argument), 32);
+        assert_eq!(size_of::<MpResponseAarch64>(), 40);
+        assert_eq!(core::mem::offset_of!(MpResponseAarch64, bsp_mpidr), 16);
+        assert_eq!(core::mem::offset_of!(MpResponseAarch64, cpu_count), 24);
+        assert_eq!(core::mem::offset_of!(MpResponseAarch64, cpus), 32);
+    }
+
+    #[test]
+    fn mp_info_reports_hardware_id_and_argument() {
+        let mut info = test_info(7);
+        info.extra_argument = 42;
+        assert_eq!((info.hw_id(), info.argument()), (7, 42));
     }
 
     #[test]

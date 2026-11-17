@@ -17,9 +17,9 @@ pub mod memory;
 pub mod paging;
 
 pub use addr::{PhysAddr, VirtAddr};
-pub use boot::{BootInfo, BootTimeline, BootloaderId, KernelImage};
+pub use boot::{BootInfo, BootTimeline, BootloaderId, CpuDescriptor, KernelImage};
 pub use console::Console;
-pub use cpu::Cpu;
+pub use cpu::{Cpu, CpuLocal, Ipi, IpiKind, MAX_CPUS};
 pub use display::{Channel, FramebufferInfo};
 pub use entropy::HardwareEntropy;
 pub use input::{ByteSource, KeyCode, KeyEvent};
