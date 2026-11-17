@@ -15,9 +15,36 @@ pub fn period_ticks(frequency_hz: u64, hz: u32) -> Option<u64> {
     frequency_hz.checked_div(u64::from(hz)).filter(|&t| t != 0)
 }
 
+/// Próximo disparo absoluto: um período depois do anterior, ou, se esse já passou
+/// (IRQ atrasada), um período depois de agora. Assim não há deriva nem rajada.
+pub const fn next_deadline(previous: u64, now: u64, reload: u64) -> u64 {
+    let next = previous.wrapping_add(reload);
+    if next.wrapping_sub(now).cast_signed() > 0 {
+        next
+    } else {
+        now.wrapping_add(reload)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_deadline_keeps_the_period_without_drift() {
+        assert_eq!(next_deadline(1_000, 1_005, 100), 1_100);
+    }
+
+    #[test]
+    fn late_irq_restarts_from_now_instead_of_bursting() {
+        assert_eq!(next_deadline(1_000, 1_250, 100), 1_350);
+        assert_eq!(next_deadline(1_000, 1_100, 100), 1_200);
+    }
+
+    #[test]
+    fn next_deadline_survives_counter_wraparound() {
+        assert_eq!(next_deadline(u64::MAX - 10, u64::MAX - 5, 100), 89);
+    }
 
     #[test]
     fn counts_convert_at_24_mhz() {

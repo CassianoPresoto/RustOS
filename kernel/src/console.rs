@@ -46,6 +46,11 @@ pub fn key_event(event: KeyEvent, mut push: impl FnMut(u8)) {
     }
 }
 
+/// Se há tela: sem ela, as teclas do teclado não viram bytes.
+pub fn has_screen() -> bool {
+    SCREEN.lock().is_some()
+}
+
 /// Troca o layout do teclado; `false` sem tela, onde o teclado não é lido.
 pub fn set_layout(layout: rustos_term::Layout) -> bool {
     SCREEN

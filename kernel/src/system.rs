@@ -28,7 +28,10 @@ impl KeymapCell {
     }
 }
 
-/// Tiques que o autoteste espera: 50 ms a 100 Hz.
+/// Tiques que o autoteste espera: 50 ms a 100 Hz. Fora de 25–200 ms, a calibração
+/// errou; sem tique em 1 s, o timer não chega.
+const SELF_TEST_MS: core::ops::RangeInclusive<u64> = 25..=200;
+const SELF_TEST_GIVE_UP_NS: u64 = 1_000_000_000;
 const SELF_TEST_TICKS: u64 = 5;
 
 /// Tamanho que a serial assume quando não há tela.
@@ -92,7 +95,8 @@ impl<B: BootInfo> Host for System<'_, B> {
     }
 
     fn keymap(&self) -> Option<&'static str> {
-        platform::has_keyboard().then(|| KEYMAP.get()).flatten()
+        let usable = platform::has_keyboard() && console::has_screen();
+        usable.then(|| KEYMAP.get()).flatten()
     }
 
     fn set_keymap(&self, name: &str) -> bool {
@@ -130,19 +134,23 @@ pub fn interrupt_self_test() -> bool {
         if breakpoint_ok { "ok" } else { "FAILED" }
     );
     let cpu = platform::cpu();
-    let (start_ticks, start_ns) = (interrupts::ticks(), platform::now_ns());
-    while interrupts::ticks() < start_ticks + SELF_TEST_TICKS {
+    let elapsed = || platform::now_ns().unwrap_or(0);
+    let (start_ticks, start_ns) = (interrupts::ticks(), elapsed());
+    while interrupts::ticks() < start_ticks + SELF_TEST_TICKS
+        && elapsed().saturating_sub(start_ns) < SELF_TEST_GIVE_UP_NS
+    {
         cpu.save_and_disable_interrupts();
         cpu.enable_interrupts_and_wait();
     }
-    let elapsed_ms = platform::now_ns()
-        .zip(start_ns)
-        .map_or(0, |(now, start)| now.saturating_sub(start) / 1_000_000);
+    let elapsed_ms = elapsed().saturating_sub(start_ns) / 1_000_000;
+    let ticked = interrupts::ticks() >= start_ticks + SELF_TEST_TICKS;
+    let timer_ok = ticked && SELF_TEST_MS.contains(&elapsed_ms);
     kprintln!(
-        "[rustos] timer: {} Hz, {SELF_TEST_TICKS} ticks in {elapsed_ms} ms",
-        platform::TIMER_HZ
+        "[rustos] timer: {} Hz, {SELF_TEST_TICKS} ticks in {elapsed_ms} ms {}",
+        platform::TIMER_HZ,
+        if timer_ok { "ok" } else { "FAILED" }
     );
-    breakpoint_ok
+    breakpoint_ok && timer_ok
 }
 
 /// Laço do shell: tira bytes da fila que as IRQs de serial e teclado enchem, e

@@ -46,8 +46,10 @@ const IOAPIC_PIN_SERIAL: u8 = 4;
 /// Base das portas do controlador PS/2: dado em 0x60, status e comando em 0x64.
 const I8042_PORTS: u16 = 0x60;
 
-/// Só a IRQ do teclado lê depois do boot: não há outro dono para disputar.
+/// Depois do boot, só a IRQ do teclado pega este lock: ninguém o segura quando
+/// ela chega. Quem quer saber se há teclado lê `KEYBOARD_PRESENT`.
 static KEYBOARD: SpinLock<Option<I8042<PortBus>>> = SpinLock::new(None);
+static KEYBOARD_PRESENT: AtomicBool = AtomicBool::new(false);
 
 static READY: AtomicBool = AtomicBool::new(false);
 /// Primeira página, sem mapeamento, da pilha de #DF: lê-la provoca um #PF.
@@ -134,10 +136,13 @@ pub fn init_interrupts(
 
     mask_legacy_pic();
     let (apic, mmio) = enable_local_apic(mode, memory, &mut mapper)?;
+    apic.local().enable();
     let destination = u8::try_from(apic.local().id(apic.is_x2apic()))
         .map_err(|_| PlatformError::MissingFeature("8-bit apic id"))?;
     let keyboard = start_keyboard();
     route_io_apic(memory, &mut mapper, destination, keyboard)?;
+    // Tecla que chegou antes de o pino abrir deixa a linha alta sem nova borda.
+    while keyboard_event().is_some() {}
     publish_apic(apic, mmio);
     start_clocks(&apic)?;
 
@@ -198,6 +203,7 @@ fn start_keyboard() -> bool {
     let ready = controller.init().is_ok();
     if ready {
         *KEYBOARD.lock() = Some(controller);
+        KEYBOARD_PRESENT.store(true, Ordering::Release);
     }
     ready
 }
@@ -262,7 +268,7 @@ pub fn serial_irq_done() {}
 
 /// Se o controlador PS/2 respondeu no boot.
 pub fn has_keyboard() -> bool {
-    KEYBOARD.lock().is_some()
+    KEYBOARD_PRESENT.load(Ordering::Acquire)
 }
 
 /// Próxima tecla do PS/2, dentro da IRQ 1; ler o dado baixa a linha.

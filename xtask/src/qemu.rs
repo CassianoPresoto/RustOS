@@ -16,6 +16,8 @@ use crate::{image, png, workspace};
 /// Igual ao `BOOT_OK_MARKER` do kernel; os dois mudam juntos.
 const BOOT_OK: &str = "[rustos] boot ok";
 const PANIC: &str = "[rustos] panic";
+/// Linhas que o kernel imprime quando um autoteste ou o boot falha.
+const FATAL: [&str; 2] = ["[rustos] fault:", "FAILED"];
 /// Linha que o kernel imprime com as proteções de hardware (guidelines 09).
 const PROTECTIONS: &str = "[rustos] protections:";
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -174,7 +176,7 @@ fn wait_for_boot(receiver: &mpsc::Receiver<String>, started: Instant) -> (Outcom
         if log.contains(BOOT_OK) {
             break Outcome::Booted(started.elapsed());
         }
-        if log.contains(PANIC) {
+        if log.contains(PANIC) || FATAL.iter().any(|mark| log.contains(mark)) {
             break Outcome::Panicked;
         }
     };
@@ -196,7 +198,11 @@ fn report(arch: Arch, outcome: Outcome, log: &str) -> Result<(), String> {
             );
             Ok(())
         }
-        Outcome::Panicked => Err(format!("smoke {}: o kernel entrou em pânico", arch.name())),
+        Outcome::Panicked => Err(failure(
+            arch,
+            "o kernel entrou em pânico ou um autoteste falhou",
+            log,
+        )),
         Outcome::TimedOut => Err(failure(arch, "sem o marcador de boot no tempo limite", log)),
         Outcome::Exited => Err(failure(arch, "a QEMU saiu antes do marcador de boot", log)),
     }

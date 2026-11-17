@@ -14,8 +14,9 @@ pub const MACHINE_CHECK: u8 = 18;
 /// As exceções ocupam 0 a 31; daí em diante o vetor é de IRQ.
 pub const FIRST_IRQ_VECTOR: u8 = 32;
 
-/// Vetores em que a CPU empilha código de erro (SDM vol. 3A, tabela 6-1): #DF, #TS,
-/// #NP, #SS, #GP, #PF, #AC, #CP e, na AMD, #VC e #SX.
+/// Vetores em que a CPU empilha código de erro (`exception_has_error_code` da QEMU e
+/// `idtentry.h` do Linux; a SDM não foi lida): #DF, #TS, #NP, #SS, #GP, #PF, #AC,
+/// #CP e, na AMD, #VC e #SX.
 pub const ERROR_CODE_VECTORS: u64 = 1 << 8
     | 1 << 10
     | 1 << 11

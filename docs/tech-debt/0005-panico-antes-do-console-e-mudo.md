@@ -1,19 +1,24 @@
 ---
 id: DEBT-0005
-title: Pânico antes do console não aparece
+title: Pânico antes do console, ou com o console preso, não aparece
 status: Open
 date: 2026-11-17
 trigger: O primeiro boot que trave sem saída na serial, ou o primeiro boot em metal
 paid_date:
 ---
 
-# DEBT 0005 — Pânico antes do console não aparece
+# DEBT 0005 — Pânico antes do console, ou com o console preso, não aparece
 
 ## O que falta
 
 O `kmain` lê o bootloader e monta a memória antes do console, porque no aarch64 a
 serial precisa de frames para as tabelas de página. Um pânico nesses passos para a
 CPU sem escrever nada: o `make smoke` só vê o tempo esgotar.
+
+O mesmo acontece depois do console. `print_panic` e o relatório de exceção usam
+`try_lock` no `SERIAL` e no `SCREEN`. Uma falha que aconteça com um deles preso
+(um page fault dentro de `Sink::write_str` ou de `Screen::render`) para a CPU sem
+imprimir.
 
 ## Por que foi aceito
 

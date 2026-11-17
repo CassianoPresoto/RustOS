@@ -70,9 +70,10 @@ inutiliza o CPUID 0x15 do Linux: por isso a referência é o PIT.
 
 ### Custo
 
-`make size ARCH=x86_64 PROFILE=release`, antes e depois: carregado 99 301 → 118 976
-bytes (`text` 80 415 → 94 591, `bss` 6 → 4 504). Os 256 stubs são 4 096 bytes de
-`text` e a IDT, 4 096 de `bss`; o resto é o despacho, o APIC e a calibração.
+O tamanho do kernel antes e depois da fase 1 está no SDD 07 (x86_64 `release`:
+100 541 → 132 200 bytes carregados, já com o teclado). Os 256 stubs são 4 096
+bytes de `text` e a IDT, 4 096 de `bss`; o resto é o despacho, o APIC, a
+calibração e o teclado.
 
 ### Memória virtual acrescentada
 

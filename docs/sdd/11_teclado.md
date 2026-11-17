@@ -97,4 +97,4 @@ que não é caractere (Enter, setas, Ctrl+letra) digita o acento pendente antes.
 ## O que ainda não existe
 
 Reset e LEDs do teclado, Num Lock e teclado USB: [DEBT-0010](../tech-debt/0010-teclado-sem-comandos-ao-dispositivo.md).
-Interrupção ligada ao kernel (IRQ 1) é da fase 1 do [roadmap](08_roadmap.md).
+No aarch64 não há teclado: a `virt` não tem PS/2, e o teclado USB é da fase 8.

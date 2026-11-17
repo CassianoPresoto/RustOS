@@ -52,14 +52,11 @@ pub unsafe fn start(hz: u32) -> Result<u64, TimerError> {
 /// Chamado a cada IRQ do timer; escrever o `CVAL` baixa a IRQ.
 pub fn rearm() {
     let reload = RELOAD_TICKS.load(Ordering::Relaxed);
-    let now = counter();
-    let next = read_deadline().wrapping_add(reload);
-    let deadline = if next.wrapping_sub(now).cast_signed() > 0 {
-        next
-    } else {
-        now.wrapping_add(reload)
-    };
-    write_deadline(deadline);
+    write_deadline(crate::time::next_deadline(
+        read_deadline(),
+        counter(),
+        reload,
+    ));
 }
 
 fn read_deadline() -> u64 {
