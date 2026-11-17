@@ -3,16 +3,20 @@
 
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
+pub use rustos_arch_aarch64::call_on_stack;
+use rustos_arch_aarch64::descriptor::Aarch64Format;
 use rustos_arch_aarch64::intid::{QEMU_VIRT_PL011_INTID, VIRTUAL_TIMER_INTID};
 use rustos_arch_aarch64::{
-    Aarch64Cpu, Aarch64PageMapper, MmioBus, QEMU_VIRT_GICD, QEMU_VIRT_GICR, QEMU_VIRT_PL011,
-    exception, gic_cpu, intid, protection, timer,
+    Aarch64Cpu, Aarch64Entropy, Aarch64Mmu, DirectMapTables, MmioBus, QEMU_VIRT_GICD,
+    QEMU_VIRT_GICR, QEMU_VIRT_PL011, active_root, exception, gic_cpu, intid, prepare_space,
+    protection, timer,
 };
 use rustos_driver_gicv3::{GicError, GicV3, affinity_from_mpidr, router_for};
 use rustos_driver_pl011::Pl011;
 use rustos_hal::{
     BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, PAGE_SIZE, PhysAddr, VirtAddr,
 };
+use rustos_mm::PageTables;
 
 use super::{PlatformError, Protection};
 use crate::interrupts::{FaultTest, IrqSource};
@@ -21,6 +25,38 @@ use crate::memory::{Memory, map_device};
 pub const ARCH: &str = "aarch64";
 
 pub type PlatformConsole = Pl011<MmioBus>;
+pub type PlatformEntropy = Aarch64Entropy;
+/// Espaço de endereçamento: as tabelas da metade alta atrás do `TTBR1_EL1`.
+pub type PlatformSpace = PageTables<Aarch64Format, DirectMapTables, Aarch64Mmu>;
+
+/// As tabelas que o `TTBR1_EL1` aponta agora.
+///
+/// # Safety
+/// O mapa direto cobre as tabelas atuais e todo frame novo, e só o chamador mexe nelas.
+pub unsafe fn active_space(direct_map_offset: u64) -> PlatformSpace {
+    // SAFETY: o índice 7 do MAIR não é usado pelo Limine nem por mapeamento algum ainda.
+    unsafe { prepare_space() };
+    // SAFETY: EL1 com MMU ligada.
+    let root = unsafe { active_root() };
+    // SAFETY: o contrato desta função.
+    let tables = unsafe { DirectMapTables::new(direct_map_offset) };
+    PageTables::new(root, tables, Aarch64Mmu)
+}
+
+/// Espaço novo e vazio, para montar antes de ativar.
+///
+/// # Safety
+/// Todo frame de `frames` é acessível em `físico + offset` antes e depois da troca.
+pub unsafe fn new_space(
+    frames: &mut impl FrameSource,
+    direct_map_offset: u64,
+) -> Result<PlatformSpace, MapError> {
+    // SAFETY: o índice 7 do MAIR não é usado pelo Limine nem por mapeamento algum ainda.
+    unsafe { prepare_space() };
+    // SAFETY: o contrato desta função.
+    let tables = unsafe { DirectMapTables::new(direct_map_offset) };
+    PageTables::new_empty(frames, tables, Aarch64Mmu)
+}
 
 /// Frequência do tique do timer.
 pub const TIMER_HZ: u32 = 100;
@@ -41,6 +77,15 @@ const PAN_UNSUPPORTED: u8 = 0;
 const PAN_ON: u8 = 1;
 const PAN_OFF: u8 = 2;
 
+/// Liga as proteções de hardware da CPU, antes das tabelas novas.
+pub fn harden() {
+    if protection::pan_available() {
+        // SAFETY: EL1, e a CPU anuncia `PAN`.
+        let on = unsafe { protection::enable_pan() };
+        PAN_STATE.store(if on { PAN_ON } else { PAN_OFF }, Ordering::Relaxed);
+    }
+}
+
 pub fn cpu() -> Aarch64Cpu {
     // SAFETY: o Limine entrega o kernel em EL1 (ou EL2 com VHE), nunca em EL0.
     unsafe { Aarch64Cpu::new() }
@@ -51,7 +96,7 @@ pub fn console(
     frames: &mut impl FrameSource,
 ) -> Result<PlatformConsole, MapError> {
     // SAFETY: MMU ligada; as tabelas do Limine e os frames novos estão no mapa direto.
-    let mut mapper = unsafe { Aarch64PageMapper::active(boot.direct_map_offset()) };
+    let mut mapper = unsafe { active_space(boot.direct_map_offset()) };
     let registers = PhysAddr::new(QEMU_VIRT_PL011);
     let virt = map_device(&mut mapper, frames, registers, PAGE_SIZE)?;
     UART_BASE.store(virt.as_u64(), Ordering::Relaxed);
@@ -70,7 +115,7 @@ pub fn init_interrupts(
     handlers: &'static Handlers,
 ) -> Result<(), PlatformError> {
     // SAFETY: MMU ligada; as tabelas do Limine e os frames novos estão no mapa direto.
-    let mut mapper = unsafe { Aarch64PageMapper::active(boot.direct_map_offset()) };
+    let mut mapper = unsafe { active_space(boot.direct_map_offset()) };
     let stack_top = memory
         .map_stack(&mut mapper, EXCEPTION_STACK_PAGES)
         .map_err(map_error)?;
@@ -98,12 +143,6 @@ pub fn init_interrupts(
         .map_err(gic_error)?;
     serial().enable_rx_interrupt();
 
-    if protection::pan_available() {
-        // SAFETY: EL1, e a CPU anuncia `PAN`.
-        let on = unsafe { protection::enable_pan() };
-        PAN_STATE.store(if on { PAN_ON } else { PAN_OFF }, Ordering::Relaxed);
-    }
-
     // SAFETY: EL1, primeira e única vez nesta CPU.
     unsafe { timer::start(TIMER_HZ) }.map_err(|error| match error {
         timer::TimerError::NoFrequency => PlatformError::MissingFeature("CNTFRQ_EL0"),
@@ -115,7 +154,7 @@ pub fn init_interrupts(
 }
 
 fn map_gic(
-    mapper: &mut Aarch64PageMapper,
+    mapper: &mut PlatformSpace,
     memory: &mut Memory,
     phys: u64,
     len: u64,
@@ -180,6 +219,16 @@ pub fn now_ns() -> Option<u64> {
     timer::now_ns()
 }
 
+/// Contador virtual (`CNTVCT_EL0`): o relógio da semente de reserva.
+pub fn cycles() -> u64 {
+    timer::counter()
+}
+
+/// `RNDRRS` ou `RNDR`, se `ID_AA64ISAR0_EL1.RNDR` anunciar.
+pub fn hardware_entropy() -> Option<PlatformEntropy> {
+    Aarch64Entropy::detect()
+}
+
 /// As proteções de hardware desta ISA e se ficaram ligadas.
 pub fn protections() -> &'static [Protection] {
     const ON: [Protection; 1] = [Protection {
@@ -200,6 +249,10 @@ pub fn protections() -> &'static [Protection] {
 /// Provoca a exceção pedida; `PageFault` lê a página de guarda da pilha de exceção.
 pub fn trigger(test: FaultTest) -> bool {
     match test {
+        FaultTest::WriteText => {
+            crate::vm::probe_write_text();
+            true
+        }
         FaultTest::Breakpoint => {
             exception::breakpoint();
             true

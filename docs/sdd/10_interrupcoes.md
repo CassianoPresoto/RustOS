@@ -14,7 +14,7 @@ entre elas está numa seção por ISA, abaixo.
 | Passo | O quê | Onde |
 | --- | --- | --- |
 | 1 | WP (`CR0`), SMEP, SMAP, UMIP (`CR4`) e NXE (`EFER`), só o que o CPUID anuncia; o estado lido de volta vira `protections()` | `arch/x86_64/src/protect.rs` |
-| 2 | `X86PageMapper::active`: lê o `CR3` e caminha as tabelas pelo mapa direto | `mmu.rs`, `walk.rs`, `pte.rs` |
+| 2 | `platform::active_space`: lê o `CR3` e caminha as tabelas pelo mapa direto | `mmu.rs`, `pte.rs`, `core/mm/src/tables.rs` |
 | 3 | Três pilhas de 4 páginas com página de guarda (`Memory::map_stack`), para #DF, NMI e #MC | `kernel/src/memory.rs` |
 | 4 | GDT, TSS e IDT próprias; `lgdt`, CS por retorno distante, `ltr`, `lidt` | `traps.rs`, `segments.rs` |
 | 5 | 8259 mascarado (0xFF em 0x21 e 0xA1) | `pic.rs` |

@@ -11,8 +11,8 @@
 | Componentes | `rustfmt`, `clippy`, `rust-src`, `llvm-tools` | `rust-toolchain.toml` |
 | Alvo x86_64 | `x86_64-unknown-none` (soft-float, sem red zone, code model kernel) | `xtask/src/arch.rs` |
 | Alvo aarch64 | `aarch64-unknown-none-softfloat` | `xtask/src/arch.rs` |
-| Linker | `rust-lld`, com `kernel/linker/<isa>.ld` e `-z max-page-size=0x1000` | `kernel/build.rs` |
-| Relocação | `static` (kernel em endereço fixo da metade alta) | `.cargo/config.toml` |
+| Linker | `rust-lld`, com `kernel/linker/<isa>.ld`, `-z max-page-size=0x1000` e `-pie` (no aarch64, também `-z notext`, DEBT-0024) | `kernel/build.rs` |
+| Relocação | `pie`: o Limine relocaliza e sorteia a base ([SDD 13](13_memoria_virtual.md)) | `.cargo/config.toml` |
 
 Os dois alvos são Tier 2 com `core` pré-compilado: não há `build-std` nem nightly.
 
@@ -31,7 +31,7 @@ Os dois alvos são Tier 2 com `core` pré-compilado: não há `build-std` nem ni
 | `make build` | `build --arch A --profile P` | Compila `rustos-kernel` para o alvo da ISA |
 | `make image` | `image` | Monta `target/esp/<isa>/`: `EFI/BOOT/<loader>`, `EFI/BOOT/limine.conf`, `boot/rustos` |
 | `make run` | `run` | Sobe na QEMU: a tela numa janela, o shell e a serial no terminal (`-serial mon:stdio`); Ctrl-A X sai |
-| `make smoke` | `smoke` | Sobe sem tela, lê a serial até `[rustos] boot ok`, pânico ou 120 s; imprime as linhas do kernel e o tempo de parede |
+| `make smoke` | `smoke` | Sobe sem tela, lê a serial até `[rustos] boot ok`, pânico ou 120 s; imprime as linhas do kernel e o tempo de parede. Exige também as linhas `protections:`, `w^x: ok` e `reclaimed:` |
 | `make screenshot CMDS="fetch;mem"` | `screenshot -- fetch mem` | Sobe sem janela, digita cada comando no shell pela serial, captura a tela pelo `screendump` do monitor da QEMU e grava `target/screenshots/<isa>.png`. Comando que começa com `keys:` vai pelo teclado da máquina (`sendkey`), em qcodes da QEMU: `keys: e c h o spc semicolon ret` |
 | `make font-preview` | `font-preview` | Desenha todos os glifos da fonte própria em `target/font-preview.png` |
 | `make size` | `size` | Lê o ELF e soma `text`, `rodata`, `data`, `bss` |
@@ -60,6 +60,7 @@ não há ISO nem `xorriso`.
 | Rede | `-nic none` | `-nic none` |
 | Aceleração | `kvm` em host Linux x86_64 | `hvf` em Mac Apple Silicon, `kvm` em host Linux aarch64 |
 
+O `limine.conf` também liga `kaslr: yes`; sem ele o Limine não sorteia a base.
 A resolução vem do `limine.conf` (`resolution:`), por ISA em
 `Arch::screen_resolution`: 1280x800 no x86_64 e 1024x768 no aarch64. Pedir
 1280x800 ao GOP do `ramfb` deixa a tela em 800x600; 1024x768 ele aceita (medido).

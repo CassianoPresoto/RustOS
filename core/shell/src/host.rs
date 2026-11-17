@@ -10,10 +10,15 @@ pub trait Host {
     fn uptime_ns(&self) -> Option<u64>;
     /// Tamanho do terminal em (colunas, linhas); a serial usa (80, 24).
     fn terminal_size(&self) -> (u16, u16);
-    /// Provoca a exceção pedida para testar o caminho de falha. `PageFault` não
-    /// volta; `false` quando a plataforma ainda não sabe provocar.
+    /// Provoca a exceção pedida para testar o caminho de falha. `PageFault` e
+    /// `WriteText` só voltam se a proteção faltar; `false` quando a plataforma
+    /// ainda não sabe provocar.
     fn fault_test(&self, _kind: FaultTest) -> bool {
         false
+    }
+    /// Um número aleatório de 64 bits do gerador do kernel; `None` sem gerador.
+    fn random_u64(&self) -> Option<u64> {
+        None
     }
     /// Layout do teclado em uso; `None` quando não há teclado.
     fn keymap(&self) -> Option<&'static str> {
@@ -30,6 +35,8 @@ pub trait Host {
 pub enum FaultTest {
     Breakpoint,
     PageFault,
+    /// Escrever em `.text`, que a proteção do kernel deve recusar.
+    WriteText,
 }
 
 /// Retrato do sistema no momento da consulta.
@@ -62,8 +69,12 @@ pub struct MemoryInfo {
     pub free_bytes: u64,
     /// RAM que o bootloader ou o firmware reservaram.
     pub reserved_bytes: u64,
-    /// Tamanho do bitmap de frames.
-    pub frame_bitmap_bytes: u64,
+    /// Metadado do alocador de frames (bitmaps do buddy).
+    pub frame_metadata_bytes: u64,
+    /// Páginas que o heap do kernel segura do alocador de frames.
+    pub heap_pages: u64,
+    /// Bytes que o kernel pediu ao heap e ainda não devolveu.
+    pub heap_used_bytes: u64,
     /// Tamanho da imagem do kernel.
     pub kernel_bytes: u64,
 }

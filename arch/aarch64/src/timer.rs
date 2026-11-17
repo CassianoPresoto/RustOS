@@ -79,7 +79,8 @@ pub fn now_ns() -> Option<u64> {
     ticks_to_ns(elapsed, FREQUENCY_HZ.load(Ordering::Relaxed))
 }
 
-fn counter() -> u64 {
+/// `CNTVCT_EL0`, em ticks de `CNTFRQ_EL0`.
+pub fn counter() -> u64 {
     let ticks: u64;
     // SAFETY: o `isb` impede a leitura de subir antes das instruções anteriores.
     unsafe {

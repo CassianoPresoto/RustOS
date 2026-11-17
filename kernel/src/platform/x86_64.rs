@@ -5,6 +5,7 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+pub use rustos_arch_x86_64::call_on_stack;
 use rustos_arch_x86_64::clock::elapsed_ns;
 use rustos_arch_x86_64::ioapic::{IOAPIC_BASE, IoApic};
 use rustos_arch_x86_64::lapic::{VECTOR_KEYBOARD, VECTOR_SERIAL, VECTOR_SPURIOUS, VECTOR_TIMER};
@@ -12,14 +13,16 @@ use rustos_arch_x86_64::pic;
 use rustos_arch_x86_64::pit::{self, Pit, Reading};
 use rustos_arch_x86_64::{
     ApicAccess, ApicMode, COM1, IstStacks, MmioBus, PIC_MASTER, PIC_SLAVE, PIT_PORTS, PortBus,
-    Protections, X86Cpu, X86PageMapper, breakpoint, cpu_features, detect_apic, enable_protections,
-    install_traps, publish_apic, rdtsc,
+    Protections, X86Cpu, X86Entropy, X86Mmu, active_root, breakpoint, cpu_features, detect_apic,
+    enable_protections, install_traps, publish_apic, rdtsc, require_features,
 };
+use rustos_arch_x86_64::{DirectMapTables, pte::X86Format};
 use rustos_driver_i8042::I8042;
 use rustos_driver_uart16550::{DIVISOR_115200, Uart16550};
 use rustos_hal::{
     BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, PAGE_SIZE, PageMapper, PhysAddr,
 };
+use rustos_mm::PageTables;
 use rustos_sync::SpinLock;
 
 use super::{PlatformError, Protection};
@@ -29,6 +32,36 @@ use crate::memory::{Memory, map_device};
 pub const ARCH: &str = "x86_64";
 
 pub type PlatformConsole = Uart16550<PortBus>;
+pub type PlatformEntropy = X86Entropy;
+/// Espaço de endereçamento: as tabelas de 4 níveis atrás do `CR3`.
+pub type PlatformSpace = PageTables<X86Format, DirectMapTables, X86Mmu>;
+
+/// As tabelas que o `CR3` aponta agora.
+///
+/// # Safety
+/// O mapa direto cobre as tabelas atuais e todo frame novo, e só o chamador mexe nelas.
+pub unsafe fn active_space(direct_map_offset: u64) -> PlatformSpace {
+    // SAFETY: ring 0 com paginação de 4 níveis no boot.
+    let root = unsafe { active_root() };
+    // SAFETY: o contrato desta função.
+    let tables = unsafe { DirectMapTables::new(direct_map_offset) };
+    PageTables::new(root, tables, X86Mmu)
+}
+
+/// Espaço novo e vazio, para montar antes de ativar.
+///
+/// # Safety
+/// Todo frame de `frames` é acessível em `físico + offset` antes e depois da troca.
+pub unsafe fn new_space(
+    frames: &mut impl FrameSource,
+    direct_map_offset: u64,
+) -> Result<PlatformSpace, MapError> {
+    // SAFETY: ring 0 no boot.
+    unsafe { require_features() }?;
+    // SAFETY: o contrato desta função.
+    let tables = unsafe { DirectMapTables::new(direct_map_offset) };
+    PageTables::new_empty(frames, tables, X86Mmu)
+}
 
 /// Frequência do tique do timer.
 pub const TIMER_HZ: u32 = 100;
@@ -86,6 +119,13 @@ static REPORT: Report = Report(UnsafeCell::new([
     },
 ]));
 
+/// Liga as proteções de hardware da CPU. Primeira coisa depois da memória: o NX tem
+/// de estar no `EFER` antes de as tabelas novas usarem o bit.
+pub fn harden() {
+    // SAFETY: ring 0 no boot, e o kernel não toca memória de usuário.
+    publish_protections(unsafe { enable_protections() });
+}
+
 pub fn cpu() -> X86Cpu {
     // SAFETY: o Limine entrega o kernel em ring 0, e ele nunca sai de lá.
     unsafe { X86Cpu::new() }
@@ -113,15 +153,13 @@ pub fn init_interrupts(
     memory: &mut Memory,
     handlers: &'static Handlers,
 ) -> Result<(), PlatformError> {
-    // SAFETY: ring 0 no boot, e o kernel não toca memória de usuário.
-    publish_protections(unsafe { enable_protections() });
     let features = cpu_features();
     if !features.tsc {
         return Err(PlatformError::MissingFeature("tsc"));
     }
     let mode = detect_apic(features).ok_or(PlatformError::MissingFeature("apic"))?;
     // SAFETY: o mapa direto cobre as tabelas e os frames; só o boot mexe nelas agora.
-    let mut mapper = unsafe { X86PageMapper::active(boot.direct_map_offset()) };
+    let mut mapper = unsafe { active_space(boot.direct_map_offset()) };
 
     let stacks = IstStacks {
         double_fault: ist_stack(memory, &mut mapper)?,
@@ -181,7 +219,7 @@ fn mask_legacy_pic() {
 fn enable_local_apic(
     mode: ApicMode,
     memory: &mut Memory,
-    mapper: &mut X86PageMapper,
+    mapper: &mut PlatformSpace,
 ) -> Result<(ApicAccess, Option<rustos_hal::VirtAddr>), PlatformError> {
     match mode {
         // SAFETY: o CPUID anunciou x2APIC, e este é o boot em ring 0.
@@ -210,7 +248,7 @@ fn start_keyboard() -> bool {
 
 fn route_io_apic(
     memory: &mut Memory,
-    mapper: &mut X86PageMapper,
+    mapper: &mut PlatformSpace,
     destination: u8,
     keyboard: bool,
 ) -> Result<(), PlatformError> {
@@ -282,6 +320,16 @@ pub fn now_ns() -> Option<u64> {
     (hz != 0).then(|| elapsed_ns(rdtsc(), TSC_ORIGIN.load(Ordering::Relaxed), hz))
 }
 
+/// Contador de ciclos (TSC): o relógio da semente de reserva.
+pub fn cycles() -> u64 {
+    rdtsc()
+}
+
+/// `RDSEED` ou `RDRAND`, se o CPUID anunciar.
+pub fn hardware_entropy() -> Option<PlatformEntropy> {
+    X86Entropy::detect(cpu_features())
+}
+
 /// As proteções de hardware desta ISA e se ficaram ligadas.
 pub fn protections() -> &'static [Protection] {
     // SAFETY: a escrita foi no boot; depois disso o relatório só é lido.
@@ -298,6 +346,7 @@ pub fn trigger(test: FaultTest) -> bool {
             // SAFETY: `READY` só vale depois de `install_traps`.
             unsafe { breakpoint() };
         }
+        FaultTest::WriteText => crate::vm::probe_write_text(),
         FaultTest::PageFault => {
             let guard = ptr::with_exposed_provenance::<u8>(
                 usize::try_from(GUARD_PAGE.load(Ordering::Relaxed)).unwrap_or(0),

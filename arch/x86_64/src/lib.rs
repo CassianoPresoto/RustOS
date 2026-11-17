@@ -12,12 +12,13 @@ pub mod pic;
 pub mod pit;
 pub mod pte;
 pub mod segments;
-pub mod walk;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod apic;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod cpu;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+mod entropy;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod mmio;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -26,6 +27,8 @@ mod mmu;
 mod port;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod protect;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+mod stack;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod sysreg;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -36,13 +39,17 @@ pub use apic::{ApicAccess, ApicMode, detect as detect_apic, eoi, publish as publ
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use cpu::X86Cpu;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub use entropy::X86Entropy;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use mmio::MmioBus;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub use mmu::X86PageMapper;
+pub use mmu::{DirectMapTables, X86Mmu, active_root, require_features};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use port::PortBus;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use protect::{Protections, enable as enable_protections};
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub use stack::{Continuation, call_on_stack};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use sysreg::{features as cpu_features, rdtsc};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]

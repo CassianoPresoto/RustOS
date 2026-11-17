@@ -25,7 +25,9 @@ pub(crate) fn info() -> SystemInfo<'static> {
             usable_bytes: 512 << 20,
             free_bytes: 500 << 20,
             reserved_bytes: 1_572_864,
-            frame_bitmap_bytes: 16_384,
+            frame_metadata_bytes: 16_384,
+            heap_pages: 12,
+            heap_used_bytes: 5_000,
             kernel_bytes: 2_306_868,
         },
         display: Some(DisplayInfo {
@@ -43,6 +45,7 @@ pub(crate) struct FakeHost {
     pub(crate) size: (u16, u16),
     pub(crate) faults: bool,
     pub(crate) keymap: core::cell::Cell<Option<&'static str>>,
+    pub(crate) random: Option<u64>,
 }
 
 impl FakeHost {
@@ -53,6 +56,7 @@ impl FakeHost {
             size: (80, 24),
             faults: false,
             keymap: core::cell::Cell::new(Some("us")),
+            random: Some(0x0123_4567_89ab_cdef),
         }
     }
 }
@@ -72,6 +76,10 @@ impl Host for FakeHost {
 
     fn fault_test(&self, _kind: crate::host::FaultTest) -> bool {
         self.faults
+    }
+
+    fn random_u64(&self) -> Option<u64> {
+        self.random
     }
 
     fn keymap(&self) -> Option<&'static str> {

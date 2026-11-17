@@ -15,6 +15,9 @@ O `kmain` lê o bootloader e monta a memória antes do console, porque no aarch6
 serial precisa de frames para as tabelas de página. Um pânico nesses passos para a
 CPU sem escrever nada: o `make smoke` só vê o tempo esgotar.
 
+Desde a fase 2 esse trecho inclui a montagem das tabelas próprias, a troca de `CR3` /
+`TTBR1_EL1` e a de pilha: falha ali também é muda (a exceção não tem IDT nem VBAR).
+
 O mesmo acontece depois do console. `print_panic` e o relatório de exceção usam
 `try_lock` no `SERIAL` e no `SCREEN`. Uma falha que aconteça com um deles preso
 (um page fault dentro de `Sink::write_str` ou de `Screen::render`) para a CPU sem

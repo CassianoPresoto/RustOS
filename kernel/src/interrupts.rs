@@ -28,6 +28,8 @@ pub enum IrqSource {
 pub enum FaultTest {
     Breakpoint,
     PageFault,
+    /// Escrita em `.text`: tem de ser um page fault de proteção (W^X).
+    WriteText,
 }
 
 static HANDLERS: Handlers = Handlers {

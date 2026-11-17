@@ -6,9 +6,11 @@ use rustos_shell::{DisplayInfo, FaultTest, Host, MemoryInfo, Shell, SystemInfo};
 use rustos_term::Layout;
 
 use crate::console::{self, Sink};
+use crate::heap;
 use crate::interrupts;
 use crate::memory::Memory;
 use crate::platform;
+use crate::random;
 
 /// Layout em uso; só o laço do shell lê e escreve, numa CPU.
 static KEYMAP: KeymapCell = KeymapCell(core::cell::Cell::new(Some("us")));
@@ -67,7 +69,8 @@ impl<'a, B: BootInfo> System<'a, B> {
 
 impl<B: BootInfo> Host for System<'_, B> {
     fn info(&self) -> SystemInfo<'_> {
-        let frames = &self.memory.frames;
+        let frames = self.memory.frames;
+        let heap = heap::stats();
         SystemInfo {
             os_name: "RustOS",
             os_version: env!("CARGO_PKG_VERSION"),
@@ -83,7 +86,9 @@ impl<B: BootInfo> Host for System<'_, B> {
                     RegionKind::AcpiReclaimable,
                     RegionKind::AcpiNvs,
                 ]),
-                frame_bitmap_bytes: self.memory.bitmap_bytes,
+                frame_metadata_bytes: self.memory.metadata_bytes,
+                heap_pages: heap.pages,
+                heap_used_bytes: heap.used_bytes,
                 kernel_bytes: self.region_bytes(&[RegionKind::KernelAndModules]),
             },
             display: self.display,
@@ -92,6 +97,10 @@ impl<B: BootInfo> Host for System<'_, B> {
 
     fn uptime_ns(&self) -> Option<u64> {
         platform::now_ns()
+    }
+
+    fn random_u64(&self) -> Option<u64> {
+        random::next_u64()
     }
 
     fn keymap(&self) -> Option<&'static str> {
@@ -115,6 +124,7 @@ impl<B: BootInfo> Host for System<'_, B> {
         let kind = match kind {
             FaultTest::Breakpoint => interrupts::FaultTest::Breakpoint,
             FaultTest::PageFault => interrupts::FaultTest::PageFault,
+            FaultTest::WriteText => interrupts::FaultTest::WriteText,
         };
         platform::trigger(kind)
     }

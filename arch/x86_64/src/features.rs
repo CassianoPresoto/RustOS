@@ -1,14 +1,31 @@
 //! Recursos da CPU que o CPUID anuncia, decodificados das folhas cruas. Puro.
+//! RDRAND é `CPUID.1:ECX[30]` e RDSEED é `CPUID.7.0:EBX[18]` (`cpufeatures.h` do Linux).
 
 /// Bits de `CPUID.1:ECX`, `CPUID.1:EDX`, `CPUID.7.0:EBX`, `CPUID.7.0:ECX` e
 /// `CPUID.80000001H:EDX` (SDM vol. 2A, instrução CPUID).
 const L1_ECX_X2APIC: u32 = 1 << 21;
+const L1_ECX_RDRAND: u32 = 1 << 30;
 const L1_EDX_APIC: u32 = 1 << 9;
 const L1_EDX_TSC: u32 = 1 << 4;
 const L7_EBX_SMEP: u32 = 1 << 7;
+const L7_EBX_RDSEED: u32 = 1 << 18;
 const L7_EBX_SMAP: u32 = 1 << 20;
 const L7_ECX_UMIP: u32 = 1 << 2;
 const EXT_EDX_NX: u32 = 1 << 20;
+
+/// Bit de cada instrução de entropia em `fill_from_words`.
+pub const ENTROPY_RDSEED: u8 = 1;
+pub const ENTROPY_RDRAND: u8 = 2;
+
+/// O nome do que de fato deu as palavras, dado o OU dos bits usados.
+pub const fn entropy_source_name(used: u8) -> &'static str {
+    match used {
+        ENTROPY_RDSEED => "rdseed",
+        ENTROPY_RDRAND => "rdrand",
+        _ if used == ENTROPY_RDSEED | ENTROPY_RDRAND => "rdseed+rdrand",
+        _ => "none",
+    }
+}
 
 /// As folhas cruas; `leaf7_*` é zero quando a CPU não tem a folha 7.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -31,6 +48,8 @@ pub struct Features {
     pub smep: bool,
     pub smap: bool,
     pub umip: bool,
+    pub rdrand: bool,
+    pub rdseed: bool,
 }
 
 impl Features {
@@ -49,6 +68,8 @@ impl Features {
             smep: ebx & L7_EBX_SMEP != 0,
             smap: ebx & L7_EBX_SMAP != 0,
             umip: ecx & L7_ECX_UMIP != 0,
+            rdrand: leaves.leaf1_ecx & L1_ECX_RDRAND != 0,
+            rdseed: ebx & L7_EBX_RDSEED != 0,
         }
     }
 }
@@ -58,12 +79,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_entropy_name_says_which_instructions_gave_words() {
+        assert_eq!(entropy_source_name(ENTROPY_RDSEED), "rdseed");
+        assert_eq!(entropy_source_name(ENTROPY_RDRAND), "rdrand");
+        assert_eq!(
+            entropy_source_name(ENTROPY_RDSEED | ENTROPY_RDRAND),
+            "rdseed+rdrand"
+        );
+        assert_eq!(entropy_source_name(0), "none");
+    }
+
+    #[test]
     fn decodes_each_bit_from_its_leaf() {
         let features = Features::from_leaves(Leaves {
             max_basic: 0x16,
-            leaf1_ecx: 1 << 21,
+            leaf1_ecx: 1 << 21 | 1 << 30,
             leaf1_edx: 1 << 9 | 1 << 4,
-            leaf7_ebx: 1 << 7 | 1 << 20,
+            leaf7_ebx: 1 << 7 | 1 << 20 | 1 << 18,
             leaf7_ecx: 1 << 2,
             ext_edx: 1 << 20,
         });
@@ -77,6 +109,8 @@ mod tests {
                 smep: true,
                 smap: true,
                 umip: true,
+                rdrand: true,
+                rdseed: true,
             }
         );
     }
@@ -97,7 +131,7 @@ mod tests {
             leaf7_ecx: u32::MAX,
             ..Leaves::default()
         });
-        assert!(!features.smep && !features.smap && !features.umip);
+        assert!(!features.smep && !features.smap && !features.umip && !features.rdseed);
     }
 
     #[test]

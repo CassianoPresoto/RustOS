@@ -10,7 +10,7 @@
 - **`asm!` e `global_asm!` só em `arch/`**, em módulo com
   `#[cfg(all(target_arch = "...", target_os = "none"))]`.
 - **A parte pura de um adaptador fica fora do módulo com `asm!`** (como
-  `descriptor.rs` e `walk.rs` no `arch/aarch64`), para rodar no teste do host.
+  `descriptor.rs` e `esr.rs` no `arch/aarch64`), para rodar no teste do host.
 - **Todo bloco `unsafe` tem `// SAFETY:` logo acima**, dizendo qual invariante
   torna o acesso válido. Lint `undocumented_unsafe_blocks` em `deny`.
 - **Uma operação `unsafe` por bloco** (`multiple_unsafe_ops_per_block` em `deny`).

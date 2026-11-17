@@ -8,6 +8,7 @@ use crate::features::{Features, Leaves};
 pub const MSR_EFER: u32 = 0xC000_0080;
 pub const EFER_NXE: u64 = 1 << 11;
 pub const CR0_WP: u64 = 1 << 16;
+pub const CR4_PGE: u64 = 1 << 7;
 pub const CR4_UMIP: u64 = 1 << 11;
 pub const CR4_SMEP: u64 = 1 << 20;
 pub const CR4_SMAP: u64 = 1 << 21;

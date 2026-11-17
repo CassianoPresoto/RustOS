@@ -5,6 +5,8 @@ use core::fmt;
 use crate::ansi::{ACCENT, CLEAR_SCREEN, DIM, LOGO, RESET};
 use crate::fmtutil::{Bytes, Millis, Percent, Uptime};
 use crate::history::Entries;
+use rustos_hal::PAGE_SIZE;
+
 use crate::host::{FaultTest, Host, SystemInfo};
 
 /// O que um comando recebe: seus argumentos (sem o nome) e as portas.
@@ -41,7 +43,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
     Command {
         name: "fault",
-        summary: "raise an exception to test the fault path (break | page)",
+        summary: "raise an exception to test the fault path (break | page | text)",
         run: fault,
     },
     Command {
@@ -68,6 +70,11 @@ pub(crate) const COMMANDS: &[Command] = &[
         name: "mem",
         summary: "show the physical memory usage",
         run: mem,
+    },
+    Command {
+        name: "random",
+        summary: "print a random 64-bit number in hex",
+        run: random,
     },
     Command {
         name: "uname",
@@ -155,16 +162,24 @@ fn fault(ctx: &mut Ctx<'_>) -> fmt::Result {
     let kind = match ctx.args.first().copied() {
         Some("break") => FaultTest::Breakpoint,
         Some("page") => FaultTest::PageFault,
-        _ => return ctx.out.write_str("usage: fault break|page\r\n"),
+        Some("text") => FaultTest::WriteText,
+        _ => return ctx.out.write_str("usage: fault break|page|text\r\n"),
     };
-    if kind == FaultTest::PageFault {
-        ctx.out.write_str("reading an unmapped page...\r\n")?;
+    match kind {
+        FaultTest::PageFault => ctx.out.write_str("reading an unmapped page...\r\n")?,
+        FaultTest::WriteText => ctx.out.write_str("writing to the kernel text...\r\n")?,
+        FaultTest::Breakpoint => {}
     }
-    if ctx.host.fault_test(kind) {
-        ctx.out
-            .write_str("breakpoint handled, back in the shell\r\n")
-    } else {
-        ctx.out.write_str("fault: not available yet\r\n")
+    if !ctx.host.fault_test(kind) {
+        return ctx.out.write_str("fault: not available yet\r\n");
+    }
+    match kind {
+        FaultTest::Breakpoint => ctx
+            .out
+            .write_str("breakpoint handled, back in the shell\r\n"),
+        FaultTest::PageFault | FaultTest::WriteText => ctx
+            .out
+            .write_str("no fault was raised: the protection is missing\r\n"),
     }
 }
 
@@ -237,17 +252,25 @@ fn mem(ctx: &mut Ctx<'_>) -> fmt::Result {
         "reserved",
         Bytes(memory.reserved_bytes)
     )?;
-    let bitmap = Percent {
-        part: memory.frame_bitmap_bytes,
+    let metadata = Percent {
+        part: memory.frame_metadata_bytes,
         whole: memory.usable_bytes,
         decimals: 3,
     };
-    let bitmap_bytes = memory.frame_bitmap_bytes;
+    let metadata_bytes = memory.frame_metadata_bytes;
     write!(
         out,
-        "  {:<13}{bitmap_bytes:>8} B  ({}, {bitmap} of RAM)\r\n",
-        "frame bitmap",
-        Bytes(bitmap_bytes),
+        "  {:<13}{metadata_bytes:>8} B  ({}, {metadata} of RAM)\r\n",
+        "frame meta",
+        Bytes(metadata_bytes),
+    )?;
+    write!(
+        out,
+        "  {:<13}{:>10}  ({} pages, {} held)\r\n",
+        "heap",
+        Bytes(memory.heap_used_bytes),
+        memory.heap_pages,
+        Bytes(memory.heap_pages * PAGE_SIZE),
     )?;
     write!(
         out,
@@ -255,6 +278,13 @@ fn mem(ctx: &mut Ctx<'_>) -> fmt::Result {
         "kernel",
         Bytes(memory.kernel_bytes)
     )
+}
+
+fn random(ctx: &mut Ctx<'_>) -> fmt::Result {
+    match ctx.host.random_u64() {
+        Some(value) => write!(ctx.out, "0x{value:016x}\r\n"),
+        None => write!(ctx.out, "random: no generator\r\n"),
+    }
 }
 
 fn blocks(out: &mut dyn fmt::Write, from: u16, to: u16) -> fmt::Result {
@@ -495,6 +525,15 @@ mod tests {
     }
 
     #[test]
+    fn fault_text_reports_a_missing_protection_when_it_returns() {
+        let mut host = FakeHost::new();
+        host.faults = true;
+        let output = run("fault", &["text"], &host);
+        assert!(output.contains("writing to the kernel text"));
+        assert!(output.contains("no fault was raised"));
+    }
+
+    #[test]
     fn fault_break_returns_to_the_shell() {
         let mut host = FakeHost::new();
         host.faults = true;
@@ -558,6 +597,33 @@ mod tests {
         assert!(text.contains("16384 B"), "{text}");
         assert!(text.contains("0.003% of RAM"), "{text}");
         assert!(text.contains("2.2 MiB"), "{text}");
+    }
+
+    #[test]
+    fn mem_reports_the_heap_in_use_and_held() {
+        let text = run("mem", &[], &FakeHost::new());
+        assert!(text.contains("frame meta"), "{text}");
+        assert!(text.contains("heap"), "{text}");
+        assert!(text.contains("4.8 KiB"), "{text}");
+        assert!(text.contains("12 pages, 48.0 KiB held"), "{text}");
+    }
+
+    #[test]
+    fn random_prints_the_host_number_as_16_hex_digits() {
+        assert_eq!(
+            run("random", &[], &FakeHost::new()),
+            "0x0123456789abcdef\r\n"
+        );
+        let mut host = FakeHost::new();
+        host.random = Some(0xff);
+        assert_eq!(run("random", &[], &host), "0x00000000000000ff\r\n");
+    }
+
+    #[test]
+    fn random_without_a_generator_says_so() {
+        let mut host = FakeHost::new();
+        host.random = None;
+        assert_eq!(run("random", &[], &host), "random: no generator\r\n");
     }
 
     #[test]

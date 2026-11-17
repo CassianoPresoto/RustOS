@@ -9,10 +9,15 @@
 .
 ├── kernel/                     # rustos-kernel: raiz de composição, o binário `rustos`
 │   ├── build.rs                # escolhe o linker script da ISA alvo
-│   ├── linker/                 # x86_64.ld, aarch64.ld: metade alta, um segmento por permissão
+│   ├── linker/                 # x86_64.ld, aarch64.ld: metade alta, um segmento por permissão, símbolos de cada seção e PT_DYNAMIC (KASLR)
 │   └── src/
 │       ├── main.rs             # kmain: boot → memória → serial → tela → relatório → boot ok → shell
-│       ├── memory.rs           # liga core/mm à memória real pelo mapa direto; janela de dispositivos
+│       ├── boot.rs             # BootRecord: o que o Limine entregou, copiado para o heap (BootInfo)
+│       ├── vm.rs               # Vm: tabelas próprias, W^X por seção, mapa direto, conferência e fault text
+│       ├── memory.rs           # Memory::init: buddy e heap; janelas de dispositivos e de pilhas; map_stack; devolução da memória do bootloader
+│       ├── frames.rs           # alocador de frames global (IrqLock) e o handle Frames
+│       ├── heap.rs             # GlobalAlloc sobre KernelHeap, DirectMap (FrameMemory) e o autoteste
+│       ├── random.rs           # gerador global: semente de hardware ou jitter, reposição
 │       ├── console.rs          # console global e kprintln!: serial e tela
 │       ├── screen.rs           # tela: framebuffer + grade do term + desenho do gfx, tema e barra
 │       ├── system.rs           # porta Host do shell e o laço de entrada
@@ -21,7 +26,8 @@
 │       └── platform/           # um módulo por ISA: ARCH, PlatformConsole, cpu(), console()
 ├── core/                       # o centro do hexágono: no_std, forbid(unsafe_code), testado no host
 │   ├── hal/                    # rustos-hal: as portas (traits) e os tipos de fronteira
-│   ├── mm/                     # rustos-mm: BitmapFrameAllocator, summarize/find_free_block, AddressWindow
+│   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow, WxChecker, PageTables (a caminhada de 4 níveis das duas ISAs), `runs`/`coalesce` (2 MiB ou 4 KiB no mapa direto); porta FrameMemory e trait FrameAllocator (SDD 12, SDD 13)
+│   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) Rng (fast key erasure) e a semente de reserva por jitter
 │   ├── sched/                  # rustos-sched: TaskId, RunQueue, RoundRobin (ainda não ligado ao kernel)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16
 │   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células), Cell, Key, Keyboard (layouts)
@@ -29,9 +35,9 @@
 ├── lib/
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set)
 ├── arch/                       # adaptadores de ISA: o único lugar com asm!
-│   ├── x86_64/                 # X86Cpu, PortBus, X86PageMapper, GDT/TSS/IDT, APIC, PIT; módulos puros (pte, walk, segments, fault, lapic, ioapic, pit, clock) testados no host
-│   └── aarch64/                # Aarch64Cpu, MmioBus, Aarch64PageMapper (TTBR1); vetores, ICC_*, CNTV e PAN;
-│                               # puros: descriptor, walk, esr, time, intid, features
+│   ├── x86_64/                 # X86Cpu, PortBus, X86Mmu e DirectMapTables (`invlpg`, `CR3`, memória das tabelas), X86Entropy, GDT/TSS/IDT, APIC, PIT, troca de pilha; módulos puros (pte com `X86Format`, segments, fault, lapic, ioapic, pit, clock) testados no host
+│   └── aarch64/                # Aarch64Cpu, MmioBus, Aarch64Mmu e DirectMapTables (TTBR1), Aarch64Entropy; vetores, ICC_*, CNTV e PAN;
+│                               # puros: descriptor (com `Aarch64Format`), esr, time, intid, features
 ├── boot/
 │   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 escrito aqui → hal::BootInfo
 ├── drivers/                    # adaptadores de dispositivo: genéricos sobre hal::RegisterBus, sem unsafe
@@ -44,7 +50,7 @@
 ├── .github/workflows/ci.yml    # gates, testes e smoke nas duas ISAs
 ├── Makefile                    # atalhos para cargo e xtask
 ├── rust-toolchain.toml         # Rust estável fixado + alvos bare-metal
-└── .cargo/config.toml          # alias `cargo xtask`, relocation-model=static nos alvos
+└── .cargo/config.toml          # alias `cargo xtask`, relocation-model=pie nos alvos (KASLR)
 ```
 
 ## Quem depende de quem
@@ -53,6 +59,7 @@
 | --- | --- |
 | `rustos-hal` | nada |
 | `rustos-mm` | `rustos-hal` |
+| `rustos-crypto` | nada |
 | `rustos-sched` | nada |
 | `rustos-gfx` | nada |
 | `rustos-term` | `rustos-hal` |
@@ -62,7 +69,7 @@
 | `rustos-arch-aarch64` | `rustos-hal` |
 | `rustos-boot-limine` | `rustos-hal` |
 | `rustos-driver-uart16550`, `rustos-driver-pl011`, `rustos-driver-i8042`, `rustos-driver-gicv3` | `rustos-hal` |
-| `rustos-kernel` | `hal`, `mm`, `gfx`, `term`, `shell`, `sync`, `boot-limine`; por ISA, `arch-*` e os drivers (x86_64: `uart16550`, `i8042`; aarch64: `pl011`, `gicv3`) |
+| `rustos-kernel` | `hal`, `mm`, `crypto`, `gfx`, `term`, `shell`, `sync`, `boot-limine`; por ISA, `arch-*` e os drivers (x86_64: `uart16550`, `i8042`; aarch64: `pl011`, `gicv3`) |
 | `xtask` | nada (só `std`) |
 
 O `rustos-sched` existe com fila e política testadas, mas o kernel ainda não o usa:
@@ -75,6 +82,7 @@ e não usada).
 | Código novo | Lugar |
 | --- | --- |
 | Algoritmo ou política (alocador, escalonador, cache, fila) | crate de `core/` do assunto |
+| Cifra, hash ou gerador de números aleatórios | `core/crypto/`; a semente do hardware vem por porta do `hal` |
 | Desenho de pixel, glifo da fonte | `core/gfx/` |
 | Sequência de terminal, codificação de tecla, layout de teclado | `core/term/` |
 | Comando do shell embutido | `core/shell/`; o dado do sistema chega pela porta `Host` |

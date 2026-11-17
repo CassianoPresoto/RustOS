@@ -1,6 +1,6 @@
 //! Porta de entrada: o que o núcleo precisa saber do bootloader.
 
-use crate::{FramebufferInfo, MemoryRegion};
+use crate::{FramebufferInfo, MemoryRegion, PhysAddr, VirtAddr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BootloaderId<'a> {
@@ -28,6 +28,24 @@ impl BootTimeline {
     }
 }
 
+/// Onde a imagem do kernel foi carregada: o físico e o virtual do início dela.
+/// O mapeamento é de deslocamento único (a imagem é contígua em memória física).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KernelImage {
+    pub physical_base: PhysAddr,
+    pub virtual_base: VirtAddr,
+}
+
+impl KernelImage {
+    /// Endereço físico de um endereço virtual da imagem; `None` abaixo da base.
+    pub const fn physical_of(&self, virt: VirtAddr) -> Option<PhysAddr> {
+        match virt.as_u64().checked_sub(self.virtual_base.as_u64()) {
+            Some(delta) => self.physical_base.checked_add(delta),
+            None => None,
+        }
+    }
+}
+
 pub trait BootInfo {
     fn memory_regions(&self) -> impl Iterator<Item = MemoryRegion> + '_;
 
@@ -40,6 +58,9 @@ pub trait BootInfo {
 
     /// O primeiro framebuffer de 32 bpp em RGB, se o firmware entregou um.
     fn framebuffer(&self) -> Option<FramebufferInfo>;
+
+    /// Base física e virtual da imagem do kernel.
+    fn kernel_image(&self) -> Option<KernelImage>;
 }
 
 #[cfg(test)]
@@ -55,6 +76,20 @@ mod tests {
         };
         assert_eq!(timeline.firmware_us(), 300);
         assert_eq!(timeline.loader_us(), 50);
+    }
+
+    #[test]
+    fn kernel_image_translates_with_one_offset() {
+        let image = KernelImage {
+            physical_base: PhysAddr::new(0x20_0000),
+            virtual_base: VirtAddr::new(0xffff_ffff_8000_0000),
+        };
+        let phys = image.physical_of(VirtAddr::new(0xffff_ffff_8000_3000));
+        assert_eq!(phys, Some(PhysAddr::new(0x20_3000)));
+        assert_eq!(
+            image.physical_of(VirtAddr::new(0xffff_ffff_7fff_f000)),
+            None
+        );
     }
 
     #[test]

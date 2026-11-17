@@ -9,8 +9,8 @@ mod requests;
 use core::ffi::{CStr, c_char};
 
 use rustos_hal::{
-    BootInfo, BootTimeline, BootloaderId, Channel, FramebufferInfo, MemoryRegion, PhysAddr,
-    RegionKind, VirtAddr,
+    BootInfo, BootTimeline, BootloaderId, Channel, FramebufferInfo, KernelImage, MemoryRegion,
+    PhysAddr, RegionKind, VirtAddr,
 };
 
 pub use protocol::BASE_REVISION;
@@ -21,6 +21,7 @@ pub enum BootError {
     UnsupportedBaseRevision,
     MissingMemoryMap,
     MissingDirectMap,
+    MissingKernelAddress,
 }
 
 /// Visão do kernel sobre as respostas do Limine. Só existe se o essencial chegou.
@@ -28,6 +29,7 @@ pub enum BootError {
 pub struct LimineBoot {
     entries: &'static [&'static MemmapEntry],
     direct_map_offset: u64,
+    kernel_image: KernelImage,
 }
 
 impl LimineBoot {
@@ -42,11 +44,18 @@ impl LimineBoot {
         let memmap = unsafe { requests::memmap() }.ok_or(BootError::MissingMemoryMap)?;
         // SAFETY: idem.
         let hhdm = unsafe { requests::hhdm() }.ok_or(BootError::MissingDirectMap)?;
+        // SAFETY: idem.
+        let address =
+            unsafe { requests::executable_address() }.ok_or(BootError::MissingKernelAddress)?;
         // SAFETY: o Limine garante `entry_count` ponteiros válidos em `entries`.
         let entries = unsafe { memmap.entries() };
         Ok(Self {
             entries,
             direct_map_offset: hhdm.offset,
+            kernel_image: KernelImage {
+                physical_base: PhysAddr::new(address.physical_base),
+                virtual_base: VirtAddr::new(address.virtual_base),
+            },
         })
     }
 }
@@ -82,6 +91,10 @@ impl BootInfo for LimineBoot {
             loader_start_us: perf.init_usec,
             kernel_handoff_us: perf.exec_usec,
         })
+    }
+
+    fn kernel_image(&self) -> Option<KernelImage> {
+        Some(self.kernel_image)
     }
 
     fn framebuffer(&self) -> Option<FramebufferInfo> {

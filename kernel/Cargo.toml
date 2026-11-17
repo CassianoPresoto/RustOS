@@ -16,6 +16,7 @@ bench = false
 [dependencies]
 rustos-hal.workspace = true
 rustos-mm.workspace = true
+rustos-crypto.workspace = true
 rustos-gfx.workspace = true
 rustos-term.workspace = true
 rustos-shell.workspace = true

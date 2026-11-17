@@ -9,7 +9,7 @@ use crate::limine;
 
 fn limine_conf(arch: Arch) -> String {
     format!(
-        "timeout: 0\nserial: yes\n\n/RustOS\n    protocol: limine\n    path: boot():/boot/rustos\n    resolution: {}\n",
+        "timeout: 0\nserial: yes\n\n/RustOS\n    protocol: limine\n    path: boot():/boot/rustos\n    kaslr: yes\n    resolution: {}\n",
         arch.screen_resolution()
     )
 }

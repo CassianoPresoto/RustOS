@@ -7,8 +7,8 @@
 
 | Anel | Pasta | O que tem | `unsafe` |
 | --- | --- | --- | --- |
-| **Portas** | `core/hal` | Traits e tipos de fronteira: `BootInfo`, `Console`, `ByteSource`, `Cpu`, `RegisterBus`, `PageMapper`, `FrameSource`, `FramebufferInfo`, `PhysAddr`, `VirtAddr`, `MemoryRegion` | proibido |
-| **Centro** | `core/mm`, `core/sched`, `core/gfx`, `core/term`, `core/shell` | Política pura: alocador de frames, leitura do mapa de memória, janela de endereços, fila de execução, rodízio; desenho de pixels e a fonte própria; emulador de terminal VT/xterm; shell embutido | proibido |
+| **Portas** | `core/hal` | Traits e tipos de fronteira: `BootInfo`, `Console`, `ByteSource`, `Cpu`, `RegisterBus`, `PageMapper`, `FrameSource`, `PageFormat`, `TableMemory`, `MmuControl`, `HardwareEntropy`, `FramebufferInfo`, `PhysAddr`, `VirtAddr`, `MemoryRegion` | proibido |
+| **Centro** | `core/mm`, `core/crypto`, `core/sched`, `core/gfx`, `core/term`, `core/shell` | Política pura: alocadores de frames (buddy, cache por CPU) e do heap, leitura do mapa de memória, janela de endereços, fila de execução, rodízio; ChaCha20, BLAKE2b e o gerador de números aleatórios; desenho de pixels e a fonte própria; emulador de terminal VT/xterm; shell embutido | proibido |
 | **Suporte** | `lib/sync` | Primitivas sem domínio (`SpinLock`) que precisam de `unsafe` para existir | permitido |
 | **Adaptadores** | `arch/*`, `boot/*`, `drivers/*` | Implementam as portas para uma ISA, um bootloader ou um dispositivo | permitido em `arch/` e `boot/`; proibido em `drivers/` |
 | **Raiz de composição** | `kernel/` | Entrada, pânico, console global, e a escolha de qual adaptador atende cada porta | permitido |
@@ -43,10 +43,11 @@ os métodos da porta são seguros. Exemplos:
 | --- | --- | --- |
 | `PortBus` (x86_64) | `PortBus::new(base)` | as portas a partir de `base` são do dispositivo e ninguém mais as usa |
 | `MmioBus` (aarch64) | `MmioBus::new(virt)` | `virt` está mapeado como dispositivo e cobre o bloco de registradores |
-| `Aarch64PageMapper` | `Aarch64PageMapper::active(offset)` | as tabelas ativas e os frames novos são acessíveis pelo mapa direto |
-| `X86PageMapper` | `X86PageMapper::active(offset)` | as tabelas ativas (`CR3`) e os frames novos são acessíveis pelo mapa direto |
+| `DirectMapTables` (as duas ISAs) | `DirectMapTables::new(offset)` | toda tabela e todo frame novo é acessível pelo mapa direto, e ninguém mais mexe nas tabelas |
+| `platform::active_space`, `platform::new_space` | `active_space(offset)`, `new_space(frames, offset)` | as tabelas ativas e os frames novos são acessíveis pelo mapa direto; só se ativa o espaço novo com código, pilha e mapa direto nele |
 | `LimineBoot` | `LimineBoot::from_bootloader()` | a memória das respostas do Limine ainda não foi reaproveitada |
 | `X86Cpu`, `Aarch64Cpu` | `::new()` | o código roda em ring 0 / EL1+ |
+| `DirectMap` (`kernel/src/heap.rs`) | `DirectMap::new(offset)` | todo endereço físico que a porta `FrameMemory` recebe é de frame do kernel e está no mapa direto, em `físico + offset` |
 
 Depois disso, `Uart16550<PortBus>` e `Pl011<MmioBus>` são drivers sem uma linha
 de `unsafe`, genéricos sobre `hal::RegisterBus`.
@@ -88,9 +89,23 @@ O `Sink` só atualiza a grade; `console::flush` desenha uma vez por mensagem do
 `kprintln!` e uma vez por tecla do shell, porque cada desenho repinta linhas
 inteiras.
 
+O `crypto` também não conhece o hardware: a semente (RDSEED, RNDR) entra pela
+porta `hal::HardwareEntropy`, que `arch/x86_64` e `arch/aarch64` implementam, e o
+estado do gerador mora no `kernel/`, atrás de um lock (`kernel/src/random.rs`,
+[SDD 09](09_seguranca.md)).
+
 `gfx`, `term` e `shell` não se conhecem (guidelines 03, regra 2): `term` não sabe
 de pixels, `gfx` não sabe de terminal, e o `shell` só escreve texto em
 `core::fmt::Write`.
+
+## O caminho de um `Vec` no kernel
+
+`Vec::push` → `GlobalAlloc::alloc` (`kernel/src/heap.rs`) → lock `HEAP` →
+`KernelHeap::allocate` (`core/mm`, política pura) → `FrameAllocator::allocate_contiguous`
+da porta, implementada por `Frames` → lock `FRAMES` → `BuddyAllocator` (`core/mm`). O
+`PhysAddr` volta pelo mesmo caminho, e o `alloc` soma o deslocamento do mapa direto.
+Quem toca a memória é só o `DirectMap`, a implementação de `FrameMemory`. Ordem de
+lock e detalhes no [SDD 12](12_memoria_fisica_e_heap.md).
 
 ## O caminho de uma interrupção (aarch64)
 
