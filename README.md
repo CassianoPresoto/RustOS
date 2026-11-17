@@ -9,7 +9,7 @@ externo: só `core`, `alloc` e o que está neste repositório.
 
 ## Estado
 
-Fase 1 — exceções, interrupções e tempo. O kernel sobe pelo Limine em **x86_64**
+Fase 2 — memória virtual e heap. O kernel sobe pelo Limine em **x86_64**
 e **aarch64** (QEMU) e monta o alocador de frames. Desenha na tela com uma **fonte
 própria** e um **emulador de terminal VT/xterm** escritos aqui, e abre um **shell
 embutido** (`help`, `fetch`, `mem`, `colors`, `uptime`, `keymap`, histórico, Tab,
@@ -19,13 +19,18 @@ PS/2 com layout US ou ABNT2. As proteções de hardware ficam ligadas: WP, NX,
 SMEP, SMAP e UMIP no x86_64, e PAN no aarch64. Nada da interface vem de
 biblioteca.
 
+A fase 2 trouxe tabelas de página próprias com W^X, heap do kernel (buddy de
+frames e slabs), gerador aleatório criptográfico (ChaCha20), KASLR e a memória
+do bootloader devolvida ao alocador. Ainda não há escalonador nem espaço de
+usuário.
+
 ```sh
 make run ARCH=x86_64           # janela com a tela; digite nela ou no terminal
 make screenshot ARCH=all CMDS="fetch;mem"   # grava target/screenshots/<isa>.png
 ```
 
-O kernel carregado ocupa ~129 KiB (x86_64) e ~103 KiB (aarch64) em `release`, e
-~86 KiB e ~70 KiB em `release-small`
+O kernel carregado ocupa ~180 KiB (x86_64) e ~150 KiB (aarch64) em `release`, e
+~119 KiB e ~101 KiB em `release-small`
 (medição no [SDD 07](docs/sdd/07_desempenho_e_recursos.md)). O que vem depois está
 no [roadmap](docs/sdd/08_roadmap.md).
 
