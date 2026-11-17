@@ -3,6 +3,8 @@
 
 #![cfg_attr(not(test), no_std)]
 
+mod ring;
 mod spin;
 
+pub use ring::ByteRing;
 pub use spin::{SpinLock, SpinLockGuard};

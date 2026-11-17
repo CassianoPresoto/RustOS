@@ -32,7 +32,7 @@ Os dois alvos são Tier 2 com `core` pré-compilado: não há `build-std` nem ni
 | `make image` | `image` | Monta `target/esp/<isa>/`: `EFI/BOOT/<loader>`, `EFI/BOOT/limine.conf`, `boot/rustos` |
 | `make run` | `run` | Sobe na QEMU: a tela numa janela, o shell e a serial no terminal (`-serial mon:stdio`); Ctrl-A X sai |
 | `make smoke` | `smoke` | Sobe sem tela, lê a serial até `[rustos] boot ok`, pânico ou 120 s; imprime as linhas do kernel e o tempo de parede |
-| `make screenshot CMDS="fetch;mem"` | `screenshot -- fetch mem` | Sobe sem janela, digita cada comando no shell pela serial, captura a tela pelo `screendump` do monitor da QEMU e grava `target/screenshots/<isa>.png` |
+| `make screenshot CMDS="fetch;mem"` | `screenshot -- fetch mem` | Sobe sem janela, digita cada comando no shell pela serial, captura a tela pelo `screendump` do monitor da QEMU e grava `target/screenshots/<isa>.png`. Comando que começa com `keys:` vai pelo teclado da máquina (`sendkey`), em qcodes da QEMU: `keys: e c h o spc semicolon ret` |
 | `make font-preview` | `font-preview` | Desenha todos os glifos da fonte própria em `target/font-preview.png` |
 | `make size` | `size` | Lê o ELF e soma `text`, `rodata`, `data`, `bss` |
 | `make check` | `check-layers`, `check-comments`, `check-docs` | Mais `cargo fmt --check` e `cargo clippy -D warnings` no host e nos dois alvos |
@@ -53,7 +53,7 @@ não há ISO nem `xorriso`.
 
 | | x86_64 | aarch64 |
 | --- | --- | --- |
-| Máquina | `-machine q35 -cpu max -m 256M` | `-machine virt -cpu max -m 256M` |
+| Máquina | `-machine q35 -cpu max -m 256M` | `-machine virt,gic-version=3 -cpu max -m 256M` |
 | Firmware | EDK2 em `-drive if=pflash,readonly=on` | EDK2 em `-bios` |
 | Disco | AHCI (padrão da q35) | `virtio-blk-pci` |
 | Tela | VGA padrão da q35 (GOP do OVMF) | `-device ramfb` (a `virt` não tem placa de vídeo) |
@@ -66,7 +66,14 @@ A resolução vem do `limine.conf` (`resolution:`), por ISA em
 
 Sem rede de propósito: a placa padrão da `virt` (virtio-net) carrega a option ROM
 `efi-virtio.rom` do iPXE, que o Ubuntu só instala com o pacote `ipxe-qemu`, e a
-QEMU sai antes do boot sem ela. TCG é sempre a reserva (`-accel <nativo> -accel tcg`). O firmware é procurado nos
+QEMU sai antes do boot sem ela. TCG é sempre a reserva (`-accel <nativo> -accel tcg`).
+
+`RUSTOS_ACCEL=tcg|hvf|kvm` troca a lista inteira por esse acelerador, sem reserva
+(`xtask/src/arch.rs`): serve para rodar o TCG no Mac, o caminho do CI (que não
+tem HVF): `RUSTOS_ACCEL=tcg make smoke ARCH=aarch64`. Valor desconhecido é ignorado, com aviso. O `gic-version=3` é fixo porque, sem ele, a
+`virt` escolhe a versão pelo acelerador (TCG: v2; HVF com o vGIC da Apple: v3).
+
+O firmware é procurado nos
 caminhos do Homebrew, Debian/Ubuntu e Fedora/Arch (`xtask/src/arch.rs`), ou nas
 variáveis `RUSTOS_FIRMWARE_X86_64` e `RUSTOS_FIRMWARE_AARCH64`.
 

@@ -43,13 +43,14 @@ Do `PROTOCOL.md`, revisão 6:
 | | x86_64 | aarch64 |
 | --- | --- | --- |
 | Privilégio | ring 0, modo longo | EL1, ou EL2 com VHE |
-| Interrupções | `IF` zerado; IDT com limite 0 | DAIF mascarado; `VBAR_EL1` indefinido |
+| Interrupções | `IF` zerado; IDT com limite 0 | DAIF mascarado; `VBAR_EL1` indefinido; EL1t (`SP_EL0` em uso) |
 | Paginação | 4 níveis; kernel e HHDM mapeados | 4 níveis, grânulo 4 KiB; tabelas da metade alta em `TTBR1_EL1` |
 | Pilha | ≥ 64 KiB em memória `BootloaderReclaimable` | idem |
 | FP/SIMD | o alvo `x86_64-unknown-none` não os usa | `CPACR_EL1 = 0`; o alvo `-softfloat` não os usa |
 
 Sem IDT/VBAR, qualquer exceção reinicia (x86) ou trava (aarch64) a máquina. A
-fase 1 do [roadmap](08_roadmap.md) instala os vetores.
+fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
+[Exceções e interrupções (aarch64)](#exceções-e-interrupções-aarch64).
 
 ## Sequência do `kmain`
 
@@ -64,10 +65,12 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores.
 4. Se há framebuffer, `Screen::new` aloca a grade do terminal em frames contíguos
    (8 bytes por célula), pinta o fundo e a barra do topo, e passa a receber tudo o
    que vai para a serial.
-5. Relatório, autoteste de um frame (escreve e relê pelo mapa direto) e
-   `[rustos] boot ok`.
-6. `system::run_shell`: o shell embutido lê a serial e escreve na serial e na tela.
-   Sem interrupções, a leitura é por consulta (DEBT-0007).
+5. `interrupts::init` liga exceções, controlador de interrupção, timer e a IRQ da
+   serial ([SDD 10](10_interrupcoes.md)) e destrava as interrupções da CPU no fim.
+6. Relatório (com `protections:`), autoteste de um frame (escreve e relê pelo mapa
+   direto), autoteste de exceção e de timer, e `[rustos] boot ok`.
+7. `system::run_shell`: o shell embutido lê a fila que a IRQ da serial (e, no
+   x86_64, a do teclado) enche, e dorme em `hlt`/`wfi` quando ela está vazia.
 
 Pânico antes do passo 3 não aparece em lugar nenhum (DEBT-0005).
 
@@ -77,11 +80,17 @@ Pânico antes do passo 3 não aparece em lugar nenhum (DEBT-0005).
 | --- | --- | --- |
 | `0xffff_ffff_8000_0000` + | Imagem do kernel (`.requests`, `.text`, `.rodata`, `.data`/`.bss`, um segmento cada) | Limine, pelo linker script |
 | `0xffff_ff00_0000_0000`, 1 GiB | Janela de dispositivos (entrada 510 do nível mais alto), distribuída por `AddressWindow` | kernel |
+| `0xffff_fe80_0000_0000`, 1 GiB | Janela das pilhas do kernel (entrada 509), uma página de guarda sem mapeamento embaixo de cada pilha | kernel (`Memory::map_stack`) |
 | `HHDM offset` + | Mapa direto de Usable, BootloaderReclaimable, Executable/Modules, Framebuffer e, desde a rev. 4, ACPI e Reserved-mapped | Limine |
 
 O mapa direto do Limine não cobre MMIO nem garante atributo de dispositivo: no
 aarch64 ele usa Normal WB (`MAIR` índice 0). Por isso registrador de dispositivo
 sempre passa pela janela de dispositivos, nunca pelo HHDM.
+
+## Exceções e interrupções
+
+O que cada ISA liga em `platform::init_interrupts`, com vetores, controlador,
+timer e fontes, está no [SDD 10](10_interrupcoes.md).
 
 ## Saída de referência
 

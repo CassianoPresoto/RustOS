@@ -27,4 +27,36 @@ impl Cpu for Aarch64Cpu {
         // SAFETY: `wfi` só suspende o núcleo até um evento ou interrupção.
         unsafe { asm!("wfi", options(nomem, nostack, preserves_flags)) };
     }
+
+    fn save_and_disable_interrupts(&self) -> bool {
+        let daif: u64;
+        // SAFETY: `new` exige EL1+; lê DAIF e mascara IRQ (bit I).
+        unsafe {
+            asm!("mrs {}, daif", "msr daifset, #2", out(reg) daif, options(nostack, preserves_flags));
+        };
+        daif & DAIF_I == 0
+    }
+
+    fn restore_interrupts(&self, were_enabled: bool) {
+        if were_enabled {
+            // SAFETY: `new` exige EL1+. Sem `nomem`: barreira para o compilador.
+            unsafe { asm!("msr daifclr, #2", options(nostack, preserves_flags)) };
+        }
+    }
+
+    fn enable_interrupts_and_wait(&self) {
+        // SAFETY: EL1+. `wfi` acorda com IRQ pendente mesmo mascarada; só então
+        // o bit I cai e a IRQ é atendida. Nenhuma se perde entre checar e dormir.
+        unsafe {
+            asm!(
+                "wfi",
+                "msr daifclr, #2",
+                "isb",
+                options(nostack, preserves_flags)
+            );
+        }
+    }
 }
+
+/// Bit I do DAIF: IRQ mascarada.
+const DAIF_I: u64 = 1 << 7;

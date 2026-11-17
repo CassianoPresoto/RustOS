@@ -49,4 +49,14 @@ impl RegisterBus for MmioBus {
         // SAFETY: o registrador está no bloco mapeado e alinhado, pelo contrato de `new`.
         unsafe { self.register::<u32>(offset).write_volatile(value) }
     }
+
+    fn read64(&self, offset: usize) -> u64 {
+        // SAFETY: o registrador está no bloco mapeado e alinhado, pelo contrato de `new`.
+        unsafe { self.register::<u64>(offset).read_volatile() }
+    }
+
+    fn write64(&self, offset: usize, value: u64) {
+        // SAFETY: o registrador está no bloco mapeado e alinhado, pelo contrato de `new`.
+        unsafe { self.register::<u64>(offset).write_volatile(value) }
+    }
 }

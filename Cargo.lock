@@ -24,6 +24,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-driver-gicv3"
+version = "0.1.0"
+dependencies = [
+ "rustos-hal",
+]
+
+[[package]]
+name = "rustos-driver-i8042"
+version = "0.1.0"
+dependencies = [
+ "rustos-hal",
+]
+
+[[package]]
 name = "rustos-driver-pl011"
 version = "0.1.0"
 dependencies = [
@@ -52,6 +66,8 @@ dependencies = [
  "rustos-arch-aarch64",
  "rustos-arch-x86_64",
  "rustos-boot-limine",
+ "rustos-driver-gicv3",
+ "rustos-driver-i8042",
  "rustos-driver-pl011",
  "rustos-driver-uart16550",
  "rustos-gfx",
@@ -87,6 +103,9 @@ version = "0.1.0"
 [[package]]
 name = "rustos-term"
 version = "0.1.0"
+dependencies = [
+ "rustos-hal",
+]
 
 [[package]]
 name = "xtask"

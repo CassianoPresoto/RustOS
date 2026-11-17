@@ -10,10 +10,12 @@ compile_error!("o kernel só compila para alvos bare-metal: use `cargo xtask bui
 #[macro_use]
 mod console;
 mod fmt;
+mod interrupts;
 mod memory;
 mod panic;
 mod platform;
 mod screen;
+mod sync;
 mod system;
 
 use rustos_boot_limine::LimineBoot;
@@ -56,6 +58,7 @@ extern "C" fn kmain() -> ! {
         }
     });
 
+    let interrupts_on = interrupts::init(&boot, &mut memory);
     report(&boot, &memory, display);
     // SAFETY: o mapa direto cobre todo frame utilizável, de onde vem o frame do teste.
     let frames_ok = unsafe { memory.self_test(boot.direct_map_offset()) };
@@ -63,11 +66,13 @@ extern "C" fn kmain() -> ! {
         "[rustos] frame self-test: {}",
         if frames_ok { "ok" } else { "FAILED" }
     );
-    if !frames_ok {
+    let irq_ok = interrupts_on && system::interrupt_self_test();
+    if !frames_ok || !irq_ok {
         rustos_hal::Cpu::halt_forever(&platform::cpu());
     }
     kprintln!("{BOOT_OK_MARKER}");
-    system::run_shell(&mut system::System::new(&boot, &memory, display))
+    let mut system = system::System::new(&boot, &memory, display);
+    system::run_shell(&mut system)
 }
 
 fn display_info(screen: &screen::Screen) -> DisplayInfo {
@@ -120,5 +125,13 @@ fn report(boot: &impl BootInfo, memory: &memory::Memory, display: Option<Display
             display.rows
         ),
         None => kprintln!("[rustos] screen: none"),
+    }
+    let mut line = fmt::Buffer::<128>::new();
+    for protection in platform::protections() {
+        let mark = if protection.enabled { '+' } else { '-' };
+        core::fmt::Write::write_fmt(&mut line, format_args!(" {mark}{}", protection.name)).ok();
+    }
+    if !line.as_str().is_empty() {
+        kprintln!("[rustos] protections:{}", line.as_str());
     }
 }

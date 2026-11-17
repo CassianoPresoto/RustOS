@@ -15,23 +15,18 @@ use rustos_mm::{
 use rustos_sync::SpinLock;
 
 /// Janela de dispositivos: entrada 510 do nível mais alto, livre no layout do Limine.
-#[cfg_attr(
-    target_arch = "x86_64",
-    allow(dead_code, reason = "a COM1 é porta de E/S (DEBT-0004)")
-)]
 const DEVICE_WINDOW: VirtAddr = VirtAddr::new(0xffff_ff00_0000_0000);
-#[cfg_attr(
-    target_arch = "x86_64",
-    allow(dead_code, reason = "a COM1 é porta de E/S (DEBT-0004)")
-)]
 const DEVICE_WINDOW_LEN: u64 = 1 << 30;
 
-#[cfg_attr(
-    target_arch = "x86_64",
-    allow(dead_code, reason = "a COM1 é porta de E/S (DEBT-0004)")
-)]
 static DEVICES: SpinLock<AddressWindow> =
     SpinLock::new(AddressWindow::new(DEVICE_WINDOW, DEVICE_WINDOW_LEN));
+
+/// Janela das pilhas do kernel: entrada 509 do nível mais alto, livre no layout do Limine.
+const STACK_WINDOW: VirtAddr = VirtAddr::new(0xffff_fe80_0000_0000);
+const STACK_WINDOW_LEN: u64 = 1 << 30;
+
+static STACKS: SpinLock<AddressWindow> =
+    SpinLock::new(AddressWindow::new(STACK_WINDOW, STACK_WINDOW_LEN));
 
 #[derive(Debug)]
 pub enum MemoryError {
@@ -78,6 +73,26 @@ impl Memory {
         })
     }
 
+    /// Pilha de `pages` páginas com uma página sem mapeamento logo abaixo: estouro
+    /// vira page fault em vez de corromper memória. Devolve o topo (fim exclusivo).
+    pub fn map_stack(
+        &mut self,
+        mapper: &mut impl PageMapper,
+        pages: u64,
+    ) -> Result<VirtAddr, MapError> {
+        let span = (pages + 1) * PAGE_SIZE;
+        let base = STACKS
+            .lock()
+            .take(span)
+            .ok_or(MapError::OutOfAddressSpace)?;
+        for page in 1..=pages {
+            let frame = self.frames.allocate().ok_or(MapError::OutOfFrames)?;
+            let virt = VirtAddr::new(base.as_u64() + page * PAGE_SIZE);
+            mapper.map_page(virt, frame.start(), PageFlags::DATA, &mut self.frames)?;
+        }
+        Ok(VirtAddr::new(base.as_u64() + span))
+    }
+
     /// Fatia de `len` valores `fill` em frames contíguos, para sempre do chamador.
     pub fn alloc_slice<T: Copy>(&mut self, len: usize, fill: T) -> Option<&'static mut [T]> {
         const { assert!(align_of::<T>() as u64 <= PAGE_SIZE) };
@@ -118,10 +133,6 @@ impl Memory {
 }
 
 /// Mapeia registradores de um dispositivo na janela de dispositivos.
-#[cfg_attr(
-    target_arch = "x86_64",
-    allow(dead_code, reason = "a COM1 é porta de E/S (DEBT-0004)")
-)]
 pub fn map_device(
     mapper: &mut impl PageMapper,
     frames: &mut impl FrameSource,

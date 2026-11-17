@@ -16,6 +16,10 @@ use crate::{image, png, workspace};
 /// Igual ao `BOOT_OK_MARKER` do kernel; os dois mudam juntos.
 const BOOT_OK: &str = "[rustos] boot ok";
 const PANIC: &str = "[rustos] panic";
+/// Linhas que o kernel imprime quando um autoteste ou o boot falha.
+const FATAL: [&str; 3] = ["[rustos] fault:", "[rustos] interrupts:", "FAILED"];
+/// Linha que o kernel imprime com as proteções de hardware (guidelines 09).
+const PROTECTIONS: &str = "[rustos] protections:";
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn command(root: &Path, arch: Arch, profile: Profile) -> Result<Command, String> {
@@ -108,6 +112,8 @@ fn capture(
     commands: &[String],
 ) -> Result<(), String> {
     thread::sleep(SETTLE);
+    let mut monitor =
+        UnixStream::connect(socket).map_err(|error| format!("monitor da QEMU: {error}"))?;
     let stdin = child.stdin.as_mut().ok_or("QEMU sem stdin")?;
     let typed = commands
         .iter()
@@ -115,14 +121,16 @@ fn capture(
         .map(str::trim)
         .filter(|command| !command.is_empty());
     for command in typed {
-        stdin
-            .write_all(format!("{command}\r").as_bytes())
-            .and_then(|()| stdin.flush())
-            .map_err(|error| format!("digitar na serial: {error}"))?;
+        if let Some(keys) = command.strip_prefix(KEYS_PREFIX) {
+            press_keys(&mut monitor, keys)?;
+        } else {
+            stdin
+                .write_all(format!("{command}\r").as_bytes())
+                .and_then(|()| stdin.flush())
+                .map_err(|error| format!("digitar na serial: {error}"))?;
+        }
         thread::sleep(SETTLE);
     }
-    let mut monitor =
-        UnixStream::connect(socket).map_err(|error| format!("monitor da QEMU: {error}"))?;
     writeln!(monitor, "screendump {}", ppm.display())
         .map_err(|error| format!("screendump: {error}"))?;
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -134,6 +142,19 @@ fn capture(
         thread::sleep(Duration::from_millis(100));
     }
     Err(format!("a QEMU não gravou {}", ppm.display()))
+}
+
+/// Comando que começa assim vai pelo teclado da máquina (`sendkey` do monitor),
+/// em qcodes da QEMU separados por espaço: `keys: e c h o spc semicolon ret`.
+const KEYS_PREFIX: &str = "keys:";
+const KEY_GAP: Duration = Duration::from_millis(60);
+
+fn press_keys(monitor: &mut UnixStream, keys: &str) -> Result<(), String> {
+    for key in keys.split_whitespace() {
+        writeln!(monitor, "sendkey {key}").map_err(|error| format!("sendkey {key}: {error}"))?;
+        thread::sleep(KEY_GAP);
+    }
+    Ok(())
 }
 
 fn stream_stdout(child: &mut std::process::Child) -> Result<mpsc::Receiver<String>, String> {
@@ -155,7 +176,7 @@ fn wait_for_boot(receiver: &mpsc::Receiver<String>, started: Instant) -> (Outcom
         if log.contains(BOOT_OK) {
             break Outcome::Booted(started.elapsed());
         }
-        if log.contains(PANIC) {
+        if log.contains(PANIC) || FATAL.iter().any(|mark| log.contains(mark)) {
             break Outcome::Panicked;
         }
     };
@@ -164,6 +185,11 @@ fn wait_for_boot(receiver: &mpsc::Receiver<String>, started: Instant) -> (Outcom
 
 fn report(arch: Arch, outcome: Outcome, log: &str) -> Result<(), String> {
     match outcome {
+        Outcome::Booted(_) if !log.contains(PROTECTIONS) => Err(failure(
+            arch,
+            "boot sem a linha de proteções de hardware (guidelines 09)",
+            log,
+        )),
         Outcome::Booted(elapsed) => {
             println!(
                 "xtask: smoke {} ok em {} ms (relógio de parede, firmware incluso)",
@@ -172,7 +198,11 @@ fn report(arch: Arch, outcome: Outcome, log: &str) -> Result<(), String> {
             );
             Ok(())
         }
-        Outcome::Panicked => Err(format!("smoke {}: o kernel entrou em pânico", arch.name())),
+        Outcome::Panicked => Err(failure(
+            arch,
+            "o kernel entrou em pânico ou um autoteste falhou",
+            log,
+        )),
         Outcome::TimedOut => Err(failure(arch, "sem o marcador de boot no tempo limite", log)),
         Outcome::Exited => Err(failure(arch, "a QEMU saiu antes do marcador de boot", log)),
     }

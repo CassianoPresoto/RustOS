@@ -25,6 +25,9 @@ const CONTROL_UART_ENABLE: u32 = 1 << 0;
 const CONTROL_TX_ENABLE: u32 = 1 << 8;
 const CONTROL_RX_ENABLE: u32 = 1 << 9;
 const INTERRUPT_ALL: u32 = 0x7FF;
+/// Recepção acima do limiar do FIFO (RXIM/RXIC) e recepção parada com dado no FIFO (RTIM/RTIC).
+const INTERRUPT_RX: u32 = 1 << 4;
+const INTERRUPT_RX_TIMEOUT: u32 = 1 << 6;
 
 #[derive(Debug)]
 pub struct Pl011<B> {
@@ -50,6 +53,22 @@ impl<B: RegisterBus> Pl011<B> {
             CONTROL,
             CONTROL_UART_ENABLE | CONTROL_TX_ENABLE | CONTROL_RX_ENABLE,
         );
+    }
+
+    /// Liga a interrupção de recepção: por limiar e por tempo esgotado, para que
+    /// um byte sozinho no FIFO também acorde o núcleo.
+    pub fn enable_rx_interrupt(&mut self) {
+        self.bus
+            .write32(INTERRUPT_CLEAR, INTERRUPT_RX | INTERRUPT_RX_TIMEOUT);
+        self.bus
+            .write32(INTERRUPT_MASK, INTERRUPT_RX | INTERRUPT_RX_TIMEOUT);
+    }
+
+    /// Limpa o pedido de recepção. Chamar antes de drenar o FIFO: o byte que
+    /// chegar depois rearma a interrupção em vez de se perder.
+    pub fn clear_rx_interrupt(&mut self) {
+        self.bus
+            .write32(INTERRUPT_CLEAR, INTERRUPT_RX | INTERRUPT_RX_TIMEOUT);
     }
 
     pub fn write_byte(&mut self, byte: u8) {
@@ -140,6 +159,27 @@ mod tests {
                 CONTROL,
                 CONTROL_UART_ENABLE | CONTROL_TX_ENABLE | CONTROL_RX_ENABLE
             ))
+        );
+    }
+
+    #[test]
+    fn rx_interrupt_is_cleared_before_it_is_unmasked() {
+        let mut uart = Pl011::new(FakeBus::default());
+        uart.enable_rx_interrupt();
+        let rx = INTERRUPT_RX | INTERRUPT_RX_TIMEOUT;
+        assert_eq!(
+            uart.bus.writes.borrow().as_slice(),
+            &[(INTERRUPT_CLEAR, rx), (INTERRUPT_MASK, rx)]
+        );
+    }
+
+    #[test]
+    fn clearing_rx_interrupt_touches_only_the_clear_register() {
+        let mut uart = Pl011::new(FakeBus::default());
+        uart.clear_rx_interrupt();
+        assert_eq!(
+            uart.bus.writes.borrow().as_slice(),
+            &[(INTERRUPT_CLEAR, 0x50)]
         );
     }
 

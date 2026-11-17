@@ -1,0 +1,17 @@
+[package]
+name = "rustos-driver-i8042"
+description = "Driver do controlador PS/2 i8042 e decodificador do conjunto 1 de scancodes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-hal.workspace = true

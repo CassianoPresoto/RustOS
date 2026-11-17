@@ -13,6 +13,5 @@ bench = false
 [lints]
 workspace = true
 
-# No host o crate fica vazio: só o alvo bare-metal usa o hal.
-[target.'cfg(target_os = "none")'.dependencies]
+[dependencies]
 rustos-hal.workspace = true

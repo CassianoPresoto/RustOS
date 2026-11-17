@@ -10,6 +10,26 @@ pub trait Host {
     fn uptime_ns(&self) -> Option<u64>;
     /// Tamanho do terminal em (colunas, linhas); a serial usa (80, 24).
     fn terminal_size(&self) -> (u16, u16);
+    /// Provoca a exceção pedida para testar o caminho de falha. `PageFault` não
+    /// volta; `false` quando a plataforma ainda não sabe provocar.
+    fn fault_test(&self, _kind: FaultTest) -> bool {
+        false
+    }
+    /// Layout do teclado em uso; `None` quando não há teclado.
+    fn keymap(&self) -> Option<&'static str> {
+        None
+    }
+    /// Troca o layout pelo nome (`us`, `br`); `false` se o nome é desconhecido.
+    fn set_keymap(&self, _name: &str) -> bool {
+        false
+    }
+}
+
+/// Exceção que o comando `fault` provoca.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultTest {
+    Breakpoint,
+    PageFault,
 }
 
 /// Retrato do sistema no momento da consulta.

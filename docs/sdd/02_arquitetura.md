@@ -44,6 +44,7 @@ os métodos da porta são seguros. Exemplos:
 | `PortBus` (x86_64) | `PortBus::new(base)` | as portas a partir de `base` são do dispositivo e ninguém mais as usa |
 | `MmioBus` (aarch64) | `MmioBus::new(virt)` | `virt` está mapeado como dispositivo e cobre o bloco de registradores |
 | `Aarch64PageMapper` | `Aarch64PageMapper::active(offset)` | as tabelas ativas e os frames novos são acessíveis pelo mapa direto |
+| `X86PageMapper` | `X86PageMapper::active(offset)` | as tabelas ativas (`CR3`) e os frames novos são acessíveis pelo mapa direto |
 | `LimineBoot` | `LimineBoot::from_bootloader()` | a memória das respostas do Limine ainda não foi reaproveitada |
 | `X86Cpu`, `Aarch64Cpu` | `::new()` | o código roda em ring 0 / EL1+ |
 
@@ -90,6 +91,14 @@ inteiras.
 `gfx`, `term` e `shell` não se conhecem (guidelines 03, regra 2): `term` não sabe
 de pixels, `gfx` não sabe de terminal, e o `shell` só escreve texto em
 `core::fmt::Write`.
+
+## O caminho de uma interrupção (aarch64)
+
+`ICC_IAR1_EL1` (`arch/aarch64/src/gic_cpu.rs`) dentro da entrada de vetor
+(`exception.rs`) → `hal::Handlers::irq(Irq(intid))` → `interrupts::on_irq` →
+`platform::irq_source` traduz o INTID em `IrqSource` → o tratador da fonte (tique
+do timer, ou drenar a UART para a fila de entrada) → `ICC_EOIR1_EL1`. O núcleo
+dorme em `wfi` quando a fila está vazia. Detalhes em [SDD 04](04_boot.md).
 
 ## Portas de entrada que virão
 

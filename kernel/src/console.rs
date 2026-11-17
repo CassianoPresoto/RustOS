@@ -3,14 +3,15 @@
 
 use core::fmt::{self, Write};
 
-use rustos_hal::{ByteSource, Console};
-use rustos_sync::SpinLock;
+use rustos_hal::{ByteSource, Console, KeyEvent};
 
 use crate::platform::PlatformConsole;
 use crate::screen::Screen;
+use crate::sync::IrqLock;
 
-static SERIAL: SpinLock<Option<PlatformConsole>> = SpinLock::new(None);
-static SCREEN: SpinLock<Option<Screen>> = SpinLock::new(None);
+/// Locks que mascaram IRQ: o handler da serial pega `SERIAL` dentro da interrupção.
+static SERIAL: IrqLock<Option<PlatformConsole>> = IrqLock::new(None);
+static SCREEN: IrqLock<Option<Screen>> = IrqLock::new(None);
 
 pub fn install(console: PlatformConsole) {
     *SERIAL.lock() = Some(console);
@@ -36,6 +37,27 @@ pub fn flush() {
 /// Próximo byte digitado na serial, sem esperar.
 pub fn read_byte() -> Option<u8> {
     SERIAL.lock().as_mut().and_then(ByteSource::read_byte)
+}
+
+/// Tecla física vira bytes de terminal, pelo layout e pelo modo de cursor da tela.
+pub fn key_event(event: KeyEvent, mut push: impl FnMut(u8)) {
+    if let Some(screen) = SCREEN.lock().as_mut() {
+        screen.key_event(event, &mut push);
+    }
+}
+
+/// Se há tela: sem ela, as teclas do teclado não viram bytes.
+pub fn has_screen() -> bool {
+    SCREEN.lock().is_some()
+}
+
+/// Troca o layout do teclado; `false` sem tela, onde o teclado não é lido.
+pub fn set_layout(layout: rustos_term::Layout) -> bool {
+    SCREEN
+        .lock()
+        .as_mut()
+        .map(|screen| screen.set_layout(layout))
+        .is_some()
 }
 
 /// Caminho do pânico: não espera nenhum lock, que pode estar com quem entrou em pânico.

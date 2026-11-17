@@ -28,3 +28,5 @@ mesmo PR.
 | [`07_desempenho_e_recursos.md`](07_desempenho_e_recursos.md) | O que já se mede, como comparar com Linux e Windows, e as técnicas que a pesquisa aponta |
 | [`08_roadmap.md`](08_roadmap.md) | A fila de implementação: as fases, o que cada uma entrega e quando termina |
 | [`09_seguranca.md`](09_seguranca.md) | Modelo de ameaça, mecanismos por fase com custo e fonte, e as decisões de segurança abertas |
+| [`10_interrupcoes.md`](10_interrupcoes.md) | Exceções, IRQ e tempo nas duas ISAs: sequência de init, vetores, controladores, timer, relógio e fontes |
+| [`11_teclado.md`](11_teclado.md) | Da tecla do PC à `Key` do terminal: i8042, decodificador, layouts US e ABNT2, teclas mortas |

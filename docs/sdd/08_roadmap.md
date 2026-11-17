@@ -20,7 +20,7 @@ modelo de ameaça e o porquê de cada mecanismo estão no [SDD 09](09_seguranca.
 | --- | --- | --- |
 | **0 — Esqueleto** ✅ | Workspace hexagonal, boot pelo Limine em x86_64 e aarch64, alocador de frames, serial, xtask, gates, CI | `make smoke ARCH=all` passa |
 | **0.5 — Tela e terminal** ✅ | Framebuffer, fonte própria, emulador VT/xterm, shell embutido, barra no topo | `fetch` desenhado na tela das duas ISAs (`make screenshot`) |
-| **1 — Exceções, interrupções e tempo** | Vetores de exceção, controlador de interrupção, timer, relógio, entrada por interrupção, proteções de hardware ligadas | Page fault proposital vira relatório; tique contado; shell dorme em `hlt`/`wfi` |
+| **1 — Exceções, interrupções e tempo** ✅ | Vetores de exceção, controlador de interrupção, timer, relógio, entrada por interrupção, proteções de hardware ligadas | Page fault proposital vira relatório; tique contado; shell dorme em `hlt`/`wfi` |
 | **2 — Memória virtual e heap** | Tabelas próprias com W^X, heap do kernel, aleatório do kernel, memória do bootloader recuperada | Escrita em `.text` falha; memória livre depois do boot medida |
 | **3 — Tarefas, SMP e escalonador** | Troca de contexto, threads do kernel, fila por CPU, escalonador atrás de trait, idle sem tique | Latência de troca medida em N núcleos |
 | **4 — Processos e isolamento** | Anel 3/EL0, syscall, carregador ELF, VFS em memória (initramfs, tmpfs), espaço de endereçamento por processo, handles com direitos, mitigações de CPU | Syscall nula medida; processo que toca o kernel morre sem derrubar nada |
@@ -49,10 +49,9 @@ quando houver medição para decidir.
 - **Tempo:** timer one-shot do APIC calibrado (sob TCG o `-cpu max` não tem
   TSC-deadline) e o timer virtual (`CNTV`, INTID 27) no aarch64. Relógio
   monotônico, e `uptime` no shell.
-- **Entrada por interrupção:** UART nas duas ISAs e teclado PS/2 no x86_64. Paga a
-  DEBT-0007.
-- **Base de memória e locks:** `PageMapper` do x86_64 (DEBT-0004) e lock que
-  mascara interrupção (DEBT-0003).
+- **Entrada por interrupção:** UART nas duas ISAs e teclado PS/2 no x86_64.
+- **Base de memória e locks:** `PageMapper` do x86_64 e lock que mascara
+  interrupção (`IrqLock`).
 - **Segurança:**
   - ligar WP, SMEP, SMAP e UMIP no x86_64 e PAN no aarch64;
   - relatar na serial o que a CPU tem e o que ficou ligado, na linha
