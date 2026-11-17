@@ -172,7 +172,10 @@ de quem dorme. Quem o arma:
 
 - `interrupts::on_timer` (`task::timer_irq`): acorda quem venceu, chama `tick(now)` e rearma
   para o pedido; sem pedido, o prazo vai a uma hora (o `start` do `CNTV` faz o mesmo, e o
-  `CVAL` vencido manteria a IRQ do aarch64 em serviço);
+  `CVAL` vencido manteria a IRQ do aarch64 em serviço). No x86_64 sem TSC-deadline a
+  contagem do APIC é de 32 bits e satura: a uma hora vira `u32::MAX` contagens, cerca de
+  69 s a 62,5 MHz, e a ociosa acorda no máximo a cada ~69 s, uma IRQ que só rearma. O
+  divisor 16 não muda (um maior alongaria o prazo e engrossaria a resolução de 16 ns);
 - `schedule`, `unpark` e `spawn`: `arm_no_later_than` só **adianta** o disparo, e um
   disparo que sobrou depois de a corrente mudar custa uma IRQ que não faz nada e rearma.
   Assim o ping-pong do `bench`, que só tem uma tarefa pronta por vez, não escreve no
@@ -188,9 +191,10 @@ contra 5 com o tique de 100 Hz.
 O kernel segue soft-float: nenhum código dele usa `xmm` nem `v0`. O mecanismo existe
 para a fase 4. **Só a tarefa criada com `simd: true` paga**: tem área própria e, na troca,
 `save` ao sair e `restore` ao entrar (`schedule`). A de fora não guarda nada; um registrador
-que ela não toca fica como estava. O salvamento é eager (sem `CR0.TS` nem `#NM`): o LazyFP
-(CVE-2018-3665) é o motivo do Linux ter desligado o lazy no 4.6, e a pesquisa não achou
-custo publicado do eager.
+que ela não toca fica como estava. O salvamento é eager (sem `CR0.TS` nem `#NM`): o Linux já o tinha como padrão desde a 4.6
+e o desligou de vez em outubro de 2016, na janela da 4.9 (commit `ca6938a1`). O LazyFP
+(CVE-2018-3665) é de 2018 e só confirmou a escolha ([SDD 09](09_seguranca.md)). A pesquisa
+não achou custo publicado do eager.
 
 ### x86_64
 

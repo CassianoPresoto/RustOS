@@ -14,7 +14,7 @@ paid_date:
 No aarch64, `init_interrupts` acorda só o redistribuidor da CPU 0
 (`0x080A_0000`). Também só nessa CPU ele liga a PPI do `CNTV` e programa a
 interface `ICC_*`. As SPIs são roteadas para a afinidade da CPU que deu boot. No
-x86_64, só o Local APIC da CPU que deu boot é ligado, e o tique periódico é dele.
+x86_64, só o Local APIC da CPU que deu boot é ligado, e o timer de um tiro é dele.
 
 ## Por que foi aceito
 
@@ -31,7 +31,7 @@ Para cada CPU que subir:
 
 - **aarch64:** achar o redistribuidor dela, percorrendo os frames até o
   `GICR_TYPER.Last`, acordá-lo e programar a `ICC_*`.
-- **x86_64:** ligar o Local APIC e o tique.
+- **x86_64:** ligar o Local APIC e o timer de um tiro.
 
 Rotear as SPIs pela política de afinidade que a fase 3 definir, e usar SGI/IPI
 para acordar outro núcleo.
