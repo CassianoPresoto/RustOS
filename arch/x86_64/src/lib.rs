@@ -29,6 +29,8 @@ mod mmio;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod mmu;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+mod percpu;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod port;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod protect;
@@ -41,8 +43,8 @@ mod traps;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use apic::{
-    ApicAccess, ApicMode, TimerMode, arm_oneshot, arm_tsc_deadline, detect as detect_apic, eoi,
-    publish as publish_apic, set_timer_mode,
+    ApicAccess, ApicMode, TimerMode, X86Ipi, arm_oneshot, arm_tsc_deadline, detect as detect_apic,
+    eoi, publish as publish_apic, set_timer_mode,
 };
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use context::{Context, switch};
@@ -55,6 +57,8 @@ pub use mmio::MmioBus;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use mmu::{DirectMapTables, X86Mmu, active_root, require_features};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub use percpu::X86CpuLocal;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use port::PortBus;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use protect::{Protections, enable as enable_protections};
@@ -63,7 +67,9 @@ pub use stack::{Continuation, call_on_stack};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use sysreg::{features as cpu_features, rdtsc};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub use traps::{IstStacks, breakpoint, install as install_traps};
+pub use traps::{
+    CpuTables, IstStacks, breakpoint, install as install_traps, load_cpu as load_cpu_tables,
+};
 
 /// Base da COM1 no PC.
 pub const COM1: u16 = 0x3F8;
