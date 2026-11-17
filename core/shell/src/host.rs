@@ -28,6 +28,55 @@ pub trait Host {
     fn set_keymap(&self, _name: &str) -> bool {
         false
     }
+    /// Chama `visit` uma vez por tarefa viva, em ordem de id; é o que `ps` lista.
+    fn tasks(&self, _visit: &mut dyn FnMut(&TaskInfo<'_>)) {}
+    /// Roda as medidas de tarefa (troca de contexto e jitter de acordar) e devolve
+    /// o resultado; `None` quando o sistema ainda não tem tarefas. Leva centenas de ms.
+    fn bench(&self) -> Option<BenchReport> {
+        None
+    }
+}
+
+/// Em que ponto do ciclo de vida uma tarefa está.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskState {
+    Running,
+    Ready,
+    /// Dormindo até um prazo (`sleep_until`).
+    Sleeping,
+    /// Esperando um evento (entrada, `park`).
+    Blocked,
+}
+
+/// Uma linha do `ps`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TaskInfo<'a> {
+    pub id: u32,
+    pub name: &'a str,
+    pub state: TaskState,
+    /// Tempo de CPU acumulado, em nanossegundos.
+    pub cpu_ns: u64,
+    /// Quantas vezes o escalonador a escolheu para rodar.
+    pub switches: u64,
+    /// Marcada como usuária de FPU/SIMD: paga o salvamento do estado na troca.
+    pub simd: bool,
+}
+
+/// Resultado do `bench`: tudo em nanossegundos.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BenchReport {
+    /// Custo de uma troca de contexto entre duas tarefas, sem estado de SIMD.
+    pub switch_ns: u64,
+    /// O mesmo, com as duas tarefas salvando e restaurando FPU/SIMD.
+    pub switch_simd_ns: u64,
+    /// Quantas vezes se mediu o atraso de `sleep_until`.
+    pub wake_samples: u32,
+    /// Atraso médio e máximo de acordar, com o resto do sistema parado.
+    pub wake_mean_ns: u64,
+    pub wake_max_ns: u64,
+    /// O mesmo, com uma tarefa ocupando a CPU.
+    pub wake_loaded_mean_ns: u64,
+    pub wake_loaded_max_ns: u64,
 }
 
 /// Exceção que o comando `fault` provoca.

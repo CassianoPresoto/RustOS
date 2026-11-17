@@ -12,7 +12,7 @@ externo: só `core`, `alloc` e o que está neste repositório.
 Fase 2 — memória virtual e heap. O kernel sobe pelo Limine em **x86_64**
 e **aarch64** (QEMU) e monta o alocador de frames. Desenha na tela com uma **fonte
 própria** e um **emulador de terminal VT/xterm** escritos aqui, e abre um **shell
-embutido** (`help`, `fetch`, `mem`, `colors`, `uptime`, `keymap`, histórico, Tab,
+embutido** (`help`, `fetch`, `mem`, `colors`, `uptime`, `keymap`, `ps`, `bench`, histórico, Tab,
 edição de linha). Exceções, controlador de interrupção (APIC ou GICv3), timer e
 relógio são próprios. O shell dorme até chegar tecla, pela serial ou pelo teclado
 PS/2 com layout US ou ABNT2. As proteções de hardware ficam ligadas: WP, NX,

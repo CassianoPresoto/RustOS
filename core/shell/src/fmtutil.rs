@@ -95,6 +95,37 @@ impl fmt::Display for Millis {
     }
 }
 
+/// Nanossegundos em microssegundos com uma casa truncada: `12.3 us`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Micros(pub u64);
+
+impl fmt::Display for Micros {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut text = StackStr::<24>::new();
+        fmt::write(
+            &mut text,
+            format_args!("{}.{} us", self.0 / 1000, self.0 % 1000 / 100),
+        )?;
+        f.pad(text.as_str())
+    }
+}
+
+/// Tempo de CPU em nanossegundos como segundos com três casas: `12.345`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Seconds(pub u64);
+
+impl fmt::Display for Seconds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut text = StackStr::<24>::new();
+        let millis = self.0 / 1_000_000;
+        fmt::write(
+            &mut text,
+            format_args!("{}.{:03}", millis / 1000, millis % 1000),
+        )?;
+        f.pad(text.as_str())
+    }
+}
+
 /// Duração em nanossegundos, no formato do `uptime`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Uptime(pub u64);
@@ -230,6 +261,21 @@ mod tests {
         assert_eq!(Millis(312_400).to_string(), "312.4");
         assert_eq!(Millis(8_199).to_string(), "8.1");
         assert_eq!(Millis(99).to_string(), "0.0");
+    }
+
+    #[test]
+    fn micros_keep_one_truncated_decimal() {
+        assert_eq!(Micros(0).to_string(), "0.0 us");
+        assert_eq!(Micros(999).to_string(), "0.9 us");
+        assert_eq!(Micros(12_345).to_string(), "12.3 us");
+        assert_eq!(format!("{:>9}", Micros(12_345)), "  12.3 us");
+    }
+
+    #[test]
+    fn seconds_show_three_decimals() {
+        assert_eq!(Seconds(0).to_string(), "0.000");
+        assert_eq!(Seconds(12_345_678_901).to_string(), "12.345");
+        assert_eq!(Seconds(999_999).to_string(), "0.000");
     }
 
     #[test]
