@@ -150,6 +150,7 @@ extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
     if vector != VECTOR_SPURIOUS {
         apic::eoi();
     }
+    (handlers.preempt)();
 }
 
 fn halt() -> ! {

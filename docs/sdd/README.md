@@ -32,3 +32,5 @@ mesmo PR.
 | [`11_teclado.md`](11_teclado.md) | Da tecla do PC à `Key` do terminal: i8042, decodificador, layouts US e ABNT2, teclas mortas |
 | [`12_memoria_fisica_e_heap.md`](12_memoria_fisica_e_heap.md) | Buddy, cache de frames por CPU e heap de slabs: o desenho, as escolhas e o que o kernel liga |
 | [`13_memoria_virtual.md`](13_memoria_virtual.md) | Tabelas próprias, W^X, pilha própria, memória do bootloader devolvida e KASLR: o desenho, as medidas e as escolhas |
+| [`14_escalonador.md`](14_escalonador.md) | A porta `Scheduler` e as políticas `RoundRobin`, `Eevdf`, `Fifo` e `Composite` (o kernel usa o `Composite`): fórmulas, fontes, medidas e o que o kernel precisa saber |
+| [`15_tarefas_e_preempcao.md`](15_tarefas_e_preempcao.md) | Tarefas, troca de contexto e preempção: o escalonador, o desenho por ISA, a regra de lock, o estado de FPU/SIMD e as medidas |

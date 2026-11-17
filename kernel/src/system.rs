@@ -2,15 +2,19 @@
 //! de memória, boot e tela, e roda o laço de entrada.
 
 use rustos_hal::{BootInfo, Cpu, PAGE_SIZE, RegionKind};
-use rustos_shell::{DisplayInfo, FaultTest, Host, MemoryInfo, Shell, SystemInfo};
+use rustos_shell::{
+    BenchReport, DisplayInfo, FaultTest, Host, MemoryInfo, Shell, SystemInfo, TaskInfo, TaskState,
+};
 use rustos_term::Layout;
 
+use crate::bench;
 use crate::console::{self, Sink};
 use crate::heap;
 use crate::interrupts;
 use crate::memory::Memory;
 use crate::platform;
 use crate::random;
+use crate::task::{self, State};
 
 /// Layout em uso; só o laço do shell lê e escreve, numa CPU.
 static KEYMAP: KeymapCell = KeymapCell(core::cell::Cell::new(Some("us")));
@@ -133,6 +137,29 @@ impl<B: BootInfo> Host for System<'_, B> {
         self.display
             .map_or(SERIAL_SIZE, |display| (display.cols, display.rows))
     }
+
+    fn tasks(&self, visit: &mut dyn FnMut(&TaskInfo<'_>)) {
+        for snapshot in task::snapshot().into_iter().flatten() {
+            let state = match snapshot.state {
+                State::Running => TaskState::Running,
+                State::Sleeping => TaskState::Sleeping,
+                State::Blocked => TaskState::Blocked,
+                State::Free | State::New | State::Ready | State::Exited => TaskState::Ready,
+            };
+            visit(&TaskInfo {
+                id: snapshot.id,
+                name: snapshot.name,
+                state,
+                cpu_ns: snapshot.cpu_ns,
+                switches: snapshot.switches,
+                simd: snapshot.simd,
+            });
+        }
+    }
+
+    fn bench(&self) -> Option<BenchReport> {
+        bench::run(bench::FULL)
+    }
 }
 
 /// Breakpoint que volta e tiques do timer contados contra o relógio.
@@ -163,20 +190,15 @@ pub fn interrupt_self_test() -> bool {
     breakpoint_ok && timer_ok
 }
 
-/// Laço do shell: tira bytes da fila que as IRQs de serial e teclado enchem, e
-/// dorme até a próxima interrupção quando ela está vazia.
+/// Laço do shell, a tarefa principal: tira bytes da fila que as IRQs de serial e
+/// teclado enchem, e bloqueia (a tarefa, não a CPU) quando ela está vazia.
 pub fn run_shell(host: &mut impl Host) -> ! {
+    task::set_current_name("shell");
     let mut shell = Shell::<LINE_BYTES, HISTORY_LINES>::new();
     shell.start(host, &mut Sink).ok();
     console::flush();
-    let cpu = platform::cpu();
     loop {
-        let were_enabled = cpu.save_and_disable_interrupts();
-        let Some(byte) = interrupts::pop_input() else {
-            cpu.enable_interrupts_and_wait();
-            continue;
-        };
-        cpu.restore_interrupts(were_enabled);
+        let byte = interrupts::read_input_blocking();
         shell.feed(byte, host, &mut Sink).ok();
         console::flush();
     }

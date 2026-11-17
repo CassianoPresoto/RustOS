@@ -1,14 +1,35 @@
-//! Escalonamento: identidade de tarefa, fila de execução e política.
-//! Política pura; a troca de contexto é de `arch/`, ligada pelo kernel.
+//! Escalonamento: política pura atrás do trait `Scheduler`; a troca de contexto
+//! é de `arch/` e o kernel liga as duas (SDD 14).
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod composite;
+pub mod eevdf;
+pub mod fifo;
 pub mod queue;
 pub mod round_robin;
+pub mod scheduler;
+pub mod weight;
 
+mod table;
+mod tree;
+
+#[cfg(test)]
+mod bench;
+#[cfg(test)]
+mod property;
+#[cfg(test)]
+mod scenarios;
+#[cfg(test)]
+mod sim;
+
+pub use composite::{Composite, RtBudget};
+pub use eevdf::{Eevdf, EevdfConfig};
+pub use fifo::Fifo;
 pub use queue::{QueueFull, RunQueue};
 pub use round_robin::RoundRobin;
+pub use scheduler::{SchedError, SchedParams, Scheduler};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TaskId(u32);

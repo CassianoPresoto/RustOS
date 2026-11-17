@@ -1,6 +1,7 @@
 //! Acesso ao Local APIC da CPU atual: MSR no modo x2APIC, MMIO no xAPIC. A
 //! sequência de uso mora em `lapic`.
 
+use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use rustos_hal::{PhysAddr, RegisterBus, VirtAddr};
@@ -11,7 +12,7 @@ use crate::lapic::{
     x2apic_msr,
 };
 use crate::mmio::MmioBus;
-use crate::sysreg::{rdmsr, wrmsr};
+use crate::sysreg::{MSR_TSC_DEADLINE, rdmsr, wrmsr};
 
 /// Como o Local APIC desta CPU deve ser usado, pelo CPUID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,27 +129,74 @@ pub fn publish(access: ApicAccess, mmio: Option<VirtAddr>) {
     ACTIVE_X2APIC.store(access.is_x2apic(), Ordering::Release);
 }
 
-/// Avisa o Local APIC que a interrupção em serviço terminou. Sem efeito antes de `publish`.
-pub fn eoi() {
+/// O Local APIC publicado por `publish`; `None` antes dele.
+fn published() -> Option<LocalApic<ApicAccess>> {
     if ACTIVE_X2APIC.load(Ordering::Acquire) {
-        ApicAccess {
-            x2apic: true,
-            mmio: None,
-        }
-        .local()
-        .eoi();
-        return;
+        return Some(
+            ApicAccess {
+                x2apic: true,
+                mmio: None,
+            }
+            .local(),
+        );
     }
     let base = ACTIVE_MMIO.load(Ordering::Relaxed);
-    if base != 0 {
-        let virt = VirtAddr::new(base as u64);
-        // SAFETY: `publish` guardou a página mapeada que `enable_xapic` recebeu.
-        let bus = unsafe { MmioBus::new(virt) };
+    if base == 0 {
+        return None;
+    }
+    let virt = VirtAddr::new(base as u64);
+    // SAFETY: `publish` guardou a página mapeada que `enable_xapic` recebeu.
+    let bus = unsafe { MmioBus::new(virt) };
+    Some(
         ApicAccess {
             x2apic: false,
             mmio: Some(bus),
         }
-        .local()
-        .eoi();
+        .local(),
+    )
+}
+
+/// Avisa o Local APIC que a interrupção em serviço terminou. Sem efeito antes de `publish`.
+pub fn eoi() {
+    if let Some(local) = published() {
+        local.eoi();
     }
+}
+
+/// Como o timer do Local APIC dispara.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimerMode {
+    /// Contador de um tiro, em ticks do contador do timer.
+    OneShot,
+    /// Comparador do TSC, pelo MSR `IA32_TSC_DEADLINE`.
+    TscDeadline,
+}
+
+/// Põe o timer no modo pedido, desarmado. Sem efeito antes de `publish`.
+pub fn set_timer_mode(mode: TimerMode) {
+    let Some(local) = published() else { return };
+    match mode {
+        TimerMode::OneShot => local.set_oneshot(),
+        TimerMode::TscDeadline => {
+            local.set_tsc_deadline();
+            // SAFETY: `mfence` não tem pré-condição; ordena o LVT antes da escrita do deadline.
+            unsafe { asm!("mfence", options(nostack, preserves_flags)) };
+        }
+    }
+}
+
+/// Arma o modo de um tiro: dispara `count` ticks do contador depois de agora.
+pub fn arm_oneshot(count: u32) {
+    if let Some(local) = published() {
+        local.arm_oneshot(count);
+    }
+}
+
+/// Arma o modo TSC-deadline: dispara quando o TSC chegar a `tsc`.
+///
+/// # Safety
+/// O timer está em `TimerMode::TscDeadline` e o CPUID anuncia o recurso.
+pub unsafe fn arm_tsc_deadline(tsc: u64) {
+    // SAFETY: o contrato da função garante o modo e o MSR.
+    unsafe { wrmsr(MSR_TSC_DEADLINE, tsc) };
 }

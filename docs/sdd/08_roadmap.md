@@ -22,7 +22,7 @@ modelo de ameaça e o porquê de cada mecanismo estão no [SDD 09](09_seguranca.
 | **0.5 — Tela e terminal** ✅ | Framebuffer, fonte própria, emulador VT/xterm, shell embutido, barra no topo | `fetch` desenhado na tela das duas ISAs (`make screenshot`) |
 | **1 — Exceções, interrupções e tempo** ✅ | Vetores de exceção, controlador de interrupção, timer, relógio, entrada por interrupção, proteções de hardware ligadas | Page fault proposital vira relatório; tique contado; shell dorme em `hlt`/`wfi` |
 | **2 — Memória virtual e heap** ✅ | Tabelas próprias com W^X, heap do kernel, aleatório do kernel, memória do bootloader recuperada | Escrita em `.text` falha; memória livre depois do boot medida |
-| **3 — Tarefas, SMP e escalonador** | Troca de contexto com estado FPU/SIMD por tarefa, threads do kernel, fila por CPU, escalonador atrás de trait (rodízio, depois EEVDF), timer de um tiro, idle sem tique | Latência de troca medida em N núcleos, e o teste que escreve `xmm0`/`v0` em duas tarefas passa |
+| **3 — Tarefas, SMP e escalonador** (1ª onda ✅, uma CPU; 2ª onda: SMP) | Troca de contexto com estado FPU/SIMD por tarefa, threads do kernel, fila por CPU, escalonador atrás de trait (rodízio, depois EEVDF), timer de um tiro, idle sem tique | Latência de troca medida em N núcleos, e o teste que escreve `xmm0`/`v0` em duas tarefas passa |
 | **4 — Processos e isolamento** | Anel 3/EL0, syscall, carregador ELF, VFS em memória (initramfs, tmpfs), espaço de endereçamento por processo, handles com direitos, mitigações de CPU, estado SIMD visível ao usuário, página zero e COW | Syscall nula medida; processo que toca o kernel morre sem derrubar nada |
 | **5 — ABI Linux e primeiros aplicativos** | Syscalls Linux traduzidas, credenciais Linux, musl estático, BusyBox | BusyBox roda sem recompilar e é medido contra o Linux; DOOM por software roda no x86_64 (marco 1 dos jogos; no aarch64 fecha na fase 6); memória ociosa medida contra a linha de base ([Memória ociosa](#memória-ociosa-o-alvo-vem-de-uma-medida)) |
 | **6 — Armazenamento persistente** | PCI Express, IOMMU, virtio-blk, NVMe, AHCI, page cache, sistema de arquivos da raiz com escrita, permissões em disco, ACPI/DTB, virtio-input e virtio-snd, readahead com janela crescente, LRU de gerações | Benchmark de E/S ao lado do Linux; virtio-input entrega eventos e virtio-snd toca um buffer |
@@ -84,6 +84,18 @@ código de terceiros que ela exige (SDL e Mesa) são decisões futuras, listadas
 
 ### 3 — Tarefas, SMP e escalonador
 
+**Estado.** A primeira onda está pronta e mede uma CPU; falta a segunda, o SMP com fila
+por CPU.
+
+| Pronto (uma CPU) | Falta (segunda onda) |
+| --- | --- |
+| Troca de contexto nas duas ISAs, threads do kernel, `spawn`/`yield`/`sleep`/`park`/`exit` ([SDD 15](15_tarefas_e_preempcao.md)) | Núcleos secundários pelo pedido MP do Limine ([DEBT-0011](../tech-debt/0011-gic-e-timer-so-na-cpu-0.md), [DEBT-0018](../tech-debt/0018-frames-sem-cache-por-cpu.md)) |
+| Estado de FPU/SIMD por tarefa, eager, com o teste de `xmm0`/`v0` | Uma instância de `Composite` por CPU, escolha de CPU ao acordar, migração e balanceamento ([DEBT-0039](../tech-debt/0039-escalonador-de-uma-cpu.md)) |
+| `Scheduler` em `core/sched` com `Eevdf`, `Fifo` (teto de 95%) e `Composite`, ligado ao kernel: `add`, `remove`, `wake`, `sleep`, `tick`, `needs_resched` ([SDD 14](14_escalonador.md)) | Estado de troca por CPU: `IN_IRQ`, `locks_held`, `ARMED_NS`, pilha de falhas ([DEBT-0036](../tech-debt/0036-escalonador-com-estado-de-troca-global.md)) |
+| Preempção por `Handlers.preempt`, shell com fatia curta, ociosa fora da fila | Acordar entre CPUs por IPI; latência de troca medida em N núcleos |
+| Timer de um tiro armado por `next_deadline_ns` e pelo próximo acordar; ociosa sem tique (2 IRQs em 50 ms) | TSC-deadline medido em x86_64 com KVM ([DEBT-0034](../tech-debt/0034-tsc-deadline-sem-teste-no-x86.md)) |
+| `ps` e `bench` no shell; `pick_next` 34 a 35 ns e troca de 99 a 164 ns no aarch64 HVF ([SDD 07](07_desempenho_e_recursos.md)) | Classe de tempo real usada por alguma tarefa do kernel; troca de contexto mais barata ([DEBT-0042](../tech-debt/0042-troca-de-contexto-lenta-com-eevdf-e-relogio.md)) |
+
 - **Tarefas:** troca de contexto em `arch/`, threads do kernel, `core/sched` ligado
   ao kernel.
 - **Estado FPU/SIMD por tarefa, sempre salvo (eager).** Entra **inteiro** nesta
@@ -100,7 +112,8 @@ código de terceiros que ela exige (SDL e Mesa) são decisões futuras, listadas
   | Estado grande | AMX por pedido do processo (fase 4) | SVE e SME por trap de primeiro uso, VL padrão pequeno (fase 4) |
   | Teste | `asm!` em `arch/`: escreve `xmm0` em duas tarefas, troca, e cada uma lê o seu valor | O mesmo com `v0` |
 
-- **Escalonador:** `trait Scheduler` (`enqueue`, `pick_next`, `tick`) em `core/sched`.
+- **Escalonador:** `trait Scheduler` (`add`, `remove`, `wake`, `sleep`, `pick_next`, `tick`,
+  `yield_current`, `next_deadline_ns`, `needs_resched`, `current`) em `core/sched`.
   - Rodízio primeiro, para provar a troca de contexto e a fila por CPU.
   - Depois um EEVDF pequeno. Por tarefa: `vruntime`, `lag`, `slice` e deadline
     virtual. Por fila: soma ponderada dos `vruntime` e soma dos pesos, que dão o
@@ -128,15 +141,15 @@ código de terceiros que ela exige (SDL e Mesa) são decisões futuras, listadas
   ociosa.
 - **Ordem dos PRs:**
 
-  | Passo | Entrega |
-  | --- | --- |
-  | a | Troca de contexto e timer de um tiro na BSP |
-  | b | Estado FPU/SIMD ligado no boot e salvo por tarefa, com o teste de `xmm0`/`v0` |
-  | c | Rodízio |
-  | d | EEVDF |
-  | e | SMP |
-  | f | Classe de tempo real |
-  | g | NO_HZ_IDLE |
+  | Passo | Entrega | Estado |
+  | --- | --- | --- |
+  | a | Troca de contexto e timer de um tiro na BSP | ✅ |
+  | b | Estado FPU/SIMD ligado no boot e salvo por tarefa, com o teste de `xmm0`/`v0` | ✅ |
+  | c | Rodízio | ✅ (o kernel o usou até ligar o EEVDF) |
+  | d | EEVDF | ✅ ligado ao kernel |
+  | e | SMP | segunda onda |
+  | f | Classe de tempo real | ✅ no `core/sched` (`Fifo` e o teto no `Composite`); nenhuma tarefa do kernel a usa |
+  | g | NO_HZ_IDLE | ✅ (a ociosa não tem tique; a linha `idle:` do boot) |
 
 ### 4 — Processos e isolamento
 

@@ -7,7 +7,7 @@
 
 | Métrica | Como | Valor hoje (QEMU, 256 MiB) |
 | --- | --- | --- |
-| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 184 093 / 121 404 bytes · aarch64: 153 101 / 103 129 bytes (fase 2 depois da revisão do PR 5: `.data.rel.ro` só leitura, caminhada única em `core/mm`, bit de livre no slab). Antes da revisão: 183 669 / 120 004 e 155 889 / 102 021. Antes: com buddy, heap e gerador, 166 544 / 106 095 e 136 292 / 88 364; antes do buddy, 133 304 / 88 735 e 105 448 / 71 508; na fase 0.5, 100 541 / 61 725 e 86 500 / 59 952. O PIE do KASLR custa 3 289 / 5 581 (x86_64) e 5 361 / 6 265 (aarch64), de 1,8% a 6,6% ([SDD 13](13_memoria_virtual.md)) |
+| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 235 680 / 147 492 bytes · aarch64: 202 941 / 132 025 bytes (fase 3 com o EEVDF no kernel: +24 584 / +12 136 (x86_64) e +20 520 / +11 824 (aarch64) sobre o mesmo kernel com o rodízio; `.data` do `SCHED`, 3 968 bytes; o resto é a política, o `i128` do EEVDF e a medida da política no `bench`). Antes, a fase 3 só com o rodízio, tarefas, preempção, estado de SIMD, timer de um tiro e `ps` e `bench`: 211 096 / 135 356 e 182 421 / 120 201, medidos de novo no commit anterior (+26 763 / +13 856 e +29 440 / +16 956 sobre a fase 2, que a linha a seguir descreve). Antes, a fase 2 depois da revisão do PR 5: 184 093 / 121 404 e 153 101 / 103 129 (`.data.rel.ro` só leitura, caminhada única em `core/mm`, bit de livre no slab). Antes da revisão: 183 669 / 120 004 e 155 889 / 102 021. Antes: com buddy, heap e gerador, 166 544 / 106 095 e 136 292 / 88 364; antes do buddy, 133 304 / 88 735 e 105 448 / 71 508; na fase 0.5, 100 541 / 61 725 e 86 500 / 59 952. O PIE do KASLR custa 3 289 / 5 581 (x86_64) e 5 361 / 6 265 (aarch64), de 1,8% a 6,6% ([SDD 13](13_memoria_virtual.md)) |
 | Memória livre depois do boot (o "pronto quando" da fase 2) | `frames:` do boot (QEMU 256 MiB, `dev`) e `mem` | x86_64: 63 811 frames (249,3 MiB, 97,4% da RAM), antes 52 321 (204,4 MiB) · aarch64: 63 237 (247,0 MiB, 96,5%), antes 54 991 (214,8 MiB). Devolvido: 46 432 e 33 424 KiB |
 | Tabelas de página do kernel | `vm:` do boot | 60 a 64 KiB (x86_64) e 44 a 48 KiB (aarch64) com 2 MiB no mapa direto; 548 e 536 KiB só com 4 KiB. Varia com o deslocamento sorteado do mapa direto |
 | Grade do terminal | 8 bytes por célula (`size_of::<Cell>()`), em frames contíguos | x86_64 1280x800: 158x47 células, 59 408 bytes (15 frames) · aarch64 1024x768: 126x45, 45 360 bytes (12 frames) |
@@ -17,12 +17,75 @@
 | Heap do kernel | `heap::self_test` e a linha `heap` do `mem` | Metadado de 64 bytes por slab, dentro da página, com o mapa de livres de 1 bit por objeto (SDD 12). Zerar ao liberar ligado: custo abaixo |
 | Aleatório no kernel | linha `random bench:` do boot (`random::benchmark`): 32 blocos de 4 KiB com `Rng::fill_bytes` e uma reposição completa, com o relógio da fase 1 | aarch64 sob HVF, `release`: 636 a 694 MB/s e 36 a 38 us por reposição (tabela abaixo) |
 | Boot até o kernel | linha `boot timeline` (pedido *bootloader performance* do Limine) | Limine: 52 ms (aarch64, HVF) / 350 ms (x86_64, TCG) |
-| Pilha de exceção (aarch64) | `Memory::map_stack`: 4 páginas mapeadas e uma de guarda, por CPU | 16 384 bytes de RAM, mais as tabelas de página que faltarem |
-| Timer (aarch64) | linha `timer:` do boot; `CNTV` com `CVAL` absoluto, 100 Hz | 50 tiques em 497 ms (HVF) e 488 ms (TCG); núcleo ocioso em `wfi` usa 0,3% de CPU do host (HVF) |
+| Pilha de falhas (aarch64) | `Memory::map_stack`: 4 páginas mapeadas e uma de guarda, por CPU; é o `SP_EL0` do EL1h (SDD 15) | 16 384 bytes de RAM, mais as tabelas de página que faltarem |
+| Custo por tarefa | SDD 15, "Custo por tarefa": `SCHED`, `Context`, pilha e área de FPU/SIMD | ~250 bytes de tabela e política (3 968 de `SCHED` com 16 slots); 8 (x86_64) ou 104 (aarch64) de `Context`; 32 768 de pilha (mais as tabelas de página); 832 (x86_64 da QEMU, `xsaveopt` com AVX) ou 528 (aarch64) de FPU/SIMD, só da tarefa que usa |
+| Troca de contexto | `bench` e a linha `switch:`: ping-pong de `unpark`/`park` entre duas tarefas, ns por troca, aquecimento e melhor de 3 | aarch64 HVF `release`, com o EEVDF: 99 a 116 ns no boot e 131 a 164 no comando; com o rodízio eram 42 e 77 a 84 (tabela abaixo); x86_64 e aarch64 em TCG só para comparar o RustOS consigo mesmo |
+| Jitter de acordar | `bench`: `agora − pedido` depois de `sleep_until`, 200 amostras | aarch64 HVF, com o EEVDF: 0,49 a 0,52 ms (ociosa em `wfi`) e 4,1 µs (CPU ocupada) de média; igual ao do rodízio (tabela abaixo) |
+| Timer (aarch64) | linha `timer:` do boot; `CNTV` com `CVAL` absoluto, 100 Hz só até `task::init`; depois não há tique periódico (linha `idle:`) | 50 tiques em 497 ms (HVF) e 488 ms (TCG) no autoteste; ociosa com o EEVDF: 2 IRQs do timer em 50 ms, contra 5 a 100 Hz (HVF, TCG e x86_64 iguais). No x86_64 com o contador do APIC (sem TSC-deadline) a ociosa ainda acorda a cada ~69 s, o que a contagem de 32 bits a 62,5 MHz alcança; no aarch64 e no TSC-deadline o prazo é de uma hora |
 | Estado do gerador aleatório | `size_of::<Rng>()` (teste em `core/crypto/src/rng.rs`) | 40 bytes: chave de 32 e contador de 8 |
 | Código de `core/crypto` | `.text` do crate sem LTO, com todas as funções públicas (`llvm-size`); no kernel, com LTO, só entra o que se usa | `release`: 8 202 (x86_64) e 7 866 (aarch64) bytes · `release-small`: 6 216 e 7 349 bytes |
 | Vazão de ChaCha20, BLAKE2b e do gerador | `cargo run --release -p rustos-crypto --example bench`, no host (Apple M5, `rustc` 1.100.0), melhor de 15 rodadas, sem SIMD (o compilador não vetorizou: o resultado com `-vectorize-loops=false -vectorize-slp=false` é o mesmo) | Ver tabela abaixo. **Números do host**; os do alvo estão abaixo |
+| Escalonador (`core/sched`) | `cargo test --release -p rustos-sched bench -- --ignored --nocapture --test-threads=1` (`core/sched/src/bench.rs`), no host | Host: `pick_next` do EEVDF em 41 a 136 ns com 8 a 512 tarefas; 96 bytes por tarefa ([SDD 14](14_escalonador.md)). No alvo (`bench`, 8 prontas): `pick_next` 34 a 35 ns e `tick` 2 ns no aarch64 HVF; 320 e 36 ns em TCG; 670 a 730 e 85 a 89 ns no x86_64 em TCG (tabela abaixo) |
 | Boot de parede | `make smoke` | inclui firmware EDK2: ~2–5 s, dominado pelo firmware |
+
+### Troca de contexto e jitter de acordar (fase 3)
+
+Como se mede: `make screenshot ARCH=… PROFILE=release CMDS="bench;bench;bench"` e a linha
+`switch:` do boot (as mesmas funções de `kernel/src/bench.rs`; SDD 15, "Medidas"). Perfil
+`release`, QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB. A aceleração decide o que o
+número quer dizer (guidelines 05): só o HVF vale como latência; o TCG compara o RustOS
+consigo mesmo. "Antes" é o kernel com o `RoundRobin` (commit `9aec89c`, o fim das tarefas
+sem o EEVDF), "depois" é o `Composite` (FIFO e EEVDF) ligado, ambos medidos de novo na mesma
+máquina; a faixa são as rodadas do `bench`.
+
+| Máquina | | Troca, sem SIMD / com SIMD (ns) | Acordar, ociosa (média / máx., µs) | Acordar, uma ocupando a CPU (média / máx., µs) |
+| --- | --- | --- | --- | --- |
+| aarch64, **HVF**, `bench` | antes | 77–84 / 102–104 | 469–488 / 776–782 | 3,5–3,7 / 14–19 |
+| | depois | 156–164 / 131–133 | 489–517 / 772–1 057 | 4,1–6,6 / 14–515 |
+| aarch64, HVF, linha do boot | antes | 41 / 55 | 520 / 733 | — |
+| | depois | 110 / 116 | 537 / 762 | — |
+| aarch64, TCG, `bench` | antes | 390–392 / 452–456 | 1 192–1 227 / 2 117–12 845 | 1 137–1 278 / 2 031–17 277 |
+| | depois | 838–850 / 949–966 | 1 223–1 241 / 2 057–2 095 | 526 / 1 058–1 084 |
+| x86_64, TCG, `bench` | antes | 326–336 / 590–628 | 1 098–1 146 / 2 064–2 071 | 1 146–1 154 / 2 030–2 087 |
+| | depois | 1 175–1 181 / 1 512–1 520 | 1 194–1 220 / 2 056–2 070 | 529–531 / 1 166–1 232 |
+
+- **A troca com o EEVDF custa cerca de 2x a do rodízio no HVF** (77–84 para 156–164 no
+  comando, 41 para 110 no boot) e de 2,5 a 3,5x em TCG. Cada ida e volta do ping-pong faz
+  `wake`, `sleep`, `pick_next` e três leituras do relógio. Fora da política, medido à
+  parte com um patch temporário que não entrou (HVF): `now_ns` 23 ns (`isb`, `mrs` e a
+  conversão), `cycles` 15, `sleep` + `wake` 39, `next_deadline_ns` 2. Uma otimização que
+  entrou: o `schedule` passou a receber o relógio que o `park` e o `yield` já leram, e o
+  tempo de CPU da tarefa a ser contado em ns em vez de ciclos (uma leitura a menos por troca):
+  141 para 99 ns na linha do boot. [DEBT-0042](../tech-debt/0042-troca-de-contexto-lenta-com-eevdf-e-relogio.md).
+- **Política no alvo** (`pick_next` e `tick` com 8 tarefas prontas e relógio de mentira,
+  linha `Scheduler policy` do `bench`): aarch64 HVF 34–35 e 2 ns; aarch64 TCG 319–320 e 36;
+  x86_64 TCG 666–677 e 85–89. O do host (41 ns com 8 tarefas) e o do HVF concordam. O x86_64 é
+  caro em TCG porque a divisão de 128 bits do `i128` é emulada
+  ([DEBT-0041](../tech-debt/0041-escalonador-do-x86-sem-medida-fora-do-tcg.md)). `__divti3`
+  e `__udivti3` de `compiler_builtins` linkam nas duas ISAs, em `release` e `release-small`.
+- **Com SIMD custa mais 6 ns no aarch64 em HVF na linha do boot** (`stp`/`ldp` de 32
+  registradores de 128 bits, mais FPSR e FPCR), e a ordem inverteu no comando (plain 160, SIMD 131): o primeiro
+  ping-pong roda logo depois de a CPU ficar ociosa e o host ainda a mantém em frequência baixa.
+  No x86_64 são ~330 ns em TCG (`xsaveopt` e `xrstor` interpretados: não é número de hardware).
+- **O HVF mede o `wfi`, não o kernel, no jitter da ociosa.** Com a ociosa em `wfi` o
+  thread do host da vCPU dorme até o prazo e acorda com ~0,5 ms de atraso. Trocando o `wfi`
+  por um laço de espera, a média cai para 3,1 µs e a troca de contexto para 36 ns (com o
+  rodízio; a CPU do host fica quente: sem `wfi` ela não baixa a frequência). Esse laço foi um
+  patch temporário, fora do código; um boot só.
+- **O TCG tem ~1,2 ms de média com a ociosa**, com o rodízio e com o EEVDF: o prazo passa pelo
+  laço principal da QEMU e não pelo kernel (provável arredondamento do prazo a ms no `ppoll`
+  do laço principal; não verificado no código da QEMU). Com uma tarefa ocupando a CPU, a média
+  caiu de ~1,15 ms para ~0,53 ms depois de o tique de 100 Hz sair; não investiguei por quê.
+- **Uma tarefa ocupando a CPU:** o `shell` (fatia de 200 µs) fura a proteção de fatia da
+  tarefa de lote (700 µs) por `PREEMPT_SHORT`, e o acordar custa 4,1 µs, como com o rodízio.
+  O pior caso com `N` ocupadas não foi medido. O 515 µs de máximo numa das rodadas do HVF é
+  um valor isolado (as outras duas dão 14 e 15 µs).
+- **Tique ocioso:** a linha `idle:` do boot, 2 IRQs do timer em 50 ms nas duas ISAs e em TCG
+  e HVF. Eram 5 com o tique de 100 Hz.
+- **Sem número de comparação.** O Linux (`lat_ctx`) e o Windows ainda não rodam na mesma
+  máquina, e o `lat_ctx` passa o token por pipe; o ping-pong daqui o faz por
+  `unpark` e `park`, então não é o mesmo teste. As fontes publicadas (1,2 a 2,2 µs em
+  Haswell, pesquisa `scheduler.md`) são de outro hardware.
 
 ### Criptografia do núcleo (host)
 
@@ -132,6 +195,55 @@ São cerca de 39 ns por KiB, 5x o piso do host: o `memset` do alvo é o suspeito
 ([DEBT-0020](../tech-debt/0020-zerar-pagina-pelo-memset-generico.md)). Para objetos
 até 64 bytes o custo é de 2 a 3 ns, e a política fica ligada (SDD 09). A medida usou um
 patch temporário no autoteste do heap, que não entrou no código. O x86_64 só roda em TCG aqui, sem número que valha.
+
+### Escalonador (fase 3, medido no host; o alvo está acima)
+
+Comando: `cargo test --release -p rustos-sched bench -- --ignored --nocapture
+--test-threads=1` (`core/sched/src/bench.rs`). Máquina: Apple M5 (aarch64), rustc
+1.100.0, perfil `release`, melhor de 7 rodadas de 100 000 chamadas, três execuções
+(variação de 2 ns ou menos). **Não é QEMU nem metal**: serve para comparar as
+políticas entre si, nunca com outro sistema (guidelines 05). Todas as tarefas são
+CPU-bound, com nices de -3 a 3, e a capacidade é 512 nas duas políticas.
+
+| Tarefas | Política | `tick` sem esgotar a fatia | `tick` que esgota | `pick_next` | `sleep` + `wake` |
+| --- | --- | --- | --- | --- | --- |
+| 8 | rodízio | 0,4 ns | 0,4 ns | 4 ns | 3 ns |
+| 8 | EEVDF | 1,9 ns | 7,8 ns | 41 ns | 39 ns |
+| 64 | rodízio | 0,5 ns | 0,5 ns | 4 ns | 17 ns |
+| 64 | EEVDF | 1,9 ns | 7,8 ns | 108 ns | 141 ns |
+| 512 | rodízio | 0,4 ns | 0,5 ns | 4 ns | 128 ns |
+| 512 | EEVDF | 1,9 ns | 7,8 ns | 136 ns | 136 ns |
+
+O `pick_next` é `(tick que esgota + pick_next) - tick que esgota`, num laço que
+avança uma fatia de 10 ms por volta; o `sleep` + `wake` é de uma tarefa pronta que
+não é a corrente. No rodízio, `sleep` e `remove` tiram do meio da fila (O(n)); no
+EEVDF, o `pick_next` é dominado pelas duas atualizações do treap (devolver a corrente
+e tirar a escolhida), não pela busca.
+
+**Árvore contra varredura** (a escolha do elegível de menor prazo, com capacidade
+igual ao número de tarefas): 2,3 / 2,8 / 5,8 ns pela descida do treap contra 11,8 /
+90 / 815 ns pela varredura linear de 8 / 64 / 512 tarefas. A varredura serve de
+oráculo nos testes e ficou como comparação.
+
+**Otimização medida:** o `recenter` divide em `i64` quando a soma cabe (em vez de
+`i128`): o `tick` que esgota a fatia caiu de 10,6 para 7,8 ns com 64 e 512 tarefas;
+o `pick_next` não mudou, e o código cresceu cerca de 2 KiB no `release` do x86_64
+(13 441 para 15 590 bytes, inlining).
+
+**Memória** (`size_of`, `bench_memory_per_task`): `Eevdf<512>` = 49 232 bytes, ou 96
+por tarefa (`Entity` 56, nó da árvore 32, tabela de ids 8); `RoundRobin<512>` = 8 752
+(17 por tarefa); `Fifo<512>` = 7 600 (14 por tarefa e as 99 listas).
+
+**Código** (`Composite<8, 64>` e `RoundRobin<64>` instanciados numa biblioteca de
+prova fora do repositório, `.text` do objeto com LTO, `llvm-size`): x86_64 15 590
+bytes no `release` e 8 700 no `release-small`; aarch64 15 228 e 10 148. A divisão em
+128 bits vem de `compiler_builtins`, fora dessa conta. No kernel, só entra o que se
+usa.
+
+**Latência de wakeup na simulação** ([SDD 14](14_escalonador.md)), 4 tarefas sempre
+prontas e uma tarefa que roda 0,2 ms e dorme 5 ms, timer de um tiro: espera média de
+2,5 µs com fatia de 0,1 ms e 863 µs com fatia de 6 ms; no pior caso espera algumas
+fatias, não o ciclo todo.
 
 ### Para onde foi o tamanho do kernel
 

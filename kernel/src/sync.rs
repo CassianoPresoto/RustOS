@@ -1,14 +1,25 @@
 //! Lock que mascara interrupção na CPU local enquanto está preso: um handler que
 //! pegue o mesmo lock nunca acha o dono interrompido no meio.
+//! Ninguém cede a CPU (`yield_now`, `sleep_until`, `park`) com um preso; o
+//! `locks_held` serve ao `debug_assert` do escalonador (SDD 15).
 
 use core::fmt;
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use rustos_hal::Cpu;
 use rustos_sync::{SpinLock, SpinLockGuard};
 
 use crate::platform;
+
+/// `IrqLock`s presos agora. Uma CPU só até o SMP: vira estado por CPU então.
+static HELD: AtomicU32 = AtomicU32::new(0);
+
+/// Quantos `IrqLock`s estão presos nesta CPU.
+pub fn locks_held() -> u32 {
+    HELD.load(Ordering::Relaxed)
+}
 
 pub struct IrqLock<T> {
     inner: SpinLock<T>,
@@ -23,8 +34,10 @@ impl<T> IrqLock<T> {
 
     pub fn lock(&self) -> IrqGuard<'_, T> {
         let were_enabled = platform::cpu().save_and_disable_interrupts();
+        let guard = ManuallyDrop::new(self.inner.lock());
+        HELD.fetch_add(1, Ordering::Relaxed);
         IrqGuard {
-            guard: ManuallyDrop::new(self.inner.lock()),
+            guard,
             were_enabled,
         }
     }
@@ -33,6 +46,7 @@ impl<T> IrqLock<T> {
         let cpu = platform::cpu();
         let were_enabled = cpu.save_and_disable_interrupts();
         if let Some(guard) = self.inner.try_lock() {
+            HELD.fetch_add(1, Ordering::Relaxed);
             Some(IrqGuard {
                 guard: ManuallyDrop::new(guard),
                 were_enabled,
@@ -75,6 +89,7 @@ impl<T> Drop for IrqGuard<'_, T> {
     fn drop(&mut self) {
         // SAFETY: o guard interno é solto só aqui, uma vez, e não é usado depois.
         unsafe { ManuallyDrop::drop(&mut self.guard) };
+        HELD.fetch_sub(1, Ordering::Relaxed);
         platform::cpu().restore_interrupts(self.were_enabled);
     }
 }

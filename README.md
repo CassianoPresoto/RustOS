@@ -9,10 +9,10 @@ externo: só `core`, `alloc` e o que está neste repositório.
 
 ## Estado
 
-Fase 2 — memória virtual e heap. O kernel sobe pelo Limine em **x86_64**
+Fase 3 — tarefas e escalonador (uma CPU). O kernel sobe pelo Limine em **x86_64**
 e **aarch64** (QEMU) e monta o alocador de frames. Desenha na tela com uma **fonte
 própria** e um **emulador de terminal VT/xterm** escritos aqui, e abre um **shell
-embutido** (`help`, `fetch`, `mem`, `colors`, `uptime`, `keymap`, histórico, Tab,
+embutido** (`help`, `fetch`, `mem`, `colors`, `uptime`, `keymap`, `ps`, `bench`, histórico, Tab,
 edição de linha). Exceções, controlador de interrupção (APIC ou GICv3), timer e
 relógio são próprios. O shell dorme até chegar tecla, pela serial ou pelo teclado
 PS/2 com layout US ou ABNT2. As proteções de hardware ficam ligadas: WP, NX,
@@ -21,8 +21,10 @@ biblioteca.
 
 A fase 2 trouxe tabelas de página próprias com W^X, heap do kernel (buddy de
 frames e slabs), gerador aleatório criptográfico (ChaCha20), KASLR e a memória
-do bootloader devolvida ao alocador. Ainda não há escalonador nem espaço de
-usuário.
+do bootloader devolvida ao alocador. A fase 3 trouxe a troca de contexto nas duas ISAs,
+threads do kernel com preempção, o escalonador EEVDF com tempo real FIFO (`core/sched`),
+estado de FPU/SIMD por tarefa e timer de um tiro sem tique com tudo ocioso. Ainda não há
+SMP nem espaço de usuário.
 
 ```sh
 make run ARCH=x86_64           # janela com a tela; digite nela ou no terminal

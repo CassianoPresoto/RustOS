@@ -3,14 +3,18 @@
 
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-pub use rustos_arch_aarch64::call_on_stack;
 use rustos_arch_aarch64::descriptor::Aarch64Format;
+pub use rustos_arch_aarch64::fpu::{
+    AREA_ALIGN as FPU_AREA_ALIGN, read_probe as fpu_read_probe, restore as fpu_restore,
+    save as fpu_save, write_probe as fpu_write_probe,
+};
 use rustos_arch_aarch64::intid::{QEMU_VIRT_PL011_INTID, VIRTUAL_TIMER_INTID};
 use rustos_arch_aarch64::{
     Aarch64Cpu, Aarch64Entropy, Aarch64Mmu, DirectMapTables, MmioBus, QEMU_VIRT_GICD,
     QEMU_VIRT_GICR, QEMU_VIRT_PL011, active_root, exception, gic_cpu, intid, prepare_space,
     protection, timer,
 };
+pub use rustos_arch_aarch64::{Context, call_on_stack, switch};
 use rustos_driver_gicv3::{GicError, GicV3, affinity_from_mpidr, router_for};
 use rustos_driver_pl011::Pl011;
 use rustos_hal::{
@@ -18,7 +22,7 @@ use rustos_hal::{
 };
 use rustos_mm::PageTables;
 
-use super::{PlatformError, Protection};
+use super::{FpuSummary, PlatformError, Protection};
 use crate::interrupts::{FaultTest, IrqSource};
 use crate::memory::{Memory, map_device};
 
@@ -123,7 +127,7 @@ pub fn init_interrupts(
     STACK_GUARD.store(guard, Ordering::Relaxed);
     // SAFETY: EL1 com IRQ mascarada; o topo é o da pilha recém-mapeada, só das exceções.
     unsafe { exception::install(handlers, stack_top) }
-        .map_err(|_| PlatformError::MissingFeature("EL1t entry (kernel is not on SP_EL0)"))?;
+        .map_err(|_| PlatformError::MissingFeature("EL1h (kernel is not on SP_EL1)"))?;
 
     let distributor = map_gic(&mut mapper, memory, QEMU_VIRT_GICD, GICD_LEN)?;
     let redistributor = map_gic(&mut mapper, memory, QEMU_VIRT_GICR, GICR_LEN)?;
@@ -144,13 +148,50 @@ pub fn init_interrupts(
     serial().enable_rx_interrupt();
 
     // SAFETY: EL1, primeira e única vez nesta CPU.
-    unsafe { timer::start(TIMER_HZ) }.map_err(|error| match error {
+    unsafe { timer::start() }.map_err(|error| match error {
         timer::TimerError::NoFrequency => PlatformError::MissingFeature("CNTFRQ_EL0"),
-        timer::TimerError::PeriodOutOfRange => {
-            PlatformError::MissingFeature("timer period (CNTFRQ_EL0 too low)")
-        }
     })?;
     Ok(())
+}
+
+/// Como o timer dispara: o comparador absoluto do `CNTV`, de um tiro.
+pub fn timer_mode() -> &'static str {
+    "cntv-cval"
+}
+
+/// Programa um tiro para o relógio (`now_ns`) chegar a `deadline_ns`; no passado, dispara já.
+pub fn arm_timer(deadline_ns: u64) {
+    timer::arm_ns(deadline_ns);
+}
+
+/// Nanossegundos que `ticks` do contador de ciclos valem.
+pub fn cycles_to_ns(ticks: u64) -> u64 {
+    timer::counter_to_ns(ticks)
+}
+
+/// Libera FP/SIMD em EL1 e EL0; a troca de contexto salva V0–V31, FPSR e FPCR.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "mesma assinatura em todas as ISAs"
+)]
+pub fn fpu_init() -> Result<FpuSummary, PlatformError> {
+    // SAFETY: EL1, uma vez, antes de qualquer troca de contexto.
+    unsafe { rustos_arch_aarch64::fpu::init() };
+    Ok(FpuSummary {
+        mode: "fpsimd",
+        bytes: rustos_arch_aarch64::fpu::AREA_BYTES,
+        components: "v0-v31 fpsr fpcr",
+    })
+}
+
+/// Bytes de uma área de estado de FP/SIMD.
+pub fn fpu_area_bytes() -> usize {
+    rustos_arch_aarch64::fpu::AREA_BYTES
+}
+
+/// Estado de reset numa área nova: tudo zero (FPCR e FPSR em reset).
+pub fn fpu_init_area(area: &mut [u8]) {
+    area.fill(0);
 }
 
 fn map_gic(
@@ -191,11 +232,6 @@ pub fn irq_source(irq: Irq) -> IrqSource {
         intid if !intid::needs_end_of_interrupt(intid) => IrqSource::Spurious,
         _ => IrqSource::Unknown,
     }
-}
-
-/// Chamado a cada tique, dentro da IRQ: rearma o timer, que é de um disparo só.
-pub fn timer_tick() {
-    timer::rearm();
 }
 
 /// Chamado antes de drenar a UART, dentro da IRQ: limpa o pedido de recepção.

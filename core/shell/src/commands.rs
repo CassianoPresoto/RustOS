@@ -3,11 +3,11 @@
 use core::fmt;
 
 use crate::ansi::{ACCENT, CLEAR_SCREEN, DIM, LOGO, RESET};
-use crate::fmtutil::{Bytes, Millis, Percent, Uptime};
+use crate::fmtutil::{Bytes, Micros, Millis, Percent, Seconds, Uptime};
 use crate::history::Entries;
 use rustos_hal::PAGE_SIZE;
 
-use crate::host::{FaultTest, Host, SystemInfo};
+use crate::host::{FaultTest, Host, SystemInfo, TaskState};
 
 /// O que um comando recebe: seus argumentos (sem o nome) e as portas.
 pub(crate) struct Ctx<'a> {
@@ -26,6 +26,11 @@ pub(crate) struct Command {
 
 /// Em ordem alfabética: é a ordem em que `help` e o Tab listam.
 pub(crate) const COMMANDS: &[Command] = &[
+    Command {
+        name: "bench",
+        summary: "measure the context switch and the wake-up jitter",
+        run: bench,
+    },
     Command {
         name: "clear",
         summary: "clear the screen",
@@ -70,6 +75,11 @@ pub(crate) const COMMANDS: &[Command] = &[
         name: "mem",
         summary: "show the physical memory usage",
         run: mem,
+    },
+    Command {
+        name: "ps",
+        summary: "list the tasks, their state and CPU time",
+        run: ps,
     },
     Command {
         name: "random",
@@ -278,6 +288,83 @@ fn mem(ctx: &mut Ctx<'_>) -> fmt::Result {
         "kernel",
         Bytes(memory.kernel_bytes)
     )
+}
+
+fn ps(ctx: &mut Ctx<'_>) -> fmt::Result {
+    write!(
+        ctx.out,
+        "{DIM}{:>3}  {:<8} {:<7} {:>10} {:>9}  simd{RESET}\r\n",
+        "id", "name", "state", "cpu (s)", "switches"
+    )?;
+    let mut result = Ok(());
+    ctx.host.tasks(&mut |task| {
+        let state = match task.state {
+            TaskState::Running => "run",
+            TaskState::Ready => "ready",
+            TaskState::Sleeping => "sleep",
+            TaskState::Blocked => "wait",
+        };
+        let simd = if task.simd { "yes" } else { "-" };
+        if result.is_ok() {
+            result = write!(
+                ctx.out,
+                "{:>3}  {:<8} {:<7} {:>10} {:>9}  {simd}\r\n",
+                task.id,
+                task.name,
+                state,
+                Seconds(task.cpu_ns),
+                task.switches
+            );
+        }
+    });
+    result
+}
+
+fn bench(ctx: &mut Ctx<'_>) -> fmt::Result {
+    let Some(report) = ctx.host.bench() else {
+        return ctx.out.write_str("bench: no tasks yet\r\n");
+    };
+    let out = &mut ctx.out;
+    write!(
+        out,
+        "{DIM}Context switch (ping-pong, per switch){RESET}\r\n"
+    )?;
+    write!(out, "  {:<14}{:>7} ns\r\n", "plain", report.switch_ns)?;
+    write!(
+        out,
+        "  {:<14}{:>7} ns\r\n",
+        "with SIMD", report.switch_simd_ns
+    )?;
+    write!(
+        out,
+        "{DIM}Wake-up jitter (sleep_until, {} samples){RESET}\r\n",
+        report.wake_samples
+    )?;
+    let row = |out: &mut dyn fmt::Write, label: &str, mean, max| {
+        write!(
+            out,
+            "  {label:<14}mean {:>9}  max {:>9}\r\n",
+            Micros(mean),
+            Micros(max)
+        )
+    };
+    row(out, "idle", report.wake_mean_ns, report.wake_max_ns)?;
+    row(
+        out,
+        "one busy task",
+        report.wake_loaded_mean_ns,
+        report.wake_loaded_max_ns,
+    )?;
+    write!(
+        out,
+        "{DIM}Scheduler policy (8 ready tasks, per call){RESET}\r\n"
+    )?;
+    write!(
+        out,
+        "  {:<14}{:>7} ns\r\n",
+        "pick_next", report.pick_next_ns
+    )?;
+    write!(out, "  {:<14}{:>7} ns\r\n", "tick", report.tick_ns)
 }
 
 fn random(ctx: &mut Ctx<'_>) -> fmt::Result {
@@ -511,6 +598,38 @@ mod tests {
         let mut host = FakeHost::new();
         host.uptime = Some(3_723_000_000_000);
         assert_eq!(run("uptime", &[], &host), "up 1h 02m 03s\r\n");
+    }
+
+    #[test]
+    fn ps_lists_one_row_per_task_with_state_and_cpu_time() {
+        let out = run("ps", &[], &FakeHost::new());
+        let rows: Vec<&str> = out.split("\r\n").collect();
+        assert!(rows[0].contains("name") && rows[0].contains("switches"));
+        assert!(rows[1].contains("idle") && rows[1].contains("ready") && rows[1].contains("0.250"));
+        assert!(rows[2].contains("shell") && rows[2].contains("run") && rows[2].contains("12.345"));
+        assert!(
+            rows[3].contains("worker") && rows[3].contains("sleep") && rows[3].ends_with("yes")
+        );
+        assert_eq!(rows.len(), 5);
+    }
+
+    #[test]
+    fn bench_prints_both_switch_costs_and_the_jitter_rows() {
+        let out = run("bench", &[], &FakeHost::new());
+        assert!(out.contains("plain") && out.contains("412 ns"));
+        assert!(out.contains("with SIMD") && out.contains("530 ns"));
+        assert!(out.contains("200 samples"));
+        assert!(out.contains("mean   12.3 us") && out.contains("max   45.6 us"));
+        assert!(out.contains("one busy task"));
+        assert!(out.contains("pick_next") && out.contains("88 ns"));
+        assert!(out.contains("tick") && out.contains("31 ns"));
+    }
+
+    #[test]
+    fn bench_without_tasks_says_so() {
+        let mut host = FakeHost::new();
+        host.bench = None;
+        assert_eq!(run("bench", &[], &host), "bench: no tasks yet\r\n");
     }
 
     #[test]

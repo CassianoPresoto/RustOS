@@ -9,42 +9,15 @@ pub fn ticks_to_ns(ticks: u64, frequency_hz: u64) -> Option<u64> {
     Some(u64::try_from(ns).unwrap_or(u64::MAX))
 }
 
-/// Ticks de um período de `hz` Hz; `None` se `hz` é zero ou passa da frequência
-/// (período de zero tick).
-pub fn period_ticks(frequency_hz: u64, hz: u32) -> Option<u64> {
-    frequency_hz.checked_div(u64::from(hz)).filter(|&t| t != 0)
-}
-
-/// Próximo disparo absoluto: um período depois do anterior, ou, se esse já passou
-/// (IRQ atrasada), um período depois de agora. Assim não há deriva nem rajada.
-pub const fn next_deadline(previous: u64, now: u64, reload: u64) -> u64 {
-    let next = previous.wrapping_add(reload);
-    if next.wrapping_sub(now).cast_signed() > 0 {
-        next
-    } else {
-        now.wrapping_add(reload)
-    }
+/// Ticks que `ns` nanossegundos valem a `frequency_hz`; satura em `u64::MAX`.
+pub fn ns_to_ticks(ns: u64, frequency_hz: u64) -> u64 {
+    let ticks = u128::from(ns) * u128::from(frequency_hz) / NS_PER_SECOND;
+    u64::try_from(ticks).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn next_deadline_keeps_the_period_without_drift() {
-        assert_eq!(next_deadline(1_000, 1_005, 100), 1_100);
-    }
-
-    #[test]
-    fn late_irq_restarts_from_now_instead_of_bursting() {
-        assert_eq!(next_deadline(1_000, 1_250, 100), 1_350);
-        assert_eq!(next_deadline(1_000, 1_100, 100), 1_200);
-    }
-
-    #[test]
-    fn next_deadline_survives_counter_wraparound() {
-        assert_eq!(next_deadline(u64::MAX - 10, u64::MAX - 5, 100), 89);
-    }
 
     #[test]
     fn counts_convert_at_24_mhz() {
@@ -67,19 +40,13 @@ mod tests {
     #[test]
     fn zero_frequency_has_no_time() {
         assert_eq!(ticks_to_ns(1000, 0), None);
-        assert_eq!(period_ticks(0, 100), None);
+        assert_eq!(ns_to_ticks(1000, 0), 0);
     }
 
     #[test]
-    fn period_is_frequency_over_rate() {
-        assert_eq!(period_ticks(24_000_000, 100), Some(240_000));
-        assert_eq!(period_ticks(1_000_000_000, 100), Some(10_000_000));
-    }
-
-    #[test]
-    fn period_needs_a_rate_the_counter_can_resolve() {
-        assert_eq!(period_ticks(24_000_000, 0), None);
-        assert_eq!(period_ticks(50, 100), None);
-        assert_eq!(period_ticks(100, 100), Some(1));
+    fn nanoseconds_convert_to_ticks_at_24_mhz() {
+        assert_eq!(ns_to_ticks(1_000_000_000, 24_000_000), 24_000_000);
+        assert_eq!(ns_to_ticks(10_000_000, 24_000_000), 240_000);
+        assert_eq!(ns_to_ticks(u64::MAX, u64::MAX), u64::MAX);
     }
 }

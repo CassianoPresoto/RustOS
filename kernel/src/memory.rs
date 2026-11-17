@@ -12,17 +12,17 @@ use rustos_mm::{
     AddressWindow, BuddyAllocator, FrameAllocator, FrameError, MemorySummary, PhysFrame,
     find_free_block, free_top_level_slot, summarize,
 };
-use rustos_sync::SpinLock;
 
 use crate::boot::BootRecord;
 use crate::frames::{self, Frames};
 use crate::heap;
+use crate::sync::IrqLock;
 
 /// Janelas de dispositivos e de pilhas: 1 GiB cada, vazias até `place_windows`.
 const WINDOW_LEN: u64 = 1 << 30;
 
-static DEVICES: SpinLock<AddressWindow> = SpinLock::new(AddressWindow::new(VirtAddr::new(0), 0));
-static STACKS: SpinLock<AddressWindow> = SpinLock::new(AddressWindow::new(VirtAddr::new(0), 0));
+static DEVICES: IrqLock<AddressWindow> = IrqLock::new(AddressWindow::new(VirtAddr::new(0), 0));
+static STACKS: IrqLock<AddressWindow> = IrqLock::new(AddressWindow::new(VirtAddr::new(0), 0));
 
 #[derive(Debug)]
 pub enum MemoryError {
@@ -107,17 +107,7 @@ impl Memory {
         mapper: &mut impl PageMapper,
         pages: u64,
     ) -> Result<VirtAddr, MapError> {
-        let span = (pages + 1) * PAGE_SIZE;
-        let base = STACKS
-            .lock()
-            .take(span)
-            .ok_or(MapError::OutOfAddressSpace)?;
-        for page in 1..=pages {
-            let frame = self.frames.allocate().ok_or(MapError::OutOfFrames)?;
-            let virt = VirtAddr::new(base.as_u64() + page * PAGE_SIZE);
-            mapper.map_page(virt, frame.start(), PageFlags::DATA, &mut self.frames)?;
-        }
-        Ok(VirtAddr::new(base.as_u64() + span))
+        map_stack(&mut self.frames, mapper, pages)
     }
 
     /// Fatia de `len` valores `fill` em frames contíguos, para sempre do chamador.
@@ -157,6 +147,26 @@ impl Memory {
                 .deallocate(PhysFrame::containing(frame.start()))
                 .is_ok()
     }
+}
+
+/// Pilha de `pages` páginas com guarda abaixo, na janela de pilhas. Quem chama
+/// serializa o `mapper`: as tabelas não têm lock próprio.
+pub fn map_stack(
+    frames: &mut Frames,
+    mapper: &mut impl PageMapper,
+    pages: u64,
+) -> Result<VirtAddr, MapError> {
+    let span = (pages + 1) * PAGE_SIZE;
+    let base = STACKS
+        .lock()
+        .take(span)
+        .ok_or(MapError::OutOfAddressSpace)?;
+    for page in 1..=pages {
+        let frame = frames.allocate().ok_or(MapError::OutOfFrames)?;
+        let virt = VirtAddr::new(base.as_u64() + page * PAGE_SIZE);
+        mapper.map_page(virt, frame.start(), PageFlags::DATA, frames)?;
+    }
+    Ok(VirtAddr::new(base.as_u64() + span))
 }
 
 /// Mapeia registradores de um dispositivo na janela de dispositivos.

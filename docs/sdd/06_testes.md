@@ -52,7 +52,9 @@ O que tem `asm!` só compila com `target_os = "none"`; a parte pura do mesmo cra
 `[rustos] boot ok`; falha com pânico (`[rustos] panic`), com a QEMU saindo antes,
 ou em 120 s. O marcador é a constante `BOOT_OK_MARKER` do kernel e `BOOT_OK` do
 xtask: os dois mudam juntos. O kernel só imprime o marcador se os autotestes de
-frame, de heap (`heap self-test`), de W^X (`w^x: ok`) e de interrupção passarem. O de
+frame, de heap (`heap self-test`), de W^X (`w^x: ok`), de interrupção e de tarefas
+(`task self-test`: preempção e estado de SIMD por tarefa, [SDD 15](15_tarefas_e_preempcao.md))
+passarem; o `smoke` exige a linha `task self-test: ok`. O de
 W^X percorre as tabelas novas ([SDD 13](13_memoria_virtual.md)); `fault text` no shell
 confere que a CPU recusa a escrita em `.text`.
 

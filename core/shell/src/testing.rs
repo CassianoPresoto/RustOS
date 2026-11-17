@@ -4,7 +4,7 @@ use core::fmt;
 
 use rustos_hal::{BootTimeline, BootloaderId};
 
-use crate::{DisplayInfo, Host, MemoryInfo, SystemInfo};
+use crate::{BenchReport, DisplayInfo, Host, MemoryInfo, SystemInfo, TaskInfo, TaskState};
 
 pub(crate) fn info() -> SystemInfo<'static> {
     SystemInfo {
@@ -46,6 +46,7 @@ pub(crate) struct FakeHost {
     pub(crate) faults: bool,
     pub(crate) keymap: core::cell::Cell<Option<&'static str>>,
     pub(crate) random: Option<u64>,
+    pub(crate) bench: Option<BenchReport>,
 }
 
 impl FakeHost {
@@ -57,6 +58,17 @@ impl FakeHost {
             faults: false,
             keymap: core::cell::Cell::new(Some("us")),
             random: Some(0x0123_4567_89ab_cdef),
+            bench: Some(BenchReport {
+                switch_ns: 412,
+                switch_simd_ns: 530,
+                wake_samples: 200,
+                wake_mean_ns: 12_345,
+                wake_max_ns: 45_678,
+                wake_loaded_mean_ns: 20_000,
+                wake_loaded_max_ns: 99_999,
+                pick_next_ns: 88,
+                tick_ns: 31,
+            }),
         }
     }
 }
@@ -80,6 +92,24 @@ impl Host for FakeHost {
 
     fn random_u64(&self) -> Option<u64> {
         self.random
+    }
+
+    fn tasks(&self, visit: &mut dyn FnMut(&TaskInfo<'_>)) {
+        let task = |id, name, state, cpu_ns, simd| TaskInfo {
+            id,
+            name,
+            state,
+            cpu_ns,
+            switches: 7,
+            simd,
+        };
+        visit(&task(0, "idle", TaskState::Ready, 250_000_000, false));
+        visit(&task(1, "shell", TaskState::Running, 12_345_678_901, false));
+        visit(&task(2, "worker", TaskState::Sleeping, 1_000_000, true));
+    }
+
+    fn bench(&self) -> Option<BenchReport> {
+        self.bench
     }
 
     fn keymap(&self) -> Option<&'static str> {

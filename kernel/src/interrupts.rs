@@ -1,13 +1,13 @@
 //! Exceções e interrupções do lado do núcleo: relatório de falha, tique do timer
 //! e a fila de entrada que a IRQ enche e o laço do shell esvazia.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rustos_hal::{BootInfo, Cpu, Fault, FaultKind, Handlers, Irq};
 use rustos_sync::ByteRing;
 
 use crate::memory::Memory;
-use crate::{console, platform};
+use crate::{console, platform, task};
 
 /// De onde veio uma IRQ, na visão do núcleo; o `platform` traduz o número.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,8 +35,18 @@ pub enum FaultTest {
 static HANDLERS: Handlers = Handlers {
     fault: on_fault,
     irq: on_irq,
+    preempt: task::preempt,
 };
+/// Período do tique de boot, antes de o escalonador ligar; depois dele não há tique periódico.
+const TICK_NS: u64 = 1_000_000_000 / platform::TIMER_HZ as u64;
+/// Prazo do timer quando nada o exige: longe, como o `start` do `CNTV` o deixa.
+const PARKED_NS: u64 = 3_600_000_000_000;
+/// Interrupções do timer desde o boot.
 static TICKS: AtomicU64 = AtomicU64::new(0);
+static NEXT_TICK_NS: AtomicU64 = AtomicU64::new(0);
+/// O prazo que está no timer de um tiro agora.
+static ARMED_NS: AtomicU64 = AtomicU64::new(u64::MAX);
+static IN_IRQ: AtomicBool = AtomicBool::new(false);
 static BREAKPOINTS: AtomicU64 = AtomicU64::new(0);
 /// Produtor: só `on_irq`. Consumidor: só `pop_input`, no laço do shell.
 static INPUT: ByteRing<256> = ByteRing::new();
@@ -46,6 +56,9 @@ static INPUT: ByteRing<256> = ByteRing::new();
 pub fn init(boot: &impl BootInfo, memory: &mut Memory) -> bool {
     match platform::init_interrupts(boot, memory, &HANDLERS) {
         Ok(()) => {
+            let first = platform::now_ns().unwrap_or(0) + TICK_NS;
+            NEXT_TICK_NS.store(first, Ordering::Relaxed);
+            arm(first);
             platform::cpu().restore_interrupts(true);
             true
         }
@@ -56,6 +69,50 @@ pub fn init(boot: &impl BootInfo, memory: &mut Memory) -> bool {
     }
 }
 
+fn arm(deadline_ns: u64) {
+    ARMED_NS.store(deadline_ns, Ordering::Relaxed);
+    platform::arm_timer(deadline_ns);
+}
+
+/// Adianta o timer de um tiro se `deadline_ns` vem antes do prazo armado.
+/// Chamar com a interrupção mascarada.
+pub fn arm_no_later_than(deadline_ns: u64) {
+    if deadline_ns < ARMED_NS.load(Ordering::Relaxed) {
+        arm(deadline_ns);
+    }
+}
+
+/// Se a CPU está dentro de um handler de IRQ.
+pub fn in_irq() -> bool {
+    IN_IRQ.load(Ordering::Relaxed)
+}
+
+/// IRQ do timer. Antes do escalonador, o tique periódico do autoteste. Depois, só o
+/// que ele pede: o fim da fatia da corrente ou o próximo acordar; sem nenhum dos
+/// dois o timer fica longe e a CPU ociosa não acorda por ele. A troca vem no fim da IRQ.
+fn on_timer() {
+    let now = platform::now_ns().unwrap_or(0);
+    TICKS.fetch_add(1, Ordering::Relaxed);
+    if task::is_ready() {
+        match task::timer_irq(now) {
+            Some(at) => arm(at),
+            None => arm(now + PARKED_NS),
+        }
+        return;
+    }
+    let tick_due = NEXT_TICK_NS.load(Ordering::Relaxed);
+    NEXT_TICK_NS.store(next_tick(tick_due, now), Ordering::Relaxed);
+    arm(NEXT_TICK_NS.load(Ordering::Relaxed));
+}
+
+/// O tique seguinte, um período depois do anterior sem acumular atraso; se a IRQ
+/// veio tão tarde que esse já passou, um período depois de agora.
+const fn next_tick(previous: u64, now: u64) -> u64 {
+    let next = previous + TICK_NS;
+    if next > now { next } else { now + TICK_NS }
+}
+
+/// Interrupções do timer desde o boot.
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
@@ -68,6 +125,21 @@ pub fn breakpoints() -> u64 {
 pub fn pop_input() -> Option<u8> {
     // SAFETY: o laço do shell é o único consumidor da fila (contrato desta função).
     unsafe { INPUT.pop() }
+}
+
+/// Próximo byte digitado; dorme (a tarefa, não a CPU) até a IRQ trazer um.
+/// Só o laço do shell chama: ele é o único consumidor da fila.
+pub fn read_input_blocking() -> u8 {
+    let cpu = platform::cpu();
+    loop {
+        let were_enabled = cpu.save_and_disable_interrupts();
+        if let Some(byte) = pop_input() {
+            cpu.restore_interrupts(were_enabled);
+            return byte;
+        }
+        task::wait_for_input();
+        cpu.restore_interrupts(were_enabled);
+    }
 }
 
 fn push_input(byte: u8) {
@@ -90,24 +162,25 @@ fn on_fault(fault: &Fault) {
 }
 
 fn on_irq(irq: Irq) {
+    IN_IRQ.store(true, Ordering::Relaxed);
     match platform::irq_source(irq) {
-        IrqSource::Timer => {
-            TICKS.fetch_add(1, Ordering::Relaxed);
-            platform::timer_tick();
-        }
+        IrqSource::Timer => on_timer(),
         IrqSource::Serial => {
             platform::serial_irq_done();
             while let Some(byte) = console::read_byte() {
                 push_input(byte);
             }
+            task::notify_input();
         }
         IrqSource::Keyboard => {
             while let Some(event) = platform::keyboard_event() {
                 console::key_event(event, push_input);
             }
+            task::notify_input();
         }
         IrqSource::Spurious | IrqSource::Unknown => {}
     }
+    IN_IRQ.store(false, Ordering::Relaxed);
 }
 
 struct Described(FaultKind);

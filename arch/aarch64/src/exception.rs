@@ -1,5 +1,6 @@
 //! Tabela de vetores do EL1 e o despacho de exceções e IRQs para `hal::Handlers`.
-//! O Limine entrega em EL1t; as exceções do kernel entram pelo grupo SP0 e rodam em `SP_EL1`.
+//! O kernel roda em EL1h: a IRQ salva o quadro na pilha da própria tarefa, onde ele
+//! sobrevive à troca de contexto. Falha síncrona e SError passam para a pilha de falhas.
 
 use core::arch::{asm, global_asm};
 use core::ptr;
@@ -29,10 +30,20 @@ static HANDLERS: AtomicPtr<Handlers> = AtomicPtr::new(ptr::null_mut());
 // Cada entrada guarda x0, x1 e o índice (0–15) e salta para o corpo comum. As
 // quatro entradas de um grupo: síncrona, IRQ, FIQ, SError; os grupos: EL1 com
 // SP0, EL1 com SPx, EL0 AArch64, EL0 AArch32. Cada entrada ocupa 0x80 bytes.
+// `vector_fault` (síncrona e SError de EL1h) empilha em `SP_EL0`, a pilha de falhas.
 global_asm!(
     r#"
     .macro vector_entry index
     .balign 0x80
+    sub sp, sp, #{frame}
+    stp x0, x1, [sp]
+    mov x1, #\index
+    b rustos_exception_common
+    .endm
+
+    .macro vector_fault index
+    .balign 0x80
+    msr spsel, #0
     sub sp, sp, #{frame}
     stp x0, x1, [sp]
     mov x1, #\index
@@ -47,10 +58,10 @@ rustos_vectors:
     vector_entry 1
     vector_entry 2
     vector_entry 3
-    vector_entry 4
+    vector_fault 4
     vector_entry 5
     vector_entry 6
-    vector_entry 7
+    vector_fault 7
     vector_entry 8
     vector_entry 9
     vector_entry 10
@@ -111,14 +122,14 @@ rustos_exception_common:
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InstallError {
-    /// O kernel já roda em `SP_EL1` (EL1h): não há pilha separada a configurar.
-    StackSelectIsEl1,
+    /// O kernel ainda roda em `SP_EL0` (EL1t): `call_on_stack` passa para EL1h.
+    NotOnEl1h,
 }
 
-/// Instala os vetores e a pilha de exceção e registra os handlers.
+/// Instala os vetores e a pilha de falhas e registra os handlers.
 /// # Safety
-/// Em EL1 com interrupções mascaradas. `stack_top` é o fim, alinhado a 16
-/// bytes, de uma pilha mapeada que só as exceções usam.
+/// Em EL1h com interrupções mascaradas. `stack_top` é o fim, alinhado a 16
+/// bytes, de uma pilha mapeada que só as falhas usam (fica em `SP_EL0`).
 pub unsafe fn install(
     handlers: &'static Handlers,
     stack_top: VirtAddr,
@@ -126,17 +137,17 @@ pub unsafe fn install(
     let selected: u64;
     // SAFETY: leitura de registrador de estado em EL1, sem efeito colateral.
     unsafe { asm!("mrs {}, spsel", out(reg) selected, options(nomem, nostack, preserves_flags)) };
-    if selected & 1 != 0 {
-        return Err(InstallError::StackSelectIsEl1);
+    if selected & 1 == 0 {
+        return Err(InstallError::NotOnEl1h);
     }
     HANDLERS.store(ptr::from_ref(handlers).cast_mut(), Ordering::Release);
-    // SAFETY: do EL1 só se escreve `SP_EL1` com ele selecionado; sem acesso à pilha
-    // entre as trocas, e com `SPSel` voltando a 0 o `sp` do kernel é o de antes.
+    // SAFETY: `SP_EL0` só se escreve com `SPSel` em 0; sem acesso à pilha entre as
+    // trocas, e com `SPSel` voltando a 1 o `sp` do kernel é o de antes.
     unsafe {
         asm!(
-            "msr spsel, #1",
-            "mov sp, {top}",
             "msr spsel, #0",
+            "mov sp, {top}",
+            "msr spsel, #1",
             top = in(reg) stack_top.as_u64(),
             options(nomem, nostack, preserves_flags),
         );
@@ -202,6 +213,7 @@ extern "C" fn dispatch(frame: &mut Frame, index: u64) {
             let intid = gic_cpu::acknowledge();
             (handlers.irq)(Irq(intid));
             gic_cpu::end_of_interrupt(intid);
+            (handlers.preempt)();
         }
         0 | 3 => {
             let syndrome = read_esr();

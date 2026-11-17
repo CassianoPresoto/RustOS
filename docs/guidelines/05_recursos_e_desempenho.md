@@ -13,8 +13,8 @@
   alocador global.
 - **Nada de alocação, `format!` ou laço sem limite no caminho quente** (interrupção,
   escalonador, syscall). Formatação é só para o console.
-- **Nada de ponto flutuante no kernel.** Os alvos são soft-float de propósito: o
-  kernel não salva registrador de FP/SIMD na troca de contexto.
+- **Nada de ponto flutuante no kernel.** Os alvos são soft-float de propósito: só a
+  tarefa criada com `simd: true` salva e restaura FPU/SIMD na troca de contexto.
 - **Metadado por recurso tem custo escrito:** quem cria estrutura por frame, por
   tarefa ou por página diz no SDD 07 quantos bytes ela custa por unidade.
 - **Otimização entra com número:** o PR traz o comando, o antes e o depois

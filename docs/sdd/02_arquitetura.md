@@ -8,7 +8,7 @@
 | Anel | Pasta | O que tem | `unsafe` |
 | --- | --- | --- | --- |
 | **Portas** | `core/hal` | Traits e tipos de fronteira: `BootInfo`, `Console`, `ByteSource`, `Cpu`, `RegisterBus`, `PageMapper`, `FrameSource`, `PageFormat`, `TableMemory`, `MmuControl`, `HardwareEntropy`, `FramebufferInfo`, `PhysAddr`, `VirtAddr`, `MemoryRegion` | proibido |
-| **Centro** | `core/mm`, `core/crypto`, `core/sched`, `core/gfx`, `core/term`, `core/shell` | Política pura: alocadores de frames (buddy, cache por CPU) e do heap, leitura do mapa de memória, janela de endereços, fila de execução, rodízio; ChaCha20, BLAKE2b e o gerador de números aleatórios; desenho de pixels e a fonte própria; emulador de terminal VT/xterm; shell embutido | proibido |
+| **Centro** | `core/mm`, `core/crypto`, `core/sched`, `core/gfx`, `core/term`, `core/shell` | Política pura: alocadores de frames (buddy, cache por CPU) e do heap, leitura do mapa de memória, janela de endereços, fila de execução, rodízio (o estado das tarefas e a troca moram no `kernel/` e no `arch/`); ChaCha20, BLAKE2b e o gerador de números aleatórios; desenho de pixels e a fonte própria; emulador de terminal VT/xterm; shell embutido | proibido |
 | **Suporte** | `lib/sync` | Primitivas sem domínio (`SpinLock`) que precisam de `unsafe` para existir | permitido |
 | **Adaptadores** | `arch/*`, `boot/*`, `drivers/*` | Implementam as portas para uma ISA, um bootloader ou um dispositivo | permitido em `arch/` e `boot/`; proibido em `drivers/` |
 | **Raiz de composição** | `kernel/` | Entrada, pânico, console global, e a escolha de qual adaptador atende cada porta | permitido |
@@ -47,6 +47,7 @@ os métodos da porta são seguros. Exemplos:
 | `platform::active_space`, `platform::new_space` | `active_space(offset)`, `new_space(frames, offset)` | as tabelas ativas e os frames novos são acessíveis pelo mapa direto; só se ativa o espaço novo com código, pilha e mapa direto nele |
 | `LimineBoot` | `LimineBoot::from_bootloader()` | a memória das respostas do Limine ainda não foi reaproveitada |
 | `X86Cpu`, `Aarch64Cpu` | `::new()` | o código roda em ring 0 / EL1+ |
+| `Context::new` (as duas ISAs) | `Context::new(top, entry, arg, on_return)` | `top` é o fim, alinhado a 16, de uma pilha mapeada só da thread; `switch` só roda com IRQ mascarada e nenhum lock preso |
 | `DirectMap` (`kernel/src/heap.rs`) | `DirectMap::new(offset)` | todo endereço físico que a porta `FrameMemory` recebe é de frame do kernel e está no mapa direto, em `físico + offset` |
 
 Depois disso, `Uart16550<PortBus>` e `Pl011<MmioBus>` são drivers sem uma linha
@@ -111,9 +112,20 @@ lock e detalhes no [SDD 12](12_memoria_fisica_e_heap.md).
 
 `ICC_IAR1_EL1` (`arch/aarch64/src/gic_cpu.rs`) dentro da entrada de vetor
 (`exception.rs`) → `hal::Handlers::irq(Irq(intid))` → `interrupts::on_irq` →
-`platform::irq_source` traduz o INTID em `IrqSource` → o tratador da fonte (tique
-do timer, ou drenar a UART para a fila de entrada) → `ICC_EOIR1_EL1`. O núcleo
-dorme em `wfi` quando a fila está vazia. Detalhes em [SDD 04](04_boot.md).
+`platform::irq_source` traduz o INTID em `IrqSource` → o tratador da fonte (o
+timer, ou drenar a UART para a fila de entrada) → `ICC_EOIR1_EL1` →
+`hal::Handlers::preempt`. A ociosa dorme em `wfi` quando ninguém está pronto.
+Detalhes em [SDD 04](04_boot.md).
+
+## O caminho de uma troca de contexto
+
+Timer dispara → `interrupts::on_timer` (`task::timer_irq`: acordar quem dorme, `tick`
+da política, rearmar o disparo que ela pede) → o `arch/` dá o EOI e chama
+`Handlers::preempt` (`task::preempt`) na pilha da tarefa interrompida → se o `Composite`
+de `core/sched` pede troca (`needs_resched`), `schedule()` pede a ele a próxima tarefa
+(`pick_next`) → `platform::fpu_save`/`fpu_restore` (só tarefa marcada SIMD) →
+`arch/<isa>::switch` troca os registradores callee-saved e o `sp`. O mesmo `schedule()`
+atende `yield_now`, `sleep_until`, `park` e `exit`. Desenho completo no [SDD 15](15_tarefas_e_preempcao.md).
 
 ## Portas de entrada que virão
 

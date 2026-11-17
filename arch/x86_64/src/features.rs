@@ -1,12 +1,17 @@
 //! Recursos da CPU que o CPUID anuncia, decodificados das folhas cruas. Puro.
-//! RDRAND é `CPUID.1:ECX[30]` e RDSEED é `CPUID.7.0:EBX[18]` (`cpufeatures.h` do Linux).
+//! RDRAND é `CPUID.1:ECX[30]` e RDSEED é `CPUID.7.0:EBX[18]`; TSC-deadline é
+//! `CPUID.1:ECX[24]` e XSAVE é `CPUID.1:ECX[26]` (`cpufeatures.h` do Linux).
 
 /// Bits de `CPUID.1:ECX`, `CPUID.1:EDX`, `CPUID.7.0:EBX`, `CPUID.7.0:ECX` e
 /// `CPUID.80000001H:EDX` (SDM vol. 2A, instrução CPUID).
 const L1_ECX_X2APIC: u32 = 1 << 21;
+const L1_ECX_TSC_DEADLINE: u32 = 1 << 24;
+const L1_ECX_XSAVE: u32 = 1 << 26;
 const L1_ECX_RDRAND: u32 = 1 << 30;
 const L1_EDX_APIC: u32 = 1 << 9;
 const L1_EDX_TSC: u32 = 1 << 4;
+const L1_EDX_FXSR: u32 = 1 << 24;
+const L1_EDX_SSE: u32 = 1 << 25;
 const L7_EBX_SMEP: u32 = 1 << 7;
 const L7_EBX_RDSEED: u32 = 1 << 18;
 const L7_EBX_SMAP: u32 = 1 << 20;
@@ -44,6 +49,10 @@ pub struct Features {
     pub apic: bool,
     pub x2apic: bool,
     pub tsc: bool,
+    pub tsc_deadline: bool,
+    pub fxsr: bool,
+    pub sse: bool,
+    pub xsave: bool,
     pub nx: bool,
     pub smep: bool,
     pub smap: bool,
@@ -64,6 +73,10 @@ impl Features {
             apic: leaves.leaf1_edx & L1_EDX_APIC != 0,
             x2apic: leaves.leaf1_ecx & L1_ECX_X2APIC != 0,
             tsc: leaves.leaf1_edx & L1_EDX_TSC != 0,
+            tsc_deadline: leaves.leaf1_ecx & L1_ECX_TSC_DEADLINE != 0,
+            fxsr: leaves.leaf1_edx & L1_EDX_FXSR != 0,
+            sse: leaves.leaf1_edx & L1_EDX_SSE != 0,
+            xsave: leaves.leaf1_ecx & L1_ECX_XSAVE != 0,
             nx: leaves.ext_edx & EXT_EDX_NX != 0,
             smep: ebx & L7_EBX_SMEP != 0,
             smap: ebx & L7_EBX_SMAP != 0,
@@ -93,8 +106,8 @@ mod tests {
     fn decodes_each_bit_from_its_leaf() {
         let features = Features::from_leaves(Leaves {
             max_basic: 0x16,
-            leaf1_ecx: 1 << 21 | 1 << 30,
-            leaf1_edx: 1 << 9 | 1 << 4,
+            leaf1_ecx: 1 << 21 | 1 << 24 | 1 << 26 | 1 << 30,
+            leaf1_edx: 1 << 9 | 1 << 4 | 1 << 24 | 1 << 25,
             leaf7_ebx: 1 << 7 | 1 << 20 | 1 << 18,
             leaf7_ecx: 1 << 2,
             ext_edx: 1 << 20,
@@ -105,6 +118,10 @@ mod tests {
                 apic: true,
                 x2apic: true,
                 tsc: true,
+                tsc_deadline: true,
+                fxsr: true,
+                sse: true,
+                xsave: true,
                 nx: true,
                 smep: true,
                 smap: true,

@@ -78,6 +78,7 @@ dependencies = [
  "rustos-gfx",
  "rustos-hal",
  "rustos-mm",
+ "rustos-sched",
  "rustos-shell",
  "rustos-sync",
  "rustos-term",
