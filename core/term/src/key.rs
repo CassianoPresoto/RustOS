@@ -39,6 +39,10 @@ pub enum Key {
     Delete,
     /// Tecla de função F1 a F12; outros números não enviam nada.
     F(u8),
+    /// Shift+Page Up: rola a visão para trás; o terminal a consome, o programa não a vê.
+    ScrollBack,
+    /// Shift+Page Down: rola a visão para a frente; o programa não a vê.
+    ScrollForward,
 }
 
 fn put(out: &mut [u8; 8], bytes: &[u8]) -> usize {
@@ -95,7 +99,7 @@ pub(crate) fn encode(key: Key, application: bool, out: &mut [u8; 8]) -> usize {
         Key::PageDown => tilde(out, 6),
         Key::F(n @ 1..=4) => put(out, &[0x1B, b'O', b'P' + n - 1]),
         Key::F(n @ 5..=12) => tilde(out, [15, 17, 18, 19, 20, 21, 23, 24][usize::from(n - 5)]),
-        Key::F(_) => 0,
+        Key::F(_) | Key::ScrollBack | Key::ScrollForward => 0,
     }
 }
 
@@ -128,6 +132,8 @@ mod tests {
         assert_eq!(bytes(Key::Delete, false), b"\x1b[3~");
         assert_eq!(bytes(Key::PageUp, false), b"\x1b[5~");
         assert_eq!(bytes(Key::PageDown, false), b"\x1b[6~");
+        assert_eq!(bytes(Key::ScrollBack, false), b"");
+        assert_eq!(bytes(Key::ScrollForward, true), b"");
     }
 
     #[test]

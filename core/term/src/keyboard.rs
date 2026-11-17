@@ -147,6 +147,8 @@ impl Keyboard {
             KeyCode::RIGHT => Key::Right,
             KeyCode::HOME => Key::Home,
             KeyCode::END => Key::End,
+            KeyCode::PAGE_UP if self.shift() => Key::ScrollBack,
+            KeyCode::PAGE_DOWN if self.shift() => Key::ScrollForward,
             KeyCode::PAGE_UP => Key::PageUp,
             KeyCode::PAGE_DOWN => Key::PageDown,
             KeyCode::INSERT => Key::Insert,
@@ -402,6 +404,17 @@ mod tests {
         ];
         for (code, key) in expected {
             assert_eq!(tap(&mut kbd, code), [key]);
+        }
+    }
+
+    #[test]
+    fn shift_page_keys_scroll_the_view_and_the_plain_ones_do_not() {
+        for layout in [Layout::Us, Layout::BrAbnt2] {
+            let mut kbd = Keyboard::new(layout);
+            assert_eq!(chord(&mut kbd, &[SHIFT], 0x4B), [Key::ScrollBack]);
+            assert_eq!(chord(&mut kbd, &[SHIFT], 0x4E), [Key::ScrollForward]);
+            assert_eq!(tap(&mut kbd, 0x4B), [Key::PageUp]);
+            assert_eq!(tap(&mut kbd, 0x4E), [Key::PageDown]);
         }
     }
 

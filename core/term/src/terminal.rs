@@ -1,13 +1,15 @@
 //! O emulador: executa o que o parser reconhece sobre a grade de células.
 
 use crate::cell::{Cell, Flags};
+use crate::charset::Charset;
 use crate::dirty::{DirtyRows, MAX_ROWS};
+use crate::history::History;
 use crate::key::{self, Key};
 use crate::palette::nearest_index;
 use crate::parser::{Event, Parser};
+use crate::tabs::{MAX_COLS, TabStops};
 
 const REPLY_CAP: usize = 64;
-const TAB_WIDTH: usize = 8;
 
 const MODE_APP_CURSOR: u8 = 1;
 const MODE_ORIGIN: u8 = 2;
@@ -46,12 +48,32 @@ struct Saved {
     col: usize,
     pen: Pen,
     origin: bool,
+    wrap_pending: bool,
+    sets: [Charset; 2],
+    gl: usize,
+}
+
+impl Saved {
+    const INITIAL: Saved = Saved {
+        row: 0,
+        col: 0,
+        pen: Pen::DEFAULT,
+        origin: false,
+        wrap_pending: false,
+        sets: [Charset::Ascii; 2],
+        gl: 0,
+    };
 }
 
 /// Emulador VT/xterm sobre uma grade de células cuja memória vem de fora.
 #[derive(Debug)]
 pub struct Terminal<'a> {
     cells: &'a mut [Cell],
+    other: &'a mut [Cell],
+    other_ring: usize,
+    alt_active: bool,
+    history: History<'a>,
+    view: usize,
     cols: usize,
     rows: usize,
     ring: usize,
@@ -59,7 +81,10 @@ pub struct Terminal<'a> {
     col: usize,
     wrap_pending: bool,
     pen: Pen,
-    saved: Saved,
+    saved: [Saved; 2],
+    sets: [Charset; 2],
+    gl: usize,
+    tabs: TabStops,
     scroll_top: usize,
     scroll_bottom: usize,
     modes: u8,
@@ -115,11 +140,17 @@ impl<'a> Terminal<'a> {
         cols.saturating_mul(rows)
     }
 
-    /// Cria o terminal sobre `cells`; `None` se a fatia for curta, o tamanho for 0 ou
-    /// `rows` passar de `MAX_ROWS`. A grade começa em branco e toda suja.
+    /// Quantas células o histórico precisa para guardar `lines` linhas de `cols` colunas.
+    pub const fn history_cells_needed(cols: usize, lines: usize) -> usize {
+        cols.saturating_mul(lines)
+    }
+
+    /// Cria o terminal sobre `cells`; `None` se a fatia for curta, o tamanho for 0,
+    /// `rows` passar de `MAX_ROWS` ou `cols` de `MAX_COLS`. A grade começa em branco e
+    /// toda suja, sem tela alternativa nem histórico (`with_alternate`, `with_history`).
     pub fn new(cells: &'a mut [Cell], cols: usize, rows: usize) -> Option<Self> {
         let needed = Self::cells_needed(cols, rows);
-        if cols == 0 || rows == 0 || rows > MAX_ROWS || cells.len() < needed {
+        if cols == 0 || rows == 0 || rows > MAX_ROWS || cols > MAX_COLS || cells.len() < needed {
             return None;
         }
         cells[..needed].fill(Cell::BLANK);
@@ -132,6 +163,11 @@ impl<'a> Terminal<'a> {
         dirty.mark_range(0, rows);
         Some(Terminal {
             cells,
+            other: &mut [],
+            other_ring: 0,
+            alt_active: false,
+            history: History::new(&mut [], cols),
+            view: 0,
             cols,
             rows,
             ring: 0,
@@ -139,12 +175,10 @@ impl<'a> Terminal<'a> {
             col: 0,
             wrap_pending: false,
             pen: Pen::DEFAULT,
-            saved: Saved {
-                row: 0,
-                col: 0,
-                pen: Pen::DEFAULT,
-                origin: false,
-            },
+            saved: [Saved::INITIAL; 2],
+            sets: [Charset::Ascii; 2],
+            gl: 0,
+            tabs: TabStops::every_eight(),
             scroll_top: 0,
             scroll_bottom: rows - 1,
             modes: MODE_AUTOWRAP | MODE_CURSOR_VISIBLE,
@@ -158,6 +192,27 @@ impl<'a> Terminal<'a> {
         })
     }
 
+    /// Entrega a memória da tela alternativa (`?47`, `?1047`, `?1049`): `cells_needed`
+    /// células, que passam a branco. `None` se a fatia for curta. Sem ela esses modos
+    /// não fazem nada.
+    pub fn with_alternate(mut self, alt: &'a mut [Cell]) -> Option<Self> {
+        let needed = Self::cells_needed(self.cols, self.rows);
+        if alt.len() < needed {
+            return None;
+        }
+        alt[..needed].fill(Cell::BLANK);
+        self.other = alt;
+        Some(self)
+    }
+
+    /// Entrega a memória do histórico de rolagem: cabem `len / cols` linhas, e a mais
+    /// antiga sai quando enche. Fatia menor que uma linha deixa o histórico desligado.
+    #[must_use]
+    pub fn with_history(mut self, cells: &'a mut [Cell]) -> Self {
+        self.history = History::new(cells, self.cols);
+        self
+    }
+
     /// Número de colunas.
     pub fn cols(&self) -> usize {
         self.cols
@@ -168,21 +223,74 @@ impl<'a> Terminal<'a> {
         self.rows
     }
 
-    /// A linha lógica `row` (0 é a de cima); fatia vazia se `row` estiver fora da grade.
+    /// A linha `row` da visão (0 é a de cima), com o histórico se a visão estiver
+    /// rolada; fatia vazia se `row` estiver fora da grade.
     pub fn row(&self, row: usize) -> &[Cell] {
-        if row < self.rows {
-            &self.cells[self.row_range(row)]
-        } else {
-            &[]
+        if row >= self.rows {
+            return &[];
         }
+        if self.view > 0 {
+            let index = self.history.len() + row - self.view;
+            return match self.history.get(index) {
+                Some(line) => line,
+                None => &self.cells[self.row_range(index - self.history.len())],
+            };
+        }
+        &self.cells[self.row_range(row)]
     }
 
-    /// Posição e visibilidade do cursor.
+    /// Posição e visibilidade do cursor; some com a visão rolada para trás.
     pub fn cursor(&self) -> Cursor {
         Cursor {
             row: self.row,
             col: self.col,
-            visible: self.modes & MODE_CURSOR_VISIBLE != 0,
+            visible: self.modes & MODE_CURSOR_VISIBLE != 0 && self.view == 0,
+        }
+    }
+
+    /// A tela alternativa está ativa.
+    pub fn is_alternate(&self) -> bool {
+        self.alt_active
+    }
+
+    /// Linhas guardadas no histórico.
+    pub fn history_len(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Quantas linhas o histórico comporta.
+    pub fn history_capacity(&self) -> usize {
+        self.history.capacity()
+    }
+
+    /// Quantas linhas a visão está acima da tela viva; 0 é a tela viva.
+    pub fn view_offset(&self) -> usize {
+        self.view
+    }
+
+    /// Rola a visão `lines` linhas para trás, até o começo do histórico. Na tela
+    /// alternativa não há histórico e nada acontece.
+    pub fn scroll_view_back(&mut self, lines: usize) {
+        if !self.alt_active {
+            self.set_view(self.view.saturating_add(lines));
+        }
+    }
+
+    /// Rola a visão `lines` linhas para a frente, até a tela viva.
+    pub fn scroll_view_forward(&mut self, lines: usize) {
+        self.set_view(self.view.saturating_sub(lines));
+    }
+
+    /// Volta a visão para a tela viva.
+    pub fn snap_to_live(&mut self) {
+        self.set_view(0);
+    }
+
+    fn set_view(&mut self, view: usize) {
+        let view = view.min(self.history.len());
+        if view != self.view {
+            self.view = view;
+            self.dirty.mark_range(0, self.rows);
         }
     }
 
@@ -221,9 +329,12 @@ impl<'a> Terminal<'a> {
     /// Alimenta o terminal. O estado do parser atravessa chamadas: UTF-8 e sequências
     /// podem ser cortados em qualquer byte.
     pub fn write(&mut self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.snap_to_live();
+        }
         let mut i = 0;
         while i < bytes.len() {
-            if self.parser.is_idle() {
+            if self.parser.is_idle() && self.sets[self.gl] == Charset::Ascii {
                 let run = bytes[i..]
                     .iter()
                     .take_while(|&&b| (0x20..0x7F).contains(&b))
@@ -305,10 +416,14 @@ impl<'a> Terminal<'a> {
 
     // ---- texto ----
 
+    fn alt_available(&self) -> bool {
+        self.alt_active || self.other.len() >= Self::cells_needed(self.cols, self.rows)
+    }
+
     fn print_ascii(&mut self, mut text: &[u8]) {
         while let Some(&last) = text.last() {
             if self.wrap_pending {
-                self.wrap_line();
+                self.resolve_wrap();
             }
             let n = text.len().min(self.cols - self.col);
             let start = self.row_range(self.row).start + self.col;
@@ -325,26 +440,20 @@ impl<'a> Terminal<'a> {
             self.last_char = Some(char::from(last));
             text = &text[n..];
             self.col += n;
-            if self.col < self.cols {
-                continue;
-            }
-            self.col = self.cols - 1;
-            if self.autowrap() {
-                self.wrap_pending = true;
-            } else if let Some(&last) = text.last() {
-                let at = self.row_range(self.row).start + self.col;
-                self.cells[at] = self.cell(char::from(last));
-                break;
+            if self.col >= self.cols {
+                self.col = self.cols - 1;
+                self.wrap_pending = self.autowrap();
             }
         }
     }
 
     fn print_char(&mut self, c: char) {
+        let c = self.sets[self.gl].map(c);
         if is_zero_width(c) {
             return;
         }
         if self.wrap_pending {
-            self.wrap_line();
+            self.resolve_wrap();
         }
         let at = self.row_range(self.row).start + self.col;
         self.cells[at] = self.cell(c);
@@ -352,15 +461,17 @@ impl<'a> Terminal<'a> {
         self.last_char = Some(c);
         if self.col + 1 < self.cols {
             self.col += 1;
-        } else if self.autowrap() {
-            self.wrap_pending = true;
+        } else {
+            self.wrap_pending = self.autowrap();
         }
     }
 
-    fn wrap_line(&mut self) {
-        self.col = 0;
+    fn resolve_wrap(&mut self) {
         self.wrap_pending = false;
-        self.index();
+        if self.autowrap() {
+            self.col = 0;
+            self.index();
+        }
     }
 
     // ---- controles ----
@@ -369,7 +480,9 @@ impl<'a> Terminal<'a> {
         match byte {
             0x07 => self.bell = true,
             0x08 => self.set_col(self.col.saturating_sub(1)),
-            0x09 => self.set_col((self.col / TAB_WIDTH + 1) * TAB_WIDTH),
+            0x09 => self.tab_forward(1),
+            0x0E => self.gl = 1,
+            0x0F => self.gl = 0,
             0x0A..=0x0C => {
                 self.wrap_pending = false;
                 self.index();
@@ -380,10 +493,16 @@ impl<'a> Terminal<'a> {
     }
 
     fn esc(&mut self, byte: u8) {
-        if self.parser.intermediate() != 0 {
+        let intermediate = self.parser.intermediate();
+        if intermediate != 0 {
+            let slot = usize::from(intermediate == b')');
+            if matches!(intermediate, b'(' | b')') {
+                self.sets[slot] = Charset::from_final(byte);
+            }
             return;
         }
         match byte {
+            b'H' => self.tabs.set(self.col),
             b'7' => self.save_cursor(),
             b'8' => self.restore_cursor(),
             b'D' => {
@@ -404,13 +523,17 @@ impl<'a> Terminal<'a> {
     }
 
     fn reset(&mut self) {
+        if self.alt_active {
+            self.cells[..self.cols * self.rows].fill(Cell::BLANK);
+            self.switch_screen(false);
+        }
         self.pen = Pen::DEFAULT;
-        self.saved = Saved {
-            row: 0,
-            col: 0,
-            pen: Pen::DEFAULT,
-            origin: false,
-        };
+        self.saved = [Saved::INITIAL; 2];
+        self.sets = [Charset::Ascii; 2];
+        self.gl = 0;
+        self.tabs = TabStops::every_eight();
+        self.history.clear();
+        self.view = 0;
         self.modes = MODE_AUTOWRAP | MODE_CURSOR_VISIBLE;
         self.scroll_top = 0;
         self.scroll_bottom = self.rows - 1;
@@ -425,21 +548,47 @@ impl<'a> Terminal<'a> {
     }
 
     fn save_cursor(&mut self) {
-        self.saved = Saved {
+        self.saved[usize::from(self.alt_active)] = Saved {
             row: self.row,
             col: self.col,
             pen: self.pen,
             origin: self.origin(),
+            wrap_pending: self.wrap_pending,
+            sets: self.sets,
+            gl: self.gl,
         };
     }
 
     fn restore_cursor(&mut self) {
-        let saved = self.saved;
-        self.row = saved.row.min(self.rows - 1);
+        let saved = self.saved[usize::from(self.alt_active)];
+        self.set_mode(MODE_ORIGIN, saved.origin);
+        self.row = if saved.origin {
+            saved.row.clamp(self.scroll_top, self.scroll_bottom)
+        } else {
+            saved.row.min(self.rows - 1)
+        };
         self.col = saved.col.min(self.cols - 1);
         self.pen = saved.pen;
-        self.set_mode(MODE_ORIGIN, saved.origin);
+        self.sets = saved.sets;
+        self.gl = saved.gl;
+        self.wrap_pending = saved.wrap_pending;
+    }
+
+    fn switch_screen(&mut self, alternate: bool) {
+        let ready = !alternate || self.alt_available();
+        if alternate == self.alt_active || !ready {
+            return;
+        }
+        core::mem::swap(&mut self.cells, &mut self.other);
+        core::mem::swap(&mut self.ring, &mut self.other_ring);
+        self.alt_active = alternate;
+        self.view = 0;
+        self.dirty.mark_range(0, self.rows);
+    }
+
+    fn clear_screen(&mut self) {
         self.wrap_pending = false;
+        self.fill_rows(0, self.rows);
     }
 
     // ---- movimento ----
@@ -447,6 +596,26 @@ impl<'a> Terminal<'a> {
     fn set_col(&mut self, col: usize) {
         self.col = col.min(self.cols - 1);
         self.wrap_pending = false;
+    }
+
+    fn tab_forward(&mut self, count: usize) {
+        for _ in 0..count {
+            let next = self.tabs.next(self.col, self.cols - 1);
+            if next == self.col {
+                break;
+            }
+            self.col = next;
+        }
+    }
+
+    fn tab_backward(&mut self, count: usize) {
+        for _ in 0..count {
+            let prev = self.tabs.prev(self.col);
+            if prev == self.col {
+                break;
+            }
+            self.col = prev;
+        }
     }
 
     fn index(&mut self) {
@@ -518,6 +687,12 @@ impl<'a> Terminal<'a> {
 
     fn scroll_up(&mut self, top: usize, bottom: usize, n: usize) {
         let n = n.min(bottom - top + 1);
+        if top == 0 && !self.alt_active {
+            for row in 0..n {
+                let range = self.row_range(row);
+                self.history.push(&self.cells[range]);
+            }
+        }
         if top == 0 && bottom + 1 == self.rows {
             self.ring = (self.ring + n) % self.rows;
             self.fill_rows(self.rows - n, self.rows);
@@ -568,6 +743,14 @@ impl<'a> Terminal<'a> {
     }
 
     fn erase_display(&mut self, mode: u16) {
+        if mode > 3 {
+            return;
+        }
+        if mode == 3 {
+            self.history.clear();
+            self.set_view(0);
+            return;
+        }
         self.wrap_pending = false;
         match mode {
             0 => {
@@ -578,18 +761,19 @@ impl<'a> Terminal<'a> {
                 self.fill_rows(0, self.row);
                 self.fill_cells(self.row, 0, self.col + 1);
             }
-            2 => self.fill_rows(0, self.rows),
-            _ => {}
+            _ => self.fill_rows(0, self.rows),
         }
     }
 
     fn erase_line(&mut self, mode: u16) {
+        if mode > 2 {
+            return;
+        }
         self.wrap_pending = false;
         match mode {
             0 => self.fill_cells(self.row, self.col, self.cols),
             1 => self.fill_cells(self.row, 0, self.col + 1),
-            2 => self.fill_cells(self.row, 0, self.cols),
-            _ => {}
+            _ => self.fill_cells(self.row, 0, self.cols),
         }
     }
 
@@ -664,6 +848,9 @@ impl<'a> Terminal<'a> {
             b'S' => self.scroll_up(self.scroll_top, self.scroll_bottom, n),
             b'T' => self.scroll_down(self.scroll_top, self.scroll_bottom, n),
             b'b' => self.repeat_last(n),
+            b'I' => self.tab_forward(n),
+            b'Z' => self.tab_backward(n),
+            b'g' => self.tab_clear(),
             b'r' => self.set_scroll_region(),
             b's' => self.save_cursor(),
             b'u' => self.restore_cursor(),
@@ -679,6 +866,14 @@ impl<'a> Terminal<'a> {
             for _ in 0..n {
                 self.print_char(c);
             }
+        }
+    }
+
+    fn tab_clear(&mut self) {
+        match self.parser.param(0) {
+            0 => self.tabs.clear(self.col),
+            3 => self.tabs.clear_all(),
+            _ => {}
         }
     }
 
@@ -708,13 +903,28 @@ impl<'a> Terminal<'a> {
                     self.set_mode(MODE_ORIGIN, on);
                     self.goto_home();
                 }
-                7 => {
-                    self.set_mode(MODE_AUTOWRAP, on);
-                    if !on {
-                        self.wrap_pending = false;
+                7 => self.set_mode(MODE_AUTOWRAP, on),
+                25 => self.set_mode(MODE_CURSOR_VISIBLE, on),
+                47 => self.switch_screen(on),
+                1047 => {
+                    if !on && self.alt_active {
+                        self.clear_screen();
+                    }
+                    self.switch_screen(on);
+                }
+                1048 if on => self.save_cursor(),
+                1048 => self.restore_cursor(),
+                1049 if on => {
+                    self.save_cursor();
+                    self.switch_screen(true);
+                    if self.alt_active {
+                        self.clear_screen();
                     }
                 }
-                25 => self.set_mode(MODE_CURSOR_VISIBLE, on),
+                1049 => {
+                    self.switch_screen(false);
+                    self.restore_cursor();
+                }
                 _ => {}
             }
         }

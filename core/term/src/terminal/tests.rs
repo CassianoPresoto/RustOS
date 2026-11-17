@@ -8,6 +8,20 @@ macro_rules! term {
     };
 }
 
+macro_rules! full {
+    ($t:ident, $cols:expr, $rows:expr, $lines:expr) => {
+        let mut main = vec![Cell::BLANK; Terminal::cells_needed($cols, $rows)];
+        let mut alt = vec![Cell::BLANK; Terminal::cells_needed($cols, $rows)];
+        let mut hist = vec![Cell::BLANK; Terminal::history_cells_needed($cols, $lines)];
+        #[allow(unused_mut, reason = "nem todo teste escreve no terminal")]
+        let mut $t = Terminal::new(&mut main, $cols, $rows)
+            .unwrap()
+            .with_alternate(&mut alt)
+            .unwrap()
+            .with_history(&mut hist);
+    };
+}
+
 fn line(t: &Terminal<'_>, row: usize) -> String {
     let text: String = t.row(row).iter().map(|c| c.ch).collect();
     text.trim_end().to_string()
@@ -48,6 +62,8 @@ fn snapshot(t: &Terminal<'_>) -> (Vec<Cell>, Cursor) {
     let cells = (0..t.rows()).flat_map(|r| t.row(r).to_vec()).collect();
     (cells, t.cursor())
 }
+
+mod screens;
 
 // ---- construção ----
 
@@ -312,10 +328,13 @@ fn csi_s_and_u_share_the_save_slot_with_decsc() {
 }
 
 #[test]
-fn decrc_clears_the_pending_wrap() {
+fn decrc_restores_the_wrap_flag_it_saved() {
     term!(t, 3, 3);
     t.write(b"\x1b7abc\x1b8X");
     assert_eq!(screen(&t), ["Xbc", "", ""]);
+    term!(u, 3, 3);
+    u.write(b"abc\x1b7\x1b[3;1H\x1b8Y");
+    assert_eq!(screen(&u), ["abc", "Y", ""]);
 }
 
 #[test]
@@ -1535,7 +1554,7 @@ impl XorShift {
     }
 
     fn byte(&mut self) -> u8 {
-        const HOT: &[u8] = b"\x1b\x1b\x1b[[[]?;;0123456789ABCDEFGHJKLMPSTXZ@`abcdfhlmnrsu\x07\x08\t\n\r\x18\x1a\\ \"!#()";
+        const HOT: &[u8] = b"\x1b\x1b\x1b[[[]?;;0123456789ABCDEFGHIJKLMPSTXZ@`abcdfghlmnrsu\x07\x08\t\n\r\x0e\x0f\x18\x1a\\ \"!#()";
         const UTF8: &[u8] = &[
             0xC3, 0xA9, 0xE2, 0x82, 0xAC, 0xF0, 0x9F, 0x98, 0x80, 0xC2, 0x9B, 0xFF,
         ];
@@ -1555,6 +1574,8 @@ fn check_invariants(t: &Terminal<'_>) {
     assert!(cursor.row < t.rows() && cursor.col < t.cols(), "{cursor:?}");
     assert!(t.scroll_top <= t.scroll_bottom && t.scroll_bottom < t.rows());
     assert!(t.ring < t.rows());
+    assert!(t.view <= t.history.len() && t.history.len() <= t.history.capacity());
+    assert!(!t.alt_active || t.view == 0);
     for row in 0..t.rows() {
         assert_eq!(t.row(row).len(), t.cols());
     }
@@ -1587,32 +1608,115 @@ fn random_bytes_never_panic_or_leave_the_grid() {
     }
 }
 
+const MODES: &[u16] = &[1, 6, 7, 25, 47, 1047, 1048, 1049, 1049, 47];
+
+fn well_formed_csi(rng: &mut XorShift, limit: u64) -> Vec<u8> {
+    const FINALS: &[u8] = b"@ABCDEFGHIJKLMPSTXZ`abdefghlmnrsu";
+    let mut seq = b"\x1b[".to_vec();
+    let private = rng.next().is_multiple_of(4);
+    if private {
+        seq.push(b'?');
+    }
+    for index in 0..rng.next() % 4 {
+        if index > 0 {
+            seq.push(b';');
+        }
+        let value = if private && rng.next().is_multiple_of(2) {
+            u64::from(MODES[usize::try_from(rng.next()).unwrap() % MODES.len()])
+        } else {
+            rng.next() % limit
+        };
+        seq.extend(value.to_string().bytes());
+    }
+    seq.push(FINALS[usize::try_from(rng.next()).unwrap() % FINALS.len()]);
+    if rng.next().is_multiple_of(3) {
+        seq.extend_from_slice(b"x\r\n");
+    }
+    seq
+}
+
 /// Sequências CSI bem formadas com parâmetros perto das bordas da grade: acham o
 /// que o fuzz de bytes soltos raramente monta (região `1;Nr` seguida de `S`/`M`).
 #[test]
 fn random_well_formed_csi_never_panics() {
-    const FINALS: &[u8] = b"@ABCDEFGHJKLMPSTXZ`abdefhlmnrsu";
     for (seed, (cols, rows)) in [(6, (1, 1)), (7, (4, 10)), (8, (80, 24)), (9, (3, 256))] {
         let mut rng = XorShift(0x0123_4567_89AB_CDEF ^ seed);
         term!(t, cols, rows);
         let limit = rows.max(cols) as u64 + 3;
         for _ in 0..40_000 {
-            let mut seq = b"\x1b[".to_vec();
-            if rng.next().is_multiple_of(4) {
-                seq.push(b'?');
-            }
-            for index in 0..rng.next() % 4 {
-                if index > 0 {
-                    seq.push(b';');
-                }
-                seq.extend((rng.next() % limit).to_string().bytes());
-            }
-            seq.push(FINALS[usize::try_from(rng.next()).unwrap() % FINALS.len()]);
-            if rng.next().is_multiple_of(3) {
-                seq.extend_from_slice(b"x\r\n");
-            }
-            t.write(&seq);
+            t.write(&well_formed_csi(&mut rng, limit));
             check_invariants(&t);
+            reply(&mut t);
+        }
+    }
+}
+
+const SCREEN_SEQUENCES: &[&[u8]] = &[
+    b"\x1b[?1049h",
+    b"\x1b[?1049l",
+    b"\x1b[?47h",
+    b"\x1b[?47l",
+    b"\x1b[?1047h",
+    b"\x1b[?1047l",
+    b"\x1b[?1048h",
+    b"\x1b[?1048l",
+    b"\x1b[3J",
+    b"\x1b[2J",
+    b"\x1b(0",
+    b"\x1b(B",
+    b"\x1b)0",
+    b"\x0e",
+    b"\x0f",
+    b"\x1bH",
+    b"\x1b[3g",
+    b"\x1b[g",
+    b"\x1b[5I",
+    b"\x1b[5Z",
+    b"\x1b7",
+    b"\x1b8",
+    b"\n\n\n",
+    b"\x1b[3S",
+    b"qxlkmjtuvwn",
+];
+
+fn poke_view(t: &mut Terminal<'_>, rng: &mut XorShift) {
+    match rng.next() % 6 {
+        0 => t.scroll_view_back((rng.next() % 40) as usize),
+        1 => t.scroll_view_forward((rng.next() % 40) as usize),
+        2 => t.snap_to_live(),
+        _ => {}
+    }
+}
+
+/// Com tela alternativa e histórico: trocas de tela, rolagem da visão e tabulação
+/// misturadas a bytes soltos e a CSI bem formado.
+#[test]
+fn random_screen_switches_scrolling_and_tabs_keep_the_invariants() {
+    for (seed, (cols, rows, lines)) in [
+        (10, (1, 1, 2)),
+        (11, (5, 3, 4)),
+        (12, (80, 24, 50)),
+        (13, (7, 256, 3)),
+        (14, (3, 8, 1)),
+    ] {
+        let mut rng = XorShift(0xFEED_FACE_0BAD_F00D ^ seed);
+        full!(t, cols, rows, lines);
+        let limit = rows.max(cols) as u64 + 3;
+        for step in 0..30_000 {
+            match rng.next() % 4 {
+                0 => t.write(
+                    SCREEN_SEQUENCES[usize::try_from(rng.next()).unwrap() % SCREEN_SEQUENCES.len()],
+                ),
+                1 => t.write(&well_formed_csi(&mut rng, limit)),
+                _ => {
+                    let len = 1 + (rng.next() % 24) as usize;
+                    let chunk: Vec<u8> = (0..len).map(|_| rng.byte()).collect();
+                    t.write(&chunk);
+                }
+            }
+            poke_view(&mut t, &mut rng);
+            check_invariants(&t);
+            assert!(t.take_dirty().all(|row| row < rows), "step {step}");
             reply(&mut t);
         }
     }
@@ -1625,4 +1729,54 @@ fn random_bytes_end_with_the_same_state_whatever_the_chunking() {
     let block = run_chunked(&bytes, &[bytes.len()]);
     assert_eq!(block, run_chunked(&bytes, &[1]));
     assert_eq!(block, run_chunked(&bytes, &[13, 2, 5, 31, 1, 1, 100]));
+}
+
+type FullSnapshot = (Vec<Cell>, Cursor, bool, usize, Vec<Cell>);
+
+fn run_chunked_full(bytes: &[u8], sizes: &[usize]) -> FullSnapshot {
+    full!(t, 17, 9, 12);
+    let mut at = 0;
+    let mut i = 0;
+    while at < bytes.len() {
+        let end = (at + sizes[i % sizes.len()]).min(bytes.len());
+        t.write(&bytes[at..end]);
+        at = end;
+        i += 1;
+    }
+    let (live, cursor) = snapshot(&t);
+    let (alt, history) = (t.is_alternate(), t.history_len());
+    t.scroll_view_back(usize::MAX);
+    let (oldest, _) = snapshot(&t);
+    (live, cursor, alt, history, oldest)
+}
+
+#[test]
+fn random_bytes_with_screens_end_with_the_same_state_whatever_the_chunking() {
+    let mut rng = XorShift(0xABAD_1DEA_5EED_C0DE);
+    let mut bytes = Vec::new();
+    for _ in 0..4_000 {
+        if rng.next().is_multiple_of(8) {
+            bytes.extend_from_slice(
+                SCREEN_SEQUENCES[usize::try_from(rng.next()).unwrap() % SCREEN_SEQUENCES.len()],
+            );
+        }
+        bytes.extend((0..8).map(|_| rng.byte()));
+    }
+    let block = run_chunked_full(&bytes, &[bytes.len()]);
+    assert_eq!(block, run_chunked_full(&bytes, &[1]));
+    assert_eq!(block, run_chunked_full(&bytes, &[13, 2, 5, 31, 1, 1, 100]));
+}
+
+#[test]
+fn the_screens_script_exercises_both_screens_and_the_history() {
+    let mut script = Vec::new();
+    for i in 0..30 {
+        script.extend_from_slice(format!("line {i}\r\n").as_bytes());
+    }
+    script.extend_from_slice(b"\x1b[?1049h\x1b(0lqqk\x1b(B\x1b[3;3Halt\x1b[?1049l\x1b[3J");
+    script.extend_from_slice(b"\x1b[3g\x1bH\t\x1b[Zend");
+    let block = run_chunked_full(&script, &[script.len()]);
+    assert_eq!(block, run_chunked_full(&script, &[1]));
+    assert!(!block.2);
+    assert_eq!(block.3, 0);
 }
