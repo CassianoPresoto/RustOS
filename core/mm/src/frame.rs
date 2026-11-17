@@ -28,6 +28,11 @@ pub enum FrameError {
     MisalignedBase(PhysAddr),
     OutOfRange(PhysAddr),
     DoubleFree(PhysAddr),
+    /// Bloco que não começa num múltiplo do próprio tamanho.
+    MisalignedBlock(PhysAddr),
+    OrderTooLarge(usize),
+    /// Mais frames do que os níveis do bitmap hierárquico alcançam.
+    TooManyFrames(usize),
 }
 
 /// Bit em 1 é frame ocupado. Nasce com tudo ocupado: só vira livre o que o
