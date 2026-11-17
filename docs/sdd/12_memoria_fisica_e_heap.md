@@ -14,7 +14,7 @@ cache por CPU ainda não está ligado (DEBT-0018). Os números medidos estão no
 | --- | --- | --- | --- |
 | `BuddyAllocator` | `buddy.rs` | Blocos de 2^k frames alinhados a 2^k, fusão com o irmão, corrida contígua | 2,03 bits/frame |
 | `FrameCache<CAP>`, `FrameCaches<CPUS, CAP>` | `cache.rs` | Pilha de frames de ordem 0 por CPU, em lote sobre o buddy | `CAP` × 8 bytes por CPU |
-| `KernelHeap<M>` | `heap.rs` | Slabs de uma página por classe de tamanho; o resto em páginas do buddy | 32 bytes por slab, dentro da página |
+| `KernelHeap<M>` | `heap.rs` | Slabs de uma página por classe de tamanho; o resto em páginas do buddy | 64 bytes por slab, dentro da página |
 | `BitTree` | `bittree.rs` | Bitmap hierárquico (interno) | — |
 
 O `BitmapFrameAllocator` saiu do `core/mm` quando o kernel passou ao buddy:
@@ -111,33 +111,41 @@ ponteiro, e o subtrai em `dealloc`. `deallocate` recebe o mesmo `Layout` de
 `allocate`: dele saem a classe e o número de páginas, sem metadado por objeto.
 
 - **Classes: 16, 32, 64, 128, 256, 512 e 1024 bytes** (`MAX_CLASS`). O menor é 16
-  porque o objeto livre guarda o encadeamento e a marca de livre (2 palavras). O objeto
+  porque o mapa de livres do cabeçalho tem 256 bits, um por objeto. O objeto
   fica em offset múltiplo do próprio tamanho, então o alinhamento do `Layout` até a
   classe é de graça; `max(size, align)` escolhe a classe.
-- **Por que não há classe de 2048:** o cabeçalho de 32 bytes no início da página
+- **Por que não há classe de 2048:** o cabeçalho de 64 bytes no início da página
   tira um objeto de 2 KiB, e sobra um por página, 50% de desperdício, o mesmo de pedir
   uma página inteira ao buddy. Classe de 2048 não ganharia nada.
-- **Slab de uma página.** Cabeçalho de 4 palavras: `next` e `prev` (slabs com vaga da
-  classe), `free` (lista de objetos devolvidos) e `state` (usados e `bump`). Objeto
+- **Slab de uma página.** Cabeçalho de 8 palavras: `next` e `prev` (slabs com vaga da
+  classe), `free` (lista de objetos devolvidos), `state` (usados e `bump`) e o mapa de
+  livres, 4 palavras com um bit por objeto. Objeto
   nunca entregue vem do `bump`, sem pré-encadear a página. Slab cheio sai da lista;
   slab vazio volta ao buddy, menos o último da classe (histerese contra ir e voltar).
 - **Pedido acima de 1024 bytes** (ou alinhamento acima dele) vai em
   `ceil(max(size, align) / 4096)` frames contíguos do buddy, alinhados à potência de
   dois que os contém.
-- **Dupla liberação no slab** é pega pela marca de livre na segunda palavra do objeto,
-  que `allocate` zera (as duas palavras: também não vaza ponteiro). Ponteiro que não
+- **Dupla liberação no slab** é pega pelo **bit de livre do objeto**, no mapa do
+  cabeçalho (posição `deslocamento / tamanho`): ligado ao devolver, desligado ao
+  entregar. A marca não vem de dado do usuário: um objeto vivo pode guardar qualquer
+  valor em qualquer palavra, inclusive o que antes servia de marca (a revisão do PR 5
+  achou que um objeto vivo com esse valor no deslocamento 8 dava pânico no `dealloc`).
+  `allocate` zera a palavra do encadeamento (não vaza ponteiro). Ponteiro que não
   cai em objeto entregue (cabeçalho, meio de objeto, objeto nunca entregue) dá
   `BadPointer`.
 - **Zerar ao liberar:** `KernelHeap::new(memory, zero_on_free)` e `set_zero_on_free`.
-  Com a política ligada, o objeto é zerado antes do encadeamento e a página, ao
-  voltar para o buddy, inteira. A política é do heap; frame que sai do buddy para
+  Com a política ligada, o objeto é zerado antes do encadeamento e a página,
+  inteira, **antes** de voltar para o buddy: depois dele outra CPU já poderia tê-la
+  pegado. Antes de zerar, `FrameAllocator::verify_used` confere que o bloco está
+  ocupado no buddy, para a dupla liberação de bloco livre não gravar zero em lugar
+  nenhum (se outro dono já pegou o bloco, o buddy não tem como saber). A política é do heap; frame que sai do buddy para
   processo é zerado por quem o usa (`FrameMemory::zero`). Custo no
   [SDD 07](07_desempenho_e_recursos.md).
 
 | Classe | Objetos por slab | Aproveitamento da página |
 | --- | --- | --- |
-| 16 | 254 | 99,2% |
-| 32 | 127 | 99,2% |
+| 16 | 252 | 98,4% |
+| 32 | 126 | 98,4% |
 | 64 | 63 | 98,4% |
 | 128 | 31 | 96,9% |
 | 256 | 15 | 93,8% |

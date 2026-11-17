@@ -99,12 +99,19 @@ Heap (`KernelHeap`), 1000 objetos vivos, par alocar+liberar, mesma máquina:
 
 | Pedido | Sem zerar | Zerando ao liberar | Custo de zerar |
 | --- | --- | --- | --- |
-| 16 B | 7 ns | 8 ns | +1 ns |
-| 64 B | 7 ns | 9 ns | +2 ns |
-| 1024 B | 7 ns | 16 ns | +9 ns |
-| 4096 B (1 página, direto no buddy) | 19 ns | 46 ns | +27 ns |
-| 8192 B (2 páginas) | 19 ns | 77 ns | +58 ns |
-| 4096 B via cache de 64 frames | 1,6 ns | — | — |
+| 16 B | 8 ns | 10 ns | +1 ns |
+| 64 B | 8 ns | 10 ns | +2 ns |
+| 1024 B | 8 ns | 17 ns | +9 ns |
+| 4096 B (1 página, direto no buddy) | 27 ns | 52 ns | +25 ns |
+| 8192 B (2 páginas) | 28 ns | 85 ns | +57 ns |
+| 4096 B via cache de 64 frames | 1,7 ns | — | — |
+
+Medida de novo depois do mapa de livres por objeto e da conferência `verify_used` antes
+de zerar (3 rodadas de cada lado, mesma máquina, `cargo test --release -p rustos-mm
+bench_heap -- --ignored`): o objeto pequeno foi de 7 para 8 ns (+1 ns do bit de livre) e
+a página ou bloco direto, de 19 para 27 ns sem zerar (+7 ns: a conferência percorre o
+buddy uma vez a mais), e de 46 para 52 ns zerando (+6 ns). É o preço de não zerar memória
+já livre. O cache de 64 frames não muda (a conferência dele é nula).
 
 Zerar custa cerca de 7 ns por KiB com o dado no cache: o piso. Com a memória fria
 (página recém-devolvida por outro núcleo) o custo é o da banda da DRAM, e só vale

@@ -16,15 +16,17 @@ const MIN_CLASS_SHIFT: u32 = 4;
 /// Maior objeto de slab. Acima dele, o pedido vai em páginas inteiras.
 pub const MAX_CLASS: usize = 1024;
 pub const CLASSES: usize = (MAX_CLASS.trailing_zeros() - MIN_CLASS_SHIFT + 1) as usize;
-/// Cabeçalho no início da página: `next`, `prev`, `free`, `state` (4 palavras).
-const HEADER: usize = 32;
+/// Cabeçalho no início da página: `next`, `prev`, `free`, `state` e o mapa de livres.
+const HEADER: usize = 64;
 const NEXT: u64 = 0;
 const PREV: u64 = 8;
 const FREE: u64 = 16;
 const STATE: u64 = 24;
+/// Um bit por objeto, na posição `deslocamento / tamanho`: ligado é "na lista livre".
+/// 4 palavras cobrem os 256 objetos possíveis da menor classe.
+const FREE_MAP: u64 = 32;
+const FREE_MAP_WORDS: u64 = 4;
 const NIL: u64 = u64::MAX;
-/// Marca de objeto livre na segunda palavra; a primeira é o encadeamento.
-const FREE_MAGIC: u64 = 0x5275_7374_4f53_4652;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeapError {
@@ -123,12 +125,16 @@ impl<M: FrameMemory> KernelHeap<M> {
             if !ptr.is_aligned(PAGE) {
                 return Err(HeapError::BadPointer(ptr));
             }
+            let first = PhysFrame::containing(ptr);
             frames
-                .deallocate_contiguous(PhysFrame::containing(ptr), pages)
+                .verify_used(first, pages)
                 .map_err(HeapError::Frames)?;
             if self.zero_on_free {
                 self.memory.zero(ptr, pages * PAGE_BYTES);
             }
+            frames
+                .deallocate_contiguous(first, pages)
+                .map_err(HeapError::Frames)?;
             self.pages -= pages;
             return Ok(());
         };
@@ -156,8 +162,10 @@ impl<M: FrameMemory> KernelHeap<M> {
         };
         self.write(page + FREE, next_free);
         self.write(page + STATE, (used + 1) | (bump << 32));
+        if free != NIL {
+            self.set_free_bit(page, object - page, size, false);
+        }
         self.write(object, 0);
-        self.write(object + 8, 0);
         if next_free == NIL && bump + size > PAGE {
             self.unlink(class, page);
         }
@@ -179,11 +187,14 @@ impl<M: FrameMemory> KernelHeap<M> {
         }
         let state = self.read(page + STATE);
         let (used, bump) = (state & 0xffff_ffff, state >> 32);
-        if used == 0 || offset >= bump {
+        if offset >= bump {
             return Err(HeapError::BadPointer(ptr));
         }
-        if self.read(object + 8) == FREE_MAGIC {
+        if self.free_bit(page, offset, size) {
             return Err(HeapError::DoubleFree(ptr));
+        }
+        if used == 0 {
+            return Err(HeapError::BadPointer(ptr));
         }
         let free = self.read(page + FREE);
         let was_full = free == NIL && bump + size > PAGE;
@@ -191,7 +202,7 @@ impl<M: FrameMemory> KernelHeap<M> {
             self.memory.zero(ptr, size_bytes);
         }
         self.write(object + NEXT, free);
-        self.write(object + 8, FREE_MAGIC);
+        self.set_free_bit(page, offset, size, true);
         self.write(page + FREE, object);
         self.write(page + STATE, (used - 1) | (bump << 32));
         if was_full {
@@ -205,6 +216,9 @@ impl<M: FrameMemory> KernelHeap<M> {
 
     fn new_slab<F: FrameAllocator>(&mut self, class: usize, frames: &mut F) -> Option<u64> {
         let page = frames.allocate_contiguous(1)?.start().as_u64();
+        for word in 0..FREE_MAP_WORDS {
+            self.write(page + FREE_MAP + word * 8, 0);
+        }
         self.write(page + FREE, NIL);
         self.write(page + STATE, (first_offset(class_size(class)) as u64) << 32);
         self.link(class, page);
@@ -220,12 +234,14 @@ impl<M: FrameMemory> KernelHeap<M> {
     ) -> Result<(), HeapError> {
         self.unlink(class, page);
         let first = PhysAddr::new(page);
-        frames
-            .deallocate_contiguous(PhysFrame::containing(first), 1)
-            .map_err(HeapError::Frames)?;
+        let frame = PhysFrame::containing(first);
+        frames.verify_used(frame, 1).map_err(HeapError::Frames)?;
         if self.zero_on_free {
             self.memory.zero(first, PAGE_BYTES);
         }
+        frames
+            .deallocate_contiguous(frame, 1)
+            .map_err(HeapError::Frames)?;
         self.pages -= 1;
         Ok(())
     }
@@ -250,6 +266,20 @@ impl<M: FrameMemory> KernelHeap<M> {
         if next != NIL {
             self.write(next + PREV, prev);
         }
+    }
+
+    fn free_bit(&self, page: u64, offset: u64, size: u64) -> bool {
+        let index = offset / size;
+        let word = self.read(page + FREE_MAP + index / 64 * 8);
+        word >> (index % 64) & 1 == 1
+    }
+
+    fn set_free_bit(&mut self, page: u64, offset: u64, size: u64, on: bool) {
+        let index = offset / size;
+        let addr = page + FREE_MAP + index / 64 * 8;
+        let mask = 1 << (index % 64);
+        let word = self.read(addr);
+        self.write(addr, if on { word | mask } else { word & !mask });
     }
 
     fn read(&self, addr: u64) -> u64 {
@@ -313,7 +343,7 @@ mod tests {
     #[test]
     fn slab_holds_the_objects_that_fit_after_the_header() {
         let per_slab: Vec<_> = (0..CLASSES).map(objects_per_slab).collect();
-        assert_eq!(per_slab, [254, 127, 63, 31, 15, 7, 3]);
+        assert_eq!(per_slab, [252, 126, 63, 31, 15, 7, 3]);
     }
 
     #[test]
@@ -431,14 +461,68 @@ mod tests {
     }
 
     #[test]
-    fn a_live_object_that_holds_the_free_marker_is_not_a_double_free_after_reuse() {
+    fn a_live_object_may_hold_any_value_in_any_word_and_is_freed_once() {
         let (mut rig, mut heap) = (rig(), heap(false));
         let mut frames = buddy(&mut rig);
-        let layout = layout(32, 8);
+        for size in [16, 32, 64, 1024] {
+            let layout = layout(size, 8);
+            let a = heap.allocate(layout, &mut frames).unwrap();
+            for word in 0..size as u64 / 8 {
+                for value in [0x5275_7374_4f53_4652, u64::MAX, 0] {
+                    heap.memory
+                        .write_u64(PhysAddr::new(a.as_u64() + word * 8), value);
+                }
+            }
+            let a8 = PhysAddr::new(a.as_u64() + 8);
+            heap.memory.write_u64(a8, 0x5275_7374_4f53_4652);
+            assert_eq!(heap.deallocate(a, layout, &mut frames), Ok(()), "{size}");
+            assert_eq!(
+                heap.deallocate(a, layout, &mut frames),
+                Err(HeapError::DoubleFree(a)),
+                "{size}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_double_free_is_caught_even_when_the_dead_object_was_scribbled_on() {
+        let (mut rig, mut heap) = (rig(), heap(false));
+        let mut frames = buddy(&mut rig);
+        let layout = layout(64, 8);
         let a = heap.allocate(layout, &mut frames).unwrap();
+        let _keep = heap.allocate(layout, &mut frames).unwrap();
         assert_eq!(heap.deallocate(a, layout, &mut frames), Ok(()));
-        let again = heap.allocate(layout, &mut frames).unwrap();
-        assert_eq!(heap.deallocate(again, layout, &mut frames), Ok(()));
+        for value in [0, 7, 0x5275_7374_4f53_4652] {
+            heap.memory.write_u64(PhysAddr::new(a.as_u64() + 8), value);
+            assert_eq!(
+                heap.deallocate(a, layout, &mut frames),
+                Err(HeapError::DoubleFree(a))
+            );
+        }
+        assert_eq!(heap.allocate(layout, &mut frames), Some(a));
+        assert_eq!(heap.deallocate(a, layout, &mut frames), Ok(()));
+    }
+
+    #[test]
+    fn the_free_bit_follows_every_object_of_a_full_slab() {
+        let (mut rig, mut heap) = (rig(), heap(false));
+        let mut frames = buddy(&mut rig);
+        let layout = layout(16, 8);
+        let all: Vec<_> = (0..objects_per_slab(0))
+            .map(|_| heap.allocate(layout, &mut frames).unwrap())
+            .collect();
+        assert_eq!(heap.pages_held(), 1);
+        for &ptr in all.iter().step_by(2) {
+            assert_eq!(heap.deallocate(ptr, layout, &mut frames), Ok(()));
+        }
+        for (n, &ptr) in all.iter().enumerate() {
+            let expected = if n % 2 == 0 {
+                Err(HeapError::DoubleFree(ptr))
+            } else {
+                Ok(())
+            };
+            assert_eq!(heap.deallocate(ptr, layout, &mut frames), expected, "{n}");
+        }
     }
 
     #[test]
@@ -596,5 +680,93 @@ mod tests {
         }
         assert!(heap.pages_held() <= CLASSES);
         assert_eq!(free - frames.free_frames(), heap.pages_held());
+    }
+
+    /// Registra a ordem em que a memória é zerada e o buddy recebe o frame de volta.
+    type Log = std::rc::Rc<core::cell::RefCell<Vec<&'static str>>>;
+
+    struct LogMemory(FakeMemory, Log);
+
+    impl FrameMemory for LogMemory {
+        fn read_u64(&self, addr: PhysAddr) -> u64 {
+            self.0.read_u64(addr)
+        }
+
+        fn write_u64(&mut self, addr: PhysAddr, value: u64) {
+            self.0.write_u64(addr, value);
+        }
+
+        fn zero(&mut self, addr: PhysAddr, len: usize) {
+            self.1.borrow_mut().push("zero");
+            self.0.zero(addr, len);
+        }
+    }
+
+    struct LogFrames<'a>(BuddyAllocator<'a>, Log);
+
+    impl FrameAllocator for LogFrames<'_> {
+        fn allocate_contiguous(&mut self, count: usize) -> Option<crate::frame::PhysFrame> {
+            self.0.allocate_contiguous(count)
+        }
+
+        fn deallocate_contiguous(
+            &mut self,
+            first: crate::frame::PhysFrame,
+            count: usize,
+        ) -> Result<(), FrameError> {
+            self.1.borrow_mut().push("free");
+            self.0.deallocate_contiguous(first, count)
+        }
+
+        fn verify_used(
+            &self,
+            first: crate::frame::PhysFrame,
+            count: usize,
+        ) -> Result<(), FrameError> {
+            self.0.verify_used(first, count)
+        }
+    }
+
+    #[test]
+    fn pages_are_wiped_before_the_buddy_gets_them_back_and_never_after_a_double_free() {
+        let mut rig = rig();
+        let log = Log::default();
+        let mut frames = LogFrames(buddy(&mut rig), log.clone());
+        let mut heap = KernelHeap::new(LogMemory(FakeMemory::new(BASE, REGION), log.clone()), true);
+        let big = layout(8192, 8);
+        let block = heap.allocate(big, &mut frames).unwrap();
+        assert_eq!(heap.deallocate(block, big, &mut frames), Ok(()));
+        assert_eq!(*log.borrow(), ["zero", "free"]);
+
+        log.borrow_mut().clear();
+        heap.memory.write_u64(block, 0xfeed);
+        assert_eq!(
+            heap.deallocate(block, big, &mut frames),
+            Err(HeapError::Frames(FrameError::DoubleFree(block)))
+        );
+        assert_eq!(
+            (log.borrow().len(), heap.memory.read_u64(block)),
+            (0, 0xfeed)
+        );
+
+        let small = layout(16, 8);
+        let object = heap.allocate(small, &mut frames).unwrap();
+        log.borrow_mut().clear();
+        assert_eq!(heap.deallocate(object, small, &mut frames), Ok(()));
+        let slab_released = log.borrow().iter().position(|&event| event == "free");
+        assert_eq!(slab_released, None, "o slab de reserva fica");
+        let other = layout(16, 8);
+        let (a, b) = (
+            heap.allocate(other, &mut frames).unwrap(),
+            heap.allocate(layout(1024, 8), &mut frames).unwrap(),
+        );
+        log.borrow_mut().clear();
+        assert_eq!(heap.deallocate(b, layout(1024, 8), &mut frames), Ok(()));
+        assert_eq!(heap.deallocate(a, other, &mut frames), Ok(()));
+        let events = log.borrow().clone();
+        let last_free = events.iter().rposition(|&e| e == "free");
+        if let Some(free) = last_free {
+            assert_eq!(events[free - 1], "zero", "{events:?}");
+        }
     }
 }

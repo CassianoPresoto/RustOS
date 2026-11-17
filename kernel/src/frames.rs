@@ -73,4 +73,8 @@ impl FrameAllocator for Frames {
     fn deallocate_contiguous(&mut self, first: PhysFrame, count: usize) -> Result<(), FrameError> {
         Self::with(|allocator| allocator.deallocate_contiguous(first, count))
     }
+
+    fn verify_used(&self, first: PhysFrame, count: usize) -> Result<(), FrameError> {
+        Self::with(|allocator| allocator.verify_used(first, count))
+    }
 }

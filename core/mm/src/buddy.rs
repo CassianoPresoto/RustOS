@@ -13,6 +13,9 @@ const ORDERS: usize = MAX_ORDER + 1;
 pub trait FrameAllocator {
     fn allocate_contiguous(&mut self, count: usize) -> Option<PhysFrame>;
     fn deallocate_contiguous(&mut self, first: PhysFrame, count: usize) -> Result<(), FrameError>;
+    /// Confere, sem mudar nada, que `deallocate_contiguous(first, count)` aceitaria a
+    /// corrida: quem vai zerar os frames chama antes, para não zerar memória livre.
+    fn verify_used(&self, first: PhysFrame, count: usize) -> Result<(), FrameError>;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -147,6 +150,14 @@ impl<'a> BuddyAllocator<'a> {
         first: PhysFrame,
         count: usize,
     ) -> Result<(), FrameError> {
+        self.verify_used(first, count)?;
+        let start = self.number_of(first.start(), count.max(1))?;
+        self.insert_range(start, start + count);
+        Ok(())
+    }
+
+    /// Todo frame da corrida está rastreado e ocupado (nenhum livre, nem dentro de bloco maior).
+    pub fn verify_used(&self, first: PhysFrame, count: usize) -> Result<(), FrameError> {
         let start = self.number_of(first.start(), count.max(1))?;
         let end = start + count;
         let mut frame = start;
@@ -157,7 +168,6 @@ impl<'a> BuddyAllocator<'a> {
             }
             frame += 1 << order;
         }
-        self.insert_range(start, end);
         Ok(())
     }
 
@@ -372,6 +382,10 @@ impl FrameAllocator for BuddyAllocator<'_> {
     fn deallocate_contiguous(&mut self, first: PhysFrame, count: usize) -> Result<(), FrameError> {
         BuddyAllocator::deallocate_contiguous(self, first, count)
     }
+
+    fn verify_used(&self, first: PhysFrame, count: usize) -> Result<(), FrameError> {
+        BuddyAllocator::verify_used(self, first, count)
+    }
 }
 
 #[cfg(test)]
@@ -554,6 +568,29 @@ mod tests {
             Err(FrameError::DoubleFree(at(5).start()))
         );
         assert_eq!(buddy.free_frames(), 64);
+    }
+
+    #[test]
+    fn verify_used_answers_like_the_free_would_without_changing_anything() {
+        let mut storage = Vec::new();
+        let mut buddy = released(&mut storage, 16, 16);
+        let run = buddy.allocate_contiguous(5).unwrap();
+        assert_eq!(buddy.verify_used(run, 5), Ok(()));
+        assert_eq!(buddy.free_frames(), 11);
+        assert_eq!(
+            buddy.verify_used(run, 8),
+            Err(FrameError::DoubleFree(run.start()))
+        );
+        assert_eq!(
+            buddy.verify_used(at(8), 1),
+            Err(FrameError::OutOfRange(at(8).start()))
+        );
+        assert_eq!(buddy.deallocate_contiguous(run, 5), Ok(()));
+        assert_eq!(
+            buddy.verify_used(run, 5),
+            Err(FrameError::DoubleFree(run.start()))
+        );
+        assert_eq!(buddy.free_frames(), 16);
     }
 
     #[test]

@@ -150,6 +150,14 @@ impl<const CAP: usize, A: FrameAllocator> FrameAllocator for Cached<'_, CAP, A> 
             self.backing.deallocate_contiguous(first, count)
         }
     }
+
+    fn verify_used(&self, first: PhysFrame, count: usize) -> Result<(), FrameError> {
+        if count == 1 {
+            Ok(())
+        } else {
+            self.backing.verify_used(first, count)
+        }
+    }
 }
 
 impl<const CAP: usize, A: FrameAllocator> FrameSource for Cached<'_, CAP, A> {
@@ -183,6 +191,10 @@ mod tests {
         ) -> Result<(), FrameError> {
             self.calls += 1;
             self.buddy.deallocate_contiguous(first, count)
+        }
+
+        fn verify_used(&self, first: PhysFrame, count: usize) -> Result<(), FrameError> {
+            self.buddy.verify_used(first, count)
         }
     }
 
