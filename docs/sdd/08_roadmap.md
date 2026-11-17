@@ -25,9 +25,9 @@ modelo de ameaça e o porquê de cada mecanismo estão no [SDD 09](09_seguranca.
 | **3 — Tarefas, SMP e escalonador** | Troca de contexto, threads do kernel, fila por CPU, escalonador atrás de trait, idle sem tique | Latência de troca medida em N núcleos |
 | **4 — Processos e isolamento** | Anel 3/EL0, syscall, carregador ELF, VFS em memória (initramfs, tmpfs), espaço de endereçamento por processo, handles com direitos, mitigações de CPU | Syscall nula medida; processo que toca o kernel morre sem derrubar nada |
 | **5 — ABI Linux e primeiros aplicativos** | Syscalls Linux traduzidas, credenciais Linux, musl estático, BusyBox | BusyBox roda sem recompilar e é medido contra o Linux |
-| **6 — Armazenamento persistente** | PCI Express, virtio-blk, NVMe, AHCI, page cache, sistema de arquivos da raiz com escrita, permissões em disco, ACPI/DTB | Benchmark de E/S ao lado do Linux |
+| **6 — Armazenamento persistente** | PCI Express, IOMMU, virtio-blk, NVMe, AHCI, page cache, sistema de arquivos da raiz com escrita, permissões em disco, ACPI/DTB | Benchmark de E/S ao lado do Linux |
 | **7 — Usuários e sessões** | Contas e grupos, login, Argon2id, elevação de privilégio por capacidade, auditoria | Dois usuários sem acesso aos arquivos um do outro |
-| **8 — Instalação** | Imagem live de pendrive, teclado e mouse USB (xHCI), IOMMU, instalador em modo texto, GPT, partição EFI, entrada de boot UEFI | Instalar num disco vazio da QEMU e subir dele sem a mídia live |
+| **8 — Instalação** | Imagem live de pendrive, teclado e mouse USB (xHCI), instalador em modo texto, GPT, partição EFI, entrada de boot UEFI | Instalar num disco vazio da QEMU e subir dele sem a mídia live |
 | **9 — Gerência de recursos e energia** | Grupos de recursos (CPU, memória, processos, E/S), limites por processo, falta de memória, contabilidade, idle states | Grupo limitado respeita o limite sob carga |
 | **10 — Rede** | virtio-net, pilha TCP/IP própria, sockets da ABI Linux, DNS, filtro de pacotes | Vazão e latência TCP ao lado do Linux |
 | **11 — Interface gráfica** | Compositor, janelas, mouse, virtio-gpu 2D, aplicativos gráficos | Um aplicativo gráfico com tempo de quadro medido |
@@ -55,7 +55,8 @@ quando houver medição para decidir.
   mascara interrupção (DEBT-0003).
 - **Segurança:**
   - ligar WP, SMEP, SMAP e UMIP no x86_64 e PAN no aarch64;
-  - relatar na serial o que a CPU tem e o que ficou ligado;
+  - relatar na serial o que a CPU tem e o que ficou ligado, na linha
+    `[rustos] protections:`, que o `make smoke` passa a exigir;
   - página de guarda em toda pilha de exceção.
 
 ### 2 — Memória virtual e heap
@@ -118,6 +119,8 @@ quando houver medição para decidir.
   - PCI Express pelo ECAM, lido do ACPI (MCFG) ou do DTB;
   - endereços de dispositivo também por ACPI e DTB, no lugar de endereço fixo
     (DEBT-0002).
+- **IOMMU (VT-d, SMMU):** liga antes do primeiro driver com DMA rodar em metal.
+  Um dispositivo só faz DMA na memória que o driver entregou a ele.
 - **Disco:** virtio-blk na QEMU, NVMe para SSD e AHCI para SATA. A QEMU emula os
   três, e o mesmo driver roda em metal.
 - **Camada de arquivos:** page cache sobre o VFS da fase 4.
@@ -165,8 +168,7 @@ e o sistema vai para o disco.
    - tudo com verificação de leitura depois de escrever.
 5. **Entrada em PC real:** teclado e mouse USB por xHCI e HID, porque PS/2 quase
    não existe mais em máquina nova.
-6. **IOMMU (VT-d, SMMU):** liga antes de NVMe e xHCI rodarem em metal: um
-   dispositivo só faz DMA na memória que o driver entregou a ele.
+   O xHCI também faz DMA, sob o IOMMU da fase 6.
 
 Decisão aberta desta fase (caso 6 do `AGENTS.md`):
 

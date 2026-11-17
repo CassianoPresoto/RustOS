@@ -33,8 +33,8 @@
     | grep -iE '(struct|enum) \w*(secret|password|seed|token)'
   ```
 
-- **Proteção ligada:** o `make smoke` falha sem a linha `[rustos] protections:`,
-  a partir da fase 1.
+- **Proteção ligada:** a partir da fase 1, o `make smoke` passa a exigir a linha
+  `[rustos] protections:` (SDD 08, fase 1).
 - **Segurança desligada por desempenho:** em review. O PR que desliga um mecanismo
   traz o número de antes e depois, como no guidelines 05.
 - **W^X:** o teste dentro do kernel da fase 2, quando ele existir, confere as

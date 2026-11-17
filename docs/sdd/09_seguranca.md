@@ -23,7 +23,7 @@
 | Binário Linux com bug explorável | Estouro de buffer, ROP | ASLR, NX, CET/PAC/BTI, filtro de syscalls | 4, 12 |
 | Entrada de rede | Pacote malformado, inundação | Pilha TCP/IP em Rust seguro, validação na fronteira, filtro que nega por padrão | 10 |
 | Disco ou imagem malformada | Sistema de arquivos corrompido de propósito | Parser em `core/` sem `unsafe`, com fuzz | 6 |
-| Dispositivo malicioso (DMA) | Escrever na memória do kernel por DMA | IOMMU (VT-d, SMMU) | 8, antes de NVMe e xHCI rodarem em metal |
+| Dispositivo malicioso (DMA) | Escrever na memória do kernel por DMA | IOMMU (VT-d, SMMU) | 6, antes do primeiro driver com DMA em metal |
 | Canal lateral de CPU | Meltdown, Spectre, MDS | Mitigações por CPU, relatadas no boot | 4 |
 | Acesso físico, firmware adulterado | Trocar kernel ou bootloader; ler o disco de uma máquina roubada | Boot verificado (Secure Boot, TPM); criptografia de disco no instalador | 8, 12, decisões abertas |
 
@@ -42,7 +42,7 @@ código.
 | WP (x86_64) | Kernel escrever em página só de leitura | 1 | Desprezível (não lido nesta rodada) | Intel SDM vol. 3 (não lido nesta rodada) |
 | SMEP, SMAP (x86_64); PAN (aarch64) | Kernel executar (SMEP) ou ler e escrever (SMAP, PAN) página de usuário por engano | 1 | Desprezível (não lido nesta rodada) | Intel SDM vol. 3, Arm ARM (não lidos nesta rodada) |
 | UMIP (x86_64) | `sgdt`/`sidt` em modo usuário vazando endereço do kernel | 1 | Desprezível (não lido nesta rodada) | Intel SDM vol. 3 (não lido nesta rodada) |
-| Pilhas de exceção separadas (IST no x86_64, `SP_EL1` no aarch64) | Exceção com a pilha corrompida derrubar a máquina sem relatório | 1 | 1 página por pilha, mais 1 de guarda | [Linux kernel stacks](https://docs.kernel.org/arch/x86/kernel-stacks.html) (IST); a página de guarda abaixo de cada pilha é desenho do RustOS (`map_stack`) |
+| Pilhas de exceção separadas | Exceção com a pilha corrompida derrubar a máquina sem relatório | 1 | 1 página por pilha, mais 1 de guarda | x86_64: IST, em [Linux kernel stacks](https://docs.kernel.org/arch/x86/kernel-stacks.html). aarch64: o kernel roda em EL1t, com `SP_EL0`, e a exceção troca para `SP_EL1`, que aponta para uma pilha só de exceção (desenho do RustOS; Arm ARM não lido nesta rodada). A página de guarda abaixo de cada pilha é desenho do RustOS, a criar na fase 1 |
 | PXN/UXN nas tabelas próprias (aarch64) | Kernel executar página de usuário; usuário executar página do kernel | 2 | Desprezível (não lido nesta rodada) | Arm ARM (não lido nesta rodada) |
 | W^X no kernel, NX em dado | Injetar e executar código no kernel | 2 | A medir: pode exigir quebrar página grande e custar TLB | [kernel self-protection](https://docs.kernel.org/security/self-protection.html) |
 | Aleatório do kernel: semente de RDSEED (x86_64) ou RNDR (aarch64), gerador ChaCha20 | Previsibilidade de endereço, chave e canário | 2 | A medir | [RFC 8439](https://www.rfc-editor.org/rfc/rfc8439.html) (ChaCha20); RDSEED e RNDR não lidos nesta rodada. CPU sem os dois (RNDR é ARMv8.5) precisa de outra semente: decisão da fase 2 |
@@ -57,7 +57,7 @@ código.
 | Credenciais Linux (uid/gid, capabilities(7)) | Programa Linux esperar o modelo Unix | 5 | — | [capabilities(7)](https://man7.org/linux/man-pages/man7/capabilities.7.html) |
 | Permissões de arquivo em disco (dono, grupo, modo) | Usuário ler arquivo de outro | 6 | A medir | POSIX (não lido nesta rodada) |
 | Argon2id para senha | Quebra de senha vazada por força bruta | 7 | ~64 MiB e t=3 por login no perfil de memória limitada; em máquina com menos RAM, menos memória e mais passadas (seção 4 do RFC) | [RFC 9106](https://www.rfc-editor.org/rfc/rfc9106.html) |
-| IOMMU (VT-d, SMMU) | Dispositivo fazer DMA fora da memória que o driver entregou | 8 | A medir | [Linux x86 IOMMU](https://docs.kernel.org/arch/x86/iommu.html) |
+| IOMMU (VT-d, SMMU) | Dispositivo fazer DMA fora da memória que o driver entregou (inferência: a fonte descreve a tradução de DMA) | 6 | A medir | [Linux x86 IOMMU](https://docs.kernel.org/arch/x86/iommu.html) |
 | Criptografia de disco (opcional no instalador) | Ler o disco fora da máquina | 8 | A medir: custo por bloco de E/S | — (decisão aberta, SDD 08) |
 | Grupos de recursos (CPU, memória, processos, E/S) | Um processo esgotar a máquina | 9 | A medir | [cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html) |
 | CET shadow stack e IBT | ROP e JOP no x86_64 | 12 | — | [Linux shstk](https://docs.kernel.org/arch/x86/shstk.html) |
