@@ -11,6 +11,12 @@ pub fn ticks_to_ns(ticks: u64, hz: u64) -> u64 {
     u64::try_from(ns).unwrap_or(u64::MAX)
 }
 
+/// Ticks de `hz` que `ns` nanossegundos valem; satura em `u64::MAX`.
+pub fn ns_to_ticks(ns: u64, hz: u64) -> u64 {
+    let ticks = u128::from(ns) * u128::from(hz) / NS_PER_SECOND;
+    u64::try_from(ticks).unwrap_or(u64::MAX)
+}
+
 /// Nanossegundos desde `origin`, para um TSC que nunca deve andar para trás.
 pub fn elapsed_ns(now: u64, origin: u64, hz: u64) -> u64 {
     ticks_to_ns(now.saturating_sub(origin), hz)
@@ -35,6 +41,13 @@ mod tests {
     #[test]
     fn saturates_instead_of_wrapping() {
         assert_eq!(ticks_to_ns(u64::MAX, 1), u64::MAX);
+    }
+
+    #[test]
+    fn ns_convert_to_ticks_at_62_5_mhz() {
+        assert_eq!(ns_to_ticks(1_000, 62_500_000), 62);
+        assert_eq!(ns_to_ticks(1_000_000_000, 62_500_000), 62_500_000);
+        assert_eq!(ns_to_ticks(u64::MAX, u64::MAX), u64::MAX);
     }
 
     #[test]

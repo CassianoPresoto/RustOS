@@ -97,13 +97,6 @@ fn per_second(delta: u64, count: u16) -> Option<u64> {
     u64::try_from(hz).ok()
 }
 
-/// Valor inicial do timer periódico do APIC para `hz` interrupções por segundo, dado
-/// o `apic_hz` do contador já dividido; ao menos 1.
-pub fn periodic_count(apic_hz: u64, hz: u32) -> u32 {
-    let count = apic_hz / u64::from(hz.max(1));
-    u32::try_from(count).unwrap_or(u32::MAX).max(1)
-}
-
 #[cfg(test)]
 mod tests {
     use core::cell::{Cell, RefCell};
@@ -210,13 +203,6 @@ mod tests {
         ]
         .into_iter();
         assert_eq!(measure(&pit, 100, 10, || readings.next().unwrap()), None);
-    }
-
-    #[test]
-    fn periodic_count_divides_by_the_tick_rate() {
-        assert_eq!(periodic_count(62_500_000, 100), 625_000);
-        assert_eq!(periodic_count(0, 100), 1);
-        assert_eq!(periodic_count(u64::MAX, 1), u32::MAX);
     }
 
     #[test]

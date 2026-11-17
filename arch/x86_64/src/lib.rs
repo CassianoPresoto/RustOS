@@ -12,13 +12,18 @@ pub mod pic;
 pub mod pit;
 pub mod pte;
 pub mod segments;
+pub mod xstate;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod apic;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+mod context;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod cpu;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod entropy;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub mod fpu;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod mmio;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -35,7 +40,12 @@ mod sysreg;
 mod traps;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub use apic::{ApicAccess, ApicMode, detect as detect_apic, eoi, publish as publish_apic};
+pub use apic::{
+    ApicAccess, ApicMode, TimerMode, arm_oneshot, arm_tsc_deadline, detect as detect_apic, eoi,
+    publish as publish_apic, set_timer_mode,
+};
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub use context::{Context, switch};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use cpu::X86Cpu;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]

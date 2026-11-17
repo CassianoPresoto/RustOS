@@ -24,7 +24,8 @@ pub const APIC_BASE_ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
 const MSR_X2APIC_BASE: u32 = 0x800;
 const SPURIOUS_ENABLE: u32 = 1 << 8;
 const LVT_MASKED: u32 = 1 << 16;
-const LVT_PERIODIC: u32 = 1 << 17;
+/// Modo TSC-deadline: bits 18:17 do LVT em `10b` (`APIC_LVT_TIMER_TSCDEADLINE` do Linux).
+const LVT_TSC_DEADLINE: u32 = 2 << 17;
 /// Divisor 16 no `TIMER_DIVIDE`: bits 3, 1 e 0 valem 0b0011 (SDM vol. 3A, figura 11-8).
 const DIVIDE_BY_16: u32 = 0x3;
 pub const TIMER_DIVISOR: u64 = 16;
@@ -84,12 +85,21 @@ impl<R: ApicRegisters> LocalApic<R> {
         u32::MAX - self.regs.read(TIMER_CURRENT)
     }
 
-    /// Timer periódico que dispara `VECTOR_TIMER` a cada `initial` ticks do contador.
-    pub fn start_periodic(&self, initial: u32) {
+    /// Timer de um tiro: divisor 16 e vetor `VECTOR_TIMER`, desarmado até `arm_oneshot`.
+    pub fn set_oneshot(&self) {
         self.regs.write(TIMER_DIVIDE, DIVIDE_BY_16);
+        self.regs.write(LVT_TIMER, u32::from(VECTOR_TIMER));
+    }
+
+    /// Dispara uma vez, `count` ticks do contador (de 1 em diante) depois de agora.
+    pub fn arm_oneshot(&self, count: u32) {
+        self.regs.write(TIMER_INITIAL, count.max(1));
+    }
+
+    /// Timer em modo TSC-deadline, que se arma pelo MSR `IA32_TSC_DEADLINE`.
+    pub fn set_tsc_deadline(&self) {
         self.regs
-            .write(LVT_TIMER, LVT_PERIODIC | u32::from(VECTOR_TIMER));
-        self.regs.write(TIMER_INITIAL, initial);
+            .write(LVT_TIMER, LVT_TSC_DEADLINE | u32::from(VECTOR_TIMER));
     }
 
     pub fn stop_timer(&self) {
@@ -145,17 +155,28 @@ mod tests {
     }
 
     #[test]
-    fn periodic_timer_programs_divide_mode_and_count_in_order() {
+    fn oneshot_selects_mode_zero_and_arms_with_the_count() {
         let regs = FakeRegs::default();
-        LocalApic::new(&regs).start_periodic(625_000);
+        let apic = LocalApic::new(&regs);
+        apic.set_oneshot();
+        apic.arm_oneshot(1000);
+        apic.arm_oneshot(0);
         assert_eq!(
             *regs.writes.borrow(),
             [
                 (TIMER_DIVIDE, 0x3),
-                (LVT_TIMER, LVT_PERIODIC | 0x20),
-                (TIMER_INITIAL, 625_000),
+                (LVT_TIMER, 0x20),
+                (TIMER_INITIAL, 1000),
+                (TIMER_INITIAL, 1),
             ]
         );
+    }
+
+    #[test]
+    fn tsc_deadline_mode_is_bits_18_17_equal_to_two() {
+        let regs = FakeRegs::default();
+        LocalApic::new(&regs).set_tsc_deadline();
+        assert_eq!(*regs.writes.borrow(), [(LVT_TIMER, 0x4_0020)]);
     }
 
     #[test]

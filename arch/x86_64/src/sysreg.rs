@@ -7,8 +7,18 @@ use crate::features::{Features, Leaves};
 
 pub const MSR_EFER: u32 = 0xC000_0080;
 pub const EFER_NXE: u64 = 1 << 11;
+pub const CR0_MP: u64 = 1 << 1;
+pub const CR0_EM: u64 = 1 << 2;
+pub const CR0_TS: u64 = 1 << 3;
+pub const CR0_NE: u64 = 1 << 5;
 pub const CR0_WP: u64 = 1 << 16;
+pub const CR4_TSD: u64 = 1 << 2;
 pub const CR4_PGE: u64 = 1 << 7;
+pub const CR4_OSFXSR: u64 = 1 << 9;
+pub const CR4_OSXMMEXCPT: u64 = 1 << 10;
+pub const CR4_OSXSAVE: u64 = 1 << 18;
+/// `IA32_TSC_DEADLINE` (`msr-index.h` do Linux).
+pub const MSR_TSC_DEADLINE: u32 = 0x6E0;
 pub const CR4_UMIP: u64 = 1 << 11;
 pub const CR4_SMEP: u64 = 1 << 20;
 pub const CR4_SMAP: u64 = 1 << 21;
@@ -69,6 +79,28 @@ pub fn read_cr4() -> u64 {
 pub unsafe fn write_cr4(value: u64) {
     // SAFETY: o contrato da função garante ring 0 e bits suportados.
     unsafe { asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags)) };
+}
+
+/// Escreve `XCR0`, que escolhe os componentes de estado que XSAVE e XRSTOR tratam.
+///
+/// # Safety
+/// Ring 0 com `OSXSAVE` ligado; `value` só tem bits de `CPUID.0DH.0` e o x87.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "xsetbv recebe as duas metades"
+)]
+pub unsafe fn write_xcr0(value: u64) {
+    // SAFETY: o contrato da função garante `OSXSAVE`, ring 0 e um valor válido.
+    unsafe {
+        asm!("xsetbv", in("ecx") 0u32, in("eax") value as u32, in("edx") (value >> 32) as u32,
+             options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// `CPUID.0DH` com a sub-folha pedida: `(eax, ebx, ecx, edx)`.
+pub fn cpuid_xstate(subleaf: u32) -> (u32, u32, u32, u32) {
+    let leaf = __cpuid_count(0xD, subleaf);
+    (leaf.eax, leaf.ebx, leaf.ecx, leaf.edx)
 }
 
 pub fn rdtsc() -> u64 {

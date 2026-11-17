@@ -46,10 +46,13 @@ pub struct Fault {
 
 /// O que o `arch/` chama. `fault` volta só para exceção recuperável; `irq` roda
 /// com interrupções mascaradas, e o `arch/` sinaliza o fim (EOI) depois dele.
+/// `preempt` roda depois do EOI, ainda mascarado, na pilha da tarefa interrompida:
+/// é o ponto onde o núcleo pode trocar de tarefa antes do retorno da interrupção.
 #[derive(Clone, Copy, Debug)]
 pub struct Handlers {
     pub fault: fn(&Fault),
     pub irq: fn(Irq),
+    pub preempt: fn(),
 }
 
 #[cfg(test)]
