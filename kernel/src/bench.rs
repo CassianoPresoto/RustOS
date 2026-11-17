@@ -46,11 +46,20 @@ fn wait_finished(count: u32) {
     }
 }
 
+/// O slot das tarefas só volta ao `spawn` depois de `Exited`; esperar por isso mantém os
+/// slots iguais de uma rodada à outra.
+fn wait_exited(ids: &[TaskId]) {
+    while !ids.iter().all(|&id| task::has_exited(id)) {
+        task::yield_now();
+    }
+}
+
 fn id(slot: &AtomicUsize) -> TaskId {
     TaskId::new(u32::try_from(slot.load(Ordering::Relaxed)).unwrap_or(0))
 }
 
 fn ping(_: usize) {
+    PING.store(task::current().as_u32() as usize, Ordering::Release);
     let pong = id(&PONG);
     let start = platform::cycles();
     for _ in 0..ROUNDS.load(Ordering::Relaxed) {
@@ -65,13 +74,14 @@ fn ping(_: usize) {
 }
 
 fn pong(_: usize) {
+    task::park();
     let ping = id(&PING);
     loop {
-        task::park();
         if STOP.load(Ordering::Acquire) {
             break;
         }
         task::unpark(ping);
+        task::park();
     }
     finish();
 }
@@ -103,8 +113,8 @@ fn ping_pong(rounds: u32, simd: bool) -> Option<u64> {
     let second = task::spawn(spawn("pong", pong)).ok()?;
     PONG.store(second.as_u32() as usize, Ordering::Relaxed);
     let first = task::spawn(spawn("ping", ping)).ok()?;
-    PING.store(first.as_u32() as usize, Ordering::Relaxed);
     wait_finished(2);
+    wait_exited(&[first, second]);
     Some(ELAPSED_NS.load(Ordering::Relaxed) / (2 * u64::from(rounds.max(1))))
 }
 
@@ -120,16 +130,20 @@ pub fn wake_jitter_ns(samples: u32, loaded: bool) -> Option<(u64, u64)> {
     STOP.store(false, Ordering::Relaxed);
     FINISHED.store(0, Ordering::Relaxed);
     MAIN.store(task::current().as_u32() as usize, Ordering::Relaxed);
-    if loaded {
-        task::spawn(Spawn {
-            name: "hog",
-            entry: hog,
-            arg: 0,
-            simd: false,
-            params: SchedParams::fair(0),
-        })
-        .ok()?;
-    }
+    let hog_id = if loaded {
+        Some(
+            task::spawn(Spawn {
+                name: "hog",
+                entry: hog,
+                arg: 0,
+                simd: false,
+                params: SchedParams::fair(0),
+            })
+            .ok()?,
+        )
+    } else {
+        None
+    };
     let (mut sum, mut max) = (0_u64, 0_u64);
     for sample in 0..samples {
         let wait = 500_000 + u64::from(sample) * 7_919 % 1_000 * 1_000;
@@ -140,8 +154,9 @@ pub fn wake_jitter_ns(samples: u32, loaded: bool) -> Option<(u64, u64)> {
         max = max.max(late);
     }
     STOP.store(true, Ordering::Release);
-    if loaded {
+    if let Some(hog_id) = hog_id {
         wait_finished(1);
+        wait_exited(&[hog_id]);
     }
     Some((sum / u64::from(samples.max(1)), max))
 }

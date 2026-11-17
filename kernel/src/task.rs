@@ -188,8 +188,8 @@ impl Scheduler {
 /// Um `Context` por tarefa, fora do lock: a troca os usa com o lock já solto.
 struct Contexts([UnsafeCell<platform::Context>; MAX_TASKS]);
 
-// SAFETY: uma CPU só, e cada acesso roda com a interrupção mascarada, de `schedule`
-// ou de `spawn` numa tarefa ainda sem rodar.
+// SAFETY: uma CPU só. `schedule` lê com a IRQ mascarada; `start` escreve com ela ligada,
+// mas só no slot `New` (ou o da ociosa, antes de `READY`), que nenhuma troca escolhe.
 unsafe impl Sync for Contexts {}
 
 static CONTEXTS: Contexts =
@@ -475,19 +475,22 @@ pub fn park_masked() {
 }
 
 /// Acorda a tarefa de `slot`, ou deixa o aviso para o próximo `park` dela.
+/// Slot que não está vivo (`Free`, `New`, `Exited`) ignora o aviso.
 pub fn unpark(id: TaskId) {
     let cpu = platform::cpu();
     let were_enabled = cpu.save_and_disable_interrupts();
     {
         let mut sched = SCHED.lock();
         let task = &mut sched.tasks[id.as_u32() as usize];
-        if task.state == State::Blocked {
-            task.state = State::Ready;
-            let now = now();
-            sched.policy.wake(id, now);
-            sched.rearm(now);
-        } else {
-            task.permit = true;
+        match task.state {
+            State::Blocked => {
+                task.state = State::Ready;
+                let now = now();
+                sched.policy.wake(id, now);
+                sched.rearm(now);
+            }
+            State::Free | State::New | State::Exited => {}
+            _ => task.permit = true,
         }
     }
     cpu.restore_interrupts(were_enabled);
@@ -524,6 +527,11 @@ pub fn set_current_name(name: &'static str) {
     let mut sched = SCHED.lock();
     let current = sched.current;
     sched.tasks[current].name = name;
+}
+
+/// A tarefa terminou e o slot está livre para a próxima.
+pub fn has_exited(id: TaskId) -> bool {
+    SCHED.lock().tasks[id.as_u32() as usize].state == State::Exited
 }
 
 /// Quantas vezes a tarefa foi escolhida para rodar.
