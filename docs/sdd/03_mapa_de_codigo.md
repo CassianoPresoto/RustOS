@@ -20,10 +20,10 @@
 │       ├── random.rs           # gerador global: semente de hardware ou jitter, reposição
 │       ├── console.rs          # console global e kprintln!: serial e tela
 │       ├── screen.rs           # tela: framebuffer + grade do term + desenho do gfx, tema e barra
-│       ├── interrupts.rs       # IRQ do timer (tique, acordar, prazo do próximo disparo), fila de entrada e o relatório de falha
+│       ├── interrupts.rs       # IRQ do timer (o que o escalonador pede: acordar, fim de fatia, próximo disparo), fila de entrada e o relatório de falha
 │       ├── sync.rs             # IrqLock: lock que mascara IRQ e conta quantos estão presos
 │       ├── system.rs           # porta Host do shell (inclui `tasks` e `bench`) e o laço de entrada
-│       ├── task.rs             # tarefas do kernel: tabela, escalonador global sobre o RoundRobin, spawn/yield/sleep/park/exit e a preempção (SDD 15)
+│       ├── task.rs             # tarefas do kernel: tabela, escalonador global sobre o `Composite` de `core/sched`, spawn/yield/sleep/park/exit e a preempção (SDD 15)
 │       ├── bench.rs            # autoteste de SIMD, latência de troca de contexto e jitter de acordar
 │       ├── fmt.rs              # texto formatado em buffer fixo
 │       ├── panic.rs            # pânico: escreve o que puder e para a CPU
@@ -32,7 +32,7 @@
 │   ├── hal/                    # rustos-hal: as portas (traits) e os tipos de fronteira
 │   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow, WxChecker, PageTables (a caminhada de 4 níveis das duas ISAs), `runs`/`coalesce` (2 MiB ou 4 KiB no mapa direto); porta FrameMemory e trait FrameAllocator (SDD 12, SDD 13)
 │   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) Rng (fast key erasure) e a semente de reserva por jitter
-│   ├── sched/                  # rustos-sched: TaskId, RunQueue, RoundRobin (a política que o kernel usa em `task.rs`)
+│   ├── sched/                  # rustos-sched: trait Scheduler, TaskId, RunQueue; RoundRobin, Eevdf (treap de prazos), Fifo e Composite (teto de 95% para o tempo real); sim, property e bench só em teste (SDD 14; o kernel usa o `Composite`)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16
 │   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células), Cell, Key, Keyboard (layouts)
 │   └── shell/                  # rustos-shell: Shell (edição de linha, histórico, comandos) e a porta Host
@@ -76,8 +76,9 @@
 | `rustos-kernel` | `hal`, `mm`, `crypto`, `sched`, `gfx`, `term`, `shell`, `sync`, `boot-limine`; por ISA, `arch-*` e os drivers (x86_64: `uart16550`, `i8042`; aarch64: `pl011`, `gicv3`) |
 | `xtask` | nada (só `std`) |
 
-O `rustos-sched` é usado pelo `kernel/src/task.rs` desde a fase 3: o rodízio escolhe a
-próxima tarefa e o kernel guarda o estado dela ([SDD 15](15_tarefas_e_preempcao.md)).
+O `rustos-sched` é usado pelo `kernel/src/task.rs` desde a fase 3: o `Composite` (FIFO e
+EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_escalonador.md),
+[SDD 15](15_tarefas_e_preempcao.md)).
 
 ## Onde ponho isto?
 

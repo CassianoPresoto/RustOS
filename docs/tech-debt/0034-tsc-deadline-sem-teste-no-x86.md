@@ -7,7 +7,7 @@ trigger: O primeiro boot do x86_64 com KVM ou em metal
 paid_date:
 ---
 
-# DEBT 0028 — TSC-deadline sem teste no x86_64
+# DEBT 0034 — TSC-deadline sem teste no x86_64
 
 ## O que falta
 

@@ -7,7 +7,7 @@ trigger: O primeiro código de usuário (fase 4), ou a primeira CPU de teste com
 paid_date:
 ---
 
-# DEBT 0029 — SVE, SME e AMX sem estado por tarefa
+# DEBT 0035 — SVE, SME e AMX sem estado por tarefa
 
 ## O que falta
 

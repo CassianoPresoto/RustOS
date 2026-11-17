@@ -34,7 +34,7 @@ bootloader Limine, um binário à parte (DEBT-0001).
 
 ## Estado atual
 
-Fase 2 do [roadmap](08_roadmap.md): o kernel sobe nas duas ISAs pela QEMU, com
+Fase 3 do [roadmap](08_roadmap.md), primeira onda (uma CPU): o kernel sobe nas duas ISAs pela QEMU, com
 tela com fonte própria, terminal VT, shell embutido, exceções, interrupções,
 timer, relógio e teclado PS/2, além de:
 
@@ -42,5 +42,9 @@ timer, relógio e teclado PS/2, além de:
   W^X.
 - **Segurança:** gerador aleatório criptográfico e KASLR.
 - **Boot:** a memória do bootloader volta para o alocador.
+- **Tarefas:** troca de contexto, threads do kernel com preempção, estado de FPU/SIMD por
+  tarefa e o escalonador EEVDF (com FIFO de tempo real) atrás do trait `Scheduler`, com o
+  timer de um tiro e a ociosa sem tique ([SDD 14](14_escalonador.md),
+  [SDD 15](15_tarefas_e_preempcao.md)).
 
-Não há escalonamento ligado nem espaço de usuário.
+Não há SMP nem espaço de usuário.

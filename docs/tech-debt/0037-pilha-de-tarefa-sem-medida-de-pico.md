@@ -7,7 +7,7 @@ trigger: O primeiro estouro de pilha de uma tarefa, ou o primeiro código de usu
 paid_date:
 ---
 
-# DEBT 0031 — Pilha de tarefa de 32 KiB sem medida de pico
+# DEBT 0037 — Pilha de tarefa de 32 KiB sem medida de pico
 
 ## O que falta
 

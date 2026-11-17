@@ -59,8 +59,9 @@ O breakpoint volta; qualquer outra exceção pára a CPU.
 
 O timer do Local APIC é de um tiro: no modo TSC-deadline se `CPUID.1:ECX[24]`
 (`IA32_TSC_DEADLINE`), senão pelo contador, divisor 16, com a contagem `apic_hz × (prazo − agora)`.
-O núcleo o rearma a cada disparo para o menor entre o próximo tique de `TIMER_HZ` e o
-próximo acordar ([SDD 15](15_tarefas_e_preempcao.md)). O relógio (`now_ns`) é o TSC menos a leitura da calibração,
+Até `task::init` o núcleo o rearma a cada disparo para o próximo tique de `TIMER_HZ`
+(o autoteste `timer:`); depois, só para o menor entre o fim da fatia da corrente e o
+próximo acordar, e sem tique com tudo ocioso ([SDD 15](15_tarefas_e_preempcao.md)). O relógio (`now_ns`) é o TSC menos a leitura da calibração,
 convertido por `ticks * 1e9 / tsc_hz` em `u128`, sem ponto flutuante. Sob a QEMU
 `-cpu max` em TCG não há TSC-deadline nem TSC invariante, e o vendor é AMD, o que
 inutiliza o CPUID 0x15 do Linux: por isso a referência é o PIT.

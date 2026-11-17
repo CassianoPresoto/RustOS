@@ -4,9 +4,10 @@
 > o timer preempte uma tarefa em cada ISA, onde fica o estado de FPU/SIMD e que regra
 > de lock a troca exige.
 
-Fase 3 do [roadmap](08_roadmap.md), uma CPU só. A política de escolha é o `RoundRobin`
-de `core/sched`; o orquestrador troca por EEVDF atrás do mesmo ponto (`Scheduler::pick`).
-Tempo e timer estão no [SDD 10](10_interrupcoes.md); pilhas, no [SDD 13](13_memoria_virtual.md).
+Fase 3 do [roadmap](08_roadmap.md), uma CPU só. A política de escolha é o `Composite`
+(FIFO e EEVDF) de `core/sched`, atrás do trait `Scheduler` ([SDD 14](14_escalonador.md)); este
+capítulo é a cola do kernel. Tempo e timer estão no [SDD 10](10_interrupcoes.md); pilhas, no
+[SDD 13](13_memoria_virtual.md).
 
 ## Quem é quem
 
@@ -17,7 +18,7 @@ Tempo e timer estão no [SDD 10](10_interrupcoes.md); pilhas, no [SDD 13](13_mem
 | `xstate` | `arch/x86_64/src/xstate.rs` | Puro, testado no host: `XCR0` a ligar, tamanho da área, estado inicial |
 | `hal::Handlers.preempt` | `core/hal/src/interrupt.rs` | Gancho que o `arch/` chama no fim de toda IRQ, depois do EOI |
 | `task.rs` | `kernel/src/task.rs` | Tabela de tarefas, `spawn`, `yield_now`, `sleep_until`, `park`/`unpark`, `exit`, a troca e a preempção |
-| `interrupts.rs` | `kernel/src/interrupts.rs` | IRQ do timer: tique, acordar e prazo do próximo disparo |
+| `interrupts.rs` | `kernel/src/interrupts.rs` | IRQ do timer: o que o escalonador pede (acordar, fim de fatia) e o rearme do disparo |
 | `bench.rs` | `kernel/src/bench.rs` | Autoteste de SIMD, latência de troca e jitter de acordar |
 | `ps`, `bench` | `core/shell`, porta `Host` (`tasks`, `bench`) | Os dois comandos do shell |
 
@@ -28,7 +29,8 @@ a usa é só o `kernel/`, pelo `platform`. `core/sched` só decide.
 
 Cada slot de `SCHED` (`MAX_TASKS` = 16) guarda: nome, estado, função e argumento, topo
 da pilha, prazo de acordar, um aviso de `unpark` adiantado (permit), tempo de CPU em
-ciclos, quantas vezes foi escolhida, se usa SIMD e a área de FPU. O `Context` fica
+ns, quantas vezes foi escolhida, se usa SIMD e a área de FPU. Os parâmetros de
+escalonamento (`SchedParams`: classe, nice, fatia) vão para a política em `spawn`. O `Context` fica
 fora do lock, em `CONTEXTS`: a troca o usa com o lock já solto. `TaskId` é o número do slot.
 
 | Estado | Quando |
@@ -39,11 +41,14 @@ fora do lock, em `CONTEXTS`: a troca o usa com o lock já solto. `TaskId` é o n
 | `Blocked` | Em `park`, até um `unpark` (ou o aviso já estava lá) |
 | `Sleeping` | Em `sleep_until`, até o prazo |
 
-- **Slot 0 é a ociosa**, fora do rodízio: roda quando nenhuma outra está pronta e faz
-  `hlt`/`wfi` com a interrupção ligada (`enable_interrupts_and_wait`).
+- **Slot 0 é a ociosa**, fora da política (como o `idle` do Linux, que não está em
+  nenhuma classe): roda quando `pick_next` devolve `None` e faz `hlt`/`wfi` com a
+  interrupção ligada (`enable_interrupts_and_wait`).
 - **Slot 1 é o boot.** `task::init` adota a execução do `kmain`, com a pilha de 64 KiB
   que já tinha, como tarefa `init`. Ela roda os autotestes e, em `run_shell`, vira a
-  tarefa `shell`. O shell dorme em `park` quando a fila de entrada está vazia, e a IRQ
+  tarefa `shell`, classe justa, nice 0 e fatia de 200 µs (interativa: o prazo virtual
+  curto a põe na frente de quem só calcula, e `PREEMPT_SHORT` fura a proteção da fatia
+  de uma corrente de 700 µs). O shell dorme em `park` quando a fila de entrada está vazia, e a IRQ
   da serial ou do teclado o acorda (`task::notify_input`).
 - **Cada tarefa nova tem pilha própria:** 8 páginas (32 KiB) e uma de guarda sem
   mapeamento, na janela de pilhas (`memory::map_stack`). Reusar o slot reusa a pilha:
@@ -53,7 +58,7 @@ fora do lock, em `CONTEXTS`: a troca o usa com o lock já solto. `TaskId` é o n
 
 | Item | Bytes |
 | --- | --- |
-| Slot de `SCHED` (`.data`, 16 slots mais a fila do rodízio) | cerca de 120 por tarefa (1 960 no total, x86_64 `release`) |
+| `SCHED` (`.data`: 16 slots, `Composite<4, 16>`) | 3 968 no total nas duas ISAs em `release`, cerca de 250 por tarefa (eram 1 960 com o rodízio); a política pesa 96 por tarefa justa ([SDD 14](14_escalonador.md)) |
 | `Context` | 8 (x86_64: só o `rsp`) e 104 (aarch64: x19–x30 e `sp`) |
 | Pilha mapeada | 32 768 (8 páginas), mais as tabelas de página que faltarem |
 | Área de FPU/SIMD, só da tarefa que usa SIMD | 832 no x86_64 da QEMU (`xsaveopt`, x87 SSE AVX) e 528 no aarch64 |
@@ -62,15 +67,27 @@ O pico de uso da pilha não foi medido: [DEBT-0037](../tech-debt/0037-pilha-de-t
 
 ## O escalonador
 
-`Scheduler` (atrás de um `IrqLock`) tem a tabela e um `RoundRobin<16>`. O `RoundRobin`
-não tira ninguém da fila, então os 15 slots de tarefa entram nela uma vez, quando são
-usados pela primeira vez, e ficam. `Scheduler::pick` chama `tick()` até achar uma tarefa
-`Ready`, no máximo uma volta; tarefa dormindo, bloqueada ou encerrada é pulada. Sem
-nenhuma pronta, a ociosa. A varredura de quem não está pronto é o custo que o rodízio
-tem e a política de prazo não terá ([DEBT-0033](../tech-debt/0033-rodizio-varre-tarefa-que-nao-esta-pronta.md)).
+`Scheduler` (atrás de um `IrqLock`) tem a tabela e um `Composite<4, 16>`: quatro vagas
+de FIFO (tempo real, sem uso no kernel ainda) e 16 de EEVDF. A política só guarda os
+prontos e o corrente, por `TaskId` (o slot); a tabela guarda o resto. O kernel avisa
+cada evento, sempre com o relógio `now_ns`:
 
-`schedule()` é a única função que troca: contabiliza o tempo da que sai, escolhe, solta
-o lock, salva e restaura o estado de SIMD (só de tarefa marcada) e chama `switch`.
+| Evento | Chamada à política |
+| --- | --- |
+| `spawn`, e `init` para o boot | `add(id, params, now)` (a ociosa não entra) |
+| `park`, `sleep_until` | `sleep(id, now)` antes de `schedule` |
+| `unpark`, acordar do timer | `wake(id, now)` |
+| `yield_now` | `yield_current(now)` |
+| `exit` | `remove(id)` |
+| IRQ do timer | `tick(now)` |
+| Fim de toda IRQ, e `schedule()` | `needs_resched()` e `pick_next(now)` |
+
+A política só tem tarefa pronta ou corrente, então não há varredura de quem dorme,
+bloqueia ou saiu, que o rodízio exigia. `MAX_TASKS` é a capacidade da tabela e da política, não o tamanho
+de um anel.
+
+`schedule()` é a única função que troca: contabiliza o tempo da que sai, pede `pick_next`
+(`None` vira a ociosa), rearma o timer, solta o lock, salva e restaura o estado de SIMD (só de tarefa marcada) e chama `switch`.
 O `unpark` com a tarefa ainda não bloqueada deixa um aviso que o próximo `park` consome,
 então "acordar antes de dormir" não perde o acordar (é o que o ping-pong do `bench` usa).
 
@@ -90,11 +107,13 @@ volta com a máscara que tinha, e a tarefa nova liga a interrupção em `task_en
 
 ## Preempção
 
-O tique (e o acordar de quem dorme) pede a troca; ela acontece no fim da IRQ, depois do
-EOI, ainda mascarada, na pilha da tarefa interrompida: `trap_dispatch` (x86_64) e
+Quem decide é a política: `wake`, `add` e `tick` levantam o `needs_resched` dela (fim da
+fatia, acordar de prazo mais curto, `RUN_TO_PARITY`). A troca acontece no fim da IRQ,
+depois do EOI, ainda mascarada, na pilha da tarefa interrompida: `trap_dispatch` (x86_64) e
 `dispatch` (aarch64) chamam `Handlers.preempt` (`task::preempt`), que faz `schedule()` se
-`NEED_RESCHED` está ligado. Quem volta a rodar sai do `switch` dentro do próprio handler,
-retorna pelo mesmo caminho e o quadro da IRQ, que ficou na pilha dela, é desempilhado.
+`needs_resched()` é verdadeiro; o kernel não tem bandeira própria. Quem volta a rodar sai
+do `switch` dentro do próprio handler, retorna pelo mesmo caminho e o quadro da IRQ, que
+ficou na pilha dela, é desempilhado.
 
 ### x86_64
 
@@ -146,12 +165,23 @@ serializa o mapeamento das pilhas por outro `IrqLock` (`SPACE`).
 | Relógio | TSC calibrado pelo PIT (SDD 10) | `CNTVCT_EL0` |
 | Sob TCG | one-shot (o `-cpu max` não anuncia TSC-deadline) | `cntv-cval` |
 
-O timer é sempre de um tiro: `interrupts::on_timer` conta o tique (se `now >= NEXT_TICK_NS`,
-100 Hz), acorda quem dorme com prazo vencido (`task::wake_due`), pede a troca se houve
-um dos dois e rearma para o menor entre o próximo tique e o próximo acordar. `sleep_until`
-adianta o disparo se o prazo vem antes do armado (`arm_no_later_than`). O tique é a
-fatia do rodízio: 10 ms. O tique segue acontecendo com tudo ocioso
-([DEBT-0038](../tech-debt/0038-tique-de-100-hz-com-tudo-ocioso.md)).
+O timer é sempre de um tiro e **não há tique periódico depois de `task::init`**
+(NO_HZ_IDLE e tarefa única sem tique). O disparo pedido é o menor entre o fim da fatia
+da corrente (`next_deadline_ns`, só existe se há alguém esperando) e o próximo acordar
+de quem dorme. Quem o arma:
+
+- `interrupts::on_timer` (`task::timer_irq`): acorda quem venceu, chama `tick(now)` e rearma
+  para o pedido; sem pedido, o prazo vai a uma hora (o `start` do `CNTV` faz o mesmo, e o
+  `CVAL` vencido manteria a IRQ do aarch64 em serviço);
+- `schedule`, `unpark` e `spawn`: `arm_no_later_than` só **adianta** o disparo, e um
+  disparo que sobrou depois de a corrente mudar custa uma IRQ que não faz nada e rearma.
+  Assim o ping-pong do `bench`, que só tem uma tarefa pronta por vez, não escreve no
+  timer a cada troca.
+
+Antes de `task::init` o tique de 100 Hz continua, porque o autoteste `timer:` do boot o
+conta. A linha `idle:` do boot mede a ociosa sem tique: o `main` dorme 50 ms e o número
+de IRQs do timer no intervalo é 2 (a do tique de boot que sobrou armada e a do acordar),
+contra 5 com o tique de 100 Hz.
 
 ## FPU e SIMD
 
@@ -202,6 +232,11 @@ ISAs (`make smoke` sai com erro); `[rustos] task self-test: ok` é linha exigida
 - **Jitter de acordar:** 200 chamadas de `sleep_until` (20 no boot) de 0,5 a 1,5 ms;
   `agora − pedido` depois do retorno, média e máximo, com o resto do sistema parado e com uma
   tarefa ocupando a CPU.
+
+- **Política:** `pick_next` e `tick` do `Composite` com 8 tarefas prontas e um relógio de
+  mentira (`policy_ns`), melhor de 4 rodadas: o custo do código da política no alvo, com o
+  `i128` do EEVDF.
+- **Tique ocioso:** a linha `idle:` (acima).
 
 Os números e a aceleração estão no [SDD 07](07_desempenho_e_recursos.md).
 

@@ -79,7 +79,8 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
 6. `interrupts::init` liga exceções, controlador de interrupção, timer e a IRQ da
    serial ([SDD 10](10_interrupcoes.md)) e destrava as interrupções da CPU no fim.
    Com ela a GDT do Limine sai de uso no x86_64. O timer fica armado para o primeiro
-   tique, de um tiro ([SDD 15](15_tarefas_e_preempcao.md)).
+   tique, de um tiro; o tique periódico acaba quando `task::init` liga o escalonador
+   ([SDD 15](15_tarefas_e_preempcao.md)).
 7. `Memory::reclaim_bootloader` devolve ao buddy as regiões `BootloaderReclaimable`.
 8. `random::init` semeia o gerador ([SDD 09](09_seguranca.md)).
 9. Relatório (com `kernel base:`, `reclaimed:`, `vm:`, `protections:`, `random:` e
@@ -137,9 +138,10 @@ QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB, perfil `dev` (a base e o mapa dir
 [rustos] exception self-test: ok
 [rustos] timer: 100 Hz, 5 ticks in 37 ms ok
 [rustos] fpu: xsaveopt, 832 bytes per task, x87 sse avx
-[rustos] sched: round-robin, 100 Hz slice, 16 tasks max, timer one-shot
-[rustos] task self-test: ok (simd state intact, 5 switches)
-[rustos] switch: 891 ns (1306 ns with simd), wake jitter: mean 1361079 ns, max 2033827 ns (20 samples)
+[rustos] sched: fifo+eevdf, 700 us base slice, 16 tasks max, timer one-shot
+[rustos] idle: 2 timer irqs in 50 ms (tickless)
+[rustos] task self-test: ok (simd state intact, 27 switches)
+[rustos] switch: 1134 ns (1438 with simd), pick_next 730 ns, tick 89 ns, wake: mean 1303751 ns, max 2009743 ns, 20 samples
 [rustos] boot ok
 ```
 
