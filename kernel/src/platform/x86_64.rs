@@ -5,6 +5,7 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+pub use rustos_arch_x86_64::call_on_stack;
 use rustos_arch_x86_64::clock::elapsed_ns;
 use rustos_arch_x86_64::ioapic::{IOAPIC_BASE, IoApic};
 use rustos_arch_x86_64::lapic::{VECTOR_KEYBOARD, VECTOR_SERIAL, VECTOR_SPURIOUS, VECTOR_TIMER};
@@ -30,6 +31,8 @@ pub const ARCH: &str = "x86_64";
 
 pub type PlatformConsole = Uart16550<PortBus>;
 pub type PlatformEntropy = X86Entropy;
+/// Espaço de endereçamento: as tabelas de 4 níveis atrás do `CR3`.
+pub type PlatformSpace = X86PageMapper;
 
 /// Frequência do tique do timer.
 pub const TIMER_HZ: u32 = 100;
@@ -87,6 +90,13 @@ static REPORT: Report = Report(UnsafeCell::new([
     },
 ]));
 
+/// Liga as proteções de hardware da CPU. Primeira coisa depois da memória: o NX tem
+/// de estar no `EFER` antes de as tabelas novas usarem o bit.
+pub fn harden() {
+    // SAFETY: ring 0 no boot, e o kernel não toca memória de usuário.
+    publish_protections(unsafe { enable_protections() });
+}
+
 pub fn cpu() -> X86Cpu {
     // SAFETY: o Limine entrega o kernel em ring 0, e ele nunca sai de lá.
     unsafe { X86Cpu::new() }
@@ -114,8 +124,6 @@ pub fn init_interrupts(
     memory: &mut Memory,
     handlers: &'static Handlers,
 ) -> Result<(), PlatformError> {
-    // SAFETY: ring 0 no boot, e o kernel não toca memória de usuário.
-    publish_protections(unsafe { enable_protections() });
     let features = cpu_features();
     if !features.tsc {
         return Err(PlatformError::MissingFeature("tsc"));
@@ -309,6 +317,7 @@ pub fn trigger(test: FaultTest) -> bool {
             // SAFETY: `READY` só vale depois de `install_traps`.
             unsafe { breakpoint() };
         }
+        FaultTest::WriteText => crate::vm::probe_write_text(),
         FaultTest::PageFault => {
             let guard = ptr::with_exposed_provenance::<u8>(
                 usize::try_from(GUARD_PAGE.load(Ordering::Relaxed)).unwrap_or(0),

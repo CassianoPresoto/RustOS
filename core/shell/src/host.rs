@@ -10,8 +10,9 @@ pub trait Host {
     fn uptime_ns(&self) -> Option<u64>;
     /// Tamanho do terminal em (colunas, linhas); a serial usa (80, 24).
     fn terminal_size(&self) -> (u16, u16);
-    /// Provoca a exceção pedida para testar o caminho de falha. `PageFault` não
-    /// volta; `false` quando a plataforma ainda não sabe provocar.
+    /// Provoca a exceção pedida para testar o caminho de falha. `PageFault` e
+    /// `WriteText` só voltam se a proteção faltar; `false` quando a plataforma
+    /// ainda não sabe provocar.
     fn fault_test(&self, _kind: FaultTest) -> bool {
         false
     }
@@ -34,6 +35,8 @@ pub trait Host {
 pub enum FaultTest {
     Breakpoint,
     PageFault,
+    /// Escrever em `.text`, que a proteção do kernel deve recusar.
+    WriteText,
 }
 
 /// Retrato do sistema no momento da consulta.

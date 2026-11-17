@@ -9,10 +9,12 @@
 .
 ├── kernel/                     # rustos-kernel: raiz de composição, o binário `rustos`
 │   ├── build.rs                # escolhe o linker script da ISA alvo
-│   ├── linker/                 # x86_64.ld, aarch64.ld: metade alta, um segmento por permissão
+│   ├── linker/                 # x86_64.ld, aarch64.ld: metade alta, um segmento por permissão, símbolos de cada seção e PT_DYNAMIC (KASLR)
 │   └── src/
 │       ├── main.rs             # kmain: boot → memória → serial → tela → relatório → boot ok → shell
-│       ├── memory.rs           # Memory::init: buddy, heap e janelas de dispositivos e de pilhas
+│       ├── boot.rs             # BootRecord: o que o Limine entregou, copiado para o heap (BootInfo)
+│       ├── vm.rs               # Vm: tabelas próprias, W^X por seção, mapa direto, conferência e fault text
+│       ├── memory.rs           # Memory::init: buddy e heap; janelas de dispositivos e de pilhas; map_stack; devolução da memória do bootloader
 │       ├── frames.rs           # alocador de frames global (IrqLock) e o handle Frames
 │       ├── heap.rs             # GlobalAlloc sobre KernelHeap, DirectMap (FrameMemory) e o autoteste
 │       ├── random.rs           # gerador global: semente de hardware ou jitter, reposição
@@ -24,7 +26,7 @@
 │       └── platform/           # um módulo por ISA: ARCH, PlatformConsole, cpu(), console()
 ├── core/                       # o centro do hexágono: no_std, forbid(unsafe_code), testado no host
 │   ├── hal/                    # rustos-hal: as portas (traits) e os tipos de fronteira
-│   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow; portas FrameMemory e FrameAllocator (SDD 12)
+│   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow, WxChecker; portas FrameMemory e FrameAllocator (SDD 12, SDD 13)
 │   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) Rng (fast key erasure) e a semente de reserva por jitter
 │   ├── sched/                  # rustos-sched: TaskId, RunQueue, RoundRobin (ainda não ligado ao kernel)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16
@@ -33,7 +35,7 @@
 ├── lib/
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set)
 ├── arch/                       # adaptadores de ISA: o único lugar com asm!
-│   ├── x86_64/                 # X86Cpu, PortBus, X86PageMapper, X86Entropy, GDT/TSS/IDT, APIC, PIT; módulos puros (pte, walk, segments, fault, lapic, ioapic, pit, clock) testados no host
+│   ├── x86_64/                 # X86Cpu, PortBus, X86PageMapper (espaço novo, ativação, troca de pilha), X86Entropy, GDT/TSS/IDT, APIC, PIT; módulos puros (pte, walk, segments, fault, lapic, ioapic, pit, clock) testados no host
 │   └── aarch64/                # Aarch64Cpu, MmioBus, Aarch64PageMapper (TTBR1), Aarch64Entropy; vetores, ICC_*, CNTV e PAN;
 │                               # puros: descriptor, walk, esr, time, intid, features
 ├── boot/
@@ -48,7 +50,7 @@
 ├── .github/workflows/ci.yml    # gates, testes e smoke nas duas ISAs
 ├── Makefile                    # atalhos para cargo e xtask
 ├── rust-toolchain.toml         # Rust estável fixado + alvos bare-metal
-└── .cargo/config.toml          # alias `cargo xtask`, relocation-model=static nos alvos
+└── .cargo/config.toml          # alias `cargo xtask`, relocation-model=pie nos alvos (KASLR)
 ```
 
 ## Quem depende de quem

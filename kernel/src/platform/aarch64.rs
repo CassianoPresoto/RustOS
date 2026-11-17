@@ -3,6 +3,7 @@
 
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
+pub use rustos_arch_aarch64::call_on_stack;
 use rustos_arch_aarch64::intid::{QEMU_VIRT_PL011_INTID, VIRTUAL_TIMER_INTID};
 use rustos_arch_aarch64::{
     Aarch64Cpu, Aarch64Entropy, Aarch64PageMapper, MmioBus, QEMU_VIRT_GICD, QEMU_VIRT_GICR,
@@ -22,6 +23,8 @@ pub const ARCH: &str = "aarch64";
 
 pub type PlatformConsole = Pl011<MmioBus>;
 pub type PlatformEntropy = Aarch64Entropy;
+/// Espaço de endereçamento: as tabelas da metade alta atrás do `TTBR1_EL1`.
+pub type PlatformSpace = Aarch64PageMapper;
 
 /// Frequência do tique do timer.
 pub const TIMER_HZ: u32 = 100;
@@ -41,6 +44,15 @@ static PAN_STATE: AtomicU8 = AtomicU8::new(PAN_UNSUPPORTED);
 const PAN_UNSUPPORTED: u8 = 0;
 const PAN_ON: u8 = 1;
 const PAN_OFF: u8 = 2;
+
+/// Liga as proteções de hardware da CPU, antes das tabelas novas.
+pub fn harden() {
+    if protection::pan_available() {
+        // SAFETY: EL1, e a CPU anuncia `PAN`.
+        let on = unsafe { protection::enable_pan() };
+        PAN_STATE.store(if on { PAN_ON } else { PAN_OFF }, Ordering::Relaxed);
+    }
+}
 
 pub fn cpu() -> Aarch64Cpu {
     // SAFETY: o Limine entrega o kernel em EL1 (ou EL2 com VHE), nunca em EL0.
@@ -98,12 +110,6 @@ pub fn init_interrupts(
     gic.enable_spi(QEMU_VIRT_PL011_INTID, SERIAL_PRIORITY, router_for(affinity))
         .map_err(gic_error)?;
     serial().enable_rx_interrupt();
-
-    if protection::pan_available() {
-        // SAFETY: EL1, e a CPU anuncia `PAN`.
-        let on = unsafe { protection::enable_pan() };
-        PAN_STATE.store(if on { PAN_ON } else { PAN_OFF }, Ordering::Relaxed);
-    }
 
     // SAFETY: EL1, primeira e única vez nesta CPU.
     unsafe { timer::start(TIMER_HZ) }.map_err(|error| match error {
@@ -211,6 +217,10 @@ pub fn protections() -> &'static [Protection] {
 /// Provoca a exceção pedida; `PageFault` lê a página de guarda da pilha de exceção.
 pub fn trigger(test: FaultTest) -> bool {
     match test {
+        FaultTest::WriteText => {
+            crate::vm::probe_write_text();
+            true
+        }
         FaultTest::Breakpoint => {
             exception::breakpoint();
             true

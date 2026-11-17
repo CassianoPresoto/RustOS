@@ -16,6 +16,10 @@ paid_date:
 grande no caminho. Só muda a codificação do descritor. A correção feita numa não
 chega na outra.
 
+A fase 2 acrescentou a folha de 2 MiB e a caminhada de conferência (`walk`) nas duas
+cópias, no mesmo molde: o gatilho abaixo disparou e a dívida continua aberta por decisão
+da fase (a tarefa mandou não pagá-la). Quem mexer na caminhada de novo paga.
+
 ## Por que foi aceito
 
 Promover a caminhada a `core/` é crate novo ou porta nova no `hal`. Com duas ISAs

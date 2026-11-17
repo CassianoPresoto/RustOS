@@ -124,6 +124,7 @@ impl<B: BootInfo> Host for System<'_, B> {
         let kind = match kind {
             FaultTest::Breakpoint => interrupts::FaultTest::Breakpoint,
             FaultTest::PageFault => interrupts::FaultTest::PageFault,
+            FaultTest::WriteText => interrupts::FaultTest::WriteText,
         };
         platform::trigger(kind)
     }

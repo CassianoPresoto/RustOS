@@ -37,5 +37,6 @@
   `[rustos] protections:` (SDD 08, fase 1).
 - **Segurança desligada por desempenho:** em review. O PR que desliga um mecanismo
   traz o número de antes e depois, como no guidelines 05.
-- **W^X:** o teste dentro do kernel da fase 2, quando ele existir, confere as
-  permissões de cada página do kernel.
+- **W^X:** o autoteste do boot percorre as tabelas do kernel e o `make smoke` exige a
+  linha `[rustos] w^x: ok`; `fault text` no shell confere que a CPU recusa escrever
+  em `.text` ([SDD 13](../sdd/13_memoria_virtual.md)).

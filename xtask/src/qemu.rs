@@ -18,8 +18,16 @@ const BOOT_OK: &str = "[rustos] boot ok";
 const PANIC: &str = "[rustos] panic";
 /// Linhas que o kernel imprime quando um autoteste ou o boot falha.
 const FATAL: [&str; 3] = ["[rustos] fault:", "[rustos] interrupts:", "FAILED"];
-/// Linha que o kernel imprime com as proteções de hardware (guidelines 09).
-const PROTECTIONS: &str = "[rustos] protections:";
+/// Linhas que todo boot precisa ter (guidelines 09): as proteções de hardware, o
+/// W^X conferido nas tabelas de página e a memória que o bootloader devolveu.
+const REQUIRED: [(&str, &str); 3] = [
+    ("[rustos] protections:", "a linha de proteções de hardware"),
+    (
+        "[rustos] w^x: ok",
+        "a conferência de W^X das tabelas de página",
+    ),
+    ("[rustos] reclaimed:", "a memória devolvida pelo bootloader"),
+];
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn command(root: &Path, arch: Arch, profile: Profile) -> Result<Command, String> {
@@ -185,12 +193,11 @@ fn wait_for_boot(receiver: &mpsc::Receiver<String>, started: Instant) -> (Outcom
 
 fn report(arch: Arch, outcome: Outcome, log: &str) -> Result<(), String> {
     match outcome {
-        Outcome::Booted(_) if !log.contains(PROTECTIONS) => Err(failure(
-            arch,
-            "boot sem a linha de proteções de hardware (guidelines 09)",
-            log,
-        )),
         Outcome::Booted(elapsed) => {
+            if let Some((_, what)) = REQUIRED.iter().find(|(line, _)| !log.contains(line)) {
+                let reason = format!("boot sem {what} (guidelines 09)");
+                return Err(failure(arch, &reason, log));
+            }
             println!(
                 "xtask: smoke {} ok em {} ms (relógio de parede, firmware incluso)",
                 arch.name(),

@@ -43,7 +43,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
     Command {
         name: "fault",
-        summary: "raise an exception to test the fault path (break | page)",
+        summary: "raise an exception to test the fault path (break | page | text)",
         run: fault,
     },
     Command {
@@ -162,16 +162,24 @@ fn fault(ctx: &mut Ctx<'_>) -> fmt::Result {
     let kind = match ctx.args.first().copied() {
         Some("break") => FaultTest::Breakpoint,
         Some("page") => FaultTest::PageFault,
-        _ => return ctx.out.write_str("usage: fault break|page\r\n"),
+        Some("text") => FaultTest::WriteText,
+        _ => return ctx.out.write_str("usage: fault break|page|text\r\n"),
     };
-    if kind == FaultTest::PageFault {
-        ctx.out.write_str("reading an unmapped page...\r\n")?;
+    match kind {
+        FaultTest::PageFault => ctx.out.write_str("reading an unmapped page...\r\n")?,
+        FaultTest::WriteText => ctx.out.write_str("writing to the kernel text...\r\n")?,
+        FaultTest::Breakpoint => {}
     }
-    if ctx.host.fault_test(kind) {
-        ctx.out
-            .write_str("breakpoint handled, back in the shell\r\n")
-    } else {
-        ctx.out.write_str("fault: not available yet\r\n")
+    if !ctx.host.fault_test(kind) {
+        return ctx.out.write_str("fault: not available yet\r\n");
+    }
+    match kind {
+        FaultTest::Breakpoint => ctx
+            .out
+            .write_str("breakpoint handled, back in the shell\r\n"),
+        FaultTest::PageFault | FaultTest::WriteText => ctx
+            .out
+            .write_str("no fault was raised: the protection is missing\r\n"),
     }
 }
 
@@ -514,6 +522,15 @@ mod tests {
     #[test]
     fn fault_reports_when_the_platform_cannot() {
         assert!(run("fault", &["break"], &FakeHost::new()).contains("not available yet"));
+    }
+
+    #[test]
+    fn fault_text_reports_a_missing_protection_when_it_returns() {
+        let mut host = FakeHost::new();
+        host.faults = true;
+        let output = run("fault", &["text"], &host);
+        assert!(output.contains("writing to the kernel text"));
+        assert!(output.contains("no fault was raised"));
     }
 
     #[test]

@@ -49,6 +49,11 @@ impl Frames {
         Self::with(BuddyAllocator::allocate)
     }
 
+    /// Entrega ao alocador a memória que o kernel já não usa (a do bootloader).
+    pub fn release_range(self, start: PhysAddr, len: u64) {
+        Self::with(|allocator| allocator.release_range(start, len));
+    }
+
     pub fn deallocate(self, frame: PhysFrame) -> Result<(), FrameError> {
         Self::with(|allocator| allocator.deallocate(frame))
     }

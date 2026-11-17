@@ -33,7 +33,8 @@ cargo test --release -p rustos-mm bench -- --ignored --nocapture --test-threads=
 | Teste | Porta falsa |
 | --- | --- |
 | `drivers/uart16550`, `drivers/pl011` | `FakeBus: RegisterBus` que grava cada escrita e simula FIFO cheia |
-| `arch/aarch64/src/walk.rs` | `FakeTables: TableMemory` em `HashMap` e `Frames: FrameSource` em `Vec` |
+| `arch/aarch64/src/walk.rs`, `arch/x86_64/src/walk.rs` | `FakeTables: TableMemory` em `HashMap` e `Frames: FrameSource` em `Vec`; mapeia página de 4 KiB e de 2 MiB e percorre as folhas |
+| `core/mm/src/wx.rs` | Lista de `Mapping` montada à mão: W+X, seção com permissão trocada, alias da imagem no mapa direto, metade baixa |
 | `boot/limine` | Layout das structs contra `limine.h` (`size_of`, `offset_of`), tradução dos tipos de região e do formato do framebuffer |
 | `core/mm/src/heap.rs` | `FakeMemory: FrameMemory`, uma faixa de palavras que derruba o teste em acesso fora dela, desalinhado ou abaixo da base |
 | `core/shell` | `Host` falso e um terminal VT mínimo (`testing.rs`) que confere prompt, linha e cursor depois de cada tecla, nas duas regras de última coluna |
@@ -49,7 +50,9 @@ mora separada do `mmu.rs`.
 `[rustos] boot ok`; falha com pânico (`[rustos] panic`), com a QEMU saindo antes,
 ou em 120 s. O marcador é a constante `BOOT_OK_MARKER` do kernel e `BOOT_OK` do
 xtask: os dois mudam juntos. O kernel só imprime o marcador se os autotestes de
-frame, de heap (`heap self-test`) e de interrupção passarem.
+frame, de heap (`heap self-test`), de W^X (`w^x: ok`) e de interrupção passarem. O de
+W^X percorre as tabelas novas ([SDD 13](13_memoria_virtual.md)); `fault text` no shell
+confere que a CPU recusa a escrita em `.text`.
 
 ## Andar 3b — tela
 

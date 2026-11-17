@@ -21,7 +21,7 @@ modelo de ameaça e o porquê de cada mecanismo estão no [SDD 09](09_seguranca.
 | **0 — Esqueleto** ✅ | Workspace hexagonal, boot pelo Limine em x86_64 e aarch64, alocador de frames, serial, xtask, gates, CI | `make smoke ARCH=all` passa |
 | **0.5 — Tela e terminal** ✅ | Framebuffer, fonte própria, emulador VT/xterm, shell embutido, barra no topo | `fetch` desenhado na tela das duas ISAs (`make screenshot`) |
 | **1 — Exceções, interrupções e tempo** ✅ | Vetores de exceção, controlador de interrupção, timer, relógio, entrada por interrupção, proteções de hardware ligadas | Page fault proposital vira relatório; tique contado; shell dorme em `hlt`/`wfi` |
-| **2 — Memória virtual e heap** | Tabelas próprias com W^X, heap do kernel, aleatório do kernel, memória do bootloader recuperada | Escrita em `.text` falha; memória livre depois do boot medida |
+| **2 — Memória virtual e heap** ✅ | Tabelas próprias com W^X, heap do kernel, aleatório do kernel, memória do bootloader recuperada | Escrita em `.text` falha; memória livre depois do boot medida |
 | **3 — Tarefas, SMP e escalonador** | Troca de contexto, threads do kernel, fila por CPU, escalonador atrás de trait, idle sem tique | Latência de troca medida em N núcleos |
 | **4 — Processos e isolamento** | Anel 3/EL0, syscall, carregador ELF, VFS em memória (initramfs, tmpfs), espaço de endereçamento por processo, handles com direitos, mitigações de CPU | Syscall nula medida; processo que toca o kernel morre sem derrubar nada |
 | **5 — ABI Linux e primeiros aplicativos** | Syscalls Linux traduzidas, credenciais Linux, musl estático, BusyBox | BusyBox roda sem recompilar e é medido contra o Linux |
@@ -60,17 +60,22 @@ quando houver medição para decidir.
 
 ### 2 — Memória virtual e heap
 
-- **Tabelas próprias do kernel:**
+- **Tabelas próprias do kernel** ([SDD 13](13_memoria_virtual.md)):
   - `.text` só leitura e execução, `.rodata` só leitura, dados com NX;
-  - página de guarda abaixo de toda pilha do kernel.
+  - mapa direto refeito (2 MiB onde dá, sem a imagem), framebuffer com o cache de vídeo,
+    metade baixa vazia;
+  - pilha própria de 64 KiB, e página de guarda abaixo de toda pilha do kernel;
+  - W^X conferido no boot (`w^x: ok`) e por `fault text`.
 - **Heap:** buddy allocator e `GlobalAlloc` para `alloc`, **ligados**: o buddy entrega
   os frames e o heap de slabs é o alocador global ([SDD 12](12_memoria_fisica_e_heap.md)).
   O cache por CPU espera a fase 3 (DEBT-0018).
-- **Memória do bootloader recuperada** (DEBT-0006).
+- **Memória do bootloader recuperada** (devolvida ao buddy depois de copiar o que se lê
+  do Limine e de trocar tabelas, pilha e GDT).
 - **Aleatório do kernel:** semente de RDSEED/RNDR (jitter do contador quando a CPU não
   tem, DEBT-0019), gerador ChaCha20 e reposição por volume, **ligados**. É a base de
   KASLR, ASLR e canários ([SDD 09](09_seguranca.md)).
-- **KASLR:** exige kernel relocável. Entra com o custo de tamanho e de boot medido.
+- **KASLR:** kernel relocável (PIE) com o Limine aplicando a relocação e sorteando a
+  base e o mapa direto. Custo de 3 a 6 KiB medido, boot sem diferença mensurável.
 - **Zerar ao liberar:** política de zerar memória devolvida, **ligada** no heap, com o
   custo medido ([SDD 07](07_desempenho_e_recursos.md)).
 

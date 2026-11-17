@@ -6,35 +6,30 @@ use core::{ptr, slice};
 
 use rustos_hal::{
     BootInfo, FrameSource, MapError, MemoryRegion, PAGE_SIZE, PageFlags, PageMapper, PhysAddr,
-    VirtAddr,
+    RegionKind, VirtAddr,
 };
 use rustos_mm::{
     AddressWindow, BuddyAllocator, FrameAllocator, FrameError, MemorySummary, PhysFrame,
-    find_free_block, summarize,
+    find_free_block, free_top_level_slot, summarize,
 };
 use rustos_sync::SpinLock;
 
+use crate::boot::BootRecord;
 use crate::frames::{self, Frames};
 use crate::heap;
 
-/// Janela de dispositivos: entrada 510 do nível mais alto, livre no layout do Limine.
-const DEVICE_WINDOW: VirtAddr = VirtAddr::new(0xffff_ff00_0000_0000);
-const DEVICE_WINDOW_LEN: u64 = 1 << 30;
+/// Janelas de dispositivos e de pilhas: 1 GiB cada, vazias até `place_windows`.
+const WINDOW_LEN: u64 = 1 << 30;
 
-static DEVICES: SpinLock<AddressWindow> =
-    SpinLock::new(AddressWindow::new(DEVICE_WINDOW, DEVICE_WINDOW_LEN));
-
-/// Janela das pilhas do kernel: entrada 509 do nível mais alto, livre no layout do Limine.
-const STACK_WINDOW: VirtAddr = VirtAddr::new(0xffff_fe80_0000_0000);
-const STACK_WINDOW_LEN: u64 = 1 << 30;
-
-static STACKS: SpinLock<AddressWindow> =
-    SpinLock::new(AddressWindow::new(STACK_WINDOW, STACK_WINDOW_LEN));
+static DEVICES: SpinLock<AddressWindow> = SpinLock::new(AddressWindow::new(VirtAddr::new(0), 0));
+static STACKS: SpinLock<AddressWindow> = SpinLock::new(AddressWindow::new(VirtAddr::new(0), 0));
 
 #[derive(Debug)]
 pub enum MemoryError {
     NoUsableMemory,
     NoRoomForMetadata,
+    /// Nenhuma entrada do nível mais alto livre para as janelas.
+    NoAddressSpace,
     Frames(#[allow(dead_code, reason = "lido pelo Debug da mensagem de pânico")] FrameError),
 }
 
@@ -53,7 +48,7 @@ impl Memory {
     /// em `físico + direct_map_offset`.
     pub unsafe fn init(boot: &impl BootInfo) -> Result<Self, MemoryError> {
         let summary = summarize(boot.memory_regions());
-        let (base, _) = summary.usable_span.ok_or(MemoryError::NoUsableMemory)?;
+        let (base, _) = summary.managed_span.ok_or(MemoryError::NoUsableMemory)?;
         let frames =
             usize::try_from(summary.span_frames()).map_err(|_| MemoryError::NoUsableMemory)?;
         let words = BuddyAllocator::words_needed(frames);
@@ -78,6 +73,31 @@ impl Memory {
             metadata_bytes,
             direct_map_offset: boot.direct_map_offset(),
         })
+    }
+
+    /// Põe as janelas de dispositivos e de pilhas, uma depois da outra, na entrada do
+    /// nível mais alto que `occupied` (mapa direto e imagem, sorteados) não toca.
+    pub fn place_windows(occupied: &[(u64, u64)]) -> Result<(), MemoryError> {
+        let base = free_top_level_slot(occupied).ok_or(MemoryError::NoAddressSpace)?;
+        let stacks = VirtAddr::new(base.as_u64() + WINDOW_LEN);
+        *DEVICES.lock() = AddressWindow::new(base, WINDOW_LEN);
+        *STACKS.lock() = AddressWindow::new(stacks, WINDOW_LEN);
+        Ok(())
+    }
+
+    /// Devolve ao alocador as regiões `BootloaderReclaimable` e atualiza `record`.
+    /// Só depois de tabelas, pilha e GDT próprias: nada pode apontar para elas.
+    /// Devolve os bytes recuperados.
+    pub fn reclaim_bootloader(&mut self, record: &mut BootRecord) -> u64 {
+        for region in record
+            .memory_regions()
+            .filter(|region| region.kind == RegionKind::BootloaderReclaimable)
+        {
+            self.frames.release_range(region.start, region.len);
+        }
+        let bytes = record.mark_reclaimed();
+        self.summary = summarize(record.memory_regions());
+        bytes
     }
 
     /// Pilha de `pages` páginas com uma página sem mapeamento logo abaixo: estouro
