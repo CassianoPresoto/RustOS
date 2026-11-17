@@ -42,4 +42,4 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0024](0024-aarch64-pie-com-textrel.md) | Kernel aarch64 relocável só com `-z notext` (TEXTREL) | Open | A `core` pré-compilada do alvo aarch64 passar a vir com relocação PIC, ou o primeiro build com build-std |
 | [0025](0025-residuo-de-chave-na-pilha.md) | Cópias do estado do ChaCha20 e do gerador antigo ficam na pilha | Open | O primeiro código de usuário (fase 4) |
 | [0026](0026-troca-de-tabela-do-aarch64-sem-conferencia.md) | Troca de tabela do aarch64 sem a leitura do Arm ARM nem a conferência do MAIR | Open | O primeiro boot em metal aarch64, ou a leitura do Arm ARM nas seções de TLB e de MAIR |
-| [0027](0027-kaslr-sem-verificacao-no-smoke.md) | KASLR sem verificação entre boots no smoke | Open | O primeiro PR que mexer no linker script, no `-pie` ou no `limine.conf` |
+

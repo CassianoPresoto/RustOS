@@ -32,3 +32,8 @@ Um `FrameCaches<CPUS, CAP>` com `CPUS` fixo, cada cache acessado só com as inte
 mascaradas na CPU dona, e `Frames` passando a servir o frame solto por ele
 (`cache.through(&mut buddy)`). O `free_frames` precisa somar o que está nos caches.
 Junto vale ler a [DEBT-0017](0017-dupla-liberacao-escondida-no-cache-de-frames.md).
+
+Ao ligar o cache, a promessa de zerar só depois de conferir não vale para frame
+solto: `FrameCache::verify_used` com `count == 1` devolve `Ok` sem conferir, porque
+conferir no buddy tiraria o ganho do cache (de 1,7 para 11,7 ns no host). Decidir
+junto: conferir só sob modo de depuração, ou aceitar e escrever o porquê.

@@ -18,6 +18,9 @@ const BOOT_OK: &str = "[rustos] boot ok";
 const PANIC: &str = "[rustos] panic";
 /// Linhas que o kernel imprime quando um autoteste ou o boot falha.
 const FATAL: [&str; 3] = ["[rustos] fault:", "[rustos] interrupts:", "FAILED"];
+/// Endereço em que os linker scripts põem o kernel. Com o KASLR ligado, o Limine
+/// carrega em outro lugar e a linha `kernel base:` nunca mostra este (SDD 13).
+const LINK_BASE: &str = "kernel base: 0xffffffff80000000 ";
 /// Linhas que todo boot precisa ter (guidelines 09): as proteções de hardware, o
 /// W^X conferido nas tabelas de página e a memória que o bootloader devolveu.
 const REQUIRED: [(&str, &str); 3] = [
@@ -197,6 +200,13 @@ fn report(arch: Arch, outcome: Outcome, log: &str) -> Result<(), String> {
             if let Some((_, what)) = REQUIRED.iter().find(|(line, _)| !log.contains(line)) {
                 let reason = format!("boot sem {what} (guidelines 09)");
                 return Err(failure(arch, &reason, log));
+            }
+            if log.contains(LINK_BASE) {
+                return Err(failure(
+                    arch,
+                    "kernel na base do linker: KASLR desligado",
+                    log,
+                ));
             }
             println!(
                 "xtask: smoke {} ok em {} ms (relógio de parede, firmware incluso)",

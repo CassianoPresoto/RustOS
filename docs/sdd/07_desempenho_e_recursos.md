@@ -14,7 +14,7 @@
 | Fonte própria | tabelas em `.rodata` (teste em `core/gfx/src/font`) | 3 884 bytes para 237 glifos 8x16 |
 | Shell | `size_of::<Shell<256, 32>>()`, na pilha do `kmain` | 8 880 bytes |
 | Metadado de memória física | `BuddyAllocator::words_needed` (SDD 12): um bitmap por ordem com resumo hierárquico; é o `metadata` da linha `frames:` do boot e o `frame meta` do `mem` | 16 704 bytes para 65 094 frames (x86_64) e 16 504 para 64 396 (aarch64): 2,05 bits por frame, 0,008% da RAM; 2,03 bits por frame em 4 GiB ou mais. O bitmap de antes, que saiu do kernel: 8 144 e 8 056 bytes |
-| Heap do kernel | `heap::self_test` e a linha `heap` do `mem` | Metadado de 32 bytes por slab, dentro da página (SDD 12). Zerar ao liberar ligado: custo abaixo |
+| Heap do kernel | `heap::self_test` e a linha `heap` do `mem` | Metadado de 64 bytes por slab, dentro da página, com o mapa de livres de 1 bit por objeto (SDD 12). Zerar ao liberar ligado: custo abaixo |
 | Aleatório no kernel | linha `random bench:` do boot (`random::benchmark`): 32 blocos de 4 KiB com `Rng::fill_bytes` e uma reposição completa, com o relógio da fase 1 | aarch64 sob HVF, `release`: 636 a 694 MB/s e 36 a 38 us por reposição (tabela abaixo) |
 | Boot até o kernel | linha `boot timeline` (pedido *bootloader performance* do Limine) | Limine: 52 ms (aarch64, HVF) / 350 ms (x86_64, TCG) |
 | Pilha de exceção (aarch64) | `Memory::map_stack`: 4 páginas mapeadas e uma de guarda, por CPU | 16 384 bytes de RAM, mais as tabelas de página que faltarem |
