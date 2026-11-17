@@ -4,6 +4,7 @@ members = [
     "kernel",
     "core/hal",
     "core/mm",
+    "core/crypto",
     "core/sched",
     "core/gfx",
     "core/term",
@@ -23,6 +24,7 @@ members = [
 default-members = [
     "core/hal",
     "core/mm",
+    "core/crypto",
     "core/sched",
     "core/gfx",
     "core/term",
@@ -50,6 +52,7 @@ publish = false
 [workspace.dependencies]
 rustos-hal = { path = "core/hal" }
 rustos-mm = { path = "core/mm" }
+rustos-crypto = { path = "core/crypto" }
 rustos-gfx = { path = "core/gfx" }
 rustos-term = { path = "core/term" }
 rustos-shell = { path = "core/shell" }
