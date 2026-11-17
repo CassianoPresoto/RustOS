@@ -7,14 +7,12 @@ use crate::arch::Arch;
 use crate::cargo::{self, Profile};
 use crate::limine;
 
-const LIMINE_CONF: &str = "\
-timeout: 0
-serial: yes
-
-/RustOS
-    protocol: limine
-    path: boot():/boot/rustos
-";
+fn limine_conf(arch: Arch) -> String {
+    format!(
+        "timeout: 0\nserial: yes\n\n/RustOS\n    protocol: limine\n    path: boot():/boot/rustos\n    resolution: {}\n",
+        arch.screen_resolution()
+    )
+}
 
 pub fn esp_dir(root: &Path, arch: Arch) -> PathBuf {
     root.join("target").join("esp").join(arch.name())
@@ -35,7 +33,7 @@ pub fn assemble(root: &Path, arch: Arch, profile: Profile) -> Result<PathBuf, St
         &boot_dir.join(arch.efi_loader()),
     )?;
     copy(&kernel, &kernel_dir.join("rustos"))?;
-    fs::write(boot_dir.join("limine.conf"), LIMINE_CONF)
+    fs::write(boot_dir.join("limine.conf"), limine_conf(arch))
         .map_err(|error| format!("gravar limine.conf: {error}"))?;
     Ok(esp)
 }

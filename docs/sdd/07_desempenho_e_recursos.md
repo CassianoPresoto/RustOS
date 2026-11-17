@@ -7,10 +7,39 @@
 
 | Métrica | Como | Valor hoje (QEMU, 256 MiB) |
 | --- | --- | --- |
-| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 13 784 / 11 104 bytes · aarch64: 14 848 / 12 436 bytes |
+| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 100 541 / 61 725 bytes · aarch64: 86 500 / 59 952 bytes |
+| Grade do terminal | 8 bytes por célula (`size_of::<Cell>()`), em frames contíguos | x86_64 1280x800: 158x47 células, 59 408 bytes (15 frames) · aarch64 1024x768: 126x45, 45 360 bytes (12 frames) |
+| Fonte própria | tabelas em `.rodata` (teste em `core/gfx/src/font`) | 3 884 bytes para 237 glifos 8x16 |
+| Shell | `size_of::<Shell<256, 32>>()`, na pilha do `kmain` | 8 880 bytes |
 | Metadado de memória física | bitmap do `BitmapFrameAllocator`: 1 bit por frame de 4 KiB | 8 144 bytes para 254 MiB rastreados (0,003%) |
 | Boot até o kernel | linha `boot timeline` (pedido *bootloader performance* do Limine) | Limine: 52 ms (aarch64, HVF) / 350 ms (x86_64, TCG) |
 | Boot de parede | `make smoke` | inclui firmware EDK2: ~2–5 s, dominado pelo firmware |
+
+### Para onde foi o tamanho do kernel
+
+A fase 0.5 (tela, terminal, fonte e shell) levou o kernel `release` de 13 784 para
+100 541 bytes no x86_64, e o `release-small` de 11 104 para 61 725 bytes. Os
+maiores símbolos do x86_64 `release` (`llvm-nm --size-sort`):
+
+| Símbolo | Bytes | O que é |
+| --- | --- | --- |
+| `system::run_shell` | 22 162 | laço do shell com `Shell::feed` e os comandos inlinados pelo `opt-level = 3` |
+| `Terminal::apply` | 7 405 | despacho de todas as sequências CSI/ESC |
+| `kmain` | 5 260 | boot com `Screen::new` e o relatório inlinados |
+| `Screen::write` | 3 366 | tradução de `\n` e desenho das linhas sujas |
+| `font::DIRECT` | 3 056 | glifos de U+0020–007E e U+00A0–00FF |
+| `commands::colors`, `commands::fetch` | 2 819 + 2 811 | os dois comandos que mais formatam texto |
+
+Rolar a tela suja a grade inteira: cada linha nova com o cursor no fim repinta
+todas as células (1280x800: cerca de 4 MB de escrita no framebuffer). O desenho
+acontece uma vez por mensagem e por tecla, não por pedaço de texto, mas ainda não
+há comparação com o que já está na tela nem rolagem por cópia.
+
+Também entram tabelas Unicode da `core` (`grapheme_extend`, `cn_planes`, ~2 KiB)
+puxadas por formatação `{:?}`. Nenhuma otimização de tamanho foi feita ainda: a
+regra do guidelines 05 pede o número de antes e depois, e este é o "antes". O
+tempo de desenho de uma tela cheia ainda não é medido: o kernel não tem relógio
+até a fase 1.
 
 Para comparação: o Linux guarda um `struct page` de 64 bytes por página de 4 KiB,
 cerca de 1,6% da RAM; o trabalho de *memdescs* mira 8 bytes, cerca de 0,2%

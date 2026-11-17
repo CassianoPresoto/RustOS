@@ -1,7 +1,9 @@
 //! Sobe o kernel na QEMU: interativo (`run`) ou como teste de fumaça (`smoke`).
 
-use std::io::Read;
-use std::path::Path;
+use std::fs;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -9,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::arch::Arch;
 use crate::cargo::Profile;
-use crate::{image, workspace};
+use crate::{image, png, workspace};
 
 /// Igual ao `BOOT_OK_MARKER` do kernel; os dois mudam juntos.
 const BOOT_OK: &str = "[rustos] boot ok";
@@ -21,29 +23,127 @@ fn command(root: &Path, arch: Arch, profile: Profile) -> Result<Command, String>
     let firmware = arch.firmware()?;
     let mut qemu = Command::new(arch.qemu());
     qemu.args(arch.qemu_machine_args(&firmware.to_string_lossy(), &esp.to_string_lossy()));
-    qemu.args(["-display", "none", "-no-reboot"]);
+    qemu.arg("-no-reboot");
     Ok(qemu)
 }
 
 pub fn run(root: &Path, arch: Arch, profile: Profile) -> Result<(), String> {
     let mut qemu = command(root, arch, profile)?;
-    println!("xtask: {} na QEMU; Ctrl-A X encerra", arch.name());
+    println!(
+        "xtask: {} na QEMU; a tela abre numa janela, o shell lê daqui; Ctrl-A X encerra",
+        arch.name()
+    );
     workspace::run(qemu.args(["-serial", "mon:stdio"]))
 }
 
 pub fn smoke(root: &Path, arch: Arch, profile: Profile) -> Result<(), String> {
     let mut qemu = command(root, arch, profile)?;
-    qemu.args(["-serial", "stdio", "-monitor", "none"])
+    qemu.args(["-display", "none", "-serial", "stdio", "-monitor", "none"])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     let started = Instant::now();
     let mut child = qemu
         .spawn()
         .map_err(|error| format!("não consegui rodar {}: {error}", arch.qemu()))?;
+    let receiver = stream_stdout(&mut child)?;
+    let (outcome, log) = wait_for_boot(&receiver, started);
+    child.kill().ok();
+    child.wait().ok();
+
+    print_kernel_lines(&log);
+    report(arch, outcome, &log)
+}
+
+/// Sobe sem janela, espera o boot, digita cada comando na serial e grava a tela
+/// pelo monitor da QEMU (PPM), convertida para PNG. Devolve o caminho do PNG.
+pub fn screenshot(
+    root: &Path,
+    arch: Arch,
+    profile: Profile,
+    commands: &[String],
+) -> Result<PathBuf, String> {
+    let dir = root.join("target").join("screenshots");
+    fs::create_dir_all(&dir).map_err(|error| format!("criar {}: {error}", dir.display()))?;
+    let ppm = dir.join(format!("{}.ppm", arch.name()));
+    let socket = dir.join(format!("{}.monitor", arch.name()));
+    fs::remove_file(&ppm).ok();
+    fs::remove_file(&socket).ok();
+
+    let mut qemu = command(root, arch, profile)?;
+    let monitor = format!("unix:{},server=on,wait=off", socket.display());
+    qemu.args(["-display", "none", "-serial", "stdio", "-monitor", &monitor])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let started = Instant::now();
+    let mut child = qemu
+        .spawn()
+        .map_err(|error| format!("não consegui rodar {}: {error}", arch.qemu()))?;
+    let receiver = stream_stdout(&mut child)?;
+    let (outcome, log) = wait_for_boot(&receiver, started);
+    let result = match outcome {
+        Outcome::Booted(_) => capture(&mut child, &socket, &ppm, commands),
+        other => report(arch, other, &log).and(Err("sem boot, sem captura".to_owned())),
+    };
+    child.kill().ok();
+    child.wait().ok();
+    fs::remove_file(&socket).ok();
+    result?;
+    let bytes = fs::read(&ppm).map_err(|error| format!("ler {}: {error}", ppm.display()))?;
+    let (width, height, rgb) = png::decode_ppm(&bytes)?;
+    let png_path = ppm.with_extension("png");
+    fs::write(&png_path, png::encode_rgb(width, height, rgb)?)
+        .map_err(|error| format!("gravar {}: {error}", png_path.display()))?;
+    fs::remove_file(&ppm).ok();
+    Ok(png_path)
+}
+
+/// Tempo para o kernel desenhar depois de cada entrada; TCG é lento.
+const SETTLE: Duration = Duration::from_millis(1500);
+
+fn capture(
+    child: &mut std::process::Child,
+    socket: &Path,
+    ppm: &Path,
+    commands: &[String],
+) -> Result<(), String> {
+    thread::sleep(SETTLE);
+    let stdin = child.stdin.as_mut().ok_or("QEMU sem stdin")?;
+    let typed = commands
+        .iter()
+        .flat_map(|arg| arg.split(';'))
+        .map(str::trim)
+        .filter(|command| !command.is_empty());
+    for command in typed {
+        stdin
+            .write_all(format!("{command}\r").as_bytes())
+            .and_then(|()| stdin.flush())
+            .map_err(|error| format!("digitar na serial: {error}"))?;
+        thread::sleep(SETTLE);
+    }
+    let mut monitor =
+        UnixStream::connect(socket).map_err(|error| format!("monitor da QEMU: {error}"))?;
+    writeln!(monitor, "screendump {}", ppm.display())
+        .map_err(|error| format!("screendump: {error}"))?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if fs::metadata(ppm).is_ok_and(|meta| meta.len() > 0) {
+            thread::sleep(Duration::from_millis(300));
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!("a QEMU não gravou {}", ppm.display()))
+}
+
+fn stream_stdout(child: &mut std::process::Child) -> Result<mpsc::Receiver<String>, String> {
     let stdout = child.stdout.take().ok_or("QEMU sem stdout")?;
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || stream_chunks(stdout, &sender));
+    Ok(receiver)
+}
 
+fn wait_for_boot(receiver: &mpsc::Receiver<String>, started: Instant) -> (Outcome, String) {
     let mut log = String::new();
     let outcome = loop {
         let remaining = SMOKE_TIMEOUT.saturating_sub(started.elapsed());
@@ -59,10 +159,10 @@ pub fn smoke(root: &Path, arch: Arch, profile: Profile) -> Result<(), String> {
             break Outcome::Panicked;
         }
     };
-    child.kill().ok();
-    child.wait().ok();
+    (outcome, log)
+}
 
-    print_kernel_lines(&log);
+fn report(arch: Arch, outcome: Outcome, log: &str) -> Result<(), String> {
     match outcome {
         Outcome::Booted(elapsed) => {
             println!(
@@ -73,15 +173,12 @@ pub fn smoke(root: &Path, arch: Arch, profile: Profile) -> Result<(), String> {
             Ok(())
         }
         Outcome::Panicked => Err(format!("smoke {}: o kernel entrou em pânico", arch.name())),
-        Outcome::TimedOut => Err(failure(
-            arch,
-            "sem o marcador de boot no tempo limite",
-            &log,
-        )),
-        Outcome::Exited => Err(failure(arch, "a QEMU saiu antes do marcador de boot", &log)),
+        Outcome::TimedOut => Err(failure(arch, "sem o marcador de boot no tempo limite", log)),
+        Outcome::Exited => Err(failure(arch, "a QEMU saiu antes do marcador de boot", log)),
     }
 }
 
+#[derive(Clone, Copy)]
 enum Outcome {
     Booted(Duration),
     Panicked,

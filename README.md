@@ -9,22 +9,21 @@ externo: só `core`, `alloc` e o que está neste repositório.
 
 ## Estado
 
-Fase 0 — esqueleto ponta a ponta. O kernel sobe pelo Limine em **x86_64** e
-**aarch64** (QEMU), lê o mapa de memória, monta o alocador de frames, mapeia o
-dispositivo da serial (aarch64) e escreve na serial:
+Fase 0.5 — tela e terminal. O kernel sobe pelo Limine em **x86_64** e **aarch64**
+(QEMU), monta o alocador de frames, desenha na tela com uma **fonte própria** e um
+**emulador de terminal VT/xterm** escritos aqui, e abre um **shell embutido**
+(`help`, `fetch`, `mem`, `colors`, `uname`, histórico, Tab, edição de linha). Nada
+da interface vem de biblioteca: fonte, terminal, desenho e shell são deste
+repositório.
 
-```text
-[rustos] RustOS 0.1.0 (aarch64)
-[rustos] bootloader: Limine 12.10.0
-[rustos] boot timeline: firmware 5101709 us, bootloader 52388 us
-[rustos] memory: 225596 KiB usable, 102088 KiB other, 27 regions
-[rustos] frames: 56394 free of 64404 tracked, bitmap 8056 bytes
-[rustos] frame self-test: ok
-[rustos] boot ok
+```sh
+make run ARCH=aarch64          # janela com a tela; o shell lê o teclado do terminal
+make screenshot ARCH=all CMDS="fetch;mem"   # grava target/screenshots/<isa>.png
 ```
 
-O kernel carregado ocupa ~13 KiB em `release` e ~11 KiB em `release-small`. O
-que vem depois está no [roadmap](docs/sdd/08_roadmap.md).
+O kernel carregado ocupa ~98 KiB em `release` e ~60 KiB em `release-small`
+(medição no [SDD 07](docs/sdd/07_desempenho_e_recursos.md)). O que vem depois está
+no [roadmap](docs/sdd/08_roadmap.md).
 
 ## Arquitetura
 
@@ -37,7 +36,9 @@ que vem depois está no [roadmap](docs/sdd/08_roadmap.md).
    (unsafe, asm)         │                   │                       │
                          └─────────┬─────────┴───────────┬───────────┘
                                    ▼                     ▼
-   portas                    core/hal  ◄──────────  core/mm, core/sched   centro do hexágono
+   portas                    core/hal  ◄──────────  core/mm, core/sched,    centro do hexágono
+                                                    core/gfx, core/term,
+                                                    core/shell
                          (traits e tipos)          (política pura, sem unsafe, testada no host)
 ```
 

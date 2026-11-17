@@ -11,15 +11,21 @@
 │   ├── build.rs                # escolhe o linker script da ISA alvo
 │   ├── linker/                 # x86_64.ld, aarch64.ld: metade alta, um segmento por permissão
 │   └── src/
-│       ├── main.rs             # kmain: boot → memória → console → relatório → boot ok
+│       ├── main.rs             # kmain: boot → memória → serial → tela → relatório → boot ok → shell
 │       ├── memory.rs           # liga core/mm à memória real pelo mapa direto; janela de dispositivos
-│       ├── console.rs          # console global e kprintln!
+│       ├── console.rs          # console global e kprintln!: serial e tela
+│       ├── screen.rs           # tela: framebuffer + grade do term + desenho do gfx, tema e barra
+│       ├── system.rs           # porta Host do shell e o laço de entrada
+│       ├── fmt.rs              # texto formatado em buffer fixo
 │       ├── panic.rs            # pânico: escreve o que puder e para a CPU
 │       └── platform/           # um módulo por ISA: ARCH, PlatformConsole, cpu(), console()
 ├── core/                       # o centro do hexágono: no_std, forbid(unsafe_code), testado no host
 │   ├── hal/                    # rustos-hal: as portas (traits) e os tipos de fronteira
 │   ├── mm/                     # rustos-mm: BitmapFrameAllocator, summarize/find_free_block, AddressWindow
-│   └── sched/                  # rustos-sched: TaskId, RunQueue, RoundRobin (ainda não ligado ao kernel)
+│   ├── sched/                  # rustos-sched: TaskId, RunQueue, RoundRobin (ainda não ligado ao kernel)
+│   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16
+│   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células), Cell, teclas
+│   └── shell/                  # rustos-shell: Shell (edição de linha, histórico, comandos) e a porta Host
 ├── lib/
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set)
 ├── arch/                       # adaptadores de ISA: o único lugar com asm!
@@ -30,7 +36,7 @@
 ├── drivers/                    # adaptadores de dispositivo: genéricos sobre hal::RegisterBus, sem unsafe
 │   ├── uart16550/              # COM1 do PC (porta) ou 16550 em MMIO
 │   └── pl011/                  # serial da QEMU virt e de placas ARM
-├── xtask/                      # ferramenta de host (só std): build, image, run, smoke, size, check-*
+├── xtask/                      # ferramenta de host (só std): build, image, run, smoke, screenshot, size, font-preview, check-*
 ├── docs/                       # sdd/, guidelines/, tech-debt/
 ├── .github/workflows/ci.yml    # gates, testes e smoke nas duas ISAs
 ├── Makefile                    # atalhos para cargo e xtask
@@ -45,12 +51,14 @@
 | `rustos-hal` | nada |
 | `rustos-mm` | `rustos-hal` |
 | `rustos-sched` | nada |
+| `rustos-gfx`, `rustos-term` | nada |
+| `rustos-shell` | `rustos-hal` |
 | `rustos-sync` | nada |
 | `rustos-arch-x86_64` | `rustos-hal` (só no alvo bare-metal) |
 | `rustos-arch-aarch64` | `rustos-hal` |
 | `rustos-boot-limine` | `rustos-hal` |
 | `rustos-driver-uart16550`, `rustos-driver-pl011` | `rustos-hal` |
-| `rustos-kernel` | `hal`, `mm`, `sync`, `boot-limine`; por ISA, `arch-*` e o driver da serial |
+| `rustos-kernel` | `hal`, `mm`, `gfx`, `term`, `shell`, `sync`, `boot-limine`; por ISA, `arch-*` e o driver da serial |
 | `xtask` | nada (só `std`) |
 
 O `rustos-sched` existe com fila e política testadas, mas o kernel ainda não o usa:
@@ -63,6 +71,10 @@ e não usada).
 | Código novo | Lugar |
 | --- | --- |
 | Algoritmo ou política (alocador, escalonador, cache, fila) | crate de `core/` do assunto |
+| Desenho de pixel, glifo da fonte | `core/gfx/` |
+| Sequência de terminal, codificação de tecla | `core/term/` |
+| Comando do shell embutido | `core/shell/`; o dado do sistema chega pela porta `Host` |
+| Tema, barra do topo, como a grade vira pixel | `kernel/src/screen.rs` |
 | Contrato que o núcleo precisa do hardware | trait em `core/hal` |
 | Instrução privilegiada, registrador de sistema, formato de tabela de página | `arch/<isa>/`; a parte pura (codificação, caminhada) em módulo sem `asm!`, testável no host |
 | Protocolo de bootloader | `boot/<protocolo>/` |

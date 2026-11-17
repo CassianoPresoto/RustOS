@@ -41,6 +41,15 @@ impl Arch {
         }
     }
 
+    /// Modo de vídeo pedido ao Limine. Pedir 1280x800 ao GOP do ramfb deixa a
+    /// tela em 800x600; 1024x768 ele aceita.
+    pub const fn screen_resolution(self) -> &'static str {
+        match self {
+            Self::X86_64 => "1280x800",
+            Self::Aarch64 => "1024x768",
+        }
+    }
+
     pub const fn qemu(self) -> &'static str {
         match self {
             Self::X86_64 => "qemu-system-x86_64",
@@ -117,6 +126,8 @@ impl Arch {
                     &format!("if=none,id=esp,format=raw,file=fat:rw:{esp}"),
                 ]);
                 push(&["-device", "virtio-blk-pci,drive=esp"]);
+                // A `virt` não tem placa de vídeo; o ramfb vira o GOP do EDK2.
+                push(&["-device", "ramfb"]);
             }
         }
         // Sem a placa de rede padrão: a da `virt` pede o efi-virtio.rom do iPXE,

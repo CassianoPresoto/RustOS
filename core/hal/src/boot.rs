@@ -1,6 +1,6 @@
 //! Porta de entrada: o que o núcleo precisa saber do bootloader.
 
-use crate::MemoryRegion;
+use crate::{FramebufferInfo, MemoryRegion};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BootloaderId<'a> {
@@ -37,6 +37,9 @@ pub trait BootInfo {
     fn bootloader(&self) -> Option<BootloaderId<'_>>;
 
     fn timeline(&self) -> Option<BootTimeline>;
+
+    /// O primeiro framebuffer de 32 bpp em RGB, se o firmware entregou um.
+    fn framebuffer(&self) -> Option<FramebufferInfo>;
 }
 
 #[cfg(test)]

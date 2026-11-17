@@ -38,6 +38,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-gfx"
+version = "0.1.0"
+
+[[package]]
 name = "rustos-hal"
 version = "0.1.0"
 
@@ -50,9 +54,12 @@ dependencies = [
  "rustos-boot-limine",
  "rustos-driver-pl011",
  "rustos-driver-uart16550",
+ "rustos-gfx",
  "rustos-hal",
  "rustos-mm",
+ "rustos-shell",
  "rustos-sync",
+ "rustos-term",
 ]
 
 [[package]]
@@ -67,7 +74,18 @@ name = "rustos-sched"
 version = "0.1.0"
 
 [[package]]
+name = "rustos-shell"
+version = "0.1.0"
+dependencies = [
+ "rustos-hal",
+]
+
+[[package]]
 name = "rustos-sync"
+version = "0.1.0"
+
+[[package]]
+name = "rustos-term"
 version = "0.1.0"
 
 [[package]]

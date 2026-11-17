@@ -7,7 +7,7 @@ XTASK := cargo xtask
 
 .DEFAULT_GOAL := help
 .PHONY: help fmt fmt-check clippy layers-check comments-check docs-check check test \
-        build image run smoke size pr clean
+        build image run smoke screenshot font-preview size pr clean
 
 help: ## lista os alvos
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -50,6 +50,12 @@ run: ## sobe na QEMU com a serial no terminal (Ctrl-A X sai)
 
 smoke: ## sobe na QEMU, espera "[rustos] boot ok" e sai
 	$(XTASK) smoke --arch $(ARCH) --profile $(PROFILE)
+
+screenshot: ## sobe sem janela, digita CMDS ("fetch;mem") no shell e grava a tela em PNG
+	$(XTASK) screenshot --arch $(ARCH) --profile $(PROFILE) -- "$(CMDS)"
+
+font-preview: ## desenha todos os glifos da fonte própria em target/font-preview.png
+	$(XTASK) font-preview
 
 size: ## tamanho das seções do kernel
 	$(XTASK) size --arch $(ARCH) --profile $(PROFILE)

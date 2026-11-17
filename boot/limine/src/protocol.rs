@@ -21,6 +21,9 @@ pub const BOOTLOADER_INFO_ID: [u64; 4] = id(0xf550_38d8_e2a1_202f, 0x2794_26fc_f
 pub const HHDM_ID: [u64; 4] = id(0x48dc_f1cb_8ad2_b852, 0x6398_4e95_9a98_244b);
 pub const MEMMAP_ID: [u64; 4] = id(0x67cf_3d9d_378a_806f, 0xe304_acdf_c50c_3c62);
 pub const PERFORMANCE_ID: [u64; 4] = id(0x6b50_ad9b_f36d_13ad, 0xdc4c_7e88_fc75_9e17);
+pub const FRAMEBUFFER_ID: [u64; 4] = id(0x9d58_27dc_d881_dd75, 0xa314_8604_f6fa_b11b);
+
+pub const FRAMEBUFFER_RGB: u8 = 1;
 
 pub const MEMMAP_USABLE: u64 = 0;
 pub const MEMMAP_ACPI_RECLAIMABLE: u64 = 2;
@@ -145,6 +148,46 @@ pub struct PerformanceResponse {
     pub exec_usec: u64,
 }
 
+/// Campos da revisão 0 da resposta; os das revisões 1 e 2 vêm depois e não são lidos.
+#[repr(C)]
+pub struct Framebuffer {
+    pub address: *mut u8,
+    pub width: u64,
+    pub height: u64,
+    pub pitch: u64,
+    pub bpp: u16,
+    pub memory_model: u8,
+    pub red_mask_size: u8,
+    pub red_mask_shift: u8,
+    pub green_mask_size: u8,
+    pub green_mask_shift: u8,
+    pub blue_mask_size: u8,
+    pub blue_mask_shift: u8,
+    pub(crate) unused: [u8; 7],
+    pub edid_size: u64,
+    pub edid: *const u8,
+}
+
+#[repr(C)]
+pub struct FramebufferResponse {
+    pub revision: u64,
+    framebuffer_count: u64,
+    framebuffers: *const &'static Framebuffer,
+}
+
+impl FramebufferResponse {
+    /// # Safety
+    /// `framebuffers` aponta para `framebuffer_count` ponteiros válidos, como o Limine garante.
+    pub unsafe fn framebuffers(&self) -> &'static [&'static Framebuffer] {
+        let len = usize::try_from(self.framebuffer_count).expect("contagem cabe em usize");
+        if self.framebuffers.is_null() || len == 0 {
+            return &[];
+        }
+        // SAFETY: ponteiro e tamanho vêm do bootloader, pelo contrato da função.
+        unsafe { slice::from_raw_parts(self.framebuffers, len) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,9 +200,25 @@ mod tests {
 
     #[test]
     fn ids_start_with_common_magic() {
-        for id in [BOOTLOADER_INFO_ID, HHDM_ID, MEMMAP_ID, PERFORMANCE_ID] {
+        for id in [
+            BOOTLOADER_INFO_ID,
+            HHDM_ID,
+            MEMMAP_ID,
+            PERFORMANCE_ID,
+            FRAMEBUFFER_ID,
+        ] {
             assert_eq!(id[..2], COMMON_MAGIC);
         }
+    }
+
+    #[test]
+    fn framebuffer_layout_matches_limine_h() {
+        assert_eq!(core::mem::offset_of!(Framebuffer, bpp), 32);
+        assert_eq!(core::mem::offset_of!(Framebuffer, memory_model), 34);
+        assert_eq!(core::mem::offset_of!(Framebuffer, blue_mask_shift), 40);
+        assert_eq!(core::mem::offset_of!(Framebuffer, edid_size), 48);
+        assert_eq!(size_of::<Framebuffer>(), 64);
+        assert_eq!(size_of::<FramebufferResponse>(), 24);
     }
 
     #[test]
