@@ -137,7 +137,7 @@ impl Screen {
         }
         let (width, height) = (to_usize(info.width), to_usize(info.height));
         let stride = to_usize(info.stride_pixels());
-        let len = stride * height;
+        let len = to_usize_u64(info.len_bytes() / u64::from(FramebufferInfo::BYTES_PER_PIXEL));
         let start = ptr::with_exposed_provenance_mut::<u32>(to_usize_u64(info.address.as_u64()));
         // SAFETY: memória do framebuffer, alinhada e exclusiva desta tela (contrato da função).
         let pixels = unsafe { slice::from_raw_parts_mut(start, len) };
@@ -177,6 +177,7 @@ impl Screen {
     }
 
     /// Texto do kernel e do shell; `\n` vira `\r\n`, como o `onlcr` de um tty.
+    /// Só atualiza a grade: os pixels mudam no próximo `render`.
     pub fn write(&mut self, bytes: &[u8]) {
         for (index, line) in bytes.split(|&byte| byte == b'\n').enumerate() {
             if index > 0 {
@@ -186,10 +187,10 @@ impl Screen {
         }
         let mut discard = [0; 32];
         while self.terminal.take_reply(&mut discard) > 0 {}
-        self.render();
     }
 
-    fn render(&mut self) {
+    /// Desenha as linhas sujas desde o último `render`. Rolar suja a grade inteira.
+    pub fn render(&mut self) {
         let cursor = self.terminal.cursor();
         let (cell_w, cell_h) = (font::WIDTH * self.scale, font::HEIGHT * self.scale);
         for row in self.terminal.take_dirty() {

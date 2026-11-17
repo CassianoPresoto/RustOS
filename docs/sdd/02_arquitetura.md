@@ -79,6 +79,14 @@ comando, que consulta o sistema pela porta `rustos_shell::Host`, implementada em
 `kernel/src/system.rs`. O shell define a própria porta (`Host`) porque ela só
 existe para ele; o `kernel/` é quem a liga ao `mm`, ao boot e à tela.
 
+O shell calcula as quebras de linha pela largura da tela (`Host::terminal_size`)
+e manda a mesma saída para a serial. Um terminal de host mais estreito que a grade
+desenha mal as linhas longas editadas; a tela é o alvo.
+
+O `Sink` só atualiza a grade; `console::flush` desenha uma vez por mensagem do
+`kprintln!` e uma vez por tecla do shell, porque cada desenho repinta linhas
+inteiras.
+
 `gfx`, `term` e `shell` não se conhecem (guidelines 03, regra 2): `term` não sabe
 de pixels, `gfx` não sabe de terminal, e o `shell` só escreve texto em
 `core::fmt::Write`.

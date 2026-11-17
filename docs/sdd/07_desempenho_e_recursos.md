@@ -30,6 +30,11 @@ maiores símbolos do x86_64 `release` (`llvm-nm --size-sort`):
 | `font::DIRECT` | 3 056 | glifos de U+0020–007E e U+00A0–00FF |
 | `commands::colors`, `commands::fetch` | 2 819 + 2 811 | os dois comandos que mais formatam texto |
 
+Rolar a tela suja a grade inteira: cada linha nova com o cursor no fim repinta
+todas as células (1280x800: cerca de 4 MB de escrita no framebuffer). O desenho
+acontece uma vez por mensagem e por tecla, não por pedaço de texto, mas ainda não
+há comparação com o que já está na tela nem rolagem por cópia.
+
 Também entram tabelas Unicode da `core` (`grapheme_extend`, `cn_planes`, ~2 KiB)
 puxadas por formatação `{:?}`. Nenhuma otimização de tamanho foi feita ainda: a
 regra do guidelines 05 pede o número de antes e depois, e este é o "antes". O

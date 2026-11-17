@@ -15,6 +15,11 @@ paid_date:
 enquanto ninguém digita. A CPU virtual fica em 100%: na QEMU, cada consulta à
 UART sai do guest, e o processo da QEMU ocupa um núcleo do host inteiro.
 
+Os bits de erro de recepção (overrun) das duas UARTs são descartados. Em
+hardware real, colar texto enquanto a tela repinta pode estourar a FIFO de 16
+bytes do 16550 (1,4 ms a 115200 baud) e perder bytes sem aviso. Na QEMU isso não
+acontece.
+
 ## Por que foi aceito
 
 O kernel ainda não tem interrupções, e sem elas `hlt`/`wfi` não acordam nunca.
@@ -29,4 +34,5 @@ A primeira interrupção de UART entregue ao kernel (fase 1).
 
 Ligar a interrupção de recepção da UART (16550 `IER` bit 0; PL011 `IMSC.RXIM`),
 pôr os bytes numa fila no handler e trocar o `spin_loop()` por
-`Cpu::wait_for_interrupt()` quando a fila estiver vazia.
+`Cpu::wait_for_interrupt()` quando a fila estiver vazia. Contar o overrun e
+relatá-lo.

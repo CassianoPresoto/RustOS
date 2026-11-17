@@ -22,6 +22,15 @@ pub fn install_screen(screen: Screen) {
 
 pub fn print(args: fmt::Arguments<'_>) {
     Sink.write_fmt(args).ok();
+    flush();
+}
+
+/// Desenha na tela o que o `Sink` escreveu: uma vez por mensagem ou tecla, não
+/// por pedaço de texto, porque cada desenho repinta linhas inteiras.
+pub fn flush() {
+    if let Some(screen) = SCREEN.lock().as_mut() {
+        screen.render();
+    }
 }
 
 /// Próximo byte digitado na serial, sem esperar.
@@ -40,10 +49,12 @@ pub fn print_panic(args: fmt::Arguments<'_>) {
         && let Some(screen) = guard.as_mut()
     {
         ScreenWriter(screen).write_fmt(args).ok();
+        screen.render();
     }
 }
 
-/// Escreve na serial e na tela, cada uma com o próprio lock, nessa ordem.
+/// Escreve na serial e na grade da tela, cada uma com o próprio lock, nessa
+/// ordem. Quem escreve pelo `Sink` chama `flush` no fim.
 #[derive(Debug)]
 pub struct Sink;
 

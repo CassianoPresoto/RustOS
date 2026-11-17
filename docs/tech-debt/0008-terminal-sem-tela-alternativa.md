@@ -19,7 +19,9 @@ paid_date:
   desenhadas por ACS saem como letras.
 - **Tabulação:** paradas fixas a cada 8 colunas, sem HTS/TBC.
 - **Unicode:** caractere largo (CJK, emoji) ocupa 1 célula, e o combinante é
-  descartado.
+  descartado. O `core/shell` conta 1 célula por caractere, inclusive para o
+  combinante: com texto decomposto (`e` + U+0301, comum ao colar do macOS), o
+  cursor da linha editada fica 1 coluna atrás até o próximo redesenho.
 
 O comportamento de pending wrap, DECSTBM e DECOM veio do conhecimento do agente
 sobre o xterm. Está coberto por teste, mas não foi conferido linha a linha contra

@@ -1497,6 +1497,22 @@ fn scroll_down_rotates_the_ring_backwards() {
 }
 
 #[test]
+fn scroll_up_beyond_a_region_that_starts_at_the_top_blanks_it() {
+    term!(t, 4, 10);
+    numbered(&mut t, 10);
+    t.write(b"\x1b[1;5r\x1b[10S");
+    assert_eq!(&screen(&t)[..6], ["", "", "", "", "", "6"]);
+}
+
+#[test]
+fn delete_lines_beyond_a_region_that_starts_at_the_top_blanks_it() {
+    term!(t, 4, 10);
+    numbered(&mut t, 10);
+    t.write(b"\x1b[1;5r\x1b[H\x1b[9M");
+    assert_eq!(&screen(&t)[..6], ["", "", "", "", "", "6"]);
+}
+
+#[test]
 fn erase_and_character_edits_work_on_a_rotated_ring() {
     term!(t, 6, 3);
     numbered(&mut t, 5);
@@ -1567,6 +1583,37 @@ fn random_bytes_never_panic_or_leave_the_grid() {
             assert!(t.take_dirty().all(|row| row < rows));
             reply(&mut t);
             t.take_bell();
+        }
+    }
+}
+
+/// Sequências CSI bem formadas com parâmetros perto das bordas da grade: acham o
+/// que o fuzz de bytes soltos raramente monta (região `1;Nr` seguida de `S`/`M`).
+#[test]
+fn random_well_formed_csi_never_panics() {
+    const FINALS: &[u8] = b"@ABCDEFGHJKLMPSTXZ`abdefhlmnrsu";
+    for (seed, (cols, rows)) in [(6, (1, 1)), (7, (4, 10)), (8, (80, 24)), (9, (3, 256))] {
+        let mut rng = XorShift(0x0123_4567_89AB_CDEF ^ seed);
+        term!(t, cols, rows);
+        let limit = rows.max(cols) as u64 + 3;
+        for _ in 0..40_000 {
+            let mut seq = b"\x1b[".to_vec();
+            if rng.next().is_multiple_of(4) {
+                seq.push(b'?');
+            }
+            for index in 0..rng.next() % 4 {
+                if index > 0 {
+                    seq.push(b';');
+                }
+                seq.extend((rng.next() % limit).to_string().bytes());
+            }
+            seq.push(FINALS[usize::try_from(rng.next()).unwrap() % FINALS.len()]);
+            if rng.next().is_multiple_of(3) {
+                seq.extend_from_slice(b"x\r\n");
+            }
+            t.write(&seq);
+            check_invariants(&t);
+            reply(&mut t);
         }
     }
 }

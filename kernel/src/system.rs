@@ -79,10 +79,12 @@ impl<B: BootInfo> Host for System<'_, B> {
 pub fn run_shell(host: &mut impl Host) -> ! {
     let mut shell = Shell::<LINE_BYTES, HISTORY_LINES>::new();
     shell.start(host, &mut Sink).ok();
+    console::flush();
     loop {
         match console::read_byte() {
             Some(byte) => {
                 shell.feed(byte, host, &mut Sink).ok();
+                console::flush();
             }
             None => spin_loop(),
         }

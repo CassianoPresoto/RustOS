@@ -523,7 +523,7 @@ impl<'a> Terminal<'a> {
             self.fill_rows(self.rows - n, self.rows);
             self.dirty.mark_range(0, self.rows);
         } else {
-            for row in top..=bottom - n {
+            for row in top..bottom + 1 - n {
                 self.copy_row(row + n, row);
             }
             self.fill_rows(bottom + 1 - n, bottom + 1);

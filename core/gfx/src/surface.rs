@@ -160,6 +160,16 @@ mod tests {
     }
 
     #[test]
+    fn reports_its_geometry_and_format() {
+        let mut pixels = buffer(8, 3);
+        let surface = surface(&mut pixels, 6, 3, 8);
+        assert_eq!((surface.width(), surface.height()), (6, 3));
+        assert_eq!(surface.format(), PixelFormat::BGRX);
+        assert_eq!(surface.pixel(6, 0), None);
+        assert_eq!(surface.pixel(0, 3), None);
+    }
+
+    #[test]
     fn last_row_does_not_need_padding() {
         let mut pixels = vec![0; 8 * 2 + 4];
         assert!(Surface::new(&mut pixels, 4, 3, 8, PixelFormat::BGRX).is_some());
