@@ -12,6 +12,7 @@
 | Fonte própria | tabelas em `.rodata` (teste em `core/gfx/src/font`) | 3 884 bytes para 237 glifos 8x16 |
 | Shell | `size_of::<Shell<256, 32>>()`, na pilha do `kmain` | 8 880 bytes |
 | Metadado de memória física | bitmap do `BitmapFrameAllocator`: 1 bit por frame de 4 KiB | 8 144 bytes para 254 MiB rastreados (0,003%) |
+| Metadado do `BuddyAllocator` | bitmap por ordem com resumo hierárquico (SDD 12), `BuddyAllocator::words_needed` | 16 720 bytes para 254 MiB (2,05 bits por frame, 0,008%); 2,03 bits por frame em 4 GiB ou mais. O bitmap de hoje: 8 144 bytes (1 bit) |
 | Boot até o kernel | linha `boot timeline` (pedido *bootloader performance* do Limine) | Limine: 52 ms (aarch64, HVF) / 350 ms (x86_64, TCG) |
 | Pilha de exceção (aarch64) | `Memory::map_stack`: 4 páginas mapeadas e uma de guarda, por CPU | 16 384 bytes de RAM, mais as tabelas de página que faltarem |
 | Timer (aarch64) | linha `timer:` do boot; `CNTV` com `CVAL` absoluto, 100 Hz | 50 tiques em 497 ms (HVF) e 488 ms (TCG); núcleo ocioso em `wfi` usa 0,3% de CPU do host (HVF) |
@@ -39,6 +40,47 @@ O BLAKE2b depende de a função G ser inlinada: sem `#[inline(always)]` ela cai 
 1 584 para 507 MB/s (a exceção ao `clippy::inline_always` tem esse número como
 motivo). O ChaCha20 não precisa. O número no alvo entra quando o kernel ligar o
 gerador (fase 2): [DEBT-0015](../tech-debt/0015-cripto-sem-medida-no-alvo.md).
+
+### Alocadores de memória (fase 2, medido no host)
+
+Comando: `cargo test --release -p rustos-mm bench -- --ignored --nocapture --test-threads=1`
+(`core/mm/src/bench.rs`). Máquina: Apple M5 (aarch64), rustc 1.100.0, perfil `release`
+(LTO, `opt-level = 3`), memória falsa em `Vec`, cache quente, região de 65 536 frames
+(256 MiB). **Não é QEMU nem metal**: serve para comparar os alocadores entre si,
+nunca com outro sistema (guidelines 05). Três rodadas, variação de 1 ns ou menos,
+exceto o bitmap de uma rodada (7,7 e 8,9 ns, contra 2,0 e 4,0 nas outras duas).
+
+| Operação (ns por par alocar+liberar, salvo "lote") | Bitmap | Buddy (a) bitmaps | Buddy (b) listas | Buddy (a) + cache de 64 |
+| --- | --- | --- | --- | --- |
+| 1 frame, memória virgem (cada par funde e parte 16 níveis) | 2 | 82 | 85 | — |
+| 1 frame, anel de 4096 vivos | 4 | 21 | 14 | 1,7 |
+| Lote: 32 768 alocações e 32 768 liberações, por operação | 1,7 | 9,8 | 13,6 | 13,1 |
+| 2 MiB (512 frames), metade de baixo ocupada | 1 240 (varredura mais 512 liberações) | 33 | 37 | — |
+
+- **O bitmap vence no frame solto** (um bit) e perde por duas ordens de grandeza no
+  bloco contíguo, que ele acha por varredura. O buddy sozinho é 5x mais lento que o
+  bitmap em 1 frame: o cache por CPU devolve o caso quente a 1,7 ns, e o lote (que o
+  cache não acelera: 13 ns contra 10) é o custo do buddy.
+- **A cascata de 16 níveis (82 ns) é o pior caso** de um par: liberar e pedir de novo
+  um frame sobre memória toda livre parte e funde o bloco inteiro a cada vez. O cache
+  por CPU absorve esse vaivém sem tocar o buddy.
+- **(a) contra (b):** (b) ganha 7 ns no frame solto e perde 4 ns no lote e 4 ns no
+  bloco grande, e escreve na memória livre; escolhemos (a) (SDD 12).
+
+Heap (`KernelHeap`), 1000 objetos vivos, par alocar+liberar, mesma máquina:
+
+| Pedido | Sem zerar | Zerando ao liberar | Custo de zerar |
+| --- | --- | --- | --- |
+| 16 B | 7 ns | 8 ns | +1 ns |
+| 64 B | 7 ns | 9 ns | +2 ns |
+| 1024 B | 7 ns | 16 ns | +9 ns |
+| 4096 B (1 página, direto no buddy) | 19 ns | 46 ns | +27 ns |
+| 8192 B (2 páginas) | 19 ns | 77 ns | +58 ns |
+| 4096 B via cache de 64 frames | 1,6 ns | — | — |
+
+Zerar custa cerca de 7 ns por KiB com o dado no cache: o piso. Com a memória fria
+(página recém-devolvida por outro núcleo) o custo é o da banda da DRAM, e só vale
+medir em metal ou com KVM/HVF. O número a escrever no SDD 09 vem daqui.
 
 ### Para onde foi o tamanho do kernel
 
@@ -71,7 +113,9 @@ cerca de 1,6% da RAM; o trabalho de *memdescs* mira 8 bytes, cerca de 0,2%
 ([Wilcox, 2022](https://lore.kernel.org/all/YvZmDfSFMydiulzw@casper.infradead.org/T/);
 [LWN](https://lwn.net/Articles/1015320)). O bitmap é mais barato porque só guarda
 livre/ocupado; quando houver páginas compartilhadas e copy-on-write, o kernel vai
-precisar de um descritor por frame, e a meta é ficar na faixa de 8–32 bytes.
+precisar de um descritor por frame, e a meta é ficar na faixa de 8–32 bytes. O buddy com bitmaps
+custa 0,25 byte por frame, sem descritor: o descritor entra com a contagem de
+referências (fase 4), não com o buddy.
 
 ## Método de comparação com Linux e Windows
 

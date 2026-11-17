@@ -63,7 +63,8 @@ quando houver medição para decidir.
 - **Tabelas próprias do kernel:**
   - `.text` só leitura e execução, `.rodata` só leitura, dados com NX;
   - página de guarda abaixo de toda pilha do kernel.
-- **Heap:** buddy allocator com cache por CPU e `GlobalAlloc` para `alloc`.
+- **Heap:** buddy allocator com cache por CPU e `GlobalAlloc` para `alloc`. O núcleo
+  puro (buddy, cache, slabs) está em `core/mm`; falta ligá-lo ao kernel ([SDD 12](12_memoria_fisica_e_heap.md)).
 - **Memória do bootloader recuperada** (DEBT-0006).
 - **Aleatório do kernel:** semente de RDSEED/RNDR, gerador ChaCha20, e reposição da
   semente. É a base de KASLR, ASLR e canários. O gerador está pronto em

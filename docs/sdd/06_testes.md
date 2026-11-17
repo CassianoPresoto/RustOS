@@ -17,8 +17,16 @@
 
 Todo crate de `core/` e `lib/` é `#![cfg_attr(not(test), no_std)]`: no teste, tem
 `std`; no kernel, não. Exemplos: `core/mm/src/frame.rs` (alocação, dupla liberação,
-faixas recortadas, palavras parciais), `lib/sync/src/spin.rs` (4 threads × 10 000
+faixas recortadas, palavras parciais), `core/mm/src/buddy.rs` e `heap.rs` (400 mil e
+300 mil passos aleatórios contra um modelo `BTreeMap`: nada se sobrepõe, o conteúdo
+sobrevive e tudo volta ao estado de partida), `lib/sync/src/spin.rs` (4 threads × 10 000
 incrementos — foi esse teste que achou o `then_some` que soltava o lock alheio).
+
+Medição de `core/mm` no host, fora do `make test` (testes `#[ignore]`):
+
+```sh
+cargo test --release -p rustos-mm bench -- --ignored --nocapture --test-threads=1
+```
 
 ## Andar 2 — adaptador com porta falsa
 
@@ -27,6 +35,7 @@ incrementos — foi esse teste que achou o `then_some` que soltava o lock alheio
 | `drivers/uart16550`, `drivers/pl011` | `FakeBus: RegisterBus` que grava cada escrita e simula FIFO cheia |
 | `arch/aarch64/src/walk.rs` | `FakeTables: TableMemory` em `HashMap` e `Frames: FrameSource` em `Vec` |
 | `boot/limine` | Layout das structs contra `limine.h` (`size_of`, `offset_of`), tradução dos tipos de região e do formato do framebuffer |
+| `core/mm/src/heap.rs` | `FakeMemory: FrameMemory`, uma faixa de palavras que derruba o teste em acesso fora dela, desalinhado ou abaixo da base |
 | `core/shell` | `Host` falso e um terminal VT mínimo (`testing.rs`) que confere prompt, linha e cursor depois de cada tecla, nas duas regras de última coluna |
 | `core/term` | Fuzz determinístico (xorshift, 300 mil bytes por tamanho de grade) que confere cursor, região e anel; o mesmo fluxo em bloco e byte a byte dá a mesma grade |
 

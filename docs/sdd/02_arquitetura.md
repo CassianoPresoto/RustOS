@@ -8,7 +8,7 @@
 | Anel | Pasta | O que tem | `unsafe` |
 | --- | --- | --- | --- |
 | **Portas** | `core/hal` | Traits e tipos de fronteira: `BootInfo`, `Console`, `ByteSource`, `Cpu`, `RegisterBus`, `PageMapper`, `FrameSource`, `FramebufferInfo`, `PhysAddr`, `VirtAddr`, `MemoryRegion` | proibido |
-| **Centro** | `core/mm`, `core/crypto`, `core/sched`, `core/gfx`, `core/term`, `core/shell` | Política pura: alocador de frames, leitura do mapa de memória, janela de endereços, fila de execução, rodízio; ChaCha20, BLAKE2b e o gerador de números aleatórios; desenho de pixels e a fonte própria; emulador de terminal VT/xterm; shell embutido | proibido |
+| **Centro** | `core/mm`, `core/crypto`, `core/sched`, `core/gfx`, `core/term`, `core/shell` | Política pura: alocadores de frames (bitmap, buddy, cache por CPU) e do heap, leitura do mapa de memória, janela de endereços, fila de execução, rodízio; ChaCha20, BLAKE2b e o gerador de números aleatórios; desenho de pixels e a fonte própria; emulador de terminal VT/xterm; shell embutido | proibido |
 | **Suporte** | `lib/sync` | Primitivas sem domínio (`SpinLock`) que precisam de `unsafe` para existir | permitido |
 | **Adaptadores** | `arch/*`, `boot/*`, `drivers/*` | Implementam as portas para uma ISA, um bootloader ou um dispositivo | permitido em `arch/` e `boot/`; proibido em `drivers/` |
 | **Raiz de composição** | `kernel/` | Entrada, pânico, console global, e a escolha de qual adaptador atende cada porta | permitido |

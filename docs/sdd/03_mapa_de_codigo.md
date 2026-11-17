@@ -21,7 +21,7 @@
 │       └── platform/           # um módulo por ISA: ARCH, PlatformConsole, cpu(), console()
 ├── core/                       # o centro do hexágono: no_std, forbid(unsafe_code), testado no host
 │   ├── hal/                    # rustos-hal: as portas (traits) e os tipos de fronteira
-│   ├── mm/                     # rustos-mm: BitmapFrameAllocator, summarize/find_free_block, AddressWindow
+│   ├── mm/                     # rustos-mm: BitmapFrameAllocator, BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow; portas FrameMemory e FrameAllocator (SDD 12)
 │   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) e Rng (fast key erasure); ainda não ligado ao kernel
 │   ├── sched/                  # rustos-sched: TaskId, RunQueue, RoundRobin (ainda não ligado ao kernel)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16

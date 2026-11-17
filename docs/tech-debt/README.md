@@ -34,3 +34,5 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0013](0013-caminhada-de-tabela-duplicada.md) | Caminhada de tabela de página duplicada entre as ISAs | Open | A terceira ISA, ou a primeira mudança no algoritmo de caminhada de uma delas |
 | [0014](0014-x86-sem-salvaguardas-de-metal.md) | x86_64 sem as salvaguardas que só o metal pede | Open | O primeiro boot do x86_64 em metal |
 | [0015](0015-cripto-sem-medida-no-alvo.md) | Criptografia do núcleo medida só no host | Open | O kernel ligar o `Rng` de `core/crypto`, na fase 2 |
+| [0016](0016-bitmap-de-frames-ainda-no-kernel.md) | Kernel ainda usa o BitmapFrameAllocator; o buddy e o heap não estão ligados | Open | O PR que liga o heap do kernel (GlobalAlloc) na fase 2 |
+| [0017](0017-dupla-liberacao-escondida-no-cache-de-frames.md) | Dupla liberação de frame no cache por CPU só aparece ao esvaziar o cache | Open | O primeiro defeito de dupla liberação de frame que o cache esconder, ou o modo de depuração do kernel |
