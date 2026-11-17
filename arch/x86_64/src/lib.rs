@@ -29,6 +29,8 @@ mod port;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod protect;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+mod stack;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod sysreg;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod traps;
@@ -47,6 +49,8 @@ pub use mmu::X86PageMapper;
 pub use port::PortBus;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use protect::{Protections, enable as enable_protections};
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub use stack::{Continuation, call_on_stack};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use sysreg::{features as cpu_features, rdtsc};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]

@@ -22,6 +22,7 @@ pub const HHDM_ID: [u64; 4] = id(0x48dc_f1cb_8ad2_b852, 0x6398_4e95_9a98_244b);
 pub const MEMMAP_ID: [u64; 4] = id(0x67cf_3d9d_378a_806f, 0xe304_acdf_c50c_3c62);
 pub const PERFORMANCE_ID: [u64; 4] = id(0x6b50_ad9b_f36d_13ad, 0xdc4c_7e88_fc75_9e17);
 pub const FRAMEBUFFER_ID: [u64; 4] = id(0x9d58_27dc_d881_dd75, 0xa314_8604_f6fa_b11b);
+pub const EXECUTABLE_ADDRESS_ID: [u64; 4] = id(0x71ba_7686_3cc5_5f63, 0xb264_4a48_c516_a487);
 
 pub const FRAMEBUFFER_RGB: u8 = 1;
 
@@ -140,6 +141,14 @@ impl MemmapResponse {
     }
 }
 
+/// Onde o Limine carregou a imagem: base física e base virtual (já com o slide).
+#[repr(C)]
+pub struct ExecutableAddressResponse {
+    pub revision: u64,
+    pub physical_base: u64,
+    pub virtual_base: u64,
+}
+
 #[repr(C)]
 pub struct PerformanceResponse {
     pub revision: u64,
@@ -206,9 +215,35 @@ mod tests {
             MEMMAP_ID,
             PERFORMANCE_ID,
             FRAMEBUFFER_ID,
+            EXECUTABLE_ADDRESS_ID,
         ] {
             assert_eq!(id[..2], COMMON_MAGIC);
         }
+    }
+
+    #[test]
+    fn executable_address_layout_matches_limine_h() {
+        assert_eq!(size_of::<ExecutableAddressResponse>(), 24);
+        assert_eq!(
+            core::mem::offset_of!(ExecutableAddressResponse, physical_base),
+            8
+        );
+        assert_eq!(
+            core::mem::offset_of!(ExecutableAddressResponse, virtual_base),
+            16
+        );
+        assert_eq!(size_of::<Request<ExecutableAddressResponse>>(), 48);
+        assert_eq!(
+            core::mem::offset_of!(Request<ExecutableAddressResponse>, response),
+            40
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unreadable_literal, reason = "cópia literal do limine.h")]
+    fn executable_address_id_matches_limine_h() {
+        assert_eq!(EXECUTABLE_ADDRESS_ID[2], 0x71ba76863cc55f63);
+        assert_eq!(EXECUTABLE_ADDRESS_ID[3], 0xb2644a48c516a487);
     }
 
     #[test]

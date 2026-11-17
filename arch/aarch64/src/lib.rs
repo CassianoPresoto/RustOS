@@ -25,6 +25,8 @@ mod mmu;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod protection;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+mod stack;
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod timer;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -35,6 +37,8 @@ pub use entropy::Aarch64Entropy;
 pub use mmio::MmioBus;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use mmu::Aarch64PageMapper;
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub use stack::{Continuation, call_on_stack};
 
 /// PL011, distribuidor e redistribuidor do GICv3 da máquina `virt` da QEMU (DEBT-0002).
 pub const QEMU_VIRT_PL011: u64 = 0x0900_0000;

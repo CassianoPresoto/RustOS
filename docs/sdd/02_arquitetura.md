@@ -45,6 +45,7 @@ os métodos da porta são seguros. Exemplos:
 | `MmioBus` (aarch64) | `MmioBus::new(virt)` | `virt` está mapeado como dispositivo e cobre o bloco de registradores |
 | `Aarch64PageMapper` | `Aarch64PageMapper::active(offset)` | as tabelas ativas e os frames novos são acessíveis pelo mapa direto |
 | `X86PageMapper` | `X86PageMapper::active(offset)` | as tabelas ativas (`CR3`) e os frames novos são acessíveis pelo mapa direto |
+| `X86PageMapper`, `Aarch64PageMapper` | `::new_space(frames, offset)` | todo frame de `frames` é acessível em `físico + offset` antes e depois da troca; só se ativa o espaço com código, pilha e mapa direto nele |
 | `LimineBoot` | `LimineBoot::from_bootloader()` | a memória das respostas do Limine ainda não foi reaproveitada |
 | `X86Cpu`, `Aarch64Cpu` | `::new()` | o código roda em ring 0 / EL1+ |
 | `DirectMap` (`kernel/src/heap.rs`) | `DirectMap::new(offset)` | todo endereço físico que a porta `FrameMemory` recebe é de frame do kernel e está no mapa direto, em `físico + offset` |

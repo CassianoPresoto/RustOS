@@ -17,7 +17,7 @@ pub mod memory;
 pub mod paging;
 
 pub use addr::{PhysAddr, VirtAddr};
-pub use boot::{BootInfo, BootTimeline, BootloaderId};
+pub use boot::{BootInfo, BootTimeline, BootloaderId, KernelImage};
 pub use console::Console;
 pub use cpu::Cpu;
 pub use display::{Channel, FramebufferInfo};
@@ -26,4 +26,7 @@ pub use input::{ByteSource, KeyCode, KeyEvent};
 pub use interrupt::{Fault, FaultKind, Handlers, Irq};
 pub use io::RegisterBus;
 pub use memory::{MemoryRegion, RegionKind};
-pub use paging::{CacheMode, FrameSource, MapError, PAGE_SIZE, PageFlags, PageMapper};
+pub use paging::{
+    AddressSpace, CacheMode, FrameSource, LARGE_PAGE_SIZE, MapError, Mapping, PAGE_SIZE, PageFlags,
+    PageMapper,
+};
