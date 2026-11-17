@@ -54,7 +54,7 @@ precisar de um descritor por frame, e a meta é ficar na faixa de 8–32 bytes.
 
 1. **Mesma máquina, mesmo firmware, versões anotadas.** Firmware e ACPI mudam o
    tempo de boot; cada rodada registra host, QEMU, firmware e versão do sistema
-   ([SUSE, KVM Forum 2022](https://kvm-forum.qemu.org/2022/QEMU%20%26%20KVM%20Automated%20Performance%20Benchmarking%20%40%20SUSE-1.pdf)).
+   ([SUSE, KVM Forum 2022](https://gitlab.com/qemu-project/kvm-forum/-/raw/main/_attachments/2022/QEMU%20%26%20KVM%20Automated%20Performance%20Benchmarking%20%40%20SUSE-1.pdf)).
 2. **QEMU para função, metal para latência.** Sob TCG o mesmo boot de Linux levou
    ~8,25 s contra ~1,22 s com KVM
    ([Santilli](https://cirosantilli.com/linux-kernel-module-cheat/benchmark-linux-kernel-boot.html)):
@@ -75,12 +75,12 @@ trecho de busca, não do documento primário.
 | Escalonador | Fila por CPU, sem lock global; política de prazo/lag (EEVDF, que substituiu o CFS no Linux 6.6) atrás de um trait | [kernel.org EEVDF](https://docs.kernel.org/scheduler/sched-eevdf.html), [LWN](https://lwn.net/Articles/925371) | 2–3 |
 | Escalonador | Política plugável, no espírito do `sched_ext` (filas de despacho por CPU) | [kernel.org sched_ext](https://docs.kernel.org/scheduler/sched-ext.html) | depois de 3 |
 | Memória física | Cache de páginas por CPU, reabastecido em lote, sobre um buddy allocator; buddy é necessário para blocos contíguos e páginas grandes | [linux-mm](https://www.linux-mm.org/PageAllocation) | 2–3 |
-| Memória física | Descritor por frame de 8–32 bytes (memdescs/folios) | [FOSDEM 2025](https://fosdem.org/2025/events/attachments/fosdem-2025-4860-shrinking-memmap/slides/237339/Wilcox-Me_GEqPExc.pdf) | 4 |
+| Memória física | Descritor por frame de 8–32 bytes (memdescs/folios) | [FOSDEM 2025](https://fosdem.org/2025/events/attachments/fosdem-2025-4860-shrinking-memmap/slides/238482/Wilcox-Me_GEqPExc.pdf) | 4 |
 | Memória virtual | PCID/ASID com contador de geração por CPU; pular TLB shootdown em CPU em modo *lazy* | `arch/x86/mm/tlb.c` do Linux (espelho, não verificado no oficial) | 3 |
 | Syscall | Submissão em lote por fila compartilhada (FlexSC, io_uring) em vez de uma trap por chamada | [FlexSC](https://www.usenix.org/legacy/events/atc11/tech/final_files/Soares.pdf) | 4 |
-| IPC | Caminho rápido curto: seL4 relata < 900 ciclos de ida e volta no x86 (relato de lista, não revisado) | [seL4 devel](https://lists.sel4.systems/hyperkitty/list/devel@sel4.systems/thread/UIYNCCE5P3AXES4OC3DI6FRVOWQMSMPI/) | 4 |
+| IPC | Caminho rápido curto, no modelo do seL4; o número entra quando for medido aqui | [seL4 performance](https://sel4.systems/About/Performance/) (página do projeto; nenhum número conferido) | 4 |
 | Mitigações | Ligar só as mitigações de Spectre/Meltdown que a CPU precisa, e relatar quais estão ligadas | [Linux admin guide](https://docs.kernel.org/admin-guide/hw-vuln/spectre.html) | 4 |
-| Interrupções | MSI-X e troca para polling acima de uma taxa, no modelo NAPI | [kernel.org NAPI](https://docs.kernel.org/networking/napi.html) | 6 |
+| Interrupções | MSI-X e troca para polling acima de uma taxa, no modelo NAPI | [kernel.org NAPI](https://docs.kernel.org/networking/napi.html) | 10 |
 | Segurança × custo | Núcleo pequeno com `unsafe`, resto seguro; o Asterinas relata desempenho próximo ao Linux com ~14% de TCB (números do próprio projeto) | [ATC '25](https://www.usenix.org/conference/atc25/presentation/peng-yuke) | já adotado |
 
 ## Princípios que viram regra

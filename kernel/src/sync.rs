@@ -1,5 +1,5 @@
 //! Lock que mascara interrupção na CPU local enquanto está preso: um handler que
-//! pegue o mesmo lock nunca acha o dono interrompido no meio (paga a DEBT-0003).
+//! pegue o mesmo lock nunca acha o dono interrompido no meio.
 
 use core::fmt;
 use core::mem::ManuallyDrop;

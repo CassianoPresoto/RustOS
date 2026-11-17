@@ -27,3 +27,4 @@ tirar regra é um dos casos em que o agente para ([`AGENTS.md`](../../AGENTS.md#
 | [`06_comentarios.md`](06_comentarios.md) | O que um comentário pode dizer, 4 linhas por bloco, `DEBT-NNNN` |
 | [`07_testes.md`](07_testes.md) | O que precisa de teste e em que andar; o smoke das duas ISAs |
 | [`08_commits_branches_e_pr.md`](08_commits_branches_e_pr.md) | Formato de commit, branch e PR; o que o PR precisa dizer |
+| [`09_seguranca.md`](09_seguranca.md) | Dado externo validado na fronteira, segredo fora de log, proteção de hardware ligada ou em dívida |

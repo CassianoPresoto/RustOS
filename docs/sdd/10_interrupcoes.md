@@ -1,9 +1,15 @@
-# SDD 10 — Exceções, interrupções e tempo no x86_64
+# SDD 10 — Exceções, interrupções e tempo
 
-> **O que este capítulo responde:** como o kernel recebe exceção e IRQ no x86_64,
-> de onde vem o tique e o relógio, e que proteções de hardware ligam no boot.
+> **O que este capítulo responde:** como o kernel recebe exceção e IRQ em cada
+> ISA, de onde vem o tique e o relógio, e que proteções de hardware ligam no boot.
 
-## Sequência de `platform::init_interrupts`
+O núcleo vê as duas ISAs pelas mesmas portas (`hal::Handlers`, `hal::Fault`,
+`hal::Cpu`) e pelo contrato de `kernel/src/platform/mod.rs`. Tudo o que muda
+entre elas está numa seção por ISA, abaixo.
+
+## x86_64
+
+### Sequência de `platform::init_interrupts`
 
 | Passo | O quê | Onde |
 | --- | --- | --- |
@@ -20,7 +26,7 @@
 O chamador (`interrupts::init`) liga o `IF` depois. A parte pura de cada passo
 roda no `cargo test` do host, com `RegisterBus` e memória de tabelas falsos.
 
-## Vetores
+### Vetores
 
 | Vetor | Quem | Pilha |
 | --- | --- | --- |
@@ -38,7 +44,7 @@ entrada comum salva os 15 registradores (ordem de `TrapFrame`), faz `cld` e cham
 erro e pelo `CR2`) ou entrega `hal::Irq` ao núcleo e dá o EOI depois do handler. O
 breakpoint volta; qualquer outra exceção pára a CPU.
 
-## Seletores
+### Seletores
 
 | Seletor | Descritor |
 | --- | --- |
@@ -48,7 +54,7 @@ breakpoint volta; qualquer outra exceção pára a CPU.
 | `0x20` (RPL 3) | Código do usuário (dados antes do código, a ordem do `sysret`) |
 | `0x28` | TSS de 16 bytes (ocupa duas entradas) |
 
-## Tempo
+### Tempo
 
 O tique é o timer do Local APIC em modo periódico, divisor 16, contagem inicial
 `apic_hz / TIMER_HZ`. O relógio (`now_ns`) é o TSC menos a leitura da calibração,
@@ -62,20 +68,20 @@ inutiliza o CPUID 0x15 do Linux: por isso a referência é o PIT.
 | Contador do timer do APIC, divisor 16 | ~62,5 MHz |
 | `timer: 100 Hz, 5 ticks in …` | 40 a 45 ms (a fase do primeiro tique é aleatória) |
 
-## Custo
+### Custo
 
 `make size ARCH=x86_64 PROFILE=release`, antes e depois: carregado 99 301 → 118 976
 bytes (`text` 80 415 → 94 591, `bss` 6 → 4 504). Os 256 stubs são 4 096 bytes de
 `text` e a IDT, 4 096 de `bss`; o resto é o despacho, o APIC e a calibração.
 
-## Memória virtual acrescentada
+### Memória virtual acrescentada
 
 | Faixa | O quê |
 | --- | --- |
 | `0xffff_fe80_0000_0000`, 1 GiB | Janela de pilhas (entrada 509), com página de guarda abaixo de cada pilha |
 | `0xffff_ff00_0000_0000`, 1 GiB | Janela de dispositivos (entrada 510): Local APIC (xAPIC) e I/O APIC, com `PCD\|PWT` (PAT[3] = UC no layout do Limine) |
 
-## Fontes
+### Fontes
 
 | Afirmação | Fonte |
 | --- | --- |
@@ -88,3 +94,27 @@ bytes (`text` 80 415 → 94 591, `bss` 6 → 4 504). Os 256 stubs são 4 096 byt
 | I/O APIC em `0xFEC0_0000` | `IO_APIC_DEFAULT_ADDRESS` em `include/hw/intc/ioapic.h` da QEMU |
 | PAT do Limine (PAT3 = UC) | `PROTOCOL.md` do Limine, seção *Caching* |
 | IST no gate é índice mais um | comentário em `arch/x86/kernel/idt.c` do Linux |
+
+## aarch64
+
+Fonte dos números: ARM ARM via `esr.h` do Linux (classes e `FSC`), `entry.S` do
+Linux (ordem dos vetores), `arm-gic-v3.h` do Linux e `hw/intc/arm_gicv3_*.c` da
+QEMU (registradores), `hw/arm/virt.c` (INTIDs e endereços). Cada decisão abaixo
+foi conferida nelas.
+
+| Peça | Como é |
+| --- | --- |
+| Vetores | `VBAR_EL1` aponta para `rustos_vectors` (`arch/aarch64/src/exception.rs`): 2 KiB, 16 entradas de 0x80. O Limine entrega em EL1t, então o kernel é sempre interrompido no grupo "EL1 com SP0"; o grupo SPx usa o mesmo corpo |
+| Pilha | `SP_EL1` aponta para uma pilha própria de 4 páginas com guarda (`map_stack`); o kernel segue em `SP_EL0`. Do EL1 só se escreve `SP_EL1` com `SPSel` em 1, então `install` troca `SPSel`, grava o `sp` e volta |
+| Quadro | x0–x30, `ELR_EL1`, `SPSR_EL1`: 272 bytes. `brk` volta para a instrução seguinte (o `ELR` aponta para o próprio `brk`: soma 4); falha não recuperável para a CPU em `wfe` |
+| `ESR_EL1` | `esr.rs` (puro): classe → `hal::FaultKind`; em aborto, `DFSC`/`IFSC` (tradução por nível, acesso, permissão, alinhamento) e `WnR`. `Fault.code` é o `ESR` cru |
+| GICv3 | `drivers/gicv3` (MMIO) mais `gic_cpu.rs` (`ICC_*_EL1`). Distribuidor em `0x0800_0000`, redistribuidor da CPU 0 em `0x080A_0000`, ambos pela janela de dispositivos (DEBT-0002). Sequência: distribuidor desligado → `ARE` + grupo 1 → acorda o redistribuidor (`GICR_WAKER`) → `ICC_SRE_EL1`, `PMR`, `IGRPEN1` |
+| Fontes | PPI 27 (`CNTV`, nível) no redistribuidor e SPI 33 (UART0, nível) no distribuidor, grupo 1, roteada para a afinidade do `MPIDR_EL1` desta CPU |
+| EOI | `EOImode` 0: um `ICC_EOIR1_EL1` baixa a prioridade e desativa. INTID ≥ 1020 (espúrio) não leva EOI |
+| Timer | `CNTV` (o Linux usa o virtual em EL1 sem EL2 e o HVF só entrega o virtual). `CNTFRQ_EL0` lido em tempo de execução. O disparo usa `CNTV_CVAL_EL0` absoluto (`TVAL` acumulava ~2 ms de atraso por tique sob QEMU: 50 tiques em 600 ms) |
+| Relógio | `now_ns` = `(CNTVCT − início) × 10⁹ / CNTFRQ` em `u128`; zero em `init_interrupts` |
+| PL011 | `IMSC.RXIM \| RTIM`; `ICR` limpo no começo da IRQ, antes de drenar o FIFO: o byte que chega depois rearma a IRQ (limpar depois perdia o acordar no modelo da QEMU) |
+| PAN | ligado se `ID_AA64MMFR1_EL1.PAN` ≠ 0, com `SCTLR_EL1.SPAN` = 0 (liga na entrada da exceção) e `PSTATE.PAN` = 1 agora; `protections:` mostra o `PSTATE.PAN` lido de volta |
+
+A mesma configuração roda no HVF (vGIC da Apple, `virt-11.1`+, macOS 15+) e no TCG:
+a `virt` fixa o GICv3 por `gic-version=3` e as duas aceleram os mesmos registradores.

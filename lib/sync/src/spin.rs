@@ -6,7 +6,8 @@ use core::hint::spin_loop;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Não mascara interrupções: handler que pegue o mesmo lock trava a CPU (DEBT-0003).
+/// Não mascara interrupções: lock que um handler também pega tem de ser o
+/// `IrqLock` do kernel, ou a CPU trava girando no próprio lock.
 pub struct SpinLock<T> {
     locked: AtomicBool,
     value: UnsafeCell<T>,

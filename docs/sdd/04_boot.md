@@ -87,29 +87,10 @@ O mapa direto do Limine não cobre MMIO nem garante atributo de dispositivo: no
 aarch64 ele usa Normal WB (`MAIR` índice 0). Por isso registrador de dispositivo
 sempre passa pela janela de dispositivos, nunca pelo HHDM.
 
-## Exceções e interrupções (aarch64)
+## Exceções e interrupções
 
-Fonte dos números: ARM ARM via `esr.h` do Linux (classes e `FSC`), `entry.S` do
-Linux (ordem dos vetores), `arm-gic-v3.h` do Linux e `hw/intc/arm_gicv3_*.c` da
-QEMU (registradores), `hw/arm/virt.c` (INTIDs e endereços). Cada decisão abaixo
-foi conferida nelas.
-
-| Peça | Como é |
-| --- | --- |
-| Vetores | `VBAR_EL1` aponta para `rustos_vectors` (`arch/aarch64/src/exception.rs`): 2 KiB, 16 entradas de 0x80. O Limine entrega em EL1t, então o kernel é sempre interrompido no grupo "EL1 com SP0"; o grupo SPx usa o mesmo corpo |
-| Pilha | `SP_EL1` aponta para uma pilha própria de 4 páginas com guarda (`map_stack`); o kernel segue em `SP_EL0`. Do EL1 só se escreve `SP_EL1` com `SPSel` em 1, então `install` troca `SPSel`, grava o `sp` e volta |
-| Quadro | x0–x30, `ELR_EL1`, `SPSR_EL1`: 272 bytes. `brk` volta para a instrução seguinte (o `ELR` aponta para o próprio `brk`: soma 4); falha não recuperável para a CPU em `wfe` |
-| `ESR_EL1` | `esr.rs` (puro): classe → `hal::FaultKind`; em aborto, `DFSC`/`IFSC` (tradução por nível, acesso, permissão, alinhamento) e `WnR`. `Fault.code` é o `ESR` cru |
-| GICv3 | `drivers/gicv3` (MMIO) mais `gic_cpu.rs` (`ICC_*_EL1`). Distribuidor em `0x0800_0000`, redistribuidor da CPU 0 em `0x080A_0000`, ambos pela janela de dispositivos (DEBT-0002). Sequência: distribuidor desligado → `ARE` + grupo 1 → acorda o redistribuidor (`GICR_WAKER`) → `ICC_SRE_EL1`, `PMR`, `IGRPEN1` |
-| Fontes | PPI 27 (`CNTV`, nível) no redistribuidor e SPI 33 (UART0, nível) no distribuidor, grupo 1, roteada para a afinidade do `MPIDR_EL1` desta CPU |
-| EOI | `EOImode` 0: um `ICC_EOIR1_EL1` baixa a prioridade e desativa. INTID ≥ 1020 (espúrio) não leva EOI |
-| Timer | `CNTV` (o Linux usa o virtual em EL1 sem EL2 e o HVF só entrega o virtual). `CNTFRQ_EL0` lido em tempo de execução. O disparo usa `CNTV_CVAL_EL0` absoluto (`TVAL` acumulava ~2 ms de atraso por tique sob QEMU: 50 tiques em 600 ms) |
-| Relógio | `now_ns` = `(CNTVCT − início) × 10⁹ / CNTFRQ` em `u128`; zero em `init_interrupts` |
-| PL011 | `IMSC.RXIM \| RTIM`; `ICR` limpo no começo da IRQ, antes de drenar o FIFO: o byte que chega depois rearma a IRQ (limpar depois perdia o acordar no modelo da QEMU) |
-| PAN | ligado se `ID_AA64MMFR1_EL1.PAN` ≠ 0, com `SCTLR_EL1.SPAN` = 0 (liga na entrada da exceção) e `PSTATE.PAN` = 1 agora; `protections:` mostra o `PSTATE.PAN` lido de volta |
-
-A mesma configuração roda no HVF (vGIC da Apple, `virt-11.1`+, macOS 15+) e no TCG:
-a `virt` fixa o GICv3 por `gic-version=3` e as duas aceleram os mesmos registradores.
+O que cada ISA liga em `platform::init_interrupts`, com vetores, controlador,
+timer e fontes, está no [SDD 10](10_interrupcoes.md).
 
 ## Saída de referência
 

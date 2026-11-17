@@ -26,6 +26,7 @@ mesmo PR.
 | [`05_build_e_execucao.md`](05_build_e_execucao.md) | Toolchain, alvos, perfis, `make`/`xtask`, QEMU e firmware |
 | [`06_testes.md`](06_testes.md) | Os andares de teste, onde cada um roda e o que ainda não existe |
 | [`07_desempenho_e_recursos.md`](07_desempenho_e_recursos.md) | O que já se mede, como comparar com Linux e Windows, e as técnicas que a pesquisa aponta |
-| [`08_roadmap.md`](08_roadmap.md) | As fases, do esqueleto à compatibilidade com binários Linux |
-| [`10_interrupcoes_x86_64.md`](10_interrupcoes_x86_64.md) | Exceções, IRQ e tempo no x86_64: sequência de init, vetores, seletores, calibração do tique e fontes |
+| [`08_roadmap.md`](08_roadmap.md) | A fila de implementação: as fases, o que cada uma entrega e quando termina |
+| [`09_seguranca.md`](09_seguranca.md) | Modelo de ameaça, mecanismos por fase com custo e fonte, e as decisões de segurança abertas |
+| [`10_interrupcoes.md`](10_interrupcoes.md) | Exceções, IRQ e tempo nas duas ISAs: sequência de init, vetores, controladores, timer, relógio e fontes |
 | [`11_teclado.md`](11_teclado.md) | Da tecla do PC à `Key` do terminal: i8042, decodificador, layouts US e ABNT2, teclas mortas |
