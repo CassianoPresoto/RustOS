@@ -50,7 +50,7 @@ impl MmuControl for Aarch64Mmu {
 
     fn activate(&self, root: PhysAddr) {
         // SAFETY: invalidar o TLB antes não tem pré-condição; evita duas traduções do
-        // mesmo endereço (tamanho de bloco diferente) vivas ao mesmo tempo.
+        // mesmo endereço (tamanho de bloco diferente) vivas ao mesmo tempo (DEBT-0026).
         unsafe {
             asm!(
                 "dsb ishst",

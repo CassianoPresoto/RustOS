@@ -12,7 +12,7 @@ paid_date:
 ## O que falta
 
 O mapa direto do kernel cobre só `Usable` e `BootloaderReclaimable`. O Limine
-(base revisão 4 e 5) também mapeia ACPI reclaimable, ACPI NVS e `RESERVED_MAPPED`
+(base revisão 6, a que `boot/limine` pede, que herda das revisões 4 e 5: PROTOCOL.md, *Base Revision 4* e *5*) também mapeia ACPI reclaimable, ACPI NVS e `RESERVED_MAPPED`
 (SMBIOS, serviços de runtime da EFI). Nenhuma delas está mapeada nas tabelas novas.
 
 ## Por que foi aceito
