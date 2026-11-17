@@ -5,7 +5,7 @@ use core::fmt;
 use crate::ansi::{ACCENT, CLEAR_SCREEN, DIM, LOGO, RESET};
 use crate::fmtutil::{Bytes, Millis, Percent, Uptime};
 use crate::history::Entries;
-use crate::host::{Host, SystemInfo};
+use crate::host::{FaultTest, Host, SystemInfo};
 
 /// O que um comando recebe: seus argumentos (sem o nome) e as portas.
 pub(crate) struct Ctx<'a> {
@@ -38,6 +38,11 @@ pub(crate) const COMMANDS: &[Command] = &[
         name: "echo",
         summary: "print the arguments",
         run: echo,
+    },
+    Command {
+        name: "fault",
+        summary: "raise an exception to test the fault path (break | page)",
+        run: fault,
     },
     Command {
         name: "fetch",
@@ -139,6 +144,23 @@ fn uname(ctx: &mut Ctx<'_>) -> fmt::Result {
         ctx.out.write_str(text)?;
     }
     ctx.out.write_str("\r\n")
+}
+
+fn fault(ctx: &mut Ctx<'_>) -> fmt::Result {
+    let kind = match ctx.args.first().copied() {
+        Some("break") => FaultTest::Breakpoint,
+        Some("page") => FaultTest::PageFault,
+        _ => return ctx.out.write_str("usage: fault break|page\r\n"),
+    };
+    if kind == FaultTest::PageFault {
+        ctx.out.write_str("reading an unmapped page...\r\n")?;
+    }
+    if ctx.host.fault_test(kind) {
+        ctx.out
+            .write_str("breakpoint handled, back in the shell\r\n")
+    } else {
+        ctx.out.write_str("fault: not available yet\r\n")
+    }
 }
 
 fn uptime(ctx: &mut Ctx<'_>) -> fmt::Result {
@@ -438,6 +460,24 @@ mod tests {
         let mut host = FakeHost::new();
         host.uptime = Some(3_723_000_000_000);
         assert_eq!(run("uptime", &[], &host), "up 1h 02m 03s\r\n");
+    }
+
+    #[test]
+    fn fault_without_argument_prints_usage() {
+        assert!(run("fault", &[], &FakeHost::new()).starts_with("usage: fault"));
+        assert!(run("fault", &["disk"], &FakeHost::new()).starts_with("usage: fault"));
+    }
+
+    #[test]
+    fn fault_reports_when_the_platform_cannot() {
+        assert!(run("fault", &["break"], &FakeHost::new()).contains("not available yet"));
+    }
+
+    #[test]
+    fn fault_break_returns_to_the_shell() {
+        let mut host = FakeHost::new();
+        host.faults = true;
+        assert!(run("fault", &["break"], &host).contains("back in the shell"));
     }
 
     #[test]

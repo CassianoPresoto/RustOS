@@ -118,8 +118,16 @@ impl Arch {
                 push(&["-drive", &format!("format=raw,file=fat:rw:{esp}")]);
             }
             Self::Aarch64 => {
+                // GICv3 fixo: sem isso a versão muda com o acelerador (TCG e HVF).
                 push(&[
-                    "-machine", "virt", "-cpu", "max", "-m", "256M", "-bios", firmware,
+                    "-machine",
+                    "virt,gic-version=3",
+                    "-cpu",
+                    "max",
+                    "-m",
+                    "256M",
+                    "-bios",
+                    firmware,
                 ]);
                 push(&[
                     "-drive",

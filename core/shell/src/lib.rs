@@ -16,5 +16,5 @@ mod shell;
 #[cfg(test)]
 mod testing;
 
-pub use host::{DisplayInfo, Host, MemoryInfo, SystemInfo};
+pub use host::{DisplayInfo, FaultTest, Host, MemoryInfo, SystemInfo};
 pub use shell::Shell;

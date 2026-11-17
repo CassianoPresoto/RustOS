@@ -33,6 +33,13 @@ const DEVICE_WINDOW_LEN: u64 = 1 << 30;
 static DEVICES: SpinLock<AddressWindow> =
     SpinLock::new(AddressWindow::new(DEVICE_WINDOW, DEVICE_WINDOW_LEN));
 
+/// Janela das pilhas do kernel: entrada 509 do nível mais alto, livre no layout do Limine.
+const STACK_WINDOW: VirtAddr = VirtAddr::new(0xffff_fe80_0000_0000);
+const STACK_WINDOW_LEN: u64 = 1 << 30;
+
+static STACKS: SpinLock<AddressWindow> =
+    SpinLock::new(AddressWindow::new(STACK_WINDOW, STACK_WINDOW_LEN));
+
 #[derive(Debug)]
 pub enum MemoryError {
     NoUsableMemory,
@@ -76,6 +83,30 @@ impl Memory {
             bitmap_bytes,
             direct_map_offset: boot.direct_map_offset(),
         })
+    }
+
+    /// Pilha de `pages` páginas com uma página sem mapeamento logo abaixo: estouro
+    /// vira page fault em vez de corromper memória. Devolve o topo (fim exclusivo).
+    #[allow(
+        dead_code,
+        reason = "os adaptadores de interrupção usam nas pilhas de exceção"
+    )]
+    pub fn map_stack(
+        &mut self,
+        mapper: &mut impl PageMapper,
+        pages: u64,
+    ) -> Result<VirtAddr, MapError> {
+        let span = (pages + 1) * PAGE_SIZE;
+        let base = STACKS
+            .lock()
+            .take(span)
+            .ok_or(MapError::OutOfAddressSpace)?;
+        for page in 1..=pages {
+            let frame = self.frames.allocate().ok_or(MapError::OutOfFrames)?;
+            let virt = VirtAddr::new(base.as_u64() + page * PAGE_SIZE);
+            mapper.map_page(virt, frame.start(), PageFlags::DATA, &mut self.frames)?;
+        }
+        Ok(VirtAddr::new(base.as_u64() + span))
     }
 
     /// Fatia de `len` valores `fill` em frames contíguos, para sempre do chamador.

@@ -41,6 +41,7 @@ pub(crate) struct FakeHost {
     pub(crate) info: SystemInfo<'static>,
     pub(crate) uptime: Option<u64>,
     pub(crate) size: (u16, u16),
+    pub(crate) faults: bool,
 }
 
 impl FakeHost {
@@ -49,6 +50,7 @@ impl FakeHost {
             info: info(),
             uptime: Some(65_000_000_000),
             size: (80, 24),
+            faults: false,
         }
     }
 }
@@ -64,6 +66,10 @@ impl Host for FakeHost {
 
     fn terminal_size(&self) -> (u16, u16) {
         self.size
+    }
+
+    fn fault_test(&self, _kind: crate::host::FaultTest) -> bool {
+        self.faults
     }
 }
 

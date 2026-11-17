@@ -27,3 +27,47 @@ pub fn console(
     uart.init();
     Ok(uart)
 }
+
+/// Frequência do tique do timer.
+pub const TIMER_HZ: u32 = 100;
+
+/// Liga exceções, controlador de interrupção, timer em `TIMER_HZ` e a IRQ de
+/// recepção da serial. Deixa a máscara da CPU desligada: o chamador decide.
+pub fn init_interrupts(
+    _boot: &impl rustos_hal::BootInfo,
+    _memory: &mut crate::memory::Memory,
+    _handlers: &'static rustos_hal::Handlers,
+) -> Result<(), super::PlatformError> {
+    Err(super::PlatformError::Unsupported)
+}
+
+/// Traduz o número da IRQ para a fonte que o núcleo entende.
+pub fn irq_source(_irq: rustos_hal::Irq) -> crate::interrupts::IrqSource {
+    crate::interrupts::IrqSource::Unknown
+}
+
+/// Chamado a cada tique, dentro da IRQ: rearma o timer se ele for one-shot.
+pub fn timer_tick() {}
+
+/// Chamado depois de drenar a UART, dentro da IRQ: limpa a interrupção dela.
+pub fn serial_irq_done() {}
+
+/// Próxima tecla do teclado da plataforma, dentro da IRQ; `None` se não há.
+pub fn keyboard_event() -> Option<rustos_hal::KeyEvent> {
+    None
+}
+
+/// Nanossegundos desde que `init_interrupts` ligou o relógio; `None` antes.
+pub fn now_ns() -> Option<u64> {
+    None
+}
+
+/// As proteções de hardware desta ISA e se ficaram ligadas.
+pub fn protections() -> &'static [super::Protection] {
+    &[]
+}
+
+/// Provoca a exceção pedida; `PageFault` não volta.
+pub fn trigger(_test: crate::interrupts::FaultTest) -> bool {
+    false
+}

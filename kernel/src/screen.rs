@@ -176,6 +176,16 @@ impl Screen {
         (self.terminal.cols(), self.terminal.rows())
     }
 
+    /// Bytes que a tecla gera no terminal. O layout entra com o teclado da fase 1.
+    #[allow(clippy::unused_self, reason = "BASE: o teclado preenche")]
+    pub fn key_bytes<'b>(
+        &mut self,
+        _event: rustos_hal::KeyEvent,
+        _out: &'b mut [u8; 8],
+    ) -> &'b [u8] {
+        &[]
+    }
+
     /// Texto do kernel e do shell; `\n` vira `\r\n`, como o `onlcr` de um tty.
     /// Só atualiza a grade: os pixels mudam no próximo `render`.
     pub fn write(&mut self, bytes: &[u8]) {
