@@ -24,7 +24,7 @@ modelo de ameaça e o porquê de cada mecanismo estão no [SDD 09](09_seguranca.
 | **2 — Memória virtual e heap** ✅ | Tabelas próprias com W^X, heap do kernel, aleatório do kernel, memória do bootloader recuperada | Escrita em `.text` falha; memória livre depois do boot medida |
 | **3 — Tarefas, SMP e escalonador** (1ª onda ✅, uma CPU; 2ª onda: SMP) | Troca de contexto com estado FPU/SIMD por tarefa, threads do kernel, fila por CPU, escalonador atrás de trait (rodízio, depois EEVDF), timer de um tiro, idle sem tique | Latência de troca medida em N núcleos, e o teste que escreve `xmm0`/`v0` em duas tarefas passa |
 | **4 — Processos e isolamento** | Anel 3/EL0, syscall, carregador ELF, VFS em memória (initramfs, tmpfs), espaço de endereçamento por processo, handles com direitos, mitigações de CPU, estado SIMD visível ao usuário, página zero e COW | Syscall nula medida; processo que toca o kernel morre sem derrubar nada |
-| **5 — ABI Linux e primeiros aplicativos** | Syscalls Linux traduzidas, credenciais Linux, musl estático, BusyBox | BusyBox roda sem recompilar e é medido contra o Linux; DOOM por software roda no x86_64 (marco 1 dos jogos; no aarch64 fecha na fase 6); memória ociosa medida contra a linha de base ([Memória ociosa](#memória-ociosa-o-alvo-vem-de-uma-medida)) |
+| **5 — ABI Linux e primeiros aplicativos** | Syscalls Linux traduzidas, credenciais Linux, musl estático, BusyBox | BusyBox roda sem recompilar e é medido contra o Linux; DOOM por software roda no x86_64 (marco 1 dos jogos; no aarch64 fecha na fase 6); memória ociosa medida contra a linha de base ([Memória ociosa](#memória-ociosa-o-alvo-vem-de-uma-medida)) e contra a hipótese do SDD 07 (≤ 36 MiB usados no x86_64 e ≤ 30,8 no aarch64, mesmo `-smp`) |
 | **6 — Armazenamento persistente** | PCI Express, IOMMU, virtio-blk, NVMe, AHCI, page cache, sistema de arquivos da raiz com escrita, permissões em disco, ACPI/DTB, virtio-input e virtio-snd, readahead com janela crescente, LRU de gerações | Benchmark de E/S ao lado do Linux; virtio-input entrega eventos e virtio-snd toca um buffer |
 | **7 — Usuários e sessões** | Contas e grupos, login, Argon2id, elevação de privilégio por capacidade, auditoria | Dois usuários sem acesso aos arquivos um do outro |
 | **8 — Instalação** | Imagem live de pendrive, teclado e mouse USB (xHCI), instalador em modo texto, GPT, partição EFI, entrada de boot UEFI, gamepad USB HID | Instalar num disco vazio da QEMU e subir dele sem a mídia live |
@@ -208,7 +208,7 @@ por CPU.
 - **Jogos:** o primeiro marco da escada, DOOM por software, fecha esta fase no
   x86_64, com o teclado PS/2. No aarch64 não há PS/2 e o virtio-input precisa de
   PCI: o marco 1 fecha lá na fase 6.
-- **Memória ociosa:** a medição contra a linha de base fecha esta fase.
+- **Memória ociosa:** a medição contra a linha de base e a hipótese do SDD 07 (≤ 36 MiB usados no x86_64 e ≤ 30,8 no aarch64, mesmo `-smp`) fecha esta fase.
 
 ### 6 — Armazenamento persistente
 
@@ -391,19 +391,26 @@ medida por nós.
 
 | Passo | O que se faz | Resultado |
 | --- | --- | --- |
-| 1. Linha de base | Linux mínimo (Alpine virt, ou `tinyconfig` com BusyBox e init) na **mesma** QEMU, mesma RAM e mesmo host que o RustOS. Espera N segundos sem carga e lê `MemAvailable` e `MemTotal`. Três boots frios, mediana | `X MB` ocupados de `N MB`, com versões anotadas |
+| 1. Linha de base | Linux de distro com raiz mínima (Alpine virt) ou enxuto (`tinyconfig` com BusyBox e init) na **mesma** QEMU, mesma RAM e mesmo host que o RustOS. Espera N segundos sem carga e lê `MemAvailable` e `MemTotal`. Três boots frios, mediana | `X MB` ocupados de `N MB`, com versões anotadas. **Feito:** 72,2 MiB (x86_64) e 61,7 MiB (aarch64) de 256, com `-smp 1`, Alpine virt com raiz mínima; o `tinyconfig` não foi medido |
 | 2. RustOS | Mesma RAM, mesmo tempo de espera. O equivalente de `MemAvailable` é a memória livre do buddy mais o que o cache pode devolver. Kernel e espaço de usuário separados | `Y MB` ocupados de `N MB` |
 | 3. Alvo | Fixado no [SDD 07](07_desempenho_e_recursos.md) como fração da linha de base, no formato "X MB de memória disponível ociosa com N MB de RAM, mediana de 3 boots" | Meta com número |
 
-- **Quando:** o passo 1 não depende do RustOS e pode rodar já; o 2 e o 3 fecham a
-  fase 5, quando há espaço de usuário para comparar
-  ([DEBT-0031](../tech-debt/0031-memoria-ociosa-sem-linha-de-base.md)).
+- **Quando:** o passo 1 não depende do RustOS e foi feito em 2026-11-17: Alpine 3.24.4
+  (kernel 6.18.60-0-virt), mesma QEMU 11.1.3, 256 MiB, EDK2, três boots frios por ISA
+  e `-smp`. A tabela, o método e as limitações estão no
+  [SDD 07](07_desempenho_e_recursos.md#linha-de-base-de-memória-ociosa-linux-de-distro-com-raiz-mínima).
+  Os passos 2 e 3 fecham a fase 5, quando há espaço de usuário para comparar: o
+  critério de saída da fase 5 cobra a repetição da medida contra a hipótese abaixo (não é dívida, é entrega da fase).
+- **O passo 3 já tem uma hipótese** no SDD 07 (usado ≤ metade da base, que é um kernel de distro: 36 MiB no
+  x86_64 e 30,8 MiB no aarch64; barra frouxa contra um kernel enxuto, cuja medida é o próximo passo), que a fase 5 confirma ou troca por um número medido.
 - **O Linux da linha de base é só instrumento de medida**, fora do produto: o
   RustOS não o embute nem o distribui. Não é o caso 2 do `AGENTS.md`.
 - **Não usar `free` do BusyBox** como medida: a fórmula antiga subestima o ocupado.
 - **Hoje** o RustOS só tem a medida do kernel: 249,3 MiB livres de 256 (x86_64) e
-  247,0 MiB (aarch64) depois do boot (SDD 07). Não é comparável: sem espaço de
-  usuário.
+  247,0 MiB (aarch64) depois do boot (SDD 07); em `release`, 249,1 e 246,9 MiB, ou
+  6,9 e 9,1 MiB usados. A base (Alpine virt, raiz mínima) usa 72,2 e 61,7 MiB. Não é comparável como
+  ganho: o RustOS não tem espaço de usuário, cache de página nem drivers (o SDD 07 lista o
+  que a diferença não prova).
 
 ## Decisões futuras (casos do `AGENTS.md`)
 

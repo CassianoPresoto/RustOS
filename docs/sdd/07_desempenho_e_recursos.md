@@ -280,6 +280,152 @@ precisar de um descritor por frame, e a meta é ficar na faixa de 8–32 bytes. 
 custa 0,25 byte por frame, sem descritor: o descritor entra com a contagem de
 referências (fase 4), não com o buddy.
 
+### Linha de base de memória ociosa (Linux de distro com raiz mínima)
+
+Passo 1 do método do [SDD 08](08_roadmap.md#memória-ociosa-o-alvo-vem-de-uma-medida),
+feito em 2026-11-17. O Linux é só instrumento de medida: não entra no produto. **O "Linux mínimo"
+desta base é um kernel `virt` de distro** (de 13 a 14 MiB de código e `bss` de 9,3 MiB no aarch64) com
+uma raiz mínima, não um kernel enxuto: o `tinyconfig` não foi medido (próximo passo, abaixo).
+
+**O que foi medido**
+
+- **Linux:** Alpine 3.24.4, kernel `6.18.60-0-virt` (`#1-Alpine SMP PREEMPT_DYNAMIC`),
+  do `alpine-netboot-3.24.4-<isa>.tar.gz` de `dl-cdn.alpinelinux.org/alpine/v3.24/releases/`
+  (a `v3.25` do mirror ainda não tem `releases/`, e a `latest-releases.yaml` aponta a
+  3.24.4). SHA-256 dos tarballs conferido com o do `latest-releases.yaml` do Alpine:
+  `1502e776…951a8` (x86_64) e `9d10f909…9745e` (aarch64). Só `vmlinuz-virt` e
+  `initramfs-virt` foram usados. O Alpine não publica soma por arquivo do netboot, então
+  os arquivos extraídos não têm soma própria conferida.
+- **Como sobe sem rede:** `-append "console=ttyS0 rdinit=/bin/sh"` (`ttyAMA0` no aarch64). O
+  `init` do Alpine não roda: não há `busybox --install`, módulo, `modloop` nem
+  `mdev`. É o kernel de distro mais um `sh` ocioso, o mais próximo de "kernel + init mínimo".
+- **Mesmas flags do RustOS** (`xtask/src/arch.rs`, `qemu_machine_args`), QEMU 11.1.3, host
+  Apple M5 com macOS 26.4: `-machine q35 -cpu max -m 256M -accel tcg` (x86_64) e
+  `-machine virt,gic-version=3 -cpu max -m 256M -accel hvf` (aarch64), `-nic none`,
+  `-no-reboot`, `-display none -serial stdio -monitor none`, mais `-smp N`. O RustOS não passa
+  `-smp` hoje (1 CPU); mediu-se com 1 e com 4.
+- **Pelo EDK2, como o RustOS:** `-bios edk2-aarch64-code.fd` (aarch64) e `-drive
+  if=pflash,format=raw,readonly=on,file=edk2-x86_64-code.fd` (x86_64), com `-kernel` e `-initrd`:
+  o EDK2 carrega o Linux pelo stub EFI. O disco FAT e o `ramfb` do RustOS ficaram de fora:
+  o Linux não os usa.
+- **Leitura:** 10 s depois da linha `Run /bin/sh as init process` no console, digitada na
+  serial: `/bin/busybox mount -t proc proc /proc` e `/bin/busybox cat /proc/meminfo`.
+  Três boots frios (um processo da QEMU novo cada), mediana por campo.
+- **Duas raízes em RAM.** O initramfs vira a raiz em `tmpfs` e conta como usado
+  (`Shmem` não entra no `MemAvailable`):
+  - **publicada:** o `initramfs-virt` sem mudança. Descomprimida tem 30 175 676 bytes (28,8 MiB,
+    x86_64) e 25 713 532 (24,5 MiB, aarch64), dos quais 66% e 59% são `lib/modules` e o resto, bibliotecas do instalador (`libcrypto`, `libapk`); `Shmem` lê 29,1 e 24,9 MiB.
+  - **mínima:** o mesmo kernel com um initramfs que montei só com o `busybox` e o carregador
+    musl tirados do `initramfs-virt` (`Shmem` 1,4 e 1,6 MiB). Para o alvo, é a base a usar, porque a
+    publicada mede o pacote de módulos de um instalador, não o ocioso.
+
+**`MemAvailable` e usado, pelo EDK2 (256 MiB de RAM)**
+
+| ISA | Raiz em RAM | `-smp` | `MemAvailable` nos 3 boots (MiB) | Mediana (MiB) | Usado: 256 − mediana (MiB) |
+| --- | --- | --- | --- | --- | --- |
+| x86_64 (TCG) | mínima | 1 | 183,8 / 183,7 / 183,9 | **183,8** | **72,2** |
+| x86_64 (TCG) | mínima | 4 | 183,9 / 185,1 / 186,0 | **185,1** | **70,9** |
+| x86_64 (TCG) | Alpine como publicado | 1 | 151,6 / 152,0 / 152,4 | **152,0** | **104,0** |
+| x86_64 (TCG) | Alpine como publicado | 4 | 157,1 / 156,4 / 156,8 | **156,8** | **99,2** |
+| aarch64 (HVF) | mínima | 1 | 194,2 / 194,3 / 194,3 | **194,3** | **61,7** |
+| aarch64 (HVF) | mínima | 4 | 186,0 / 185,1 / 186,8 | **186,0** | **70,0** |
+| aarch64 (HVF) | Alpine como publicado | 1 | 163,4 / 170,5 / 170,4 | **170,4** | **85,6** |
+| aarch64 (HVF) | Alpine como publicado | 4 | 163,0 / 165,6 / 166,1 | **165,6** | **90,4** |
+
+**Campos de `/proc/meminfo`, medianas em MiB (EDK2)**
+
+| ISA | Raiz | `-smp` | MemTotal | MemFree | MemAvailable | Buffers | Cached | Shmem | KernelStack | PageTables | Slab |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| x86_64 | mínima | 1 | 210,0 | 186,7 | 183,8 | 0,0 | 1,4 | 1,4 | 1,1 | 0,4 | 8,1 |
+| x86_64 | mínima | 4 | 209,2 | 187,9 | 185,1 | 0,0 | 1,4 | 1,4 | 1,5 | 0,5 | 10,9 |
+| x86_64 | publicada | 1 | 210,0 | 154,7 | 152,0 | 0,0 | 29,1 | 29,1 | 1,1 | 0,4 | 9,2 |
+| x86_64 | publicada | 4 | 209,2 | 159,3 | 156,8 | 0,0 | 29,1 | 29,1 | 1,5 | 0,5 | 11,8 |
+| aarch64 | mínima | 1 | 210,2 | 196,8 | 194,3 | 0,0 | 1,6 | 1,6 | 0,8 | 0,2 | 7,0 |
+| aarch64 | mínima | 4 | 209,1 | 188,4 | 186,0 | 0,0 | 1,6 | 1,6 | 1,1 | 0,2 | 9,4 |
+| aarch64 | publicada | 1 | 210,2 | 172,8 | 170,4 | 0,0 | 24,9 | 24,9 | 0,8 | 0,2 | 7,6 |
+| aarch64 | publicada | 4 | 209,1 | 167,8 | 165,6 | 0,0 | 24,9 | 24,9 | 1,1 | 0,2 | 9,9 |
+
+**Sem o EDK2** (`-kernel` direto, SeaBIOS no x86_64 e sem firmware próprio no aarch64), com a raiz
+publicada. O firmware reserva memória diferente da do caminho UEFI: a `MemTotal` sobe 4,5 MiB (aarch64) e
+5,8 MiB (x86_64), e o disponível sobe 2,9 e 10,5 MiB contra a tabela do EDK2. A comparação com o
+RustOS usa a do EDK2, que é o caminho dele. A memória que o firmware não entrega conta dos dois lados:
+no Linux x86_64 pelo EDK2 são 6 392 KiB fora da linha `Memory:` (262 144 menos 255 752), perto dos 6 624 KiB
+do RustOS (262 144 menos 255 520, `memory:`); no aarch64 ela está nos `reserved` do Linux (58 092 KiB pelo
+EDK2 e 53 500 direto) e nos 8 996 KiB do RustOS.
+
+| ISA | `-smp` | `MemAvailable` nos 3 boots (MiB) | Mediana (MiB) | Usado (MiB) |
+| --- | --- | --- | --- | --- |
+| x86_64 (TCG) | 1 | 162,6 / 162,5 / 162,5 | 162,5 | 93,5 |
+| x86_64 (TCG) | 4 | 162,2 / 162,6 / 161,4 | 162,2 | 93,8 |
+| aarch64 (HVF) | 1 | 173,3 / 175,2 / 173,3 | 173,3 | 82,7 |
+| aarch64 (HVF) | 4 | 167,7 / 166,9 / 168,4 | 167,7 | 88,3 |
+
+**RustOS** (`main` em `24be32a`, `release`, 1 CPU, `make smoke` e `make screenshot ... CMDS="mem"`):
+
+| ISA | `memory:` | `reclaimed:` | `frames:` | `mem`: livre | Disponível (livre + cache devolvível) | Usado: 256 − disponível |
+| --- | --- | --- | --- | --- | --- | --- |
+| x86_64 (TCG) | 255 520 KiB usable | 43 332 KiB | 63 809 livres de 65 268 | 249,1 MiB (usado 380 KiB, reservado 2,0 MiB) | **249,1 MiB** | **6,9 MiB** |
+| aarch64 (HVF) | 253 148 KiB usable | 30 316 KiB | 63 231 livres de 65 536 | 246,9 MiB (usado 320 KiB, reservado 12 KiB) | **246,9 MiB** | **9,1 MiB** |
+
+O cache de página do RustOS não existe ainda, então o disponível é o livre do buddy. Dos
+6,9 e 9,1 MiB "usados", só 0,4 e 0,3 MiB são memória em uso dentro do mapa usável; o resto
+(6,5 e 8,8 MiB) é o que o firmware e o bootloader não entregam como RAM. O mesmo buraco existe do lado
+do Linux (ver acima), e a imagem do kernel do RustOS está nesse resto, não nos 0,4 MiB "em uso".
+
+**O que cada lado tem**
+
+- **Linux:** kernel `virt` de distro (a linha `Memory:` do `dmesg` soma code, rwdata, rodata, `init` e
+  `bss`: 30 MiB no x86_64 e 34 no aarch64; o `init`, de 2 a 3 MiB, é liberado depois), `struct page` por frame, caches do slab (7 a 12 MiB), um BusyBox e a raiz em `tmpfs`.
+  Sem módulos carregados, sem rede (`-nic none`), sem disco montado.
+- **RustOS:** kernel carregado de 230,7 KiB (x86_64) e 198,9 KiB (aarch64) (`make size PROFILE=release`: 236 320 e 203 729 bytes), shell embutido no kernel, console na
+  tela e na serial, buddy, heap, escalonador, tarefas. Sem espaço de usuário, sem cache de
+  página, sem drivers de disco ou de rede.
+
+**O que a diferença não prova**
+
+- Que o RustOS final vai gastar de 10 a 15% do que a base gasta (hoje 6,9 contra 72,2 MiB no x86_64 e 9,1
+  contra 61,7 no aarch64). Hoje ele não tem nada que custe memória por processo, por arquivo ou por
+  dispositivo; o Linux também não tem na base, mas paga o custo fixo do kernel de distro inteiro.
+- **Que o RustOS ganha de um Linux enxuto.** A base é um kernel de distro; contra um `tinyconfig` o
+  Linux gastaria menos e a razão do RustOS subiria. Por isso o alvo "≤ metade" é uma barra frouxa.
+- Que a ordem se mantém com espaço de usuário, cache de página e drivers (fases 4 a 6). Cada
+  um acrescenta memória; a medida só vale de novo com o BusyBox rodando em cima do RustOS.
+- Que o shell embutido equivale a um `sh` de usuário: o do Linux é um processo com pilha, `mm`
+  e arquivos; o do RustOS é uma função do kernel.
+
+**Alvo proposto (hipótese, a confirmar na fase 5)**
+
+> Com 256 MiB de RAM e o mesmo `-smp` da base, o RustOS com kernel e BusyBox ocioso usa
+> **no máximo metade do que a base (Linux de distro, raiz mínima) usa**, mediana de 3 boots: **usado ≤ 36 MiB**
+> (disponível **≥ 220 MiB**) no x86_64 e **usado ≤ 30,8 MiB** (disponível **≥ 225,2 MiB**) no aarch64.
+
+Metade da base deixa de folga de 29 MiB (x86_64) e 22 MiB (aarch64) sobre o que o RustOS usa
+hoje, para espaço de usuário, cache e drivers. Se a fase 5 estourar isso, a hipótese está
+errada e muda com o número na mão, pelo caminho de Decisões. Ao confirmar: repetir a base com o `-smp`
+que o RustOS tiver e com a mesma ferramenta, porque no aarch64 o Linux gasta de 5 a 8 MiB a mais com 4 CPUs
+(`Slab`, pilhas e dados por CPU); no x86_64 não houve aumento.
+
+**Próximo passo:** medir um Linux enxuto (`tinyconfig` mais BusyBox e init) nas mesmas condições, para a
+base deixar de ser a de uma distro; se ele ficar bem abaixo, o alvo acima aperta.
+
+**Limitações**
+
+- **Um host.** x86_64 em TCG (emulação de CPU) e aarch64 em HVF: o x86_64 mede a memória do guest,
+  que não depende do acelerador, mas não é medida de metal.
+- **Dispersão entre os 3 boots** (máximo menos mínimo do `MemAvailable`): de 0,1 a 2,1 MiB na maioria
+  das linhas (2,1 no x86_64 mínima `-smp 4`, 1,7 no aarch64 mínima `-smp 4`, 1,9 e 1,5 no aarch64 direto,
+  1,2 no x86_64 direto `-smp 4`), 3,1 MiB no aarch64 publicada `-smp 4` e 7,1 MiB no aarch64 publicada
+  `-smp 1`, onde o 1.º boot ficou abaixo dos outros dois (163,4 contra 170,5 e 170,4 MiB) e a mediana o
+  descarta. Três amostras é o que o método pede, mas não dá dispersão confiável.
+- **A raiz mínima é montagem minha**, não artefato do Alpine; a publicada é a do Alpine e infla o usado.
+- **Pelo EDK2, o x86_64 com a raiz publicada gasta menos com 4 CPUs do que com 1** (de 104,0 para
+  99,2 MiB, 4,8 MiB, maior que a dispersão): não explicado. Com a raiz mínima a diferença (1,3 MiB) está
+  dentro do ruído.
+- **`MemAvailable` não é a mesma conta do buddy livre:** o kernel desconta dele de 2,5 a 3 MiB
+  (`MemFree − MemAvailable`) que o RustOS não desconta. O `free` do BusyBox não foi usado (SDD 08).
+- **Sem disco, ramfb nem rede no Linux.** O RustOS sobe com o disco FAT e, no aarch64, com o `ramfb`;
+  o Linux subiu sem nenhum dos dois.
+
 ## Método de comparação com Linux e Windows
 
 1. **Mesma máquina, mesmo firmware, versões anotadas.** Firmware e ACPI mudam o
@@ -294,8 +440,9 @@ referências (fase 4), não com o buddy.
    ABI Linux (fase 5): syscall nula, troca de contexto, page fault, IPC. No Windows,
    o equivalente funcional mais próximo, com o método escrito ao lado do número.
 5. **Memória ociosa**: RAM livre depois do boot sobre RAM total, com a mesma RAM. O
-   alvo vem de uma linha de base de Linux mínimo medida na mesma QEMU, não de chute:
-   o método está no [SDD 08](08_roadmap.md#memória-ociosa-o-alvo-vem-de-uma-medida).
+   alvo vem de uma linha de base de Linux medida na mesma QEMU, não de chute:
+   o método está no [SDD 08](08_roadmap.md#memória-ociosa-o-alvo-vem-de-uma-medida) e a
+   medida em [Linha de base de memória ociosa](#linha-de-base-de-memória-ociosa-linux-de-distro-com-raiz-mínima).
 
 ## O que a pesquisa aponta, por subsistema
 
