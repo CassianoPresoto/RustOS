@@ -34,7 +34,13 @@ bootloader Limine, um binário à parte (DEBT-0001).
 
 ## Estado atual
 
-Fase 1 do [roadmap](08_roadmap.md): o kernel sobe nas duas ISAs pela QEMU, com
-alocador de frames, tela com fonte própria, terminal VT, shell embutido,
-exceções, interrupções, timer, relógio e teclado PS/2. Não há escalonamento
-ligado, heap nem espaço de usuário.
+Fase 2 do [roadmap](08_roadmap.md): o kernel sobe nas duas ISAs pela QEMU, com
+tela com fonte própria, terminal VT, shell embutido, exceções, interrupções,
+timer, relógio e teclado PS/2, além de:
+
+- **Memória:** buddy de frames, heap do kernel e tabelas de página próprias com
+  W^X.
+- **Segurança:** gerador aleatório criptográfico e KASLR.
+- **Boot:** a memória do bootloader volta para o alocador.
+
+Não há escalonamento ligado nem espaço de usuário.
