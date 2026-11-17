@@ -15,6 +15,7 @@ pub mod frame;
 pub mod heap;
 pub mod layout;
 pub mod memory;
+pub mod ranges;
 pub mod tables;
 #[cfg(test)]
 mod testing;

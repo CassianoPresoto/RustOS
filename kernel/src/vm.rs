@@ -2,9 +2,10 @@
 //! imagem e o mapa direto refeito. A troca para elas é `Vm::activate`.
 
 use rustos_hal::{
-    AddressSpace, BootInfo, FrameSource, LARGE_PAGE_SIZE, MapError, PAGE_SIZE, PageFlags,
-    PageMapper, PhysAddr, RegionKind, VirtAddr,
+    AddressSpace, BootInfo, FrameSource, MapError, PAGE_SIZE, PageFlags, PageMapper, PhysAddr,
+    RegionKind, VirtAddr,
 };
+use rustos_mm::ranges::{coalesce, runs};
 use rustos_mm::{Section, Violation, WxChecker};
 
 use crate::frames::Frames;
@@ -112,7 +113,7 @@ fn image_sections() -> [Section; 4] {
     ]
 }
 
-/// Mapeia `[phys, phys + len)` em `virt`, de 2 MiB em 2 MiB onde os dois alinham.
+/// Mapeia `[phys, phys + len)` em `virt`, de 2 MiB em 2 MiB onde a política deixa.
 fn map_range(
     space: &mut PlatformSpace,
     frames: &mut Counting<'_>,
@@ -122,20 +123,14 @@ fn map_range(
     len: u64,
     flags: PageFlags,
 ) -> Result<(), MapError> {
-    let mut done = 0;
-    while done < len {
-        let (virt, phys) = (VirtAddr::new(virt + done), PhysAddr::new(phys + done));
-        if len - done >= LARGE_PAGE_SIZE
-            && virt.is_aligned(LARGE_PAGE_SIZE)
-            && phys.is_aligned(LARGE_PAGE_SIZE)
-        {
+    for run in runs(virt, phys, len) {
+        let (virt, phys) = (VirtAddr::new(run.virt), PhysAddr::new(run.phys));
+        if run.large {
             space.map_large_page(virt, phys, flags, frames)?;
             stats.large_pages += 1;
-            done += LARGE_PAGE_SIZE;
         } else {
             space.map_page(virt, phys, flags, frames)?;
             stats.small_pages += 1;
-            done += PAGE_SIZE;
         }
     }
     Ok(())
@@ -249,26 +244,17 @@ fn map_direct(
         let len = end - start;
         map_range(space, frames, stats, offset + start, start, len, flags)
     };
-    let mut run: Option<(u64, u64)> = None;
-    let ram = boot.memory_regions().filter(|region| {
-        matches!(
-            region.kind,
-            RegionKind::Usable | RegionKind::BootloaderReclaimable
-        )
-    });
-    for region in ram {
-        let (start, end) = (region.start.as_u64(), region.end());
-        run = match run {
-            Some((first, last)) if last == start => Some((first, end)),
-            Some((first, last)) => {
-                map(first, last, PageFlags::DATA)?;
-                Some((start, end))
-            }
-            None => Some((start, end)),
-        };
-    }
-    if let Some((first, last)) = run {
-        map(first, last, PageFlags::DATA)?;
+    let ram = boot
+        .memory_regions()
+        .filter(|region| {
+            matches!(
+                region.kind,
+                RegionKind::Usable | RegionKind::BootloaderReclaimable
+            )
+        })
+        .map(|region| (region.start.as_u64(), region.end()));
+    for (start, end) in coalesce(ram) {
+        map(start, end, PageFlags::DATA)?;
     }
     if let Some(info) = boot.framebuffer() {
         let start = info

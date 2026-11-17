@@ -35,6 +35,7 @@ cargo test --release -p rustos-mm bench -- --ignored --nocapture --test-threads=
 | `drivers/uart16550`, `drivers/pl011` | `FakeBus: RegisterBus` que grava cada escrita e simula FIFO cheia |
 | `core/mm/src/tables.rs` | `Toy: PageFormat` (mesma forma dos formatos reais), `FakeTables: TableMemory` em `HashMap`, `Cpu: MmuControl` que conta as publicações e `Frames: FrameSource` em `Vec`; mapeia página de 4 KiB e de 2 MiB, recusa W+X e percorre as folhas |
 | `arch/*/src/pte.rs`, `descriptor.rs` | A codificação: ida e volta de cada `PageFlags`, e o `PageFormat` que distingue tabela, folha grande e entrada vazia |
+| `core/mm/src/ranges.rs` | Só aritmética: cabeça e cauda desalinhadas, virtual e físico que discordam no alinhamento, região menor que 2 MiB, regiões adjacentes, sobrepostas e vazias |
 | `core/mm/src/wx.rs` | Lista de `Mapping` montada à mão: W+X, seção com permissão trocada, alias da imagem no mapa direto, metade baixa |
 | `boot/limine` | Layout das structs contra `limine.h` (`size_of`, `offset_of`), tradução dos tipos de região e do formato do framebuffer |
 | `core/mm/src/heap.rs` | `FakeMemory: FrameMemory`, uma faixa de palavras que derruba o teste em acesso fora dela, desalinhado ou abaixo da base |

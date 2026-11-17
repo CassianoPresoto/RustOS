@@ -91,7 +91,7 @@ Em todas as folhas do aarch64 o UXN fica ligado (página do kernel nunca executa
 ## Página grande
 
 O mapa direto usa **2 MiB onde o endereço virtual e o físico alinham, e 4 KiB nas pontas**
-(`map_range` em `kernel/src/vm.rs`). Imagem e framebuffer usam a mesma função; a imagem,
+(`runs` em `core/mm/src/ranges.rs`, que o `map_range` de `kernel/src/vm.rs` segue; `coalesce` junta as regiões vizinhas ou sobrepostas antes). Imagem e framebuffer usam a mesma função; a imagem,
 que tem seções de 4 KiB por permissão, não chega a usar 2 MiB.
 
 | QEMU, 256 MiB, `dev` | x86_64 | aarch64 |
