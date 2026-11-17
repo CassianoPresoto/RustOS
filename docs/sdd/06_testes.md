@@ -40,7 +40,7 @@ cargo test --release -p rustos-mm bench -- --ignored --nocapture --test-threads=
 | `boot/limine` | Layout das structs contra `limine.h` (`size_of`, `offset_of`), tradução dos tipos de região e do formato do framebuffer |
 | `core/mm/src/heap.rs` | `FakeMemory: FrameMemory`, uma faixa de palavras que derruba o teste em acesso fora dela, desalinhado ou abaixo da base |
 | `core/shell` | `Host` falso e um terminal VT mínimo (`testing.rs`) que confere prompt, linha e cursor depois de cada tecla, nas duas regras de última coluna |
-| `core/term` | Fuzz determinístico (xorshift, 300 mil bytes por tamanho de grade) que confere cursor, região e anel; o mesmo fluxo em bloco e byte a byte dá a mesma grade |
+| `core/term` | Fuzz determinístico (xorshift, 300 mil bytes por tamanho de grade) que confere cursor, região e anel; o mesmo fluxo em bloco e byte a byte dá a mesma grade. Um segundo fuzz, com tela alternativa e histórico, mistura trocas de tela, `ED 3`, conjuntos G0/G1, tabulação e rolagem da visão a bytes soltos e a CSI bem formado, e confere também o histórico e a visão |
 
 O que tem `asm!` só compila com `target_os = "none"`; a parte pura do mesmo crate
 (`descriptor.rs`, `pte.rs`) roda no host. A caminhada de tabela é uma só, em

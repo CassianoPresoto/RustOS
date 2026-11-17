@@ -74,6 +74,10 @@ terminal, o desenho e o shell são deste repositório.
 | 4 | `kernel/src/screen.rs` (`render`) | Para cada célula das linhas sujas: cor pelo tema, estilo (`gfx::Style`) e glifo (`gfx::font`) |
 | 5 | `core/gfx` (`Surface::draw_glyph`) | Escreve os pixels em ordem, linha a linha, sem nunca ler o framebuffer |
 
+Com a tela alternativa e o histórico, a grade que `render` lê é a da visão: a
+principal, a alternativa ou, rolada para trás, linhas do histórico ([SDD 16](16_terminal.md)).
+Shift+PageUp e Shift+PageDown rolam a visão dentro de `Screen::key_event`, que redesenha ali.
+
 A grade do terminal é o buffer-sombra: quem precisa saber o que está na tela lê a
 grade, nunca a memória de vídeo, que no x86_64 é write-combining e lenta de ler.
 

@@ -68,6 +68,8 @@ Regras do `Keyboard`:
 
 - **Ctrl+tecla** vira `Key::Ctrl(c)` com `c` ASCII minúsculo; fora de ASCII não
   gera nada.
+- **Shift+PageUp e Shift+PageDown** viram `Key::ScrollBack` e `Key::ScrollForward`,
+  que rolam o histórico do terminal e não geram byte ([SDD 16](16_terminal.md)).
 - **Alt+caractere** vira `Key::Escape` e depois o caractere (prefixo ESC do xterm).
 - **Caps Lock** troca o nível só de letras (a–z e `ç`); com Shift, volta ao
   minúsculo. Alterna uma vez por pressionamento físico.

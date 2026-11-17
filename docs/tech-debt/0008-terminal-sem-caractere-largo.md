@@ -1,48 +1,45 @@
 ---
 id: DEBT-0008
-title: Terminal sem tela alternativa, rolagem para trás nem caractere largo
+title: Terminal sem caractere largo nem combinante
 status: Open
 date: 2026-11-17
-trigger: O primeiro programa de tela cheia (vi, less, top) rodando no terminal, na fase 5
+trigger: O primeiro programa da fase 5 (vi, less) mostrando CJK, emoji ou acento decomposto no terminal, ou a fonte ganhar glifo de largura dupla
 paid_date:
 ---
 
-# DEBT 0008 — Terminal sem tela alternativa, rolagem para trás nem caractere largo
+# DEBT 0008 — Terminal sem caractere largo nem combinante
 
 ## O que falta
 
-`core/term` ignora:
+`core/term` põe 1 célula em todo caractere, e descarta o combinante e o de
+largura zero (`is_zero_width`). CJK e emoji ocupam 1 célula em vez de 2, e
+`e` + U+0301 (texto decomposto, comum ao colar do macOS) sai como `e`. O
+`core/shell` também conta 1 célula por caractere, inclusive para o combinante:
+o cursor da linha editada fica 1 coluna atrás até o próximo redesenho.
 
-- **Modos de tela:** a tela alternativa (`?1049`, `?47`, `?1047`), o histórico de
-  rolagem e o `ED 3`.
-- **Desenho de caixas:** a troca de conjunto de caracteres (`ESC ( 0`). Caixas
-  desenhadas por ACS saem como letras.
-- **Tabulação:** paradas fixas a cada 8 colunas, sem HTS/TBC.
-- **Unicode:** caractere largo (CJK, emoji) ocupa 1 célula, e o combinante é
-  descartado. O `core/shell` conta 1 célula por caractere, inclusive para o
-  combinante: com texto decomposto (`e` + U+0301, comum ao colar do macOS), o
-  cursor da linha editada fica 1 coluna atrás até o próximo redesenho.
-
-O comportamento de pending wrap, DECSTBM e DECOM veio do conhecimento do agente
-sobre o xterm. Está coberto por teste, mas não foi conferido linha a linha contra
-o `ctlseqs`.
+A tela alternativa, o histórico de rolagem, o desenho de caixas e as paradas de
+tabulação já existem ([SDD 16](../sdd/16_terminal.md)), assim como a conferência
+de quebra pendente, DECSTBM e DECOM contra o xterm.
 
 ## Por que foi aceito
 
-O único escritor do terminal hoje é o kernel e o shell embutido, que só usam
-texto, cor, cursor e limpeza de tela.
+- **Largura:** a fonte de `core/gfx` só tem U+0020 a U+00FF e alguns símbolos, e
+  nenhum glifo de largura dupla. Largura dupla hoje desenharia o substituto em 2
+  células, sem ganho. Ela pede a tabela East Asian Width do Unicode (algumas
+  centenas de faixas) e uma célula de continuação que o `Cell` de 8 bytes não tem.
+- **Combinante:** pede um segundo ponto de código por célula, e o `Cell` tem
+  exatamente 8 bytes (`size_of::<Cell>() == 8`, afirmado em `cell.rs`).
 
 ## Gatilho
 
-O primeiro programa de tela cheia (vi, less, top) rodando no terminal, na fase 5.
+O primeiro programa da fase 5 (vi, less) mostrando CJK, emoji ou acento decomposto
+no terminal, ou a fonte ganhar glifo de largura dupla.
 
 ## Como pagar
 
-- **Tela alternativa:** uma segunda grade alocada pelo kernel e entregue ao
-  `Terminal`.
-- **Histórico:** um anel de linhas antigas com capacidade fixa e custo escrito no
-  SDD 07.
-- **Desenho de caixas:** o mapa DEC Special Graphics para os glifos de caixa que a
-  fonte já tem.
-- **Caractere largo:** largura pela tabela East Asian Width do Unicode.
-- **Conferência:** um teste por sequência conferido contra o `ctlseqs` do xterm.
+- **Largura:** tabela East Asian Width (W e F) em faixas ordenadas, busca binária,
+  e uma marca de continuação na célula seguinte. O `gfx` ganha o desenho de glifo
+  de duas células.
+- **Combinante:** decidir entre um byte a mais no `Cell` (e o custo do SDD 07 por
+  célula) e uma tabela lateral de combinantes por linha.
+- **Shell:** `core/shell` passa a usar a mesma largura do terminal.
