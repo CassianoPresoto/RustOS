@@ -7,6 +7,7 @@
 mod cell;
 mod dirty;
 mod key;
+mod keyboard;
 mod palette;
 mod parser;
 mod terminal;
@@ -14,5 +15,6 @@ mod terminal;
 pub use cell::{Cell, Flags};
 pub use dirty::{DirtyRows, MAX_ROWS};
 pub use key::Key;
+pub use keyboard::{Keyboard, Layout};
 pub use palette::xterm_rgb;
 pub use terminal::{Cursor, Terminal};

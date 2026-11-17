@@ -27,3 +27,4 @@ mesmo PR.
 | [`06_testes.md`](06_testes.md) | Os andares de teste, onde cada um roda e o que ainda não existe |
 | [`07_desempenho_e_recursos.md`](07_desempenho_e_recursos.md) | O que já se mede, como comparar com Linux e Windows, e as técnicas que a pesquisa aponta |
 | [`08_roadmap.md`](08_roadmap.md) | As fases, do esqueleto à compatibilidade com binários Linux |
+| [`09_teclado.md`](09_teclado.md) | Da tecla do PC à `Key` do terminal: i8042, decodificador, layouts US e ABNT2, teclas mortas |

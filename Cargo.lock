@@ -24,6 +24,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-driver-i8042"
+version = "0.1.0"
+dependencies = [
+ "rustos-hal",
+]
+
+[[package]]
 name = "rustos-driver-pl011"
 version = "0.1.0"
 dependencies = [
@@ -87,6 +94,9 @@ version = "0.1.0"
 [[package]]
 name = "rustos-term"
 version = "0.1.0"
+dependencies = [
+ "rustos-hal",
+]
 
 [[package]]
 name = "xtask"

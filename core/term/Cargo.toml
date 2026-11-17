@@ -12,3 +12,6 @@ bench = false
 
 [lints]
 workspace = true
+
+[dependencies]
+rustos-hal.workspace = true
