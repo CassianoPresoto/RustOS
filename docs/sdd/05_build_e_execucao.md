@@ -54,9 +54,12 @@ não há ISO nem `xorriso`.
 | Máquina | `-machine q35 -cpu max -m 256M` | `-machine virt -cpu max -m 256M` |
 | Firmware | EDK2 em `-drive if=pflash,readonly=on` | EDK2 em `-bios` |
 | Disco | AHCI (padrão da q35) | `virtio-blk-pci` |
+| Rede | `-nic none` | `-nic none` |
 | Aceleração | `kvm` em host Linux x86_64 | `hvf` em Mac Apple Silicon, `kvm` em host Linux aarch64 |
 
-TCG é sempre a reserva (`-accel <nativo> -accel tcg`). O firmware é procurado nos
+Sem rede de propósito: a placa padrão da `virt` (virtio-net) carrega a option ROM
+`efi-virtio.rom` do iPXE, que o Ubuntu só instala com o pacote `ipxe-qemu`, e a
+QEMU sai antes do boot sem ela. TCG é sempre a reserva (`-accel <nativo> -accel tcg`). O firmware é procurado nos
 caminhos do Homebrew, Debian/Ubuntu e Fedora/Arch (`xtask/src/arch.rs`), ou nas
 variáveis `RUSTOS_FIRMWARE_X86_64` e `RUSTOS_FIRMWARE_AARCH64`.
 

@@ -119,6 +119,9 @@ impl Arch {
                 push(&["-device", "virtio-blk-pci,drive=esp"]);
             }
         }
+        // Sem a placa de rede padrão: a da `virt` pede o efi-virtio.rom do iPXE,
+        // que o Ubuntu só instala com o pacote ipxe-qemu.
+        push(&["-nic", "none"]);
         for accel in self.accelerators() {
             push(&["-accel", accel]);
         }
