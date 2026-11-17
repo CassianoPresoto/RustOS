@@ -1,0 +1,14 @@
+[package]
+name = "rustos-term"
+description = "Emulador de terminal: sequências VT/xterm sobre uma grade de células."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[lints]
+workspace = true

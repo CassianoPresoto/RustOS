@@ -29,6 +29,12 @@ Os pedidos ficam em `boot/limine/src/requests.rs`, nas seções `.requests_start
 | HHDM | Deslocamento do mapa direto: `virtual = físico + offset` | `BootError::MissingDirectMap`, pânico |
 | Bootloader info | Nome e versão para o relatório | linha omitida |
 | Bootloader performance | Marcos de reset, início do Limine e entrega ao kernel, em µs | linha omitida |
+| Framebuffer | O primeiro framebuffer linear: endereço no HHDM, tamanho, pitch e máscaras de cor. Só 32 bpp RGB com canais de 8 bits é aceito | sem tela; a serial continua |
+
+O Limine mapeia o framebuffer no HHDM com o cache certo para vídeo:
+write-combining (`PAT[5]`) no x86_64 e `MAIR_EL1.Attr1` no aarch64 (PROTOCOL.md,
+seção *Caching*). O kernel não remapeia: usa o endereço da resposta, e só mexe no
+índice 7 do `MAIR_EL1`.
 
 ## Estado da máquina na entrada
 
@@ -55,9 +61,13 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores.
    `Aarch64PageMapper` lê `TTBR1_EL1`, grava Device-nGnRnE no índice 7 do
    `MAIR_EL1`, aloca as tabelas que faltam do alocador de frames e mapeia a página
    na janela de dispositivos.
-4. Relatório na serial, autoteste de um frame (escreve e relê pelo mapa direto) e
+4. Se há framebuffer, `Screen::new` aloca a grade do terminal em frames contíguos
+   (8 bytes por célula), pinta o fundo e a barra do topo, e passa a receber tudo o
+   que vai para a serial.
+5. Relatório, autoteste de um frame (escreve e relê pelo mapa direto) e
    `[rustos] boot ok`.
-5. `halt_forever`: interrupções mascaradas e `hlt`/`wfi` em laço.
+6. `system::run_shell`: o shell embutido lê a serial e escreve na serial e na tela.
+   Sem interrupções, a leitura é por consulta (DEBT-0007).
 
 Pânico antes do passo 3 não aparece em lugar nenhum (DEBT-0005).
 

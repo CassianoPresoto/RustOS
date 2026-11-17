@@ -1,30 +1,61 @@
-//! Console global do kernel e a macro `kprintln!`.
+//! Console global do kernel e a macro `kprintln!`: tudo vai para a serial e,
+//! quando existe, para a tela.
 
 use core::fmt::{self, Write};
 
-use rustos_hal::Console;
+use rustos_hal::{ByteSource, Console};
 use rustos_sync::SpinLock;
 
 use crate::platform::PlatformConsole;
+use crate::screen::Screen;
 
-static CONSOLE: SpinLock<Option<PlatformConsole>> = SpinLock::new(None);
+static SERIAL: SpinLock<Option<PlatformConsole>> = SpinLock::new(None);
+static SCREEN: SpinLock<Option<Screen>> = SpinLock::new(None);
 
 pub fn install(console: PlatformConsole) {
-    *CONSOLE.lock() = Some(console);
+    *SERIAL.lock() = Some(console);
+}
+
+pub fn install_screen(screen: Screen) {
+    *SCREEN.lock() = Some(screen);
 }
 
 pub fn print(args: fmt::Arguments<'_>) {
-    if let Some(console) = CONSOLE.lock().as_mut() {
-        Writer(console).write_fmt(args).ok();
+    Sink.write_fmt(args).ok();
+}
+
+/// Próximo byte digitado na serial, sem esperar.
+pub fn read_byte() -> Option<u8> {
+    SERIAL.lock().as_mut().and_then(ByteSource::read_byte)
+}
+
+/// Caminho do pânico: não espera nenhum lock, que pode estar com quem entrou em pânico.
+pub fn print_panic(args: fmt::Arguments<'_>) {
+    if let Some(mut guard) = SERIAL.try_lock()
+        && let Some(serial) = guard.as_mut()
+    {
+        Writer(serial).write_fmt(args).ok();
+    }
+    if let Some(mut guard) = SCREEN.try_lock()
+        && let Some(screen) = guard.as_mut()
+    {
+        ScreenWriter(screen).write_fmt(args).ok();
     }
 }
 
-/// Caminho do pânico: não espera o lock, que pode estar com quem entrou em pânico.
-pub fn print_panic(args: fmt::Arguments<'_>) {
-    if let Some(mut guard) = CONSOLE.try_lock()
-        && let Some(console) = guard.as_mut()
-    {
-        Writer(console).write_fmt(args).ok();
+/// Escreve na serial e na tela, cada uma com o próprio lock, nessa ordem.
+#[derive(Debug)]
+pub struct Sink;
+
+impl Write for Sink {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        if let Some(serial) = SERIAL.lock().as_mut() {
+            serial.write_bytes(text.as_bytes());
+        }
+        if let Some(screen) = SCREEN.lock().as_mut() {
+            screen.write(text.as_bytes());
+        }
+        Ok(())
     }
 }
 
@@ -33,6 +64,15 @@ struct Writer<'a, C>(&'a mut C);
 impl<C: Console> Write for Writer<'_, C> {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         self.0.write_bytes(text.as_bytes());
+        Ok(())
+    }
+}
+
+struct ScreenWriter<'a>(&'a mut Screen);
+
+impl Write for ScreenWriter<'_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        self.0.write(text.as_bytes());
         Ok(())
     }
 }

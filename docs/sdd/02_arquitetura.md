@@ -7,8 +7,8 @@
 
 | Anel | Pasta | O que tem | `unsafe` |
 | --- | --- | --- | --- |
-| **Portas** | `core/hal` | Traits e tipos de fronteira: `BootInfo`, `Console`, `Cpu`, `RegisterBus`, `PageMapper`, `FrameSource`, `PhysAddr`, `VirtAddr`, `MemoryRegion` | proibido |
-| **Centro** | `core/mm`, `core/sched` | Política pura: alocador de frames, leitura do mapa de memória, janela de endereços, fila de execução, rodízio | proibido |
+| **Portas** | `core/hal` | Traits e tipos de fronteira: `BootInfo`, `Console`, `ByteSource`, `Cpu`, `RegisterBus`, `PageMapper`, `FrameSource`, `FramebufferInfo`, `PhysAddr`, `VirtAddr`, `MemoryRegion` | proibido |
+| **Centro** | `core/mm`, `core/sched`, `core/gfx`, `core/term`, `core/shell` | Política pura: alocador de frames, leitura do mapa de memória, janela de endereços, fila de execução, rodízio; desenho de pixels e a fonte própria; emulador de terminal VT/xterm; shell embutido | proibido |
 | **Suporte** | `lib/sync` | Primitivas sem domínio (`SpinLock`) que precisam de `unsafe` para existir | permitido |
 | **Adaptadores** | `arch/*`, `boot/*`, `drivers/*` | Implementam as portas para uma ISA, um bootloader ou um dispositivo | permitido em `arch/` e `boot/`; proibido em `drivers/` |
 | **Raiz de composição** | `kernel/` | Entrada, pânico, console global, e a escolha de qual adaptador atende cada porta | permitido |
@@ -57,6 +57,31 @@ de `unsafe`, genéricos sobre `hal::RegisterBus`.
 `hal::RegisterBus::write32` → `MmioBus` (adaptador, `write_volatile`) → PL011.
 
 No x86_64 é o mesmo caminho com `Uart16550<PortBus>` e a instrução `out`.
+
+## O caminho da tela e do shell
+
+A tela não tem biblioteca de terceiros em nenhuma camada: a fonte, o emulador de
+terminal, o desenho e o shell são deste repositório.
+
+| Passo | Quem | O que faz |
+| --- | --- | --- |
+| 1 | `kernel/src/console.rs` (`Sink`) | Manda cada texto para a serial e para a tela, cada uma com o próprio lock |
+| 2 | `kernel/src/screen.rs` (`Screen::write`) | Traduz `\n` em `\r\n` (o `onlcr` de um tty) e entrega os bytes ao terminal |
+| 3 | `core/term` (`Terminal::write`) | Interpreta UTF-8 e as sequências VT/xterm sobre a grade de células, e marca as linhas sujas |
+| 4 | `kernel/src/screen.rs` (`render`) | Para cada célula das linhas sujas: cor pelo tema, estilo (`gfx::Style`) e glifo (`gfx::font`) |
+| 5 | `core/gfx` (`Surface::draw_glyph`) | Escreve os pixels em ordem, linha a linha, sem nunca ler o framebuffer |
+
+A grade do terminal é o buffer-sombra: quem precisa saber o que está na tela lê a
+grade, nunca a memória de vídeo, que no x86_64 é write-combining e lenta de ler.
+
+A entrada faz o caminho inverso: `hal::ByteSource` (a UART) → `Shell::feed` →
+comando, que consulta o sistema pela porta `rustos_shell::Host`, implementada em
+`kernel/src/system.rs`. O shell define a própria porta (`Host`) porque ela só
+existe para ele; o `kernel/` é quem a liga ao `mm`, ao boot e à tela.
+
+`gfx`, `term` e `shell` não se conhecem (guidelines 03, regra 2): `term` não sabe
+de pixels, `gfx` não sabe de terminal, e o `shell` só escreve texto em
+`core::fmt::Write`.
 
 ## Portas de entrada que virão
 

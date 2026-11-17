@@ -6,7 +6,7 @@
 
 use core::hint::spin_loop;
 
-use rustos_hal::{Console, RegisterBus};
+use rustos_hal::{ByteSource, Console, RegisterBus};
 
 const DATA: usize = 0x00;
 const FLAG: usize = 0x18;
@@ -16,7 +16,9 @@ const INTERRUPT_MASK: usize = 0x38;
 const INTERRUPT_CLEAR: usize = 0x44;
 
 const FLAG_BUSY: u32 = 1 << 3;
+const FLAG_RX_EMPTY: u32 = 1 << 4;
 const FLAG_TX_FULL: u32 = 1 << 5;
+const DATA_BYTE: u32 = 0xFF;
 const LINE_FIFO_ENABLE: u32 = 1 << 4;
 const LINE_WORD_8BIT: u32 = 0b11 << 5;
 const CONTROL_UART_ENABLE: u32 = 1 << 0;
@@ -69,9 +71,18 @@ impl<B: RegisterBus> Console for Pl011<B> {
     }
 }
 
+impl<B: RegisterBus> ByteSource for Pl011<B> {
+    /// Os bits de erro (8–11) do DATA são descartados: o byte chega como veio.
+    fn read_byte(&mut self) -> Option<u8> {
+        let empty = self.bus.read32(FLAG) & FLAG_RX_EMPTY != 0;
+        (!empty).then(|| (self.bus.read32(DATA) & DATA_BYTE) as u8)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
 
     use super::*;
 
@@ -79,6 +90,7 @@ mod tests {
     struct FakeBus {
         writes: RefCell<Vec<(usize, u32)>>,
         full_polls: Cell<u32>,
+        received: RefCell<VecDeque<u32>>,
     }
 
     impl RegisterBus for FakeBus {
@@ -91,12 +103,24 @@ mod tests {
         }
 
         fn read32(&self, offset: usize) -> u32 {
+            if offset == DATA {
+                return self
+                    .received
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("leu DATA sem dado");
+            }
             assert_eq!(offset, FLAG);
+            let empty = if self.received.borrow().is_empty() {
+                FLAG_RX_EMPTY
+            } else {
+                0
+            };
             if self.full_polls.get() > 0 {
                 self.full_polls.set(self.full_polls.get() - 1);
-                return FLAG_TX_FULL;
+                return FLAG_TX_FULL | empty;
             }
-            0
+            empty
         }
 
         fn write32(&self, offset: usize, value: u32) {
@@ -138,5 +162,23 @@ mod tests {
         uart.write_bytes(b"\n");
         let data: Vec<u32> = uart.bus.writes.borrow().iter().map(|(_, v)| *v).collect();
         assert_eq!(data, [u32::from(b'\r'), u32::from(b'\n')]);
+    }
+
+    #[test]
+    fn read_byte_is_none_while_rx_fifo_is_empty() {
+        let mut uart = Pl011::new(FakeBus::default());
+        assert_eq!(uart.read_byte(), None);
+    }
+
+    #[test]
+    fn read_byte_drops_error_bits() {
+        let bus = FakeBus::default();
+        bus.received
+            .borrow_mut()
+            .extend([0x0F00 | u32::from(b'a'), u32::from(b'b')]);
+        let mut uart = Pl011::new(bus);
+        assert_eq!(uart.read_byte(), Some(b'a'));
+        assert_eq!(uart.read_byte(), Some(b'b'));
+        assert_eq!(uart.read_byte(), None);
     }
 }

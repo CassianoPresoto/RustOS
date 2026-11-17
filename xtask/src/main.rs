@@ -6,9 +6,11 @@
 mod arch;
 mod cargo;
 mod checks;
+mod font_preview;
 mod image;
 mod limine;
 mod manifest;
+mod png;
 mod qemu;
 mod size;
 mod workspace;
@@ -26,11 +28,14 @@ comandos:
   image           monta a partição EFI (Limine + kernel) em target/esp/<arch>
   run             sobe no QEMU com a serial no terminal (Ctrl-A X sai)
   smoke           sobe no QEMU, espera o marcador de boot e sai com o resultado
+  screenshot      sobe sem janela, digita os comandos depois de `--` (um por argumento
+                  ou separados por `;`) e grava a tela em target/screenshots/<arch>.png
   size            tamanho das seções do kernel (o que ocupa memória)
   check-layers    dependências entre camadas e onde `unsafe`/`asm!` podem morar
   check-comments  política de comentários e referências a DEBT-NNNN
   check-docs      índices, frontmatter das dívidas e links de docs/
   check           os três check-*
+  font-preview    gera target/font-preview.png com a grade da fonte (--scale N, 1 a 8)
 
   A = x86_64 | aarch64 | all  (padrão: x86_64)
   P = dev | release | release-small  (padrão: dev)";
@@ -48,6 +53,8 @@ fn main() -> ExitCode {
 struct Options {
     arches: Vec<Arch>,
     profile: Profile,
+    /// Tudo depois de `--`: os comandos que o `screenshot` digita no shell.
+    typed: Vec<String>,
 }
 
 fn run(args: &[String]) -> Result<(), String> {
@@ -55,8 +62,11 @@ fn run(args: &[String]) -> Result<(), String> {
         println!("{USAGE}");
         return Ok(());
     };
-    let options = parse_options(rest)?;
     let root = workspace::root();
+    if command == "font-preview" {
+        return font_preview::run(&root, rest);
+    }
+    let options = parse_options(rest)?;
     match command.as_str() {
         "build" => each_arch(&options, |arch| {
             cargo::build_kernel(&root, arch, options.profile).map(drop)
@@ -66,6 +76,11 @@ fn run(args: &[String]) -> Result<(), String> {
         }),
         "run" => each_arch(&options, |arch| qemu::run(&root, arch, options.profile)),
         "smoke" => each_arch(&options, |arch| qemu::smoke(&root, arch, options.profile)),
+        "screenshot" => each_arch(&options, |arch| {
+            let path = qemu::screenshot(&root, arch, options.profile, &options.typed)?;
+            println!("xtask: tela de {} em {}", arch.name(), path.display());
+            Ok(())
+        }),
         "size" => each_arch(&options, |arch| size::report(&root, arch, options.profile)),
         "check-layers" => checks::layers(&root),
         "check-comments" => checks::comments(&root),
@@ -80,9 +95,14 @@ fn run(args: &[String]) -> Result<(), String> {
 }
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
+    let (args, typed) = match args.iter().position(|arg| arg == "--") {
+        Some(split) => (&args[..split], args[split + 1..].to_vec()),
+        None => (args, Vec::new()),
+    };
     let mut options = Options {
         arches: vec![Arch::X86_64],
         profile: Profile::Dev,
+        typed,
     };
     let mut args = args.iter();
     while let Some(flag) = args.next() {

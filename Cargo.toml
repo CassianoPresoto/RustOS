@@ -5,6 +5,9 @@ members = [
     "core/hal",
     "core/mm",
     "core/sched",
+    "core/gfx",
+    "core/term",
+    "core/shell",
     "lib/sync",
     "arch/x86_64",
     "arch/aarch64",
@@ -19,6 +22,9 @@ default-members = [
     "core/hal",
     "core/mm",
     "core/sched",
+    "core/gfx",
+    "core/term",
+    "core/shell",
     "lib/sync",
     "arch/x86_64",
     "arch/aarch64",
@@ -40,6 +46,9 @@ publish = false
 [workspace.dependencies]
 rustos-hal = { path = "core/hal" }
 rustos-mm = { path = "core/mm" }
+rustos-gfx = { path = "core/gfx" }
+rustos-term = { path = "core/term" }
+rustos-shell = { path = "core/shell" }
 rustos-sync = { path = "lib/sync" }
 rustos-arch-x86_64 = { path = "arch/x86_64" }
 rustos-arch-aarch64 = { path = "arch/aarch64" }

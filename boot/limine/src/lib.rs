@@ -8,10 +8,13 @@ mod requests;
 
 use core::ffi::{CStr, c_char};
 
-use rustos_hal::{BootInfo, BootTimeline, BootloaderId, MemoryRegion, PhysAddr, RegionKind};
+use rustos_hal::{
+    BootInfo, BootTimeline, BootloaderId, Channel, FramebufferInfo, MemoryRegion, PhysAddr,
+    RegionKind, VirtAddr,
+};
 
 pub use protocol::BASE_REVISION;
-use protocol::MemmapEntry;
+use protocol::{Framebuffer, MemmapEntry};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BootError {
@@ -80,6 +83,35 @@ impl BootInfo for LimineBoot {
             kernel_handoff_us: perf.exec_usec,
         })
     }
+
+    fn framebuffer(&self) -> Option<FramebufferInfo> {
+        // SAFETY: as respostas seguem válidas enquanto a memória do bootloader não é reaproveitada.
+        let response = unsafe { requests::framebuffer() }?;
+        // SAFETY: o Limine garante `framebuffer_count` ponteiros válidos.
+        let framebuffers = unsafe { response.framebuffers() };
+        framebuffers.first().and_then(|fb| framebuffer_info(fb))
+    }
+}
+
+/// Só 32 bpp em RGB com canais de 8 bits; outro formato fica sem tela.
+fn framebuffer_info(fb: &Framebuffer) -> Option<FramebufferInfo> {
+    let channel =
+        |size: u8, shift: u8| (size == 8 && shift <= 24).then_some(Channel { shift, size });
+    if fb.memory_model != protocol::FRAMEBUFFER_RGB || fb.bpp != 32 || fb.address.is_null() {
+        return None;
+    }
+    let info = FramebufferInfo {
+        address: VirtAddr::new(fb.address.addr() as u64),
+        width: u32::try_from(fb.width).ok()?,
+        height: u32::try_from(fb.height).ok()?,
+        pitch: u32::try_from(fb.pitch).ok()?,
+        red: channel(fb.red_mask_size, fb.red_mask_shift)?,
+        green: channel(fb.green_mask_size, fb.green_mask_shift)?,
+        blue: channel(fb.blue_mask_size, fb.blue_mask_shift)?,
+    };
+    let fits = info.pitch.is_multiple_of(FramebufferInfo::BYTES_PER_PIXEL)
+        && info.stride_pixels() >= info.width;
+    (fits && info.width > 0 && info.height > 0).then_some(info)
 }
 
 /// # Safety
@@ -126,6 +158,50 @@ mod tests {
         assert_eq!(region_kind(1), RegionKind::Reserved);
         assert_eq!(region_kind(8), RegionKind::Reserved);
         assert_eq!(region_kind(999), RegionKind::Reserved);
+    }
+
+    fn limine_fb(bpp: u16, pitch: u64) -> Framebuffer {
+        Framebuffer {
+            address: core::ptr::without_provenance_mut(0xffff_8000_fd00_0000),
+            width: 1280,
+            height: 800,
+            pitch,
+            bpp,
+            memory_model: protocol::FRAMEBUFFER_RGB,
+            red_mask_size: 8,
+            red_mask_shift: 16,
+            green_mask_size: 8,
+            green_mask_shift: 8,
+            blue_mask_size: 8,
+            blue_mask_shift: 0,
+            unused: [0; 7],
+            edid_size: 0,
+            edid: core::ptr::null(),
+        }
+    }
+
+    #[test]
+    fn translates_rgb_32bpp_framebuffer() {
+        let info = framebuffer_info(&limine_fb(32, 1280 * 4)).expect("formato aceito");
+        assert_eq!(
+            (info.width, info.height, info.stride_pixels()),
+            (1280, 800, 1280)
+        );
+        assert_eq!(info.red, Channel { shift: 16, size: 8 });
+        assert_eq!(info.address, VirtAddr::new(0xffff_8000_fd00_0000));
+    }
+
+    #[test]
+    fn rejects_formats_the_renderer_cannot_draw() {
+        assert!(framebuffer_info(&limine_fb(24, 1280 * 3)).is_none());
+        assert!(framebuffer_info(&limine_fb(32, 1279 * 4)).is_none());
+        assert!(framebuffer_info(&limine_fb(32, 1280 * 4 + 2)).is_none());
+        let mut fb = limine_fb(32, 1280 * 4);
+        fb.memory_model = 0;
+        assert!(framebuffer_info(&fb).is_none());
+        let mut fb = limine_fb(32, 1280 * 4);
+        fb.green_mask_size = 6;
+        assert!(framebuffer_info(&fb).is_none());
     }
 
     #[test]

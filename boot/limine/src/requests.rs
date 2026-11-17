@@ -2,9 +2,9 @@
 //! O linker script mantém as três seções em ordem e com `KEEP`; no host não há seção.
 
 use crate::protocol::{
-    BASE_REVISION, BOOTLOADER_INFO_ID, BaseRevision, BootloaderInfoResponse, HHDM_ID, HhdmResponse,
-    MEMMAP_ID, Marker, MemmapResponse, PERFORMANCE_ID, PerformanceResponse, REQUESTS_END_MARKER,
-    REQUESTS_START_MARKER, Request,
+    BASE_REVISION, BOOTLOADER_INFO_ID, BaseRevision, BootloaderInfoResponse, FRAMEBUFFER_ID,
+    FramebufferResponse, HHDM_ID, HhdmResponse, MEMMAP_ID, Marker, MemmapResponse, PERFORMANCE_ID,
+    PerformanceResponse, REQUESTS_END_MARKER, REQUESTS_START_MARKER, Request,
 };
 
 #[used]
@@ -30,6 +30,10 @@ static MEMMAP: Request<MemmapResponse> = Request::new(MEMMAP_ID);
 #[used]
 #[cfg_attr(target_os = "none", unsafe(link_section = ".requests"))]
 static PERFORMANCE: Request<PerformanceResponse> = Request::new(PERFORMANCE_ID);
+
+#[used]
+#[cfg_attr(target_os = "none", unsafe(link_section = ".requests"))]
+static FRAMEBUFFER: Request<FramebufferResponse> = Request::new(FRAMEBUFFER_ID);
 
 #[used]
 #[cfg_attr(target_os = "none", unsafe(link_section = ".requests_end_marker"))]
@@ -65,4 +69,11 @@ pub unsafe fn memmap() -> Option<&'static MemmapResponse> {
 pub unsafe fn performance() -> Option<&'static PerformanceResponse> {
     // SAFETY: repassada a quem chama.
     unsafe { PERFORMANCE.response() }
+}
+
+/// # Safety
+/// Ver `Request::response`.
+pub unsafe fn framebuffer() -> Option<&'static FramebufferResponse> {
+    // SAFETY: repassada a quem chama.
+    unsafe { FRAMEBUFFER.response() }
 }

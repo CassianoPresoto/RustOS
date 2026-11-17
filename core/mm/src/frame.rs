@@ -114,6 +114,39 @@ impl<'a> BitmapFrameAllocator<'a> {
         None
     }
 
+    /// Os `count` frames livres seguidos de endereço mais baixo, numa varredura O(frames).
+    /// Para estruturas de boot (grade do terminal); o caminho quente usa `allocate`.
+    pub fn allocate_contiguous(&mut self, count: usize) -> Option<PhysFrame> {
+        if count == 0 || count > self.free {
+            return None;
+        }
+        let (mut run_start, mut run) = (0, 0);
+        let mut index = 0;
+        while index < self.frames {
+            let word = self.words[index / WORD_BITS];
+            if index.is_multiple_of(WORD_BITS) && word == u64::MAX {
+                run = 0;
+                index += WORD_BITS;
+                continue;
+            }
+            if word & (1 << (index % WORD_BITS)) == 0 {
+                if run == 0 {
+                    run_start = index;
+                }
+                run += 1;
+                if run == count {
+                    self.update(run_start, run_start + count, true);
+                    self.free -= count;
+                    return Some(self.frame_at(run_start));
+                }
+            } else {
+                run = 0;
+            }
+            index += 1;
+        }
+        None
+    }
+
     pub fn deallocate(&mut self, frame: PhysFrame) -> Result<(), FrameError> {
         let index = self.index_of(frame.start())?;
         let (word, bit) = (index / WORD_BITS, index % WORD_BITS);
@@ -346,6 +379,58 @@ mod tests {
         assert_eq!(frames.allocate().map(PhysFrame::start), Some(frame(100)));
         frames.deallocate(PhysFrame::containing(frame(0))).unwrap();
         assert_eq!(frames.allocate().map(PhysFrame::start), Some(frame(0)));
+    }
+
+    #[test]
+    fn contiguous_run_may_cross_a_word_boundary() {
+        let mut storage = [0; 3];
+        let mut frames = allocator(&mut storage, 150);
+        frames.release_range(frame(10), 3 * FRAME_SIZE);
+        frames.release_range(frame(60), 10 * FRAME_SIZE);
+        let run = frames
+            .allocate_contiguous(8)
+            .expect("há 10 seguidos a partir de 60");
+        assert_eq!(run.start(), frame(60));
+        assert_eq!(frames.free_frames(), 5);
+        assert_eq!(
+            frames.allocate_contiguous(3).map(PhysFrame::start),
+            Some(frame(10))
+        );
+    }
+
+    #[test]
+    fn contiguous_frames_are_marked_used() {
+        let mut storage = [0; 1];
+        let mut frames = allocator(&mut storage, 8);
+        frames.release_range(frame(0), 8 * FRAME_SIZE);
+        assert!(frames.allocate_contiguous(6).is_some());
+        assert_eq!(frames.allocate().map(PhysFrame::start), Some(frame(6)));
+        assert_eq!(frames.allocate().map(PhysFrame::start), Some(frame(7)));
+        assert_eq!(frames.allocate(), None);
+    }
+
+    #[test]
+    fn contiguous_rejects_zero_too_many_and_fragmented() {
+        let mut storage = [0; 1];
+        let mut frames = allocator(&mut storage, 10);
+        frames.release_range(frame(0), 2 * FRAME_SIZE);
+        frames.release_range(frame(5), 2 * FRAME_SIZE);
+        assert_eq!(frames.allocate_contiguous(0), None);
+        assert_eq!(frames.allocate_contiguous(5), None);
+        assert_eq!(frames.allocate_contiguous(3), None);
+        assert_eq!(frames.free_frames(), 4);
+    }
+
+    #[test]
+    fn contiguous_never_runs_past_the_last_frame() {
+        let mut storage = [0; 1];
+        let mut frames = allocator(&mut storage, 4);
+        frames.release_range(frame(0), 4 * FRAME_SIZE);
+        assert_eq!(frames.allocate_contiguous(5), None);
+        assert_eq!(
+            frames.allocate_contiguous(4).map(PhysFrame::start),
+            Some(frame(0))
+        );
     }
 
     #[test]

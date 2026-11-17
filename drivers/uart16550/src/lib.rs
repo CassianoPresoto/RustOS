@@ -1,12 +1,12 @@
 //! UART 16550: COM1 do PC por porta de E/S, ou MMIO em placas RISC-V e ARM.
-//! Só transmissão, por espera ativa; interrupção e recepção entram com o console interativo.
+//! Transmissão por espera ativa e recepção por consulta; interrupção entra na fase 1.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
 use core::hint::spin_loop;
 
-use rustos_hal::{Console, RegisterBus};
+use rustos_hal::{ByteSource, Console, RegisterBus};
 
 const DATA: usize = 0;
 const INTERRUPT_ENABLE: usize = 1;
@@ -21,6 +21,7 @@ const LINE_DLAB: u8 = 1 << 7;
 const LINE_8N1: u8 = 0b11;
 const FIFO_ENABLE_AND_CLEAR: u8 = 0xC7;
 const MODEM_DTR_RTS: u8 = 0b11;
+const STATUS_DATA_READY: u8 = 1 << 0;
 const STATUS_TX_EMPTY: u8 = 1 << 5;
 
 /// Divisor de 115200 baud com o relógio padrão de 1,8432 MHz.
@@ -67,9 +68,16 @@ impl<B: RegisterBus> Console for Uart16550<B> {
     }
 }
 
+impl<B: RegisterBus> ByteSource for Uart16550<B> {
+    fn read_byte(&mut self) -> Option<u8> {
+        (self.bus.read8(LINE_STATUS) & STATUS_DATA_READY != 0).then(|| self.bus.read8(DATA))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
 
     use super::*;
 
@@ -77,16 +85,29 @@ mod tests {
     struct FakeBus {
         writes: RefCell<Vec<(usize, u8)>>,
         busy_polls: Cell<u32>,
+        received: RefCell<VecDeque<u8>>,
     }
 
     impl RegisterBus for FakeBus {
         fn read8(&self, offset: usize) -> u8 {
+            if offset == DATA {
+                return self
+                    .received
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("leu DATA sem dado");
+            }
             assert_eq!(offset, LINE_STATUS);
+            let ready = if self.received.borrow().is_empty() {
+                0
+            } else {
+                STATUS_DATA_READY
+            };
             if self.busy_polls.get() > 0 {
                 self.busy_polls.set(self.busy_polls.get() - 1);
-                return 0;
+                return ready;
             }
-            STATUS_TX_EMPTY
+            STATUS_TX_EMPTY | ready
         }
 
         fn write8(&self, offset: usize, value: u8) {
@@ -137,5 +158,21 @@ mod tests {
         uart.write_byte(b'x');
         assert_eq!(uart.bus.busy_polls.get(), 0);
         assert_eq!(data_bytes(&uart.bus), b"x");
+    }
+
+    #[test]
+    fn read_byte_is_none_without_data_ready() {
+        let mut uart = Uart16550::new(FakeBus::default());
+        assert_eq!(uart.read_byte(), None);
+    }
+
+    #[test]
+    fn read_byte_drains_the_receiver_in_order() {
+        let bus = FakeBus::default();
+        bus.received.borrow_mut().extend(*b"ok");
+        let mut uart = Uart16550::new(bus);
+        assert_eq!(uart.read_byte(), Some(b'o'));
+        assert_eq!(uart.read_byte(), Some(b'k'));
+        assert_eq!(uart.read_byte(), None);
     }
 }

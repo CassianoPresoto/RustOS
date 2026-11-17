@@ -1,6 +1,7 @@
 //! Liga `core/mm` à memória de verdade: o único lugar que transforma endereço
 //! físico em ponteiro, pelo mapa direto que o bootloader montou.
 
+use core::mem::MaybeUninit;
 use core::{ptr, slice};
 
 use rustos_hal::{
@@ -44,6 +45,7 @@ pub struct Memory {
     pub frames: BitmapFrameAllocator<'static>,
     pub summary: MemorySummary,
     pub bitmap_bytes: u64,
+    direct_map_offset: u64,
 }
 
 impl Memory {
@@ -72,7 +74,25 @@ impl Memory {
             frames: allocator,
             summary,
             bitmap_bytes,
+            direct_map_offset: boot.direct_map_offset(),
         })
+    }
+
+    /// Fatia de `len` valores `fill` em frames contíguos, para sempre do chamador.
+    pub fn alloc_slice<T: Copy>(&mut self, len: usize, fill: T) -> Option<&'static mut [T]> {
+        const { assert!(align_of::<T>() as u64 <= PAGE_SIZE) };
+        let bytes = len.checked_mul(size_of::<T>())?;
+        let frames = bytes.div_ceil(usize::try_from(PAGE_SIZE).ok()?).max(1);
+        let first = self.frames.allocate_contiguous(frames)?;
+        let virt = usize::try_from(first.start().as_u64() + self.direct_map_offset).ok()?;
+        let start = ptr::with_exposed_provenance_mut::<MaybeUninit<T>>(virt);
+        // SAFETY: frames recém-saídos do alocador, no mapa direto (contrato do `init`).
+        let slots = unsafe { slice::from_raw_parts_mut(start, len) };
+        for slot in slots.iter_mut() {
+            slot.write(fill);
+        }
+        // SAFETY: todo elemento acabou de ser inicializado com `fill`.
+        Some(unsafe { slice::from_raw_parts_mut(start.cast::<T>(), len) })
     }
 
     /// Pega um frame, escreve e relê pelo mapa direto, e o devolve.

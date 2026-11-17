@@ -1,0 +1,563 @@
+//! Comandos embutidos: uma tabela de `{ name, summary, run }`.
+
+use core::fmt;
+
+use crate::ansi::{ACCENT, CLEAR_SCREEN, DIM, LOGO, RESET};
+use crate::fmtutil::{Bytes, Millis, Percent, Uptime};
+use crate::history::Entries;
+use crate::host::{Host, SystemInfo};
+
+/// O que um comando recebe: seus argumentos (sem o nome) e as portas.
+pub(crate) struct Ctx<'a> {
+    pub(crate) args: &'a [&'a str],
+    pub(crate) host: &'a dyn Host,
+    pub(crate) out: &'a mut dyn fmt::Write,
+    pub(crate) history: &'a dyn Entries,
+}
+
+/// Entrada da tabela de comandos.
+pub(crate) struct Command {
+    pub(crate) name: &'static str,
+    pub(crate) summary: &'static str,
+    pub(crate) run: fn(&mut Ctx<'_>) -> fmt::Result,
+}
+
+/// Em ordem alfabética: é a ordem em que `help` e o Tab listam.
+pub(crate) const COMMANDS: &[Command] = &[
+    Command {
+        name: "clear",
+        summary: "clear the screen",
+        run: clear,
+    },
+    Command {
+        name: "colors",
+        summary: "show the 16 ANSI colors and the 256-color palette",
+        run: colors,
+    },
+    Command {
+        name: "echo",
+        summary: "print the arguments",
+        run: echo,
+    },
+    Command {
+        name: "fetch",
+        summary: "show a summary of the system",
+        run: fetch,
+    },
+    Command {
+        name: "help",
+        summary: "list the commands",
+        run: help,
+    },
+    Command {
+        name: "history",
+        summary: "list the command history",
+        run: history,
+    },
+    Command {
+        name: "mem",
+        summary: "show the physical memory usage",
+        run: mem,
+    },
+    Command {
+        name: "uname",
+        summary: "print system information (-a -s -r -m)",
+        run: uname,
+    },
+    Command {
+        name: "uptime",
+        summary: "show how long the system has been running",
+        run: uptime,
+    },
+    Command {
+        name: "version",
+        summary: "print the system version",
+        run: version,
+    },
+];
+
+pub(crate) fn find(name: &str) -> Option<&'static Command> {
+    COMMANDS.iter().find(|command| command.name == name)
+}
+
+fn clear(ctx: &mut Ctx<'_>) -> fmt::Result {
+    ctx.out.write_str(CLEAR_SCREEN)
+}
+
+fn echo(ctx: &mut Ctx<'_>) -> fmt::Result {
+    for (index, word) in ctx.args.iter().enumerate() {
+        if index > 0 {
+            ctx.out.write_char(' ')?;
+        }
+        ctx.out.write_str(word)?;
+    }
+    ctx.out.write_str("\r\n")
+}
+
+fn help(ctx: &mut Ctx<'_>) -> fmt::Result {
+    write!(ctx.out, "{DIM}Built-in commands:{RESET}\r\n")?;
+    for command in COMMANDS {
+        let Command { name, summary, .. } = command;
+        write!(ctx.out, "  {ACCENT}{name:<8}{RESET} {summary}\r\n")?;
+    }
+    Ok(())
+}
+
+fn version(ctx: &mut Ctx<'_>) -> fmt::Result {
+    let info = ctx.host.info();
+    write!(ctx.out, "{} {}\r\n", info.os_name, info.os_version)
+}
+
+fn uname(ctx: &mut Ctx<'_>) -> fmt::Result {
+    let info = ctx.host.info();
+    let (mut name, mut release, mut machine) = (ctx.args.is_empty(), false, false);
+    for arg in ctx.args {
+        let Some(flags) = arg.strip_prefix('-').filter(|flags| !flags.is_empty()) else {
+            return write!(ctx.out, "uname: extra operand '{arg}'\r\n");
+        };
+        for flag in flags.chars() {
+            match flag {
+                's' => name = true,
+                'r' => release = true,
+                'm' => machine = true,
+                'a' => (name, release, machine) = (true, true, true),
+                _ => return write!(ctx.out, "uname: invalid option -- '{flag}'\r\n"),
+            }
+        }
+    }
+    let fields = [
+        (name, info.os_name),
+        (release, info.os_version),
+        (machine, info.arch),
+    ];
+    let mut first = true;
+    for (_, text) in fields.iter().filter(|(selected, _)| *selected) {
+        if !first {
+            ctx.out.write_char(' ')?;
+        }
+        first = false;
+        ctx.out.write_str(text)?;
+    }
+    ctx.out.write_str("\r\n")
+}
+
+fn uptime(ctx: &mut Ctx<'_>) -> fmt::Result {
+    match ctx.host.uptime_ns() {
+        Some(ns) => write!(ctx.out, "up {}\r\n", Uptime(ns)),
+        None => ctx.out.write_str("uptime: not available yet\r\n"),
+    }
+}
+
+fn history(ctx: &mut Ctx<'_>) -> fmt::Result {
+    for n in 0..ctx.history.count() {
+        if let Some((number, line)) = ctx.history.nth_oldest(n) {
+            write!(ctx.out, "{number:>5}  {line}\r\n")?;
+        }
+    }
+    Ok(())
+}
+
+fn mem(ctx: &mut Ctx<'_>) -> fmt::Result {
+    let memory = ctx.host.info().memory;
+    let used = memory.usable_bytes.saturating_sub(memory.free_bytes);
+    let share = |part| Percent {
+        part,
+        whole: memory.usable_bytes,
+        decimals: 1,
+    };
+    let out = &mut *ctx.out;
+    write!(out, "{DIM}Memory{RESET}\r\n")?;
+    write!(
+        out,
+        "  {:<13}{:>10}\r\n",
+        "usable",
+        Bytes(memory.usable_bytes)
+    )?;
+    write!(
+        out,
+        "  {:<13}{:>10}  ({})\r\n",
+        "used",
+        Bytes(used),
+        share(used)
+    )?;
+    let free = memory.free_bytes;
+    write!(
+        out,
+        "  {:<13}{:>10}  ({})\r\n",
+        "free",
+        Bytes(free),
+        share(free)
+    )?;
+    write!(
+        out,
+        "  {:<13}{:>10}\r\n",
+        "reserved",
+        Bytes(memory.reserved_bytes)
+    )?;
+    let bitmap = Percent {
+        part: memory.frame_bitmap_bytes,
+        whole: memory.usable_bytes,
+        decimals: 3,
+    };
+    let bitmap_bytes = memory.frame_bitmap_bytes;
+    write!(
+        out,
+        "  {:<13}{bitmap_bytes:>8} B  ({}, {bitmap} of RAM)\r\n",
+        "frame bitmap",
+        Bytes(bitmap_bytes),
+    )?;
+    write!(
+        out,
+        "  {:<13}{:>10}\r\n",
+        "kernel",
+        Bytes(memory.kernel_bytes)
+    )
+}
+
+fn blocks(out: &mut dyn fmt::Write, from: u16, to: u16) -> fmt::Result {
+    for color in from..to {
+        write!(out, "\x1b[48;5;{color}m  ")?;
+    }
+    write!(out, "{RESET}\r\n")
+}
+
+fn colors(ctx: &mut Ctx<'_>) -> fmt::Result {
+    let out = &mut *ctx.out;
+    write!(out, "{DIM}ANSI colors (0-15){RESET}\r\n")?;
+    blocks(out, 0, 16)?;
+    write!(out, "{DIM}Color cube (16-231){RESET}\r\n")?;
+    for row in 0..6 {
+        blocks(out, 16 + row * 36, 16 + (row + 1) * 36)?;
+    }
+    write!(out, "{DIM}Grayscale (232-255){RESET}\r\n")?;
+    blocks(out, 232, 256)
+}
+
+pub(crate) const LOGO_WIDTH: usize = 19;
+
+pub(crate) const LOGO_ROWS: [&str; 9] = [
+    "  .-----------.  ",
+    " /  #####      \\ ",
+    "|  ##   ##      |",
+    "|  ##   ##      |",
+    "|  #####        |",
+    "|  ## ##        |",
+    "|  ##  ##       |",
+    " \\  ##   ##    / ",
+    "  '-----------'  ",
+];
+
+fn label(out: &mut dyn fmt::Write, text: &str) -> fmt::Result {
+    write!(out, "{ACCENT}{text}{RESET}: ")
+}
+
+fn fetch_row(ctx: &mut Ctx<'_>, info: &SystemInfo<'_>, row: usize) -> fmt::Result {
+    let uptime = ctx.host.uptime_ns();
+    let out = &mut *ctx.out;
+    match row {
+        0 => {
+            label(out, "OS")?;
+            out.write_str(info.os_name)
+        }
+        1 => {
+            label(out, "Kernel")?;
+            write!(out, "{} {}", info.os_name, info.os_version)
+        }
+        2 => {
+            label(out, "Arch")?;
+            out.write_str(info.arch)
+        }
+        3 => {
+            label(out, "Bootloader")?;
+            match info.bootloader {
+                Some(boot) => write!(out, "{} {}", boot.name, boot.version),
+                None => out.write_str("unknown"),
+            }
+        }
+        4 => {
+            label(out, "Boot")?;
+            match info.boot_timeline {
+                Some(line) => write!(
+                    out,
+                    "firmware {} ms, loader {} ms",
+                    Millis(line.firmware_us()),
+                    Millis(line.loader_us())
+                ),
+                None => out.write_str("unknown"),
+            }
+        }
+        5 => {
+            label(out, "CPU")?;
+            out.write_str(info.cpu.unwrap_or("unknown"))
+        }
+        6 => {
+            let memory = info.memory;
+            let used = memory.usable_bytes.saturating_sub(memory.free_bytes);
+            let share = Percent {
+                part: used,
+                whole: memory.usable_bytes,
+                decimals: 0,
+            };
+            label(out, "Memory")?;
+            write!(
+                out,
+                "{} / {} ({share})",
+                Bytes(used),
+                Bytes(memory.usable_bytes)
+            )
+        }
+        7 => {
+            label(out, "Display")?;
+            match info.display {
+                Some(d) => write!(
+                    out,
+                    "{}x{} ({}x{} cells)",
+                    d.width, d.height, d.cols, d.rows
+                ),
+                None => out.write_str("none"),
+            }
+        }
+        _ => {
+            label(out, "Uptime")?;
+            match uptime {
+                Some(ns) => write!(out, "{}", Uptime(ns)),
+                None => out.write_str("not available yet"),
+            }
+        }
+    }
+}
+
+fn fetch(ctx: &mut Ctx<'_>) -> fmt::Result {
+    let info = ctx.host.info();
+    for (row, logo) in LOGO_ROWS.iter().enumerate() {
+        write!(ctx.out, "{LOGO}{logo:<LOGO_WIDTH$}{RESET}")?;
+        fetch_row(ctx, &info, row)?;
+        ctx.out.write_str("\r\n")?;
+    }
+    write!(ctx.out, "\r\n{:LOGO_WIDTH$}", "")?;
+    blocks(ctx.out, 0, 16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{FakeHost, info};
+
+    fn run(name: &str, args: &[&str], host: &FakeHost) -> String {
+        let mut out = String::new();
+        let mut ctx = Ctx {
+            args,
+            host,
+            out: &mut out,
+            history: &crate::history::History::<16, 4>::new(),
+        };
+        (find(name).expect("known command").run)(&mut ctx).unwrap();
+        out
+    }
+
+    #[test]
+    fn table_is_sorted_and_names_are_unique() {
+        let names: Vec<_> = COMMANDS.iter().map(|c| c.name).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(names, sorted);
+    }
+
+    #[test]
+    fn every_command_has_a_summary_and_help_lists_it() {
+        let help = run("help", &[], &FakeHost::new());
+        for command in COMMANDS {
+            assert_ne!(command.summary.len(), 0);
+            assert!(help.contains(command.name), "{}", command.name);
+            assert!(help.contains(command.summary), "{}", command.name);
+        }
+    }
+
+    #[test]
+    fn find_matches_whole_names_only() {
+        assert!(find("echo").is_some());
+        assert!(find("ech").is_none());
+        assert!(find("").is_none());
+    }
+
+    #[test]
+    fn echo_joins_arguments_with_single_spaces() {
+        assert_eq!(run("echo", &["a", "b  c"], &FakeHost::new()), "a b  c\r\n");
+        assert_eq!(run("echo", &[], &FakeHost::new()), "\r\n");
+        assert_eq!(run("echo", &["", "x"], &FakeHost::new()), " x\r\n");
+    }
+
+    #[test]
+    fn clear_homes_and_erases() {
+        assert_eq!(run("clear", &[], &FakeHost::new()), "\x1b[H\x1b[2J");
+    }
+
+    #[test]
+    fn version_prints_name_and_version() {
+        assert_eq!(run("version", &[], &FakeHost::new()), "RustOS 0.1.0\r\n");
+    }
+
+    #[test]
+    fn uname_defaults_to_the_system_name() {
+        assert_eq!(run("uname", &[], &FakeHost::new()), "RustOS\r\n");
+    }
+
+    #[test]
+    fn uname_flags_select_fields() {
+        let host = FakeHost::new();
+        assert_eq!(run("uname", &["-s"], &host), "RustOS\r\n");
+        assert_eq!(run("uname", &["-r"], &host), "0.1.0\r\n");
+        assert_eq!(run("uname", &["-m"], &host), "x86_64\r\n");
+        assert_eq!(run("uname", &["-a"], &host), "RustOS 0.1.0 x86_64\r\n");
+    }
+
+    #[test]
+    fn uname_combines_flags_in_canonical_order() {
+        let host = FakeHost::new();
+        assert_eq!(run("uname", &["-mr"], &host), "0.1.0 x86_64\r\n");
+        assert_eq!(run("uname", &["-m", "-s"], &host), "RustOS x86_64\r\n");
+    }
+
+    #[test]
+    fn uname_rejects_unknown_flags_and_operands() {
+        let host = FakeHost::new();
+        assert_eq!(
+            run("uname", &["-x"], &host),
+            "uname: invalid option -- 'x'\r\n"
+        );
+        assert_eq!(
+            run("uname", &["foo"], &host),
+            "uname: extra operand 'foo'\r\n"
+        );
+        assert_eq!(run("uname", &["-"], &host), "uname: extra operand '-'\r\n");
+    }
+
+    #[test]
+    fn uptime_reports_the_clock() {
+        let mut host = FakeHost::new();
+        host.uptime = Some(3_723_000_000_000);
+        assert_eq!(run("uptime", &[], &host), "up 1h 02m 03s\r\n");
+    }
+
+    #[test]
+    fn uptime_without_a_clock_says_so() {
+        let mut host = FakeHost::new();
+        host.uptime = None;
+        assert!(run("uptime", &[], &host).contains("not available yet"));
+    }
+
+    #[test]
+    fn history_numbers_each_line() {
+        let mut log = crate::history::History::<16, 4>::new();
+        log.push("ls");
+        log.push("echo hi");
+        let host = FakeHost::new();
+        let mut out = String::new();
+        let mut ctx = Ctx {
+            args: &[],
+            host: &host,
+            out: &mut out,
+            history: &log,
+        };
+        history(&mut ctx).unwrap();
+        assert_eq!(out, "    1  ls\r\n    2  echo hi\r\n");
+    }
+
+    #[test]
+    fn history_of_nothing_prints_nothing() {
+        assert_eq!(run("history", &[], &FakeHost::new()), "");
+    }
+
+    #[test]
+    fn mem_reports_every_figure() {
+        let text = run("mem", &[], &FakeHost::new());
+        assert!(text.contains("usable"), "{text}");
+        assert!(text.contains("512.0 MiB"), "{text}");
+        assert!(text.contains("free"), "{text}");
+        assert!(text.contains("500.0 MiB"), "{text}");
+        assert!(text.contains("reserved"), "{text}");
+        assert!(text.contains("1.5 MiB"), "{text}");
+        assert!(text.contains("16384 B"), "{text}");
+        assert!(text.contains("0.003% of RAM"), "{text}");
+        assert!(text.contains("2.2 MiB"), "{text}");
+    }
+
+    #[test]
+    fn mem_with_no_memory_does_not_divide_by_zero() {
+        let mut host = FakeHost::new();
+        host.info.memory = crate::MemoryInfo::default();
+        let text = run("mem", &[], &host);
+        assert!(text.contains("0 B"), "{text}");
+        assert!(text.contains("0.0%"), "{text}");
+    }
+
+    #[test]
+    fn mem_with_more_free_than_usable_does_not_underflow() {
+        let mut host = FakeHost::new();
+        host.info.memory.free_bytes = host.info.memory.usable_bytes + 1;
+        assert!(run("mem", &[], &host).contains("used"));
+    }
+
+    #[test]
+    fn colors_paints_all_256_entries() {
+        let text = run("colors", &[], &FakeHost::new());
+        for color in 0..256 {
+            assert!(text.contains(&format!("\x1b[48;5;{color}m")), "{color}");
+        }
+        assert!(text.contains("ANSI colors"));
+    }
+
+    #[test]
+    fn fetch_shows_every_label_and_value() {
+        let text = run("fetch", &[], &FakeHost::new());
+        for part in [
+            "OS\x1b[0m: RustOS",
+            "Kernel\x1b[0m: RustOS 0.1.0",
+            "Arch\x1b[0m: x86_64",
+            "Bootloader\x1b[0m: Limine 9.2.3",
+            "Boot\x1b[0m: firmware 312.4 ms, loader 8.1 ms",
+            "CPU\x1b[0m: Test CPU @ 3.0GHz",
+            "Memory\x1b[0m: 12.0 MiB / 512.0 MiB (2%)",
+            "Display\x1b[0m: 1280x800 (160x50 cells)",
+            "Uptime\x1b[0m: 1m 05s",
+        ] {
+            assert!(text.contains(part), "{part} in {text}");
+        }
+    }
+
+    #[test]
+    fn fetch_ends_with_the_sixteen_color_blocks() {
+        let text = run("fetch", &[], &FakeHost::new());
+        let last = text.trim_end().lines().last().unwrap();
+        assert_eq!(last.matches("\x1b[48;5;").count(), 16);
+        assert!(last.contains("\x1b[48;5;15m"));
+    }
+
+    #[test]
+    fn fetch_falls_back_when_the_system_knows_little() {
+        let mut host = FakeHost::new();
+        host.uptime = None;
+        host.info = crate::SystemInfo {
+            bootloader: None,
+            boot_timeline: None,
+            cpu: None,
+            display: None,
+            ..info()
+        };
+        let text = run("fetch", &[], &host);
+        assert!(text.contains("Bootloader\x1b[0m: unknown"));
+        assert!(text.contains("Boot\x1b[0m: unknown"));
+        assert!(text.contains("CPU\x1b[0m: unknown"));
+        assert!(text.contains("Display\x1b[0m: none"));
+        assert!(text.contains("Uptime\x1b[0m: not available yet"));
+    }
+
+    #[test]
+    fn fetch_logo_fits_its_column() {
+        for row in LOGO_ROWS {
+            assert!(row.chars().count() < LOGO_WIDTH, "{row}");
+            assert!(row.is_ascii());
+        }
+    }
+}
