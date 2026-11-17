@@ -1,6 +1,7 @@
 //! Escolha dos adaptadores por ISA. Cada módulo expõe a mesma superfície, listada
 //! nos `pub use` abaixo: console, CPU, interrupções, relógio, entropia, proteções,
-//! espaço de endereçamento e troca de pilha. O contrato de cada uma está no SDD 02.
+//! espaço de endereçamento, troca de pilha, troca de contexto, estado de FPU/SIMD e
+//! timer de um tiro. O contrato de cada uma está no SDD 02 e no SDD 15.
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
@@ -9,15 +10,19 @@ mod x86_64;
 
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::{
-    ARCH, PlatformConsole, PlatformSpace, TIMER_HZ, call_on_stack, console, cpu, cycles, harden,
+    ARCH, Context, FPU_AREA_ALIGN, PlatformConsole, PlatformSpace, TIMER_HZ, active_space,
+    arm_timer, call_on_stack, console, cpu, cycles, cycles_to_ns, fpu_area_bytes, fpu_init,
+    fpu_init_area, fpu_read_probe, fpu_restore, fpu_save, fpu_write_probe, harden,
     hardware_entropy, has_keyboard, init_interrupts, irq_source, keyboard_event, new_space, now_ns,
-    protections, serial_irq_done, timer_tick, trigger,
+    protections, serial_irq_done, switch, timer_mode, trigger,
 };
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::{
-    ARCH, PlatformConsole, PlatformSpace, TIMER_HZ, call_on_stack, console, cpu, cycles, harden,
+    ARCH, Context, FPU_AREA_ALIGN, PlatformConsole, PlatformSpace, TIMER_HZ, active_space,
+    arm_timer, call_on_stack, console, cpu, cycles, cycles_to_ns, fpu_area_bytes, fpu_init,
+    fpu_init_area, fpu_read_probe, fpu_restore, fpu_save, fpu_write_probe, harden,
     hardware_entropy, has_keyboard, init_interrupts, irq_source, keyboard_event, new_space, now_ns,
-    protections, serial_irq_done, timer_tick, trigger,
+    protections, serial_irq_done, switch, timer_mode, trigger,
 };
 
 /// Por que a plataforma não ligou as interrupções.
@@ -33,4 +38,12 @@ pub enum PlatformError {
 pub struct Protection {
     pub name: &'static str,
     pub enabled: bool,
+}
+
+/// O que `fpu_init` ligou, para o relatório do boot.
+#[derive(Clone, Copy, Debug)]
+pub struct FpuSummary {
+    pub mode: &'static str,
+    pub bytes: usize,
+    pub components: &'static str,
 }

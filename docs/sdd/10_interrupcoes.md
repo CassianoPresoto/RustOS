@@ -3,8 +3,8 @@
 > **O que este capítulo responde:** como o kernel recebe exceção e IRQ em cada
 > ISA, de onde vem o tique e o relógio, e que proteções de hardware ligam no boot.
 
-O núcleo vê as duas ISAs pelas mesmas portas (`hal::Handlers`, `hal::Fault`,
-`hal::Cpu`) e pelo contrato de `kernel/src/platform/mod.rs`. Tudo o que muda
+O núcleo vê as duas ISAs pelas mesmas portas (`hal::Handlers`, com `fault`, `irq` e
+`preempt`; `hal::Fault`; `hal::Cpu`) e pelo contrato de `kernel/src/platform/mod.rs`. Tudo o que muda
 entre elas está numa seção por ISA, abaixo.
 
 ## x86_64
@@ -20,7 +20,7 @@ entre elas está numa seção por ISA, abaixo.
 | 5 | 8259 mascarado (0xFF em 0x21 e 0xA1) | `pic.rs` |
 | 6 | Local APIC: x2APIC por MSR se `CPUID.1:ECX[21]`, senão xAPIC por MMIO na janela de dispositivos | `apic.rs`, `lapic.rs` |
 | 7 | I/O APIC em `0xFEC0_0000` (DEBT-0009): pino 4 (COM1) → vetor `0x24`; pino 1 (teclado) → `0x21`, mascarado | `ioapic.rs` |
-| 8 | Calibração: um intervalo de 20 ms do PIT (canal 2) mede o TSC e o contador do timer do APIC; timer periódico em `TIMER_HZ` | `pit.rs`, `clock.rs` |
+| 8 | Calibração: um intervalo de 20 ms do PIT (canal 2) mede o TSC e o contador do timer do APIC; o timer fica em modo de um tiro (TSC-deadline se o CPUID anuncia), desarmado: `interrupts::init` arma o primeiro tique | `pit.rs`, `clock.rs`, `lapic.rs` |
 | 9 | `Uart16550::enable_receive_interrupt` (`IER` bit 0 e `OUT2` do `MCR`), por último | `drivers/uart16550` |
 
 O chamador (`interrupts::init`) liga o `IF` depois. A parte pura de cada passo
@@ -32,7 +32,7 @@ roda no `cargo test` do host, com `RegisterBus` e memória de tabelas falsos.
 | --- | --- | --- |
 | 0–31 | Exceções da CPU; tem código de erro 8, 10–14, 17, 21, 29 e 30 (`fault::ERROR_CODE_VECTORS`) | atual |
 | 8 (#DF), 2 (NMI), 18 (#MC) | IST1, IST2 e IST3 da TSS (o campo do gate é o índice mais um) | própria |
-| `0x20` | Timer do Local APIC | atual |
+| `0x20` | Timer do Local APIC | atual (a da tarefa interrompida) |
 | `0x21` | Teclado PS/2 (pino 1, mascarado) | atual |
 | `0x24` | COM1 (pino 4) | atual |
 | `0xFF` | Espúrio: chega ao `Handlers.irq` e não recebe EOI | atual |
@@ -41,8 +41,9 @@ Os 256 gates apontam para stubs de 16 bytes (`rustos_isr_stubs + 16 * vetor`) qu
 empilham um código de erro falso onde a CPU não empilha e o número do vetor. A
 entrada comum salva os 15 registradores (ordem de `TrapFrame`), faz `cld` e chama
 `trap_dispatch`, que decodifica em `hal::Fault` (page fault pelos bits do código de
-erro e pelo `CR2`) ou entrega `hal::Irq` ao núcleo e dá o EOI depois do handler. O
-breakpoint volta; qualquer outra exceção pára a CPU.
+erro e pelo `CR2`) ou entrega `hal::Irq` ao núcleo, dá o EOI depois do handler e chama
+`Handlers.preempt`, onde o núcleo pode trocar de tarefa ([SDD 15](15_tarefas_e_preempcao.md)).
+O breakpoint volta; qualquer outra exceção pára a CPU.
 
 ### Seletores
 
@@ -56,8 +57,10 @@ breakpoint volta; qualquer outra exceção pára a CPU.
 
 ### Tempo
 
-O tique é o timer do Local APIC em modo periódico, divisor 16, contagem inicial
-`apic_hz / TIMER_HZ`. O relógio (`now_ns`) é o TSC menos a leitura da calibração,
+O timer do Local APIC é de um tiro: no modo TSC-deadline se `CPUID.1:ECX[24]`
+(`IA32_TSC_DEADLINE`), senão pelo contador, divisor 16, com a contagem `apic_hz × (prazo − agora)`.
+O núcleo o rearma a cada disparo para o menor entre o próximo tique de `TIMER_HZ` e o
+próximo acordar ([SDD 15](15_tarefas_e_preempcao.md)). O relógio (`now_ns`) é o TSC menos a leitura da calibração,
 convertido por `ticks * 1e9 / tsc_hz` em `u128`, sem ponto flutuante. Sob a QEMU
 `-cpu max` em TCG não há TSC-deadline nem TSC invariante, e o vendor é AMD, o que
 inutiliza o CPUID 0x15 do Linux: por isso a referência é o PIT.
@@ -67,6 +70,7 @@ inutiliza o CPUID 0x15 do Linux: por isso a referência é o PIT.
 | TSC | ~1,0000 GHz (o TCG conta nanossegundos) |
 | Contador do timer do APIC, divisor 16 | ~62,5 MHz |
 | `timer: 100 Hz, 5 ticks in …` | 40 a 45 ms (a fase do primeiro tique é aleatória) |
+| `sched: … timer one-shot` | o contador do APIC (62,5 MHz); o TSC-deadline nunca rodou ([DEBT-0034](../tech-debt/0034-tsc-deadline-sem-teste-no-x86.md)) |
 
 ### Custo
 
@@ -105,14 +109,14 @@ foi conferida nelas.
 
 | Peça | Como é |
 | --- | --- |
-| Vetores | `VBAR_EL1` aponta para `rustos_vectors` (`arch/aarch64/src/exception.rs`): 2 KiB, 16 entradas de 0x80. O Limine entrega em EL1t, então o kernel é sempre interrompido no grupo "EL1 com SP0"; o grupo SPx usa o mesmo corpo |
-| Pilha | `SP_EL1` aponta para uma pilha própria de 4 páginas com guarda (`map_stack`); o kernel segue em `SP_EL0`. Do EL1 só se escreve `SP_EL1` com `SPSel` em 1, então `install` troca `SPSel`, grava o `sp` e volta |
+| Vetores | `VBAR_EL1` aponta para `rustos_vectors` (`arch/aarch64/src/exception.rs`): 2 KiB, 16 entradas de 0x80. O kernel roda em EL1h (`call_on_stack` seleciona `SP_EL1`), então é interrompido no grupo "EL1 com SPx" (4–7); o grupo SP0 usa o mesmo corpo |
+| Pilha | IRQ empilha na pilha da própria tarefa (`SP_EL1`). Síncrona e SError (4 e 7) fazem `msr spsel, #0` e empilham em `SP_EL0`, a pilha de falhas de 4 páginas com guarda (`map_stack`) que `install` grava, com `SPSel` em 0 (só assim do EL1 se escreve `SP_EL0`) ([SDD 15](15_tarefas_e_preempcao.md)) |
 | Quadro | x0–x30, `ELR_EL1`, `SPSR_EL1`: 272 bytes. `brk` volta para a instrução seguinte (o `ELR` aponta para o próprio `brk`: soma 4); falha não recuperável para a CPU em `wfe` |
 | `ESR_EL1` | `esr.rs` (puro): classe → `hal::FaultKind`; em aborto, `DFSC`/`IFSC` (tradução por nível, acesso, permissão, alinhamento) e `WnR`. `Fault.code` é o `ESR` cru |
 | GICv3 | `drivers/gicv3` (MMIO) mais `gic_cpu.rs` (`ICC_*_EL1`). Distribuidor em `0x0800_0000`, redistribuidor da CPU 0 em `0x080A_0000`, ambos pela janela de dispositivos (DEBT-0002). Sequência: distribuidor desligado → `ARE` + grupo 1 → acorda o redistribuidor (`GICR_WAKER`) → `ICC_SRE_EL1`, `PMR`, `IGRPEN1` |
 | Fontes | PPI 27 (`CNTV`, nível) no redistribuidor e SPI 33 (UART0, nível) no distribuidor, grupo 1, roteada para a afinidade do `MPIDR_EL1` desta CPU |
-| EOI | `EOImode` 0: um `ICC_EOIR1_EL1` baixa a prioridade e desativa. INTID ≥ 1020 (espúrio) não leva EOI |
-| Timer | `CNTV` (o Linux usa o virtual em EL1 sem EL2 e o HVF só entrega o virtual). `CNTFRQ_EL0` lido em tempo de execução. O disparo usa `CNTV_CVAL_EL0` absoluto (`TVAL` acumulava ~2 ms de atraso por tique sob QEMU: 50 tiques em 600 ms) |
+| EOI | `EOImode` 0: um `ICC_EOIR1_EL1` baixa a prioridade e desativa, antes de `Handlers.preempt`. INTID ≥ 1020 (espúrio) não leva EOI |
+| Timer | `CNTV` (o Linux usa o virtual em EL1 sem EL2 e o HVF só entrega o virtual). `CNTFRQ_EL0` lido em tempo de execução. O disparo usa `CNTV_CVAL_EL0` absoluto (`TVAL` acumulava ~2 ms de atraso por tique sob QEMU: 50 tiques em 600 ms), de um tiro: o núcleo o rearma a cada disparo para o próximo tique ou acordar |
 | Relógio | `now_ns` = `(CNTVCT − início) × 10⁹ / CNTFRQ` em `u128`; zero em `init_interrupts` |
 | PL011 | `IMSC.RXIM \| RTIM`; `ICR` limpo no começo da IRQ, antes de drenar o FIFO: o byte que chega depois rearma a IRQ (limpar depois perdia o acordar no modelo da QEMU) |
 | PAN | ligado se `ID_AA64MMFR1_EL1.PAN` ≠ 0, com `SCTLR_EL1.SPAN` = 0 (liga na entrada da exceção) e `PSTATE.PAN` = 1 agora; `protections:` mostra o `PSTATE.PAN` lido de volta |

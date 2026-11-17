@@ -49,7 +49,8 @@ Do `PROTOCOL.md`, revisão 6:
 | Interrupções | `IF` zerado; IDT com limite 0 | DAIF mascarado; `VBAR_EL1` indefinido; EL1t (`SP_EL0` em uso) |
 | Paginação | 4 níveis; kernel e HHDM mapeados | 4 níveis, grânulo 4 KiB; tabelas da metade alta em `TTBR1_EL1` |
 | Pilha | ≥ 64 KiB em memória `BootloaderReclaimable` | idem |
-| FP/SIMD | o alvo `x86_64-unknown-none` não os usa | `CPACR_EL1 = 0`; o alvo `-softfloat` não os usa |
+| FP/SIMD | o alvo `x86_64-unknown-none` não os usa; `task::init` liga x87, SSE e XSAVE | `CPACR_EL1 = 0`; o alvo `-softfloat` não os usa; `task::init` põe `FPEN` em `0b11` ([SDD 15](15_tarefas_e_preempcao.md)) |
+| Pilha de execução | `rsp` na pilha do Limine, trocado pelo `call_on_stack` | EL1t com `SP_EL0`; `call_on_stack` passa para EL1h (`SP_EL1`) |
 
 Sem IDT/VBAR, qualquer exceção reinicia (x86) ou trava (aarch64) a máquina. A
 fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
@@ -77,15 +78,19 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
    que vai para a serial.
 6. `interrupts::init` liga exceções, controlador de interrupção, timer e a IRQ da
    serial ([SDD 10](10_interrupcoes.md)) e destrava as interrupções da CPU no fim.
-   Com ela a GDT do Limine sai de uso no x86_64.
+   Com ela a GDT do Limine sai de uso no x86_64. O timer fica armado para o primeiro
+   tique, de um tiro ([SDD 15](15_tarefas_e_preempcao.md)).
 7. `Memory::reclaim_bootloader` devolve ao buddy as regiões `BootloaderReclaimable`.
 8. `random::init` semeia o gerador ([SDD 09](09_seguranca.md)).
 9. Relatório (com `kernel base:`, `reclaimed:`, `vm:`, `protections:`, `random:` e
    `random bench:`), autoteste de um frame (escreve e relê pelo mapa direto), autoteste
-   do heap, `w^x:` (percorre as tabelas), autoteste de exceção e de timer, e
-   `[rustos] boot ok`.
-10. `system::run_shell`: o shell embutido lê a fila que a IRQ da serial (e, no
-   x86_64, a do teclado) enche, e dorme em `hlt`/`wfi` quando ela está vazia.
+   do heap, `w^x:` (percorre as tabelas), autoteste de exceção e de timer.
+   `task::init` adota a execução atual como a tarefa `init`, cria a ociosa e liga
+   FPU/SIMD (`fpu:`, `sched:`); o autoteste de preempção e de estado de SIMD
+   (`task self-test:`) e as medidas curtas (`switch:`) rodam, e vem `[rustos] boot ok`.
+10. `system::run_shell`: a tarefa `init` vira a tarefa `shell`. Ela lê a fila que a IRQ
+   da serial (e, no x86_64, a do teclado) enche e bloqueia (`park`) quando ela está
+   vazia; a ociosa dorme em `hlt`/`wfi` quando ninguém está pronto.
 
 Pânico antes do passo 4 não aparece em lugar nenhum (DEBT-0005).
 
@@ -131,6 +136,10 @@ QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB, perfil `dev` (a base e o mapa dir
 [rustos] w^x: ok (64968 pages)
 [rustos] exception self-test: ok
 [rustos] timer: 100 Hz, 5 ticks in 37 ms ok
+[rustos] fpu: xsaveopt, 832 bytes per task, x87 sse avx
+[rustos] sched: round-robin, 100 Hz slice, 16 tasks max, timer one-shot
+[rustos] task self-test: ok (simd state intact, 5 switches)
+[rustos] switch: 891 ns (1306 ns with simd), wake jitter: mean 1361079 ns, max 2033827 ns (20 samples)
 [rustos] boot ok
 ```
 

@@ -9,6 +9,7 @@ extern crate alloc;
 #[cfg(not(target_os = "none"))]
 compile_error!("o kernel só compila para alvos bare-metal: use `cargo xtask build`");
 
+mod bench;
 mod boot;
 #[macro_use]
 mod console;
@@ -23,6 +24,7 @@ mod random;
 mod screen;
 mod sync;
 mod system;
+mod task;
 mod vm;
 
 use alloc::boxed::Box;
@@ -143,12 +145,57 @@ fn boot_kernel(handoff: Handoff) -> ! {
     );
     let wx_ok = report_wx(&vm);
     let irq_ok = interrupts_on && system::interrupt_self_test();
-    if !frames_ok || !heap_ok || !wx_ok || !irq_ok {
+    let tasks_ok = irq_ok && report_tasks(&boot, &memory);
+    if !frames_ok || !heap_ok || !wx_ok || !irq_ok || !tasks_ok {
         rustos_hal::Cpu::halt_forever(&platform::cpu());
     }
     kprintln!("{BOOT_OK_MARKER}");
     let mut system = system::System::new(&boot, &memory, display);
     system::run_shell(&mut system)
+}
+
+/// Liga as tarefas, confere a preempção e o estado de SIMD de cada uma, e mede a
+/// troca de contexto e o jitter de acordar (as medidas curtas do boot).
+fn report_tasks(boot: &impl BootInfo, memory: &memory::Memory) -> bool {
+    // SAFETY: o mapa direto cobre todo frame do alocador; só `task` mapeia pilhas daqui em diante.
+    let summary = match unsafe { task::init(memory.frames, boot.direct_map_offset()) } {
+        Ok(summary) => summary,
+        Err(error) => {
+            kprintln!("[rustos] tasks: {error:?}");
+            return false;
+        }
+    };
+    kprintln!(
+        "[rustos] fpu: {}, {} bytes per task, {}",
+        summary.mode,
+        summary.bytes,
+        summary.components
+    );
+    kprintln!(
+        "[rustos] sched: round-robin, {} Hz slice, {} tasks max, timer {}",
+        platform::TIMER_HZ,
+        task::MAX_TASKS,
+        platform::timer_mode()
+    );
+    let preempted = bench::simd_self_test();
+    match preempted {
+        Some(count) => {
+            kprintln!("[rustos] task self-test: ok (simd state intact, {count} switches)");
+        }
+        None => kprintln!("[rustos] task self-test: FAILED"),
+    }
+    match bench::run(bench::BOOT) {
+        Some(report) => kprintln!(
+            "[rustos] switch: {} ns ({} ns with simd), wake jitter: mean {} ns, max {} ns ({} samples)",
+            report.switch_ns,
+            report.switch_simd_ns,
+            report.wake_mean_ns,
+            report.wake_max_ns,
+            report.wake_samples
+        ),
+        None => kprintln!("[rustos] switch: not measured"),
+    }
+    preempted.is_some()
 }
 
 /// O que o boot tem de impredizível: contadores de ciclo e os tempos do bootloader.

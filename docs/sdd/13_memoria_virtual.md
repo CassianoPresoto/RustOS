@@ -117,6 +117,11 @@ aqui; não há medida de pico de uso. A troca é um `asm!` por ISA
 (`call_on_stack(top, entry, arg)`): grava `sp`, zera o frame pointer e chama `entry(arg)`,
 que nunca volta. Os dados passam por `Box::into_raw`, não pela pilha antiga.
 
+Cada tarefa do kernel tem a sua, do mesmo `map_stack` (8 páginas e uma de guarda), e
+reusa a do slot que ocupa ([SDD 15](15_tarefas_e_preempcao.md)). A janela de pilhas é só de
+avanço, então encerrar uma tarefa não devolve endereço. No aarch64 o `call_on_stack`
+também passa o kernel para EL1h.
+
 ## Memória do bootloader devolvida
 
 `Memory::reclaim_bootloader` só roda depois de três trocas: tabelas (passo 4), pilha

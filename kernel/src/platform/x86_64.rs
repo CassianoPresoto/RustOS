@@ -5,17 +5,21 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-pub use rustos_arch_x86_64::call_on_stack;
-use rustos_arch_x86_64::clock::elapsed_ns;
+use rustos_arch_x86_64::clock::{elapsed_ns, ns_to_ticks, ticks_to_ns};
+pub use rustos_arch_x86_64::fpu::{
+    AREA_ALIGN as FPU_AREA_ALIGN, restore as fpu_restore, save as fpu_save,
+};
 use rustos_arch_x86_64::ioapic::{IOAPIC_BASE, IoApic};
 use rustos_arch_x86_64::lapic::{VECTOR_KEYBOARD, VECTOR_SERIAL, VECTOR_SPURIOUS, VECTOR_TIMER};
 use rustos_arch_x86_64::pic;
 use rustos_arch_x86_64::pit::{self, Pit, Reading};
 use rustos_arch_x86_64::{
     ApicAccess, ApicMode, COM1, IstStacks, MmioBus, PIC_MASTER, PIC_SLAVE, PIT_PORTS, PortBus,
-    Protections, X86Cpu, X86Entropy, X86Mmu, active_root, breakpoint, cpu_features, detect_apic,
-    enable_protections, install_traps, publish_apic, rdtsc, require_features,
+    Protections, TimerMode, X86Cpu, X86Entropy, X86Mmu, active_root, arm_oneshot, arm_tsc_deadline,
+    breakpoint, cpu_features, detect_apic, enable_protections, install_traps, publish_apic, rdtsc,
+    require_features, set_timer_mode, xstate,
 };
+pub use rustos_arch_x86_64::{Context, call_on_stack, switch};
 use rustos_arch_x86_64::{DirectMapTables, pte::X86Format};
 use rustos_driver_i8042::I8042;
 use rustos_driver_uart16550::{DIVISOR_115200, Uart16550};
@@ -25,7 +29,7 @@ use rustos_hal::{
 use rustos_mm::PageTables;
 use rustos_sync::SpinLock;
 
-use super::{PlatformError, Protection};
+use super::{FpuSummary, PlatformError, Protection};
 use crate::interrupts::{FaultTest, IrqSource};
 use crate::memory::{Memory, map_device};
 
@@ -89,6 +93,9 @@ static READY: AtomicBool = AtomicBool::new(false);
 static GUARD_PAGE: AtomicU64 = AtomicU64::new(0);
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
 static TSC_ORIGIN: AtomicU64 = AtomicU64::new(0);
+/// Frequência do contador do timer do APIC, já com o divisor.
+static APIC_HZ: AtomicU64 = AtomicU64::new(0);
+static TSC_DEADLINE: AtomicBool = AtomicBool::new(false);
 
 /// Escrita só em `init_interrupts`, antes de qualquer leitura.
 struct Report(UnsafeCell<[Protection; 5]>);
@@ -270,7 +277,8 @@ fn route_io_apic(
         .map_err(missing)
 }
 
-/// Mede o TSC e o contador do timer do APIC contra o PIT, e arma o tique.
+/// Mede o TSC e o contador do timer do APIC contra o PIT e escolhe o modo de
+/// um tiro: TSC-deadline se o CPUID anuncia, senão o contador do APIC.
 fn start_clocks(apic: &ApicAccess) -> Result<(), PlatformError> {
     let local = apic.local();
     // SAFETY: as portas do PIT são só desta função, no boot.
@@ -283,9 +291,68 @@ fn start_clocks(apic: &ApicAccess) -> Result<(), PlatformError> {
     .ok_or(PlatformError::MissingFeature("pit"))?;
     TSC_HZ.store(measured.tsc_hz, Ordering::Relaxed);
     TSC_ORIGIN.store(rdtsc(), Ordering::Relaxed);
-    local.start_periodic(pit::periodic_count(measured.apic_hz, TIMER_HZ));
+    APIC_HZ.store(measured.apic_hz, Ordering::Relaxed);
+    let deadline = cpu_features().tsc_deadline;
+    TSC_DEADLINE.store(deadline, Ordering::Relaxed);
+    set_timer_mode(if deadline {
+        TimerMode::TscDeadline
+    } else {
+        TimerMode::OneShot
+    });
     Ok(())
 }
+
+/// Como o timer dispara: `tsc-deadline` ou `one-shot` (contador do APIC).
+pub fn timer_mode() -> &'static str {
+    if TSC_DEADLINE.load(Ordering::Relaxed) {
+        "tsc-deadline"
+    } else {
+        "one-shot"
+    }
+}
+
+/// Programa um tiro para o relógio (`now_ns`) chegar a `deadline_ns`; no passado,
+/// dispara já. O caminho TSC-deadline nunca rodou (DEBT-0034).
+pub fn arm_timer(deadline_ns: u64) {
+    if TSC_DEADLINE.load(Ordering::Relaxed) {
+        let ticks = ns_to_ticks(deadline_ns, TSC_HZ.load(Ordering::Relaxed));
+        // SAFETY: `TSC_DEADLINE` só vale com o CPUID anunciando o recurso e o modo ligado.
+        unsafe { arm_tsc_deadline(TSC_ORIGIN.load(Ordering::Relaxed).wrapping_add(ticks)) };
+        return;
+    }
+    let delta = deadline_ns.saturating_sub(now_ns().unwrap_or(0));
+    let count = ns_to_ticks(delta, APIC_HZ.load(Ordering::Relaxed));
+    arm_oneshot(u32::try_from(count).unwrap_or(u32::MAX));
+}
+
+/// Nanossegundos que `ticks` do contador de ciclos valem.
+pub fn cycles_to_ns(ticks: u64) -> u64 {
+    ticks_to_ns(ticks, TSC_HZ.load(Ordering::Relaxed))
+}
+
+/// Liga x87, SSE e XSAVE; o relatório diz o que a troca de contexto salva.
+pub fn fpu_init() -> Result<FpuSummary, PlatformError> {
+    // SAFETY: ring 0, uma vez, antes de qualquer troca de contexto.
+    let info = unsafe { rustos_arch_x86_64::fpu::init(cpu_features()) }
+        .map_err(|_| PlatformError::MissingFeature("sse"))?;
+    Ok(FpuSummary {
+        mode: info.mode.name(),
+        bytes: info.bytes,
+        components: xstate::components(info.xcr0),
+    })
+}
+
+/// Bytes de uma área de estado de FPU/SIMD.
+pub fn fpu_area_bytes() -> usize {
+    rustos_arch_x86_64::fpu::area_bytes()
+}
+
+/// Estado de reset numa área nova.
+pub fn fpu_init_area(area: &mut [u8]) {
+    xstate::init_area(area);
+}
+
+pub use rustos_arch_x86_64::fpu::{read_probe as fpu_read_probe, write_probe as fpu_write_probe};
 
 /// Traduz o número da IRQ para a fonte que o núcleo entende.
 pub fn irq_source(irq: Irq) -> IrqSource {
@@ -297,9 +364,6 @@ pub fn irq_source(irq: Irq) -> IrqSource {
         _ => IrqSource::Unknown,
     }
 }
-
-/// O timer do APIC é periódico: não há o que rearmar, e o EOI é do `arch/`.
-pub fn timer_tick() {}
 
 /// Ler o `DATA` até esvaziar a FIFO já baixou a linha da UART; o EOI é do `arch/`.
 pub fn serial_irq_done() {}

@@ -22,14 +22,19 @@ const FATAL: [&str; 3] = ["[rustos] fault:", "[rustos] interrupts:", "FAILED"];
 /// carrega em outro lugar e a linha `kernel base:` nunca mostra este (SDD 13).
 const LINK_BASE: &str = "kernel base: 0xffffffff80000000 ";
 /// Linhas que todo boot precisa ter (guidelines 09): as proteções de hardware, o
-/// W^X conferido nas tabelas de página e a memória que o bootloader devolveu.
-const REQUIRED: [(&str, &str); 3] = [
+/// W^X conferido nas tabelas de página, a memória que o bootloader devolveu e a
+/// preempção com o estado de SIMD por tarefa.
+const REQUIRED: [(&str, &str); 4] = [
     ("[rustos] protections:", "a linha de proteções de hardware"),
     (
         "[rustos] w^x: ok",
         "a conferência de W^X das tabelas de página",
     ),
     ("[rustos] reclaimed:", "a memória devolvida pelo bootloader"),
+    (
+        "[rustos] task self-test: ok",
+        "o autoteste de preempção e de estado de SIMD por tarefa",
+    ),
 ];
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
 

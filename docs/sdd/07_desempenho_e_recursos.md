@@ -7,7 +7,7 @@
 
 | Métrica | Como | Valor hoje (QEMU, 256 MiB) |
 | --- | --- | --- |
-| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 184 093 / 121 404 bytes · aarch64: 153 101 / 103 129 bytes (fase 2 depois da revisão do PR 5: `.data.rel.ro` só leitura, caminhada única em `core/mm`, bit de livre no slab). Antes da revisão: 183 669 / 120 004 e 155 889 / 102 021. Antes: com buddy, heap e gerador, 166 544 / 106 095 e 136 292 / 88 364; antes do buddy, 133 304 / 88 735 e 105 448 / 71 508; na fase 0.5, 100 541 / 61 725 e 86 500 / 59 952. O PIE do KASLR custa 3 289 / 5 581 (x86_64) e 5 361 / 6 265 (aarch64), de 1,8% a 6,6% ([SDD 13](13_memoria_virtual.md)) |
+| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 210 856 / 135 260 bytes · aarch64: 182 541 / 120 085 bytes (fase 3, com tarefas, preempção, estado de SIMD, timer de um tiro e os comandos `ps` e `bench`: +26 763 / +13 856 (x86_64) e +29 440 / +16 956 (aarch64) sobre a linha a seguir, medida de novo em `main`; `.data` do `SCHED`, 1 960 bytes; o resto é código inlinado em `boot_kernel` e `run_shell`). Antes, a fase 2 depois da revisão do PR 5: 184 093 / 121 404 e 153 101 / 103 129 (`.data.rel.ro` só leitura, caminhada única em `core/mm`, bit de livre no slab). Antes da revisão: 183 669 / 120 004 e 155 889 / 102 021. Antes: com buddy, heap e gerador, 166 544 / 106 095 e 136 292 / 88 364; antes do buddy, 133 304 / 88 735 e 105 448 / 71 508; na fase 0.5, 100 541 / 61 725 e 86 500 / 59 952. O PIE do KASLR custa 3 289 / 5 581 (x86_64) e 5 361 / 6 265 (aarch64), de 1,8% a 6,6% ([SDD 13](13_memoria_virtual.md)) |
 | Memória livre depois do boot (o "pronto quando" da fase 2) | `frames:` do boot (QEMU 256 MiB, `dev`) e `mem` | x86_64: 63 811 frames (249,3 MiB, 97,4% da RAM), antes 52 321 (204,4 MiB) · aarch64: 63 237 (247,0 MiB, 96,5%), antes 54 991 (214,8 MiB). Devolvido: 46 432 e 33 424 KiB |
 | Tabelas de página do kernel | `vm:` do boot | 60 a 64 KiB (x86_64) e 44 a 48 KiB (aarch64) com 2 MiB no mapa direto; 548 e 536 KiB só com 4 KiB. Varia com o deslocamento sorteado do mapa direto |
 | Grade do terminal | 8 bytes por célula (`size_of::<Cell>()`), em frames contíguos | x86_64 1280x800: 158x47 células, 59 408 bytes (15 frames) · aarch64 1024x768: 126x45, 45 360 bytes (12 frames) |
@@ -17,12 +17,51 @@
 | Heap do kernel | `heap::self_test` e a linha `heap` do `mem` | Metadado de 64 bytes por slab, dentro da página, com o mapa de livres de 1 bit por objeto (SDD 12). Zerar ao liberar ligado: custo abaixo |
 | Aleatório no kernel | linha `random bench:` do boot (`random::benchmark`): 32 blocos de 4 KiB com `Rng::fill_bytes` e uma reposição completa, com o relógio da fase 1 | aarch64 sob HVF, `release`: 636 a 694 MB/s e 36 a 38 us por reposição (tabela abaixo) |
 | Boot até o kernel | linha `boot timeline` (pedido *bootloader performance* do Limine) | Limine: 52 ms (aarch64, HVF) / 350 ms (x86_64, TCG) |
-| Pilha de exceção (aarch64) | `Memory::map_stack`: 4 páginas mapeadas e uma de guarda, por CPU | 16 384 bytes de RAM, mais as tabelas de página que faltarem |
+| Pilha de falhas (aarch64) | `Memory::map_stack`: 4 páginas mapeadas e uma de guarda, por CPU; é o `SP_EL0` do EL1h (SDD 15) | 16 384 bytes de RAM, mais as tabelas de página que faltarem |
+| Custo por tarefa | SDD 15, "Custo por tarefa": `SCHED`, `Context`, pilha e área de FPU/SIMD | ~120 bytes de tabela; 8 (x86_64) ou 104 (aarch64) de `Context`; 32 768 de pilha (mais as tabelas de página); 832 (x86_64 da QEMU, `xsaveopt` com AVX) ou 528 (aarch64) de FPU/SIMD, só da tarefa que usa |
+| Troca de contexto | `bench` e a linha `switch:`: ping-pong de `unpark`/`park` entre duas tarefas, ns por troca, aquecimento e melhor de 3 | aarch64 HVF `release`: 42 ns no boot e 77 a 79 no comando (SDD 07, abaixo); x86_64 e aarch64 em TCG só para comparar o RustOS consigo mesmo |
+| Jitter de acordar | `bench`: `agora − pedido` depois de `sleep_until`, 200 amostras | aarch64 HVF: 0,47 ms (ociosa em `wfi`) e 4 µs (CPU ocupada) de média; ver a tabela abaixo |
 | Timer (aarch64) | linha `timer:` do boot; `CNTV` com `CVAL` absoluto, 100 Hz | 50 tiques em 497 ms (HVF) e 488 ms (TCG); núcleo ocioso em `wfi` usa 0,3% de CPU do host (HVF) |
 | Estado do gerador aleatório | `size_of::<Rng>()` (teste em `core/crypto/src/rng.rs`) | 40 bytes: chave de 32 e contador de 8 |
 | Código de `core/crypto` | `.text` do crate sem LTO, com todas as funções públicas (`llvm-size`); no kernel, com LTO, só entra o que se usa | `release`: 8 202 (x86_64) e 7 866 (aarch64) bytes · `release-small`: 6 216 e 7 349 bytes |
 | Vazão de ChaCha20, BLAKE2b e do gerador | `cargo run --release -p rustos-crypto --example bench`, no host (Apple M5, `rustc` 1.100.0), melhor de 15 rodadas, sem SIMD (o compilador não vetorizou: o resultado com `-vectorize-loops=false -vectorize-slp=false` é o mesmo) | Ver tabela abaixo. **Números do host**; os do alvo estão abaixo |
 | Boot de parede | `make smoke` | inclui firmware EDK2: ~2–5 s, dominado pelo firmware |
+
+### Troca de contexto e jitter de acordar (fase 3)
+
+Como se mede: `make screenshot ARCH=… PROFILE=release CMDS="bench;bench;bench"` e a linha
+`switch:` do boot (as mesmas funções de `kernel/src/bench.rs`; SDD 15, "Medidas"). Perfil
+`release`, QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB. A aceleração decide o que o
+número quer dizer (guidelines 05): só o HVF vale como latência.
+
+| Máquina | Troca, sem SIMD / com SIMD (ns) | Acordar, ociosa (média / máx., µs) | Acordar, uma tarefa ocupando a CPU (média / máx., µs) |
+| --- | --- | --- | --- |
+| aarch64, **HVF**, `bench` | 77–79 / 89–107 | 456–480 / 778–817 | 3,7–4,1 / 11–37 |
+| aarch64, HVF, linha do boot (20 amostras) | 42 / 57 | 529 / 750 | — |
+| aarch64, HVF, ociosa em laço (sem `wfi`), um boot | 36 / 49 | 3,1 / 10,7 | 2,6 / 3,5 |
+| aarch64, TCG | 396–408 / 474–479 | 1 175–1 198 / 2 115–3 707 | 1 130–1 150 / ~2 010 |
+| x86_64, TCG | 328–331 / 588–592 | 1 131–1 158 / 2 049–2 201 | 1 127–1 152 / 2 029–2 115 |
+
+- **Com SIMD custa mais 12 a 28 ns no aarch64** (`stp`/`ldp` de 32 registradores de 128
+  bits, mais FPSR e FPCR) e ~260 ns no x86_64 em TCG (`xsaveopt` e `xrstor` interpretados:
+  não é número de hardware).
+- **O HVF mede o `wfi`, não o kernel, no jitter da ociosa.** Com a ociosa em `wfi` o
+  thread do host da vCPU dorme até o prazo e acorda com ~0,47 ms de atraso. Trocando o `wfi`
+  por um laço de espera, a média cai para 3,1 µs e a troca de contexto para 36 ns (a CPU do
+  host fica quente: sem `wfi` ela não baixa a frequência). Esse laço foi um patch temporário,
+  fora do código; um boot só. O `bench` roda logo depois de a CPU ficar ociosa, por
+  isso dá 77 ns, e a linha do boot 42 ns.
+- **O TCG tem ~1,1 ms de média em tudo**, com ou sem carga: o prazo passa pelo laço
+  principal da QEMU e não pelo kernel (provável arredondamento do prazo a ms no `ppoll` do
+  laço principal; não verificado no código da QEMU). A troca em TCG é ~5 a 10x mais lenta que no HVF.
+- **Rodízio sem prioridade:** com uma tarefa ocupando a CPU, o acordar espera a vez no
+  anel, mas com uma só tarefa a mais isso é um passo (3,7 a 4,1 µs). Com `N` ocupadas o
+  pior caso seria `N` trocas de contexto; a política de prazo ([DEBT-0033](../tech-debt/0033-rodizio-varre-tarefa-que-nao-esta-pronta.md))
+  deve medir de novo.
+- **Sem número de comparação.** O Linux (`lat_ctx`) e o Windows ainda não rodam na mesma
+  máquina, e o `lat_ctx` passa o token por pipe; o ping-pong daqui o faz por
+  `unpark` e `park`, então não é o mesmo teste. As fontes publicadas (1,2 a 2,2 µs em
+  Haswell, pesquisa `scheduler.md`) são de outro hardware.
 
 ### Criptografia do núcleo (host)
 

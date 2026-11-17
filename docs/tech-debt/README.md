@@ -48,3 +48,9 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0030](0030-intel-hda-sem-a-leitura-da-spec.md) | Driver de Intel HDA sem a leitura da especificação | Open | Antes de escrever o driver de Intel HDA, o que só acontece se o primeiro boot de áudio em metal precisar dele |
 | [0031](0031-memoria-ociosa-sem-linha-de-base.md) | Alvo de memória ociosa sem linha de base medida | Open | Antes de fechar a fase 5 |
 | [0032](0032-virtio-input-sem-a-leitura-da-spec.md) | virtio-input sem a leitura da especificação | Open | Antes de escrever o driver de virtio-input, na fase 6 |
+| [0033](0033-rodizio-varre-tarefa-que-nao-esta-pronta.md) | Rodízio varre tarefa que não está pronta | Open | O EEVDF de core/sched entrar no lugar do rodízio, ou o primeiro boot com mais de 16 tarefas |
+| [0034](0034-tsc-deadline-sem-teste-no-x86.md) | TSC-deadline sem teste no x86_64 | Open | O primeiro boot do x86_64 com KVM ou em metal |
+| [0035](0035-sve-sme-e-amx-sem-estado-por-tarefa.md) | SVE, SME e AMX sem estado por tarefa | Open | O primeiro código de usuário (fase 4), ou a primeira CPU de teste com SVE, SME ou AMX |
+| [0036](0036-escalonador-com-estado-de-troca-global.md) | Escalonador com estado de troca global | Open | O primeiro núcleo secundário subir, na fase 3 |
+| [0037](0037-pilha-de-tarefa-sem-medida-de-pico.md) | Pilha de tarefa de 32 KiB sem medida de pico | Open | O primeiro estouro de pilha de uma tarefa, ou o primeiro código de usuário (fase 4) |
+| [0038](0038-tique-de-100-hz-com-tudo-ocioso.md) | Tique de 100 Hz com tudo ocioso | Open | A primeira medida de energia ou de uso de CPU ocioso em metal, ou em placa a bateria |

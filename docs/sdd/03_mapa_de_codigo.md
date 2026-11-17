@@ -11,7 +11,7 @@
 │   ├── build.rs                # escolhe o linker script da ISA alvo
 │   ├── linker/                 # x86_64.ld, aarch64.ld: metade alta, um segmento por permissão, símbolos de cada seção e PT_DYNAMIC (KASLR)
 │   └── src/
-│       ├── main.rs             # kmain: boot → memória → serial → tela → relatório → boot ok → shell
+│       ├── main.rs             # kmain: boot → memória → serial → tela → relatório → tarefas → boot ok → shell
 │       ├── boot.rs             # BootRecord: o que o Limine entregou, copiado para o heap (BootInfo)
 │       ├── vm.rs               # Vm: tabelas próprias, W^X por seção, mapa direto, conferência e fault text
 │       ├── memory.rs           # Memory::init: buddy e heap; janelas de dispositivos e de pilhas; map_stack; devolução da memória do bootloader
@@ -20,7 +20,11 @@
 │       ├── random.rs           # gerador global: semente de hardware ou jitter, reposição
 │       ├── console.rs          # console global e kprintln!: serial e tela
 │       ├── screen.rs           # tela: framebuffer + grade do term + desenho do gfx, tema e barra
-│       ├── system.rs           # porta Host do shell e o laço de entrada
+│       ├── interrupts.rs       # IRQ do timer (tique, acordar, prazo do próximo disparo), fila de entrada e o relatório de falha
+│       ├── sync.rs             # IrqLock: lock que mascara IRQ e conta quantos estão presos
+│       ├── system.rs           # porta Host do shell (inclui `tasks` e `bench`) e o laço de entrada
+│       ├── task.rs             # tarefas do kernel: tabela, escalonador global sobre o RoundRobin, spawn/yield/sleep/park/exit e a preempção (SDD 15)
+│       ├── bench.rs            # autoteste de SIMD, latência de troca de contexto e jitter de acordar
 │       ├── fmt.rs              # texto formatado em buffer fixo
 │       ├── panic.rs            # pânico: escreve o que puder e para a CPU
 │       └── platform/           # um módulo por ISA: ARCH, PlatformConsole, cpu(), console()
@@ -28,15 +32,15 @@
 │   ├── hal/                    # rustos-hal: as portas (traits) e os tipos de fronteira
 │   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow, WxChecker, PageTables (a caminhada de 4 níveis das duas ISAs), `runs`/`coalesce` (2 MiB ou 4 KiB no mapa direto); porta FrameMemory e trait FrameAllocator (SDD 12, SDD 13)
 │   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) Rng (fast key erasure) e a semente de reserva por jitter
-│   ├── sched/                  # rustos-sched: TaskId, RunQueue, RoundRobin (ainda não ligado ao kernel)
+│   ├── sched/                  # rustos-sched: TaskId, RunQueue, RoundRobin (a política que o kernel usa em `task.rs`)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16
 │   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células), Cell, Key, Keyboard (layouts)
 │   └── shell/                  # rustos-shell: Shell (edição de linha, histórico, comandos) e a porta Host
 ├── lib/
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set)
 ├── arch/                       # adaptadores de ISA: o único lugar com asm!
-│   ├── x86_64/                 # X86Cpu, PortBus, X86Mmu e DirectMapTables (`invlpg`, `CR3`, memória das tabelas), X86Entropy, GDT/TSS/IDT, APIC, PIT, troca de pilha; módulos puros (pte com `X86Format`, segments, fault, lapic, ioapic, pit, clock) testados no host
-│   └── aarch64/                # Aarch64Cpu, MmioBus, Aarch64Mmu e DirectMapTables (TTBR1), Aarch64Entropy; vetores, ICC_*, CNTV e PAN;
+│   ├── x86_64/                 # X86Cpu, PortBus, X86Mmu e DirectMapTables (`invlpg`, `CR3`, memória das tabelas), X86Entropy, GDT/TSS/IDT, APIC (periódico → um tiro/TSC-deadline), PIT, troca de pilha, `Context`/`switch`, `fpu`; módulos puros (pte com `X86Format`, segments, fault, lapic, ioapic, pit, clock, xstate) testados no host
+│   └── aarch64/                # Aarch64Cpu, MmioBus, Aarch64Mmu e DirectMapTables (TTBR1), Aarch64Entropy; vetores (EL1h), ICC_*, CNTV de um tiro, PAN, `Context`/`switch` e `fpu`;
 │                               # puros: descriptor (com `Aarch64Format`), esr, time, intid, features
 ├── boot/
 │   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 escrito aqui → hal::BootInfo
@@ -69,19 +73,18 @@
 | `rustos-arch-aarch64` | `rustos-hal` |
 | `rustos-boot-limine` | `rustos-hal` |
 | `rustos-driver-uart16550`, `rustos-driver-pl011`, `rustos-driver-i8042`, `rustos-driver-gicv3` | `rustos-hal` |
-| `rustos-kernel` | `hal`, `mm`, `crypto`, `gfx`, `term`, `shell`, `sync`, `boot-limine`; por ISA, `arch-*` e os drivers (x86_64: `uart16550`, `i8042`; aarch64: `pl011`, `gicv3`) |
+| `rustos-kernel` | `hal`, `mm`, `crypto`, `sched`, `gfx`, `term`, `shell`, `sync`, `boot-limine`; por ISA, `arch-*` e os drivers (x86_64: `uart16550`, `i8042`; aarch64: `pl011`, `gicv3`) |
 | `xtask` | nada (só `std`) |
 
-O `rustos-sched` existe com fila e política testadas, mas o kernel ainda não o usa:
-ele entra com a troca de contexto, na fase 3 do [roadmap](08_roadmap.md). Por isso
-também não está em `[workspace.dependencies]` (o cargo avisa dependência declarada
-e não usada).
+O `rustos-sched` é usado pelo `kernel/src/task.rs` desde a fase 3: o rodízio escolhe a
+próxima tarefa e o kernel guarda o estado dela ([SDD 15](15_tarefas_e_preempcao.md)).
 
 ## Onde ponho isto?
 
 | Código novo | Lugar |
 | --- | --- |
 | Algoritmo ou política (alocador, escalonador, cache, fila) | crate de `core/` do assunto |
+| Estado de uma tarefa, pilha, troca de contexto, preempção | `kernel/src/task.rs`; salvar e restaurar registrador, em `arch/<isa>/src/context.rs` e `fpu.rs` |
 | Cifra, hash ou gerador de números aleatórios | `core/crypto/`; a semente do hardware vem por porta do `hal` |
 | Desenho de pixel, glifo da fonte | `core/gfx/` |
 | Sequência de terminal, codificação de tecla, layout de teclado | `core/term/` |

@@ -53,6 +53,7 @@ publish = false
 rustos-hal = { path = "core/hal" }
 rustos-mm = { path = "core/mm" }
 rustos-crypto = { path = "core/crypto" }
+rustos-sched = { path = "core/sched" }
 rustos-gfx = { path = "core/gfx" }
 rustos-term = { path = "core/term" }
 rustos-shell = { path = "core/shell" }
