@@ -5,7 +5,7 @@ use core::arch::asm;
 use rustos_hal::HardwareEntropy;
 use rustos_hal::entropy::fill_from_words;
 
-use crate::features::Features;
+use crate::features::{ENTROPY_RDRAND, ENTROPY_RDSEED, Features, entropy_source_name};
 
 /// Tentativas por palavra: `RDSEED` falha com frequência sob carga, `RDRAND` quase nunca
 /// (o Linux repete `RDRAND` 10 vezes, `RDRAND_RETRY_LOOPS`).
@@ -31,29 +31,25 @@ impl X86Entropy {
         }
     }
 
-    fn word(self) -> Option<u64> {
+    fn word(self) -> Option<(u64, u8)> {
         if self.rdseed {
             for _ in 0..RDSEED_ATTEMPTS {
                 if let Some(word) = rdseed() {
-                    return Some(word);
+                    return Some((word, ENTROPY_RDSEED));
                 }
                 core::hint::spin_loop();
             }
         }
         if self.rdrand {
-            return (0..RDRAND_ATTEMPTS).find_map(|_| rdrand());
+            return (0..RDRAND_ATTEMPTS).find_map(|_| rdrand().map(|word| (word, ENTROPY_RDRAND)));
         }
         None
     }
 }
 
 impl HardwareEntropy for X86Entropy {
-    fn name(&self) -> &'static str {
-        if self.rdseed { "rdseed" } else { "rdrand" }
-    }
-
-    fn fill(&self, out: &mut [u8]) -> bool {
-        fill_from_words(out, 1, || self.word())
+    fn fill(&self, out: &mut [u8]) -> Option<&'static str> {
+        fill_from_words(out, 1, || self.word()).map(entropy_source_name)
     }
 }
 

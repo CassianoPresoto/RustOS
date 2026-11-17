@@ -13,6 +13,20 @@ const L7_EBX_SMAP: u32 = 1 << 20;
 const L7_ECX_UMIP: u32 = 1 << 2;
 const EXT_EDX_NX: u32 = 1 << 20;
 
+/// Bit de cada instrução de entropia em `fill_from_words`.
+pub const ENTROPY_RDSEED: u8 = 1;
+pub const ENTROPY_RDRAND: u8 = 2;
+
+/// O nome do que de fato deu as palavras, dado o OU dos bits usados.
+pub const fn entropy_source_name(used: u8) -> &'static str {
+    match used {
+        ENTROPY_RDSEED => "rdseed",
+        ENTROPY_RDRAND => "rdrand",
+        _ if used == ENTROPY_RDSEED | ENTROPY_RDRAND => "rdseed+rdrand",
+        _ => "none",
+    }
+}
+
 /// As folhas cruas; `leaf7_*` é zero quando a CPU não tem a folha 7.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Leaves {
@@ -63,6 +77,17 @@ impl Features {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_entropy_name_says_which_instructions_gave_words() {
+        assert_eq!(entropy_source_name(ENTROPY_RDSEED), "rdseed");
+        assert_eq!(entropy_source_name(ENTROPY_RDRAND), "rdrand");
+        assert_eq!(
+            entropy_source_name(ENTROPY_RDSEED | ENTROPY_RDRAND),
+            "rdseed+rdrand"
+        );
+        assert_eq!(entropy_source_name(0), "none");
+    }
 
     #[test]
     fn decodes_each_bit_from_its_leaf() {

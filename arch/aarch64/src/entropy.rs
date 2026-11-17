@@ -5,7 +5,7 @@ use core::arch::asm;
 use rustos_hal::HardwareEntropy;
 use rustos_hal::entropy::fill_from_words;
 
-use crate::features::rndr_supported;
+use crate::features::{ENTROPY_RNDR, ENTROPY_RNDRRS, entropy_source_name, rndr_supported};
 
 /// Tentativas por palavra: a leitura sinaliza falha com `NZCV = 0b0100` e pede nova tentativa.
 const ATTEMPTS: u32 = 16;
@@ -28,12 +28,13 @@ impl Aarch64Entropy {
 }
 
 impl HardwareEntropy for Aarch64Entropy {
-    fn name(&self) -> &'static str {
-        "rndrrs"
-    }
-
-    fn fill(&self, out: &mut [u8]) -> bool {
-        fill_from_words(out, ATTEMPTS, || rndrrs().or_else(rndr))
+    fn fill(&self, out: &mut [u8]) -> Option<&'static str> {
+        let next = || {
+            rndrrs()
+                .map(|word| (word, ENTROPY_RNDRRS))
+                .or_else(|| rndr().map(|word| (word, ENTROPY_RNDR)))
+        };
+        fill_from_words(out, ATTEMPTS, next).map(entropy_source_name)
     }
 }
 

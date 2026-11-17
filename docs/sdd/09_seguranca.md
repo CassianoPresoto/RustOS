@@ -127,7 +127,7 @@ Duas propriedades que o desenho dá e os testes conferem:
 Está em `kernel/src/random.rs`, ligado no `kmain` depois das interrupções (o relógio
 precisa estar de pé para a linha `random bench:`).
 
-1. **Hardware, por uma porta do `hal`** (`HardwareEntropy`: `name` e `fill`), que o
+1. **Hardware, por uma porta do `hal`** (`HardwareEntropy::fill`, que devolve o nome da fonte), que o
    `arch/` implementa. `fill_from_words` (no `hal`, com teste) cuida da repetição
    limitada por palavra e da ordem little-endian.
    - **x86_64** (`X86Entropy`): o CPUID diz o que há (`RDRAND` é `CPUID.1:ECX[30]`, `RDSEED`
@@ -144,8 +144,11 @@ precisa estar de pé para a linha `random bench:`).
    contador (`rdtsc`, `CNTVCT_EL0`) 512 vezes com um trabalho curto entre as leituras e
    devolve o BLAKE2b-256 delas. Os marcos do boot (ciclos na entrada do `kmain` e agora,
    os três tempos do bootloader, o relógio e os frames livres) entram por outro `reseed`.
-3. **Fonte relatada:** `[rustos] random: rdseed` (ou `rdrand`, `rndrrs`) ou
-   `[rustos] random: jitter (weak)`. Fraco porque nada mede quantos bits o jitter vale;
+3. **Fonte relatada:** `[rustos] random: rdseed` (ou `rdrand`, `rndrrs`, `rndr`) ou
+   `[rustos] random: jitter (weak)`. O nome é o que de fato deu as palavras:
+   `HardwareEntropy::fill` devolve o OU das instruções usadas, e quando o `RDSEED`
+   falhou e o `RDRAND` completou a semente sai `rdseed+rdrand` (`rndrrs+rndr` no
+   aarch64). Fraco porque nada mede quantos bits o jitter vale;
    no aarch64 sob HVF o contador anda a 24 MHz e cada amostra traz pouco ruído. A
    fraqueza é a [DEBT-0019](../tech-debt/0019-aleatorio-sem-fonte-de-hardware-fraco.md).
 4. **Estado:** `static RNG: IrqLock<Option<Rng>>`. O comando `random` do shell chama

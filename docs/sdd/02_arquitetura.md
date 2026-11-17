@@ -7,7 +7,7 @@
 
 | Anel | Pasta | O que tem | `unsafe` |
 | --- | --- | --- | --- |
-| **Portas** | `core/hal` | Traits e tipos de fronteira: `BootInfo`, `Console`, `ByteSource`, `Cpu`, `RegisterBus`, `PageMapper`, `FrameSource`, `HardwareEntropy`, `FramebufferInfo`, `PhysAddr`, `VirtAddr`, `MemoryRegion` | proibido |
+| **Portas** | `core/hal` | Traits e tipos de fronteira: `BootInfo`, `Console`, `ByteSource`, `Cpu`, `RegisterBus`, `PageMapper`, `FrameSource`, `PageFormat`, `TableMemory`, `MmuControl`, `HardwareEntropy`, `FramebufferInfo`, `PhysAddr`, `VirtAddr`, `MemoryRegion` | proibido |
 | **Centro** | `core/mm`, `core/crypto`, `core/sched`, `core/gfx`, `core/term`, `core/shell` | Política pura: alocadores de frames (buddy, cache por CPU) e do heap, leitura do mapa de memória, janela de endereços, fila de execução, rodízio; ChaCha20, BLAKE2b e o gerador de números aleatórios; desenho de pixels e a fonte própria; emulador de terminal VT/xterm; shell embutido | proibido |
 | **Suporte** | `lib/sync` | Primitivas sem domínio (`SpinLock`) que precisam de `unsafe` para existir | permitido |
 | **Adaptadores** | `arch/*`, `boot/*`, `drivers/*` | Implementam as portas para uma ISA, um bootloader ou um dispositivo | permitido em `arch/` e `boot/`; proibido em `drivers/` |

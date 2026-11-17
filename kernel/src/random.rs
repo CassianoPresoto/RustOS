@@ -50,12 +50,15 @@ pub fn next_u64() -> Option<u64> {
 /// o jitter do contador e os marcos. A semente em pilha é zerada ao sair.
 fn replenish(rng: &mut Rng, marks: &[u64]) -> Source {
     let mut seed = [0_u8; HARDWARE_SAMPLE_LEN];
-    let source = match platform::hardware_entropy() {
-        Some(hardware) if hardware.fill(&mut seed) && hardware_output_plausible(&seed) => {
+    let from_hardware = platform::hardware_entropy()
+        .and_then(|hardware| hardware.fill(&mut seed))
+        .filter(|_| hardware_output_plausible(&seed));
+    let source = match from_hardware {
+        Some(name) => {
             rng.reseed(&seed);
-            Source::Hardware(hardware.name())
+            Source::Hardware(name)
         }
-        _ => Source::Jitter,
+        None => Source::Jitter,
     };
     wipe(&mut seed);
     let mut jitter = gather_jitter(platform::cycles, JITTER_ROUNDS);

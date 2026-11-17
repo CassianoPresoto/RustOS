@@ -110,6 +110,14 @@ mod tests {
     }
 
     #[test]
+    fn the_limit_is_exactly_five_changes_in_seven() {
+        let four = sample([1, 1, 1, 1, 2, 3, 4, 5]);
+        let five = sample([1, 1, 1, 2, 3, 4, 5, 6]);
+        assert!(!hardware_output_plausible(&four));
+        assert!(hardware_output_plausible(&five));
+    }
+
+    #[test]
     fn varying_hardware_output_is_accepted() {
         assert!(hardware_output_plausible(&sample([1, 2, 3, 4, 5, 6, 7, 8])));
         assert!(hardware_output_plausible(&sample([1, 2, 1, 2, 1, 2, 1, 2])));
