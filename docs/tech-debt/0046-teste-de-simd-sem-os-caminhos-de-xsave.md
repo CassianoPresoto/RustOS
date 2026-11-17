@@ -11,8 +11,8 @@ paid_date:
 
 ## O que falta
 
-O autoteste de SIMD roda só o caminho que a CPU de teste escolhe (`XSAVEOPT` no TCG e no
-HVF); `MODE_XSAVE` e `MODE_FXSAVE` nunca rodam. Ele escreve e confere só os 16 bytes de
+O autoteste de SIMD roda só o caminho que a CPU de teste escolhe (no x86_64, `XSAVEOPT`,
+que o TCG anuncia); `MODE_XSAVE` e `MODE_FXSAVE` nunca rodam. Ele escreve e confere só os 16 bytes de
 `xmm0`/`v0`: não cobre a metade alta do YMM, o MXCSR nem o FPCR.
 
 ## Por que foi aceito
