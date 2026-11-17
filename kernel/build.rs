@@ -8,5 +8,9 @@ fn main() {
     if os == "none" {
         println!("cargo:rustc-link-arg-bins=-T{dir}/linker/{arch}.ld");
         println!("cargo:rustc-link-arg-bins=-zmax-page-size=0x1000");
+        println!("cargo:rustc-link-arg-bins=-pie");
+        if arch == "aarch64" {
+            println!("cargo:rustc-link-arg-bins=-znotext");
+        }
     }
 }
