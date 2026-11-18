@@ -653,6 +653,21 @@ fn pull(thief: usize, gap: u32) -> bool {
     publish(me, &queue);
     bump(&me.stats.pulled, 1);
     true
+/// Lock preso na troca é deadlock mudo: a conferência vale também em `release` (SDD 15).
+#[inline]
+fn check_locks_held(expected: u32) {
+    let held = locks_held();
+    if held != expected {
+        locks_held_on_switch(held, expected);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn locks_held_on_switch(held: u32, expected: u32) -> ! {
+    panic!("context switch with {held} IrqLock held, expected {expected}");
+}
+
 }
 
 /// Escolhe a próxima tarefa e troca para ela. Chamar com a interrupção mascarada
@@ -664,14 +679,14 @@ fn schedule() {
 /// `schedule` com o relógio que o chamador já leu.
 fn schedule_at(now_ns: u64) {
     let cpu = percpu::current();
-    debug_assert_eq!(locks_held(), 0, "troca de contexto com IrqLock preso");
+    check_locks_held(0);
     switch_from(cpu, cpu.queue.lock(), now_ns);
 }
 
 /// `schedule_at` para quem já tem o lock da fila preso e mais nenhum: o lock vale da decisão
 /// de bloquear até a escolha, sem soltar e pegar de novo, e é solto antes da troca.
 fn switch_from(cpu: &PerCpu, mut queue: IrqGuard<'static, Queue>, now_ns: u64) {
-    debug_assert_eq!(locks_held(), 1, "troca de contexto com IrqLock preso");
+    check_locks_held(1);
     let from = cpu.current.load(Ordering::Relaxed) as usize;
     let outgoing = slot(from);
     let since = outgoing.since_ns.load(Ordering::Relaxed);

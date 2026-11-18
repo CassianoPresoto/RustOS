@@ -171,6 +171,8 @@ pub enum FaultTest {
     NestedPanic,
     /// Pânico em todas as CPUs ao mesmo tempo.
     Simultaneous,
+    /// Ceder a CPU com um lock preso: o escalonador tem de recusar com um pânico.
+    HeldLock,
 }
 
 /// Retrato do sistema no momento da consulta.

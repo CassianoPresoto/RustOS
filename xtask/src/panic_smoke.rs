@@ -44,7 +44,7 @@ const NONE: Scenario = Scenario {
     prompt_after: false,
 };
 
-const SCENARIOS: [Scenario; 8] = [
+const SCENARIOS: [Scenario; 9] = [
     Scenario {
         name: "panic at entry, before memory",
         cmdline: Some("rustos.panic_early=1"),
@@ -93,6 +93,15 @@ const SCENARIOS: [Scenario; 8] = [
         ],
         once: Some("[rustos] panic:"),
         forbid: &["failed again", "[[rustos]"],
+        ..NONE
+    },
+    Scenario {
+        name: "yield with an IrqLock held, a panic and not a deadlock",
+        commands: &["fault held"],
+        expect: &[
+            "yielding the CPU with a lock held",
+            "context switch with 2 IrqLock held, expected 1",
+        ],
         ..NONE
     },
     Scenario {

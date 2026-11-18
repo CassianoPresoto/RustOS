@@ -1,7 +1,7 @@
 //! Spinlock que mascara interrupção na CPU local enquanto está preso: um handler que
 //! pegue o mesmo lock nunca acha o dono interrompido no meio, e outra CPU gira até ele
 //! soltar. Ninguém cede a CPU (`yield_now`, `sleep_until`, `park`) com um preso; o
-//! `locks_held` por CPU serve ao `debug_assert` do escalonador (SDD 15).
+//! `locks_held` por CPU serve à conferência do escalonador, também em `release` (SDD 15).
 
 use core::fmt;
 use core::mem::ManuallyDrop;

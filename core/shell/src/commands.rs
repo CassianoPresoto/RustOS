@@ -53,7 +53,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
     Command {
         name: "fault",
-        summary: "raise an exception to test the fault path (break | page | text | cpu | lock | nested | all)",
+        summary: "raise an exception to test the fault path (break | page | text | cpu | lock | nested | all | held)",
         run: fault,
     },
     Command {
@@ -187,10 +187,11 @@ fn fault(ctx: &mut Ctx<'_>) -> fmt::Result {
         Some("lock") => FaultTest::ConsoleLock,
         Some("nested") => FaultTest::NestedPanic,
         Some("all") => FaultTest::Simultaneous,
+        Some("held") => FaultTest::HeldLock,
         _ => {
             return ctx
                 .out
-                .write_str("usage: fault break|page|text|cpu|lock|nested|all\r\n");
+                .write_str("usage: fault break|page|text|cpu|lock|nested|all|held\r\n");
         }
     };
     match kind {
@@ -208,6 +209,9 @@ fn fault(ctx: &mut Ctx<'_>) -> fmt::Result {
         FaultTest::Simultaneous => ctx
             .out
             .write_str("panicking on every core at once...\r\n")?,
+        FaultTest::HeldLock => ctx
+            .out
+            .write_str("yielding the CPU with a lock held...\r\n")?,
         FaultTest::Breakpoint => {}
     }
     if !ctx.host.fault_test(kind) {
@@ -221,7 +225,8 @@ fn fault(ctx: &mut Ctx<'_>) -> fmt::Result {
         | FaultTest::WriteText
         | FaultTest::ConsoleLock
         | FaultTest::NestedPanic
-        | FaultTest::Simultaneous => ctx
+        | FaultTest::Simultaneous
+        | FaultTest::HeldLock => ctx
             .out
             .write_str("no fault was raised: the protection is missing\r\n"),
         FaultTest::CpuPanic => ctx.out.write_str("the panic did not stop the system\r\n"),
@@ -977,6 +982,8 @@ mod tests {
         assert!(nested.contains("inside the panic message") && nested.contains("no fault"));
         let all = run("fault", &["all"], &host);
         assert!(all.contains("every core at once") && all.contains("no fault"));
+        let held = run("fault", &["held"], &host);
+        assert!(held.contains("lock held") && held.contains("no fault"));
         assert!(run("fault", &["lock"], &FakeHost::new()).contains("not available yet"));
     }
 

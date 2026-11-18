@@ -139,10 +139,13 @@ impl<B: BootInfo> Host for System<'_, B> {
             FaultTest::NestedPanic => panic::nested_test(),
             #[cfg(feature = "panic-tests")]
             FaultTest::Simultaneous => return panic::simultaneous_test(),
+            #[cfg(feature = "panic-tests")]
+            FaultTest::HeldLock => return panic::held_lock_test(),
             #[cfg(not(feature = "panic-tests"))]
-            FaultTest::ConsoleLock | FaultTest::NestedPanic | FaultTest::Simultaneous => {
-                return false;
-            }
+            FaultTest::ConsoleLock
+            | FaultTest::NestedPanic
+            | FaultTest::Simultaneous
+            | FaultTest::HeldLock => return false,
         };
         platform::trigger(kind)
     }
