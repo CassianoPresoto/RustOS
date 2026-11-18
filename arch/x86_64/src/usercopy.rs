@@ -7,7 +7,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// A CPU tem SMAP: sem ele `stac` e `clac` são `#UD`.
-static SMAP_ON: AtomicBool = AtomicBool::new(false);
+pub(crate) static SMAP_ON: AtomicBool = AtomicBool::new(false);
 
 /// Diz à rotina se `stac` e `clac` existem. Uma vez, no boot, antes da primeira cópia.
 pub fn set_smap(on: bool) {

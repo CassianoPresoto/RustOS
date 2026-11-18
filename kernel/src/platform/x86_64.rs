@@ -617,6 +617,9 @@ pub fn secondary_init(resources: SecondaryResources) -> Result<(), PlatformError
     fpu_init().map(|_| ())
 }
 
+/// O x86_64 mantém o cache de instrução coerente com as escritas: nada a fazer.
+pub fn sync_icache(_start: usize, _len: usize) {}
+
 /// A raiz do kernel e o que o usuário precisa antes da primeira tarefa. Uma vez, depois de
 /// `Vm::activate`; o x86_64 não aloca nada.
 #[allow(
@@ -698,6 +701,12 @@ pub fn copy_to_user(range: UserRange, src: &[u8]) -> bool {
         rustos_arch_x86_64::usercopy::copy_to_user(range.addr(), src.as_ptr(), src.len())
     };
     missing == 0
+}
+
+/// O kernel roda com `EFLAGS.AC` ligado (SMAP desarmado)?
+#[cfg(feature = "selftest")]
+pub fn ac_set() -> bool {
+    rustos_arch_x86_64::ac_flag_set()
 }
 
 /// Esta ISA tem saída rápida de syscall (`SYSRET`) que se liga e desliga.

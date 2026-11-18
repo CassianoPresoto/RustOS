@@ -15,7 +15,8 @@ O [SDD 17](../sdd/17_processos_isolamento_e_syscalls.md#aarch64-svc) manda toda 
 de EL1h entrar na pilha da tarefa (`SP_EL1`), com o teste de estouro do `kernel_ventry` do Linux, e
 só o estouro ir para a pilha de falhas. A 4a mudou o que o desenho exigia e nada além: o
 `vector_fault` lê a pilha de falhas do bloco por CPU (`TPIDR_EL1`) em vez do `SP_EL0`, que agora é
-a pilha do usuário. Falha de EL1h continua na pilha de falhas, que reinicia do topo a cada uma.
+a pilha do usuário. Falha de EL1h continua na pilha de falhas, que reinicia do topo a cada exceção síncrona de EL1h:
+uma falta dentro do relatório de outra apaga o quadro da primeira.
 
 ## Por que foi aceito
 

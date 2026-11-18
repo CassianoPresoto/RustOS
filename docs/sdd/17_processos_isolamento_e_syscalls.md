@@ -108,7 +108,7 @@ capítulo segue como desenho. Os números estão em
 | Onde mora o programa de teste | Blob de `global_asm!` em `arch/<isa>/src/user_blob.rs`, na seção `.text` do kernel, copiado para uma página de usuário em `0x40_0000` | O `asm!` só mora em `arch/` (regra 4 do guidelines 04) e o `kernel/` nunca liga `arch/<isa>-user` (regra 12); código de teste fica atrás da feature `selftest` |
 | `simd` | A tarefa de usuário nasce com `simd: true` | Sem área de estado, o `xmm0` e o `v0` vazariam entre tarefas; a 4d fecha o resto |
 | `kernel_half_in_sync` | `Process::load` confere que as 256 entradas altas da raiz nova são as da raiz do kernel e recusa o processo se não forem | Entrada nova do kernel depois da cópia dessincronizaria as raízes |
-| Filtro do `debug_write` | Cada linha sai com `[user] ` na frente | O usuário não imita uma linha `[rustos]` do smoke |
+| Filtro do `debug_write` | Só ASCII imprimível, `\n` e `\t` passam; todo outro byte (inclusive os de UTF-8, que escondem o CSI de 8 bits, U+2028 e o bidi) vira `?`; cada linha sai com `[user] ` na frente e a saída sempre termina em `\n`. O xtask só aceita marcador do kernel no **começo** da linha (`[rustos] …`, sem `\r`) | O usuário não imita uma linha `[rustos]` do smoke nem encerra o boot cedo com um `[rustos] boot ok` no meio da linha dele |
 
 **Medido na QEMU 11.1.3** (o que o desenho tinha como NÃO VERIFICADO e a pesquisa só tinha de fonte
 secundária):
@@ -119,7 +119,7 @@ secundária):
 | SMAP (x86_64) | Um `mov` comum do kernel numa página de usuário dá `#PF` de proteção; a cópia entre `stac` e `clac` funciona |
 | `WXN` sobre EL0 (aarch64) | Uma página de código de usuário mapeada de propósito como RWX (o mapeador foi desligado só nesse teste, que não está no código) executa sem o `WXN` e dá falta de instrução em EL0 com ele. O `WXN` vale para EL0. Ligado depois de `Vm::activate` em cada CPU |
 | `SVC` vindo de EL0 | `EC = 0x15`; o vetor 8 o despacha pelo `x8` |
-| Privilegiada em EL0 | `msr ttbr0_el1` dá `EC 0x18`, que o decodificador trata como instrução ilegal; `brk` de EL0 dá `EC 0x3C` e mata o processo |
+| Privilegiada em EL0 | `msr ttbr0_el1` dá `EC 0x00` (instrução desconhecida), e `mrs` de contador ou timer que o `CNTKCTL_EL1` nega dá `EC 0x18`; o decodificador trata os dois como instrução ilegal. `brk` de EL0 dá `EC 0x3C` e mata o processo |
 | `hlt` e `TF` em anel 3 | `hlt` dá `#GP`; `popf` com `TF` dá `#DB` na IST4, com o processo morto na pilha da tarefa |
 | `SYSRET` | Passa o autoteste inteiro; o `IRETQ` fica de reserva e se pode ligar e desligar pelo autoteste (número no SDD 07) |
 
@@ -539,7 +539,7 @@ kernel. Entrada nova depois do boot dessincronizaria as raízes (o Linux resolve
 
 | | x86_64 | aarch64 |
 | --- | --- | --- |
-| Raiz do processo | `CR3` | `TTBR0_EL1`; `TCR_EL1.EPD0` (bit 7) volta a 0, `T0SZ` (bits 5:0) fica em 17 para 47 bits, `TG0` (15:14) em `0b00` (**verificado pelo Linux**; ARM ARM por ler) |
+| Raiz do processo | `CR3` | `TTBR0_EL1`; `TCR_EL1.EPD0` (bit 7) volta a 0, `T0SZ` (bits 5:0) fica em 16 (48 bits, o que o Limine deixa; o mapeador só passa de `USER_TOP` se alguém pedir), `TG0` (15:14) em `0b00` (**verificado pelo Linux**; ARM ARM por ler) |
 | Etiqueta | PCID nos 12 bits baixos do CR3 (`CR3_PCID_MASK = 0xFFF`, `CR3_NOFLUSH = BIT(63)`: `processor-flags.h` do Linux); o Linux liga `CR4.PCIDE` se a CPU anuncia `PCID` (`cr4_init`). **Verificado** (espelho do SDM, [mov cr3](https://www.felixcloutier.com/x86/mov-1) e [invpcid](https://www.felixcloutier.com/x86/invpcid)): com `PCIDE = 1`, o bit 63 do operando do `mov cr3` decide se o TLB é invalidado; com `PCIDE = 0`, os bits 2:0 e 11:5 do CR3 são ignorados. `INVPCID`: tipo 0 = um endereço de um PCID, 1 = um PCID inteiro, 2 = tudo (global inclusive), 3 = tudo menos o global; **`#GP`** com `PCIDE = 0` e tipo 0 ou 1 com PCID diferente de zero, e com tipo maior que 3 | ASID em `TTBR0_EL1[63:48]` quando `TCR_EL1.A1 = 0`; largura em `ID_AA64MMFR0_EL1.ASIDBits[7:4]` (`0b0000` = 8, `0b0010` = 16) e `TCR_EL1.AS` (bit 36) escolhe 16 bits (**verificado pelo Linux**) |
 | Troca de processo | Escreve CR3 com o PCID do processo; sem esvaziar o TLB | Escreve `TTBR0_EL1` com o ASID; sem `tlbi` |
 | Alocação | Gerador global de ASID/PCID, com contador de geração: esgotou, esvazia tudo e começa outra geração. Módulo puro em `core/mm/src/asid.rs`, testado no host ([abaixo](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)); o estado por CPU (`active`, `reserved`, `flush_pending`) mora dentro dele, indexado pela CPU | idem |
@@ -858,7 +858,7 @@ O contrato de como um programa **começa**, igual para o `init` e para qualquer 
 | `AccessDenied` | -4 | Falta direito no handle |
 | `NoMemory` | -5 | Sem frame, sem slot, passou o teto de handles, ou a contabilidade negou ([decisão 9](#decisão-9--overcommit-na-abi-nativa)) |
 | `BadState` | -6 | **Só** processo já morto ou em morte (`thread_create`, `process_kill`). Não existe "thread já iniciada": `thread_create` cria **e inicia** |
-| `NotSupported` | -7 | Número de syscall desconhecido; flag que a fase não implementa; a própria ponta do canal no array de handles |
+| `NotSupported` | -7 | Número de syscall desconhecido; flag que a fase não implementa; a própria ponta do canal no array de handles; recurso do kernel indisponível (`random_get` com o gerador sem semente, `clock_get_monotonic` sem relógio) |
 | `OutOfRange` | -8 | Ponteiro ou intervalo fora de `UserRange`, ou na faixa nula |
 | `PeerClosed` | -9 | O outro lado do canal sumiu (na leitura, só depois de a fila esvaziar) |
 | `ShouldWait` | -10 | Canal sem mensagem (leitura) ou cheio (escrita): espere e tente de novo. **Não consome handle** |
@@ -1362,7 +1362,7 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 | Dívida 0023, aarch64 sem `WXN` | **Paga na 4a**: o teste na QEMU confirmou o efeito sobre EL0 (uma página RWX de usuário deixa de executar com o `WXN`); a linha `protections:` do aarch64 ganhou `wxn` |
 | Dívida 0037, pilha sem medida de pico (paga no #19: 16 KiB pelo pico medido) e [DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) | A 4a remediu com syscall e falta fatal: 2,0 KiB e 1,6 KiB de 16 (`release`). Os 16 KiB ficam; a 0070 segue aberta até a 4c e a 4f medirem handles, canais e a falta resolvida |
 | [DEBT-0052](../tech-debt/0052-afinidade-so-no-spawn.md) Afinidade só no `spawn` | Não dispara: a ABI nativa não tem afinidade |
-| **Abertas pela 4a:** [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md) (limpeza da pilha até 128 bytes limpos), [DEBT-0077](../tech-debt/0077-iretq-sem-fixup-de-falha-fora-do-rip-e-do-rsp.md) (`iretq` sem *fixup*), [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md) (EL1h na pilha de falhas), [DEBT-0079](../tech-debt/0079-ac-aberto-na-irq-no-meio-da-copia-de-usuario.md) (`AC` na IRQ da cópia); [DEBT-0072](../tech-debt/0072-pilhas-de-excecao-sem-medida-permanente.md) agora inclui a IST4 | A 4a fecha os itens dela |
+| **Abertas pela 4a:** [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md) (limpeza da pilha até 128 bytes limpos), [DEBT-0077](../tech-debt/0077-iretq-sem-fixup-de-falha-fora-do-rip-e-do-rsp.md) (`iretq` sem *fixup*), [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md) (EL1h na pilha de falhas); [DEBT-0081](../tech-debt/0081-debug-write-de-512-bytes-com-a-irq-mascarada.md) (`debug_write` com a IRQ mascarada) e [DEBT-0082](../tech-debt/0082-sem-lfence-depois-do-swapgs-condicional.md) (sem `lfence` depois do `swapgs`); [DEBT-0072](../tech-debt/0072-pilhas-de-excecao-sem-medida-permanente.md) agora inclui a IST4 | A 4a fecha os itens dela |
 | **A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados (4c; gatilho: o primeiro programa que os produza, ou os grupos de recursos da fase 9); imagem de usuário sem ASLR (4b; [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
 
 **Pagas antes da fase:** 0011 (GIC e timer só na CPU 0), 0018 (frames sem cache por CPU), 0036

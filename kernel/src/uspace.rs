@@ -56,6 +56,9 @@ impl UserSpace {
                 // SAFETY: `part` cabe numa página e o frame acabou de sair do alocador, só nosso.
                 unsafe { memory::fill_frame(frame, part) };
             }
+            if flags.executable {
+                memory::sync_code_frame(frame);
+            }
             let at = VirtAddr::new(virt + page * PAGE_SIZE);
             if let Err(error) = self.tables.map_page(at, frame, flags, &mut self.frames) {
                 self.release(frame);

@@ -2,10 +2,11 @@
 //! `nop`, `clock_get_monotonic`, `random_get`, `process_exit` e a `debug_write` provisória, sem
 //! handle; o resto devolve `NotSupported` e o processo segue. Roda mascarado, na pilha da tarefa.
 
+use core::fmt::Write as _;
 use rustos_hal::abi::{
-    DEBUG_WRITE_MAX, RANDOM_GET_MAX, Status, Syscall, SyscallArgs, SyscallReturn,
-    debug_byte_allowed,
+    DEBUG_WRITE_MAX, RANDOM_GET_MAX, Status, Syscall, SyscallArgs, SyscallReturn, debug_sanitize,
 };
+
 use rustos_mm::UserRange;
 
 use crate::{console, platform, process, random};
@@ -36,7 +37,9 @@ pub fn dispatch(args: &SyscallArgs) -> SyscallReturn {
         }
         Syscall::ProcessExit => process::exit(a0.cast_signed()),
         Syscall::DebugWrite => debug_write(a0, a1),
-        Syscall::ClockGetMonotonic => SyscallReturn::ok(platform::now_ns().unwrap_or(0)),
+        Syscall::ClockGetMonotonic => {
+            platform::now_ns().map_or(SyscallReturn::err(Status::NotSupported), SyscallReturn::ok)
+        }
         Syscall::RandomGet => random_get(a0, a1),
         _ => SyscallReturn::err(Status::NotSupported),
     }
@@ -62,36 +65,21 @@ fn debug_write(ptr: u64, len: u64) -> SyscallReturn {
     SyscallReturn::ok(len)
 }
 
-/// Os bytes do usuário como texto: o filtro descarta o que injeta sequência de terminal, e o
-/// que não é UTF-8 vira `?`. Cada linha sai com `[user] ` na frente: o usuário não imita uma
-/// linha `[rustos]` do kernel.
+/// Os bytes do usuário como texto que o console aceita (`hal::abi::debug_sanitize`): só ASCII
+/// imprimível, cada linha com `[user] ` na frente e a saída sempre terminada em `\n`, de modo
+/// que o usuário não imite uma linha `[rustos]` do kernel.
 struct Filtered<'a>(&'a [u8]);
 
 impl core::fmt::Display for Filtered<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let mut at_line_start = true;
-        for chunk in self.0.utf8_chunks() {
-            for ch in chunk.valid().chars() {
-                if !ch.is_ascii() || debug_byte_allowed(ch as u8) {
-                    put(f, ch, &mut at_line_start)?;
-                }
+        let mut result = Ok(());
+        debug_sanitize(self.0, "[user] ", |ch| {
+            if result.is_ok() {
+                result = f.write_char(ch);
             }
-            if !chunk.invalid().is_empty() {
-                put(f, '?', &mut at_line_start)?;
-            }
-        }
-        Ok(())
+        });
+        result
     }
-}
-
-fn put(f: &mut core::fmt::Formatter<'_>, ch: char, at_line_start: &mut bool) -> core::fmt::Result {
-    if *at_line_start {
-        f.write_str("[user] ")?;
-        *at_line_start = false;
-    }
-    f.write_fmt(format_args!("{ch}"))?;
-    *at_line_start = ch == '\n';
-    Ok(())
 }
 
 /// `random_get(ptr, len)`: `len` de 1 a `RANDOM_GET_MAX` bytes do gerador do kernel.
@@ -109,7 +97,7 @@ fn random_get(ptr: u64, len: u64) -> SyscallReturn {
     while filled < count {
         let Some(word) = random::next_u64() else {
             rustos_crypto::wipe(&mut buffer);
-            return SyscallReturn::err(Status::BadState);
+            return SyscallReturn::err(Status::NotSupported);
         };
         let take = (count - filled).min(8);
         buffer[filled..filled + take].copy_from_slice(&word.to_le_bytes()[..take]);

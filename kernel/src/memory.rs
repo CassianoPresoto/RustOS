@@ -17,6 +17,7 @@ use rustos_mm::{
 use crate::boot::BootRecord;
 use crate::frames::{self, Frames};
 use crate::heap;
+use crate::platform;
 use crate::stack::Stack;
 use crate::sync::IrqLock;
 
@@ -255,6 +256,11 @@ pub fn zero_frame(phys: PhysAddr) {
     // SAFETY: todo frame do alocador é acessível no mapa direto (contrato de `Memory::init`) e o
     // chamador o tem só para si.
     unsafe { frame_ptr(phys).write_bytes(0, FRAME_BYTES) };
+}
+
+/// O frame tem código que o usuário vai executar: torna a escrita visível ao cache de instrução.
+pub fn sync_code_frame(phys: PhysAddr) {
+    platform::sync_icache(frame_ptr(phys).addr(), FRAME_BYTES);
 }
 
 /// Copia `bytes` para o início do frame (que o chamador zerou), pelo mapa direto.

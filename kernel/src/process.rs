@@ -274,4 +274,4 @@ pub fn last_event() -> Option<(u32, ProcessEvent)> {
 #[cfg(feature = "selftest")]
 mod selftest;
 #[cfg(feature = "selftest")]
-pub use selftest::{on_nop, self_test};
+pub use selftest::{check_ac, on_nop, self_test};

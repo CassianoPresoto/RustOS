@@ -20,6 +20,7 @@ rustos_user_blob_start:
     .global rustos_user_fault_priv
     .global rustos_user_fault_trap
     .global rustos_user_fault_stack
+    .global rustos_user_flags
     .global rustos_user_null_loop
     .global rustos_user_blob_end
 
@@ -57,6 +58,12 @@ rustos_user_hello:
     syscall
     cmp rax, -7
     jne .Lfail4
+    mov edi, 0x20000
+    mov esi, 8
+    mov eax, {debug_write}
+    syscall
+    cmp rax, -8
+    jne .Lfail5
     xor edi, edi
     jmp .Lexit
 .Lfail1:
@@ -70,6 +77,9 @@ rustos_user_hello:
     jmp .Lexit
 .Lfail4:
     mov edi, 4
+    jmp .Lexit
+.Lfail5:
+    mov edi, 5
 .Lexit:
     mov eax, {process_exit}
     syscall
@@ -85,6 +95,9 @@ rustos_user_fault_mem:
 
     .balign 16
 rustos_user_fault_priv:
+    pushfq
+    or qword ptr [rsp], 0x40000
+    popfq
     hlt
     xor edi, edi
     mov eax, {process_exit}
@@ -110,6 +123,42 @@ rustos_user_fault_stack:
     xor eax, eax
     syscall
     xor edi, edi
+    mov eax, {process_exit}
+    syscall
+    ud2
+
+    .balign 16
+rustos_user_flags:
+    mov r12, rdi
+    pushfq
+    or qword ptr [rsp], 0x4000
+    popfq
+    pushfq
+    or qword ptr [rsp], 0x40000
+    popfq
+    pushfq
+    pop rax
+    and eax, 0x44000
+    cmp eax, 0x44000
+    jne 3f
+    rdtsc
+    shl rdx, 32
+    or rax, rdx
+    mov r13, rax
+2:
+    xor eax, eax
+    syscall
+    rdtsc
+    shl rdx, 32
+    or rax, rdx
+    sub rax, r13
+    cmp rax, r12
+    jb 2b
+    xor edi, edi
+    jmp 4f
+3:
+    mov edi, 3
+4:
     mov eax, {process_exit}
     syscall
     ud2
@@ -152,6 +201,7 @@ unsafe extern "C" {
     static rustos_user_fault_priv: u8;
     static rustos_user_fault_trap: u8;
     static rustos_user_fault_stack: u8;
+    static rustos_user_flags: u8;
     static rustos_user_null_loop: u8;
 }
 
@@ -169,6 +219,9 @@ pub enum Case {
     FaultTrap,
     /// Aponta o `sp` para um valor inválido e usa a pilha: o kernel não pode cair ao voltar.
     FaultBadStack,
+    /// Liga `NT` e `AC` por `popf` e chama `nop` por `rdi` ciclos de TSC, recebendo IRQ: o kernel
+    /// não pode rodar com `AC` ligado nem o processo morrer.
+    FlagsAc,
     /// `rdi` chamadas `nop` e sai com os ciclos do TSC que levaram.
     NullLoop,
 }
@@ -193,6 +246,7 @@ pub fn offset(case: Case) -> usize {
         Case::FaultPrivileged => address(ptr::addr_of!(rustos_user_fault_priv)),
         Case::FaultTrap => address(ptr::addr_of!(rustos_user_fault_trap)),
         Case::FaultBadStack => address(ptr::addr_of!(rustos_user_fault_stack)),
+        Case::FlagsAc => address(ptr::addr_of!(rustos_user_flags)),
         Case::NullLoop => address(ptr::addr_of!(rustos_user_null_loop)),
     };
     at - start

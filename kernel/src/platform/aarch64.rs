@@ -488,6 +488,13 @@ pub fn secondary_init(resources: SecondaryResources) -> Result<(), PlatformError
     fpu_init().map(|_| ())
 }
 
+/// O que o kernel escreveu em `[start, start + len)` vai ser executado: o aarch64 não mantém o
+/// cache de instrução coerente sozinho.
+pub fn sync_icache(start: usize, len: usize) {
+    // SAFETY: a faixa é um frame do alocador, mapeado e legível pelo mapa direto.
+    unsafe { rustos_arch_aarch64::cache::sync_icache(start, len) };
+}
+
 /// A raiz vazia do `TTBR0_EL1`: um frame zerado que a tarefa só de kernel usa. Guardada para o
 /// núcleo secundário, que a lê depois de `task::init`.
 static EMPTY_ROOT: AtomicU64 = AtomicU64::new(0);
@@ -575,6 +582,12 @@ pub fn copy_to_user(range: UserRange, src: &[u8]) -> bool {
         rustos_arch_aarch64::usercopy::copy_to_user(range.addr(), src.as_ptr(), src.len())
     };
     missing == 0
+}
+
+/// No aarch64 não há `AC`; o `SCTLR.SPAN` zerado religa o PAN a cada exceção.
+#[cfg(feature = "selftest")]
+pub fn ac_set() -> bool {
+    false
 }
 
 /// O `eret` é a única saída para EL0: não há saída rápida a ligar.

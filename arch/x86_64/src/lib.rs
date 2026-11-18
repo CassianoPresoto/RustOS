@@ -82,7 +82,7 @@ pub use traps::{
     install_early as install_early_traps, load_cpu as load_cpu_tables, set_scrub, set_sysret,
 };
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub use user::{enter_user, set_kernel_root, switch_space};
+pub use user::{ac_flag_set, enter_user, set_kernel_root, switch_space};
 
 /// Base da COM1 no PC.
 pub const COM1: u16 = 0x3F8;

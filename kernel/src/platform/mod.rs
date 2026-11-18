@@ -17,8 +17,8 @@ pub use aarch64::{
     fpu_restore, fpu_save, harden, hardware_entropy, has_keyboard, init_interrupts, ipi,
     ipi_target, irq_source, kernel_half_in_sync, kernel_root, keyboard_event, local_hw_id,
     new_space, new_user_space, now_ns, prepare_secondary, protections, sched_clock_ns,
-    secondary_early, secondary_init, serial_irq_done, switch, switch_space, trigger, user_cpu_init,
-    user_init,
+    secondary_early, secondary_init, serial_irq_done, switch, switch_space, sync_icache, trigger,
+    user_cpu_init, user_init,
 };
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::{
@@ -29,14 +29,14 @@ pub use x86_64::{
     fpu_restore, fpu_save, harden, hardware_entropy, has_keyboard, init_interrupts, ipi,
     ipi_target, irq_source, kernel_half_in_sync, kernel_root, keyboard_event, local_hw_id,
     new_space, new_user_space, now_ns, prepare_secondary, protections, sched_clock_ns,
-    secondary_early, secondary_init, serial_irq_done, switch, switch_space, trigger, user_cpu_init,
-    user_init,
+    secondary_early, secondary_init, serial_irq_done, switch, switch_space, sync_icache, trigger,
+    user_cpu_init, user_init,
 };
 
 #[cfg(all(feature = "selftest", target_arch = "aarch64"))]
-pub use aarch64::{HAS_FAST_RETURN, set_fast_return, set_stack_clean, user_blob};
+pub use aarch64::{HAS_FAST_RETURN, ac_set, set_fast_return, set_stack_clean, user_blob};
 #[cfg(all(feature = "selftest", target_arch = "x86_64"))]
-pub use x86_64::{HAS_FAST_RETURN, set_fast_return, set_stack_clean, user_blob};
+pub use x86_64::{HAS_FAST_RETURN, ac_set, set_fast_return, set_stack_clean, user_blob};
 
 #[cfg(all(feature = "selftest", target_arch = "aarch64"))]
 pub use aarch64::{clock_error_ppm, fpu_read_probe, fpu_write_probe, timer_mode};

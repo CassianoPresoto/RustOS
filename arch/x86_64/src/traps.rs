@@ -141,6 +141,9 @@ rustos_isr_common:
     test byte ptr [rsp + 24], 3
     jz 1f
     swapgs
+    cmp byte ptr [rip + {SMAP_ON}], 0
+    je 1f
+    clac
 1:
     .global rustos_isr_common_swapped
 rustos_isr_common_swapped:
@@ -273,6 +276,9 @@ rustos_isr_paranoid:
     js 6f
     swapgs
     mov ebx, 1
+    cmp byte ptr [rip + {SMAP_ON}], 0
+    je 6f
+    clac
 6:
     cld
     mov rdi, rsp
@@ -308,6 +314,10 @@ rustos_debug_entry:
     jmp rustos_isr_paranoid
 8:
     swapgs
+    cmp byte ptr [rip + {SMAP_ON}], 0
+    je 9f
+    clac
+9:
     push rax
     push rcx
     mov rcx, gs:[{KERNEL_RSP}]
@@ -348,14 +358,16 @@ rustos_debug_entry:
     SYSCALL_VECTOR = const SYSCALL_VECTOR,
     SYSRET_ON = sym SYSRET_ON,
     SCRUB_ON = sym SCRUB_ON,
+    SMAP_ON = sym crate::usercopy::SMAP_ON,
     RF_TF = const RF | TF,
     USER_CS = const USER_CODE,
     USER_SS = const USER_DATA,
     USER_TOP = const USER_TOP,
 );
 
-/// A saída de syscall pode usar `SYSRET` quando a conferência de `sysret::can_sysret` passa; sem
-/// isto, sempre `IRETQ`. O autoteste liga e desliga para medir.
+/// A saída de syscall usa `SYSRET` quando as condições de `sysret::can_sysret` valem; o asm acima
+/// as repete (`RCX == RIP`, `R11 == RFLAGS`, seletores, `RIP < USER_TOP`, sem `RF`/`TF`): mudar
+/// uma pede mudar a outra. Sem isto, sempre `IRETQ`; o autoteste liga e desliga para medir.
 static SYSRET_ON: AtomicBool = AtomicBool::new(true);
 
 /// A volta ao usuário chama `leave_user` e repinta a janela abaixo do quadro. Só o autoteste a
@@ -405,11 +417,15 @@ extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
     let vector = u8::try_from(frame.vector).unwrap_or(u8::MAX);
     if vector < FIRST_IRQ_VECTOR {
         let from_user = frame.cs & 3 == 3;
-        if vector == PAGE_FAULT && !from_user && usercopy::is_usercopy_fault(frame.rip) {
+        let cr2 = if vector == PAGE_FAULT { read_cr2() } else { 0 };
+        if vector == PAGE_FAULT
+            && !from_user
+            && usercopy::is_usercopy_fault(frame.rip)
+            && cr2 < USER_TOP
+        {
             frame.rip = usercopy::recovery_address();
             return;
         }
-        let cr2 = if vector == PAGE_FAULT { read_cr2() } else { 0 };
         let mut report = fault::decode(vector, frame.error, frame.rip, cr2);
         report.from_user = from_user && fault::user_fault_kills_only_the_process(vector);
         report.user_sp = if report.from_user { frame.rsp } else { 0 };

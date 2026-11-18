@@ -36,6 +36,31 @@ const SCAN_NEXT: u8 = 2;
 static PROBE: AtomicU8 = AtomicU8::new(OFF);
 static FOUND: AtomicUsize = AtomicUsize::new(0);
 
+/// Vezes que o kernel rodou com `EFLAGS.AC` ligado, vistas na volta ao usuário e na troca.
+static AC_LEAKS: AtomicUsize = AtomicUsize::new(0);
+
+/// Chamado na volta ao usuário e depois de cada troca de tarefa: o kernel nunca roda com `AC`.
+pub fn check_ac() {
+    if platform::ac_set() {
+        AC_LEAKS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// O processo liga `NT` e `AC` por `popf` e faz syscalls durante 8 ms, na CPU 0, onde o timer
+/// do próprio autoteste o interrompe: sobrevive, e o kernel nunca roda com `AC`. O caso
+/// `privileged` liga `AC` e leva um `#GP`, o caminho que a QEMU não limpa sozinho.
+fn flags_survive(frames: Frames, map_offset: u64) -> bool {
+    let start = (platform::now_ns(), platform::cycles());
+    while platform::now_ns()
+        .zip(start.0)
+        .is_some_and(|(now, from)| now < from + 1_000_000)
+    {}
+    let per_ms = platform::cycles().saturating_sub(start.1);
+    AC_LEAKS.store(0, Ordering::Relaxed);
+    let result = run_case(frames, map_offset, Case::FlagsAc, per_ms * 8, 1);
+    exited_with(result, 0) && AC_LEAKS.load(Ordering::Relaxed) == 0
+}
+
 /// O gancho do `nop`: na primeira chamada planta um padrão fundo na pilha do kernel, na segunda
 /// varre a mesma profundidade. Sem a limpeza na volta ao usuário o padrão ainda está lá.
 pub fn on_nop() {
@@ -182,9 +207,12 @@ pub fn self_test(frames: Frames, map_offset: u64) -> bool {
     let probe = ptr::addr_of!(KERNEL_PROBE).expose_provenance() as u64;
     let kernel = faulted(run_case(frames, map_offset, Case::FaultMemory, probe, 0));
     let kernel_ok = kernel.is_some_and(|event| event.fault_kind == fault_kind::PAGE_FAULT);
-    let privileged = faulted(run_case(frames, map_offset, Case::FaultPrivileged, 0, 0)).is_some();
+    AC_LEAKS.store(0, Ordering::Relaxed);
+    let privileged = faulted(run_case(frames, map_offset, Case::FaultPrivileged, 0, 0)).is_some()
+        && AC_LEAKS.load(Ordering::Relaxed) == 0;
     let trap = faulted(run_case(frames, map_offset, Case::FaultTrap, 0, 0)).is_some();
     let stack = faulted(run_case(frames, map_offset, Case::FaultBadStack, 0, 0)).is_some();
+    let flags = flags_survive(frames, map_offset);
     let (syscall_depth, fault_depth) = (scrub::deepest(), fault_peak());
     scrub::set_measuring(false);
     let clean_found = residue(frames, map_offset);
@@ -217,9 +245,10 @@ pub fn self_test(frames: Frames, map_offset: u64) -> bool {
         syscall_depth,
         fault_depth
     );
-    let ok = hello && kernel_ok && privileged && trap && stack && scrub_ok && medians.is_some();
+    let ok =
+        hello && kernel_ok && privileged && trap && stack && flags && scrub_ok && medians.is_some();
     kprintln!(
-        "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, stack clean {scrub_ok})",
+        "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, flags {flags}, stack clean {scrub_ok})",
         if ok { "ok" } else { "FAILED" }
     );
     ok

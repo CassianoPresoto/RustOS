@@ -156,7 +156,7 @@ const FIRMWARE_CEILING_MS: u64 = 4000;
 /// Os microssegundos de `boot timeline: firmware N us`.
 fn firmware_boot_us(log: &str) -> Option<u64> {
     const MARK: &str = "[rustos] boot timeline: firmware ";
-    let rest = &log[log.find(MARK)? + MARK.len()..];
+    let rest = &kernel_line(log, MARK)?[MARK.len()..];
     rest.split_ascii_whitespace().next()?.parse().ok()
 }
 
@@ -426,6 +426,41 @@ pub fn stream_stdout(child: &mut std::process::Child) -> Result<mpsc::Receiver<S
     Ok(receiver)
 }
 
+/// As linhas do kernel: a linha inteira, sem o `\r`, **começa** com `[rustos]`. Texto de usuário
+/// (`debug_write`, sempre prefixado por `[user]`) e lixo de firmware no meio da linha não contam.
+fn kernel_lines(log: &str) -> impl Iterator<Item = &str> {
+    log.split('\n')
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| line.starts_with("[rustos]"))
+}
+
+/// Alguma linha do kernel começa com `mark` (um prefixo `[rustos] …`); qualquer outro texto (a
+/// resposta do shell, a base do kernel) se procura no log inteiro.
+fn has_mark(log: &str, mark: &str) -> bool {
+    if mark.starts_with("[rustos]") {
+        kernel_lines(log).any(|line| line.starts_with(mark))
+    } else {
+        log.contains(mark)
+    }
+}
+
+/// Uma linha fatal do kernel: o prefixo de `FATAL` no começo, ou `FAILED` dentro de uma linha do
+/// kernel (o texto de usuário, prefixado por `[user]`, não conta).
+fn has_fatal(log: &str) -> bool {
+    FATAL.iter().any(|mark| {
+        if mark.starts_with("[rustos]") {
+            has_mark(log, mark)
+        } else {
+            kernel_lines(log).any(|line| line.contains(mark))
+        }
+    })
+}
+
+/// A primeira linha do kernel que começa com `mark`.
+fn kernel_line<'a>(log: &'a str, mark: &str) -> Option<&'a str> {
+    kernel_lines(log).find(|line| line.starts_with(mark))
+}
+
 fn wait_for_boot(receiver: &mpsc::Receiver<String>, started: Instant) -> (Outcome, String) {
     let mut log = String::new();
     let outcome = loop {
@@ -435,10 +470,10 @@ fn wait_for_boot(receiver: &mpsc::Receiver<String>, started: Instant) -> (Outcom
             Err(mpsc::RecvTimeoutError::Timeout) => break Outcome::TimedOut,
             Err(mpsc::RecvTimeoutError::Disconnected) => break Outcome::Exited,
         }
-        if log.contains(BOOT_OK) {
+        if has_mark(&log, BOOT_OK) {
             break Outcome::Booted(started.elapsed());
         }
-        if log.contains(PANIC) || FATAL.iter().any(|mark| log.contains(mark)) {
+        if has_mark(&log, PANIC) || has_fatal(&log) {
             drain(receiver, &mut log, FATAL_DRAIN);
             break Outcome::Panicked;
         }
@@ -480,7 +515,7 @@ fn mode_lines(mode: BootMode) -> Vec<(&'static str, &'static str)> {
 
 /// Os milissegundos de `boot time: kernel N ms to prompt`.
 fn kernel_boot_ms(log: &str) -> Option<u64> {
-    let rest = &log[log.find(BOOT_TIME)? + BOOT_TIME.len()..];
+    let rest = &kernel_line(log, BOOT_TIME)?[BOOT_TIME.len()..];
     rest.split_ascii_whitespace().next()?.parse().ok()
 }
 
@@ -489,13 +524,13 @@ fn report(arch: Arch, mode: BootMode, outcome: Outcome, log: &str) -> Result<(),
         Outcome::Booted(elapsed) => {
             if let Some((_, what)) = mode_lines(mode)
                 .iter()
-                .find(|(line, _)| !log.contains(line))
+                .find(|(line, _)| !has_mark(log, line))
             {
                 let reason = format!("boot sem {what} (guidelines 09)");
                 return Err(failure(arch, &reason, log));
             }
             if mode != BootMode::SelfTest {
-                if let Some(line) = normal_forbidden().iter().find(|line| log.contains(*line)) {
+                if let Some(line) = normal_forbidden().iter().find(|line| has_mark(log, line)) {
                     let reason = format!("o boot normal rodou `{line}`, que é do modo de teste");
                     return Err(failure(arch, &reason, log));
                 }
@@ -530,11 +565,11 @@ fn report(arch: Arch, mode: BootMode, outcome: Outcome, log: &str) -> Result<(),
                 }
             }
             let online = cpus_line(Arch::cpus());
-            if !log.contains(&online) {
+            if !has_mark(log, &online) {
                 let reason = format!("boot sem `{online}`: nem todos os núcleos subiram");
                 return Err(failure(arch, &reason, log));
             }
-            if !log.contains(KASLR_ON) || log.contains(LINK_BASE) {
+            if !has_mark(log, KASLR_ON) || has_mark(log, LINK_BASE) {
                 return Err(failure(arch, "KASLR desligado: sem `kaslr: on`", log));
             }
             if !cargo::has_feature(&cargo::listed_features(), "debug-addrs")
@@ -563,7 +598,7 @@ fn report(arch: Arch, mode: BootMode, outcome: Outcome, log: &str) -> Result<(),
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Outcome {
     Booted(Duration),
     Panicked,
@@ -585,10 +620,7 @@ fn stream_chunks(mut stdout: impl Read, sender: &mpsc::Sender<String>) {
 }
 
 fn print_kernel_lines(log: &str) {
-    for line in log
-        .lines()
-        .filter_map(|line| line.find("[rustos]").map(|at| &line[at..]))
-    {
+    for line in kernel_lines(log) {
         println!("  {}", line.trim_end());
     }
 }
@@ -777,7 +809,7 @@ mod tests {
 
     #[test]
     fn the_kernel_boot_time_is_read_from_its_line() {
-        let log = "x [rustos] boot time: kernel 41 ms to prompt (memory 3, smp 0)\n";
+        let log = "[rustos] boot time: kernel 41 ms to prompt (memory 3, smp 0)\n";
         assert_eq!(kernel_boot_ms(log), Some(41));
         assert_eq!(kernel_boot_ms("[rustos] boot time: kernel soon"), None);
         assert_eq!(kernel_boot_ms("nada"), None);
@@ -787,5 +819,40 @@ mod tests {
     fn the_smoke_line_follows_the_requested_core_count() {
         assert_eq!(cpus_line(4), "[rustos] cpus: 4 online");
         assert_eq!(cpus_line(12), "[rustos] cpus: 8 online");
+    }
+
+    #[test]
+    fn a_user_line_that_imitates_the_boot_marker_does_not_end_the_boot() {
+        let (tx, rx) = mpsc::channel();
+        tx.send("[rustos] user: entered ring3/el0\r\n[user] [rustos] boot ok\r\n".to_owned())
+            .unwrap();
+        tx.send("[user] x [rustos] panic: fake FAILED\r\n".to_owned())
+            .unwrap();
+        drop(tx);
+        let (outcome, _) = wait_for_boot(&rx, Instant::now());
+        assert!(matches!(outcome, Outcome::Exited), "{outcome:?}");
+    }
+
+    #[test]
+    fn the_real_marker_still_ends_the_boot_and_a_carriage_return_is_ignored() {
+        let (tx, rx) = mpsc::channel();
+        tx.send("[user] [rustos] boot ok\r\n[rustos] boot ok\r\n".to_owned())
+            .unwrap();
+        let (outcome, _) = wait_for_boot(&rx, Instant::now());
+        assert!(matches!(outcome, Outcome::Booted(_)), "{outcome:?}");
+    }
+
+    #[test]
+    fn marks_match_only_kernel_lines_and_the_kernel_line_keeps_its_prefix() {
+        let log = "[user] [rustos] timer: 100 Hz\r\nlixo [rustos] frame self-test: ok\n[rustos] cpus: 4 online (found 4)\r\n";
+        assert!(!has_mark(log, "[rustos] timer: "));
+        assert!(!has_mark(log, "[rustos] frame self-test: ok"));
+        assert!(has_mark(log, "[rustos] cpus: 4 online"));
+        assert!(!has_fatal(log));
+        assert!(!has_fatal("[user] FAILED\n"));
+        assert!(has_fatal("[rustos] w^x: FAILED\n"));
+        let boot =
+            "[user] [rustos] boot time: kernel 1 ms\n[rustos] boot time: kernel 25 ms to prompt\n";
+        assert_eq!(kernel_boot_ms(boot), Some(25));
     }
 }

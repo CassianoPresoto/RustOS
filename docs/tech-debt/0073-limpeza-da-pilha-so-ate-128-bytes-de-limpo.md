@@ -18,6 +18,10 @@ resíduo fundo fica na pilha até o próximo uso. Hoje nenhum quadro do caminho 
 (`debug_write` e `random_get` ficam fora de linha para o `nop` não carregar os buffers deles), e o
 autoteste planta 2 KiB e confere que somem.
 
+Outro resíduo que ela não alcança: os quadros de arranque (`process_main`, `enter_user`) ficam na
+pilha do kernel até a primeira syscall ou IRQ do processo, porque a primeira volta ao usuário não
+passa pela limpeza.
+
 ## Por que foi aceito
 
 A limpeza exata (varrer do fundo até a primeira palavra suja, a marca d'água de `first_unpainted`)
