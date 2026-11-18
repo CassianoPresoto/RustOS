@@ -66,3 +66,4 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0058](0058-zerar-pagina-no-x86-sem-medida-em-hardware.md) | Zerar página no x86_64 sem medida em hardware, `rep stosb` com ERMS fora | Open | O primeiro boot do x86_64 com KVM ou em metal |
 | [0059](0059-estado-do-chacha20-derramado-na-pilha-no-x86.md) | Resíduo em `core/crypto` que o autoteste de pilha não enxerga | Open | A primeira volta do kernel para código de usuário (a syscall da fase 4), ou o primeiro `copy_to_user` que leia a pilha do kernel |
 | [0060](0060-recuo-do-zerar-sem-cobertura-no-smoke.md) | Recuo de STP do zerar página sem cobertura automática | Open | A primeira CPU aarch64 com DCZID_EL0.DZP ligado, ou o primeiro modelo da QEMU que o ligue |
+| [0061](0061-percpu-sem-separar-linhas-de-cache.md) | PerCpu sem separar as linhas de cache por quem escreve | Open | O primeiro boot em metal, ou em VM com mais de 8 núcleos, em que a troca entre CPUs ou a fila por CPU meça pior que no HVF |
