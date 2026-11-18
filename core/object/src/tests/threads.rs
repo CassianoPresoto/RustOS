@@ -1,13 +1,14 @@
 //! Threads de verdade, como pede o guidelines 07: duas tabelas e um canal entre elas, com a
 //! ordem de lock tabela, depois canal, e o fechamento sempre fora dos dois.
 
-use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::{Arc, Barrier};
 use std::thread;
 
 use rustos_hal::abi::{Handle, Rights, Status};
 
 use super::support::{Tab, TestObj, close_handle, count, handle_of, new_channel, read, tab, write};
-use crate::{Lock, ObjectKind};
+use crate::{Lock, Object, ObjectKind, Side};
 
 const ROUNDS: usize = 3000;
 
@@ -111,4 +112,37 @@ fn closing_the_peer_while_handles_travel_closes_every_handle_exactly_once() {
         assert_eq!(leaked, live_in_q, "rodada {round}");
         assert_eq!(count(&b), 0);
     }
+}
+
+#[test]
+fn the_end_died_hook_ignores_the_peer_lock_held_by_another_thread() {
+    let (a, _b) = new_channel();
+    let end = Arc::clone(a.end_ref().unwrap());
+    let held = Arc::new(Barrier::new(2));
+    let (release, wait) = mpsc::channel::<()>();
+    let holder = {
+        let (a, held) = (a.clone(), Arc::clone(&held));
+        thread::spawn(move || {
+            a.with_channel(|_| {
+                held.wait();
+                wait.recv().unwrap();
+            })
+        })
+    };
+    held.wait();
+    a.on_end_died(Side::B);
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(
+        end.peer_closed_calls
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}
+
+#[test]
+#[should_panic(expected = "gancho com o lock do par preso nesta thread")]
+fn the_end_died_hook_inside_the_peer_lock_of_the_same_thread_fails() {
+    let (a, _b) = new_channel();
+    a.with_channel(|_| a.on_end_died(Side::B));
 }
