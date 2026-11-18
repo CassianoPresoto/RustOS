@@ -24,6 +24,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-cpio"
+version = "0.1.0"
+
+[[package]]
 name = "rustos-crypto"
 version = "0.1.0"
 
@@ -54,6 +58,10 @@ version = "0.1.0"
 dependencies = [
  "rustos-hal",
 ]
+
+[[package]]
+name = "rustos-elf"
+version = "0.1.0"
 
 [[package]]
 name = "rustos-gfx"
