@@ -1,6 +1,7 @@
 //! Manutenção de cache para código que o kernel escreveu e o usuário vai executar: o `CTR_EL0` do
 //! HVF é `IDC=1`, `DIC=0`, então a instrução precisa de `ic ivau` mesmo sem limpar o dado.
 
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 use core::arch::asm;
 
 /// `CTR_EL0.DminLine` (bits 19:16) e `IminLine` (bits 3:0): log2 do tamanho da linha em palavras.
@@ -16,6 +17,7 @@ pub const fn line_sizes(ctr: u64) -> (usize, usize) {
 /// Deixa `[start, start + len)` (endereço do kernel) visível como instrução em todas as CPUs.
 /// # Safety
 /// EL1; a faixa está mapeada e legível.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn sync_icache(start: usize, len: usize) {
     let ctr: u64;
     // SAFETY: leitura de registrador de identificação, sem efeito colateral.
