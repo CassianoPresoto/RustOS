@@ -153,7 +153,8 @@ impl<Fmt: PageFormat, Mem: TableMemory, Ctl: MmuControl> PageTables<Fmt, Mem, Ct
         let (old, _) = Fmt::decode_leaf(self.memory.read(table, index), false);
         self.memory.write(table, index, 0);
         self.control.entry_removed(virt);
-        self.memory.write(table, index, Fmt::page_entry(phys, flags));
+        self.memory
+            .write(table, index, Fmt::page_entry(phys, flags));
         self.control.entry_changed(virt);
         Ok(old)
     }
@@ -857,7 +858,12 @@ mod tests {
     fn user_space<'a>(cpu: &'a Cpu, frames: &mut Frames) -> Space<'a> {
         let mut space = space(cpu);
         space
-            .map_page(USER_VIRT, PhysAddr::new(0xA000), PageFlags::USER_RODATA, frames)
+            .map_page(
+                USER_VIRT,
+                PhysAddr::new(0xA000),
+                PageFlags::USER_RODATA,
+                frames,
+            )
             .unwrap();
         space
     }
@@ -938,7 +944,12 @@ mod tests {
         let (cpu, mut frames) = (Cpu::default(), Frames(vec![0x6000, 0x5000, 0x4000, 0x3000]));
         let mut space = space(&cpu);
         space
-            .map_large_page(LARGE_VIRT, PhysAddr::new(0x4020_0000), PageFlags::DATA, &mut frames)
+            .map_large_page(
+                LARGE_VIRT,
+                PhysAddr::new(0x4020_0000),
+                PageFlags::DATA,
+                &mut frames,
+            )
             .unwrap();
         assert_eq!(space.leaf(LARGE_VIRT), None);
         assert_eq!(space.unmap_page(LARGE_VIRT), None);

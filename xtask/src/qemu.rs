@@ -669,8 +669,14 @@ fn stream_chunks(mut stdout: impl Read, sender: &mpsc::Sender<String>) {
     }
 }
 
+/// Imprime o que o kernel disse e, depois da marca, o que os programas de usuário disseram: o
+/// prefixo `[user]` mostra de quem é cada linha (só as do kernel valem para os gates).
 fn print_kernel_lines(log: &str) {
-    for line in kernel_lines(log) {
+    for line in log
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| line.starts_with("[rustos]") || line.starts_with("[user] "))
+    {
         println!("  {}", line.trim_end());
     }
 }

@@ -87,6 +87,15 @@ fn report_cost(started: u64, used: u64, spawned: &process::Spawned) {
         stats.tables,
         used.saturating_sub(stats.data + stats.tables)
     );
+    if let Some((_, end)) = process::last_stats() {
+        kprintln!(
+            "[rustos] user: init at exit: {} data, {} tables, {} of {} lazy pages backed",
+            end.data,
+            end.tables,
+            end.lazy_backed,
+            end.lazy_reserved
+        );
+    }
     kprintln!(
         "[rustos] user: stack top drawn over {} bits of page, image at a fixed address (no ASLR, DEBT-0083)",
         loader::stack_aslr_bits()

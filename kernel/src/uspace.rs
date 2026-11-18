@@ -2,10 +2,10 @@
 //! (`CR3` ou `TTBR0_EL1`), frames que ele mapeia, a falta de página que cria a página no primeiro
 //! toque, o *shootdown* de TLB e a devolução dos frames, zerados, na morte (SDD 17).
 
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 #[cfg(feature = "selftest")]
 use rustos_hal::AddressSpace;
 use rustos_hal::abi::{USER_MIN, USER_TOP};
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use rustos_hal::{FrameSource, MapError, PAGE_SIZE, PageFlags, PageMapper, PhysAddr, VirtAddr};
 use rustos_mm::PhysFrame;
@@ -405,7 +405,10 @@ impl UserSpace {
     /// uma região preguiçosa acerta a promessa dela.
     #[cfg_attr(
         not(feature = "selftest"),
-        allow(dead_code, reason = "o `vmar_unmap` da 4c a usa; hoje só o modo de teste")
+        allow(
+            dead_code,
+            reason = "o `vmar_unmap` da 4c a usa; hoje só o modo de teste"
+        )
     )]
     pub fn unmap_page(&mut self, virt: u64) -> bool {
         let Some(frame) = self.tables.unmap_page(VirtAddr::new(virt)) else {

@@ -107,17 +107,16 @@ impl TableMemory for DirectMapTables {
     }
 }
 
-/// Descarta a tradução de `pages` páginas a partir de `virt` nesta CPU: `invlpg` por página, ou o
-/// TLB inteiro se são muitas. É o que cada CPU faz ao receber um *shootdown*.
+/// Descarta a tradução de `pages` páginas de `virt` nesta CPU; acima de 32, o TLB inteiro.
 ///
 /// # Safety
-/// Ring 0. Com mais de `FLUSH_ALL_ABOVE` páginas reescreve o `CR3` com o valor que já tem.
+/// Ring 0.
 pub unsafe fn flush_pages(virt: u64, pages: u64) {
     if pages > FLUSH_ALL_ABOVE {
         let cr3: u64;
         // SAFETY: leitura de registrador de controle em ring 0, pelo contrato acima.
         unsafe { asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags)) };
-        // SAFETY: reescrever o `CR3` com o próprio valor só esvazia o TLB (sem PCID, sem páginas globais).
+        // SAFETY: reescrever o `CR3` com o próprio valor só esvazia o TLB.
         unsafe { asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags)) };
         return;
     }

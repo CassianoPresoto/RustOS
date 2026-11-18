@@ -74,7 +74,10 @@ mod mailbox {
             let late = deadline
                 .zip(platform::now_ns())
                 .is_some_and(|(limit, now)| now > limit);
-            assert!(!late && spins < ACK_SPIN_LIMIT, "tlb shootdown sem resposta");
+            assert!(
+                !late && spins < ACK_SPIN_LIMIT,
+                "tlb shootdown sem resposta"
+            );
             core::hint::spin_loop();
         }
     }

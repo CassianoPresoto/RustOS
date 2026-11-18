@@ -49,12 +49,10 @@ pub struct Fault {
     pub user_sp: u64,
 }
 
-/// O que o `arch/` chama. `fault` volta só para exceção recuperável ou para falta de página de
-/// usuário que o núcleo resolveu (`from_user`: a instrução se repete); `copy_fault` tenta resolver a
-/// falta de página de usuário que a cópia usuário↔kernel provocou e diz se a cópia se repete. `irq`
-/// roda mascarada e o `arch/` dá o EOI depois. `preempt` roda depois do EOI, na pilha da tarefa interrompida: ali o
-/// núcleo pode trocar de tarefa. `syscall` atende o usuário, mascarada. `leave_user` roda logo
-/// antes da volta ao usuário, com o quadro salvo: o núcleo limpa a pilha abaixo dele.
+/// O que o `arch/` chama. `fault` volta se a exceção é recuperável ou a falta de usuário foi resolvida
+/// (a instrução se repete); `copy_fault` diz se a cópia usuário↔kernel que faltou se repete. `irq`
+/// roda mascarada e o `arch/` dá o EOI depois. `preempt` roda depois do EOI, na pilha da tarefa
+/// interrompida. `syscall` atende o usuário, mascarada. `leave_user` roda antes da volta ao usuário.
 #[derive(Clone, Copy, Debug)]
 pub struct Handlers {
     pub fault: fn(&Fault),

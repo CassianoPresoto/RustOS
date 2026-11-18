@@ -10,8 +10,8 @@ use rustos_hal::abi::{SyscallArgs, USER_TOP};
 use rustos_hal::{Fault, FaultKind, Handlers, Irq, STACK_PAINT, VirtAddr};
 
 use crate::fault::{
-    self, DEBUG, DOUBLE_FAULT, ERROR_CODE_VECTORS, FIRST_IRQ_VECTOR, MACHINE_CHECK, NMI, PAGE_FAULT,
-    PF_WRITE,
+    self, DEBUG, DOUBLE_FAULT, ERROR_CODE_VECTORS, FIRST_IRQ_VECTOR, MACHINE_CHECK, NMI,
+    PAGE_FAULT, PF_WRITE,
 };
 use crate::lapic::VECTOR_SPURIOUS;
 use crate::percpu::prefix;

@@ -51,9 +51,9 @@ const IMAGE: u64 = 0x2000_0000;
 
 fn all_zero(space: &UserSpace, virt: u64) -> bool {
     let mut page = [0xFF_u8; 256];
-    (0..PAGE).step_by(256).all(|offset| {
-        space.read(virt + offset, &mut page) && page.iter().all(|&byte| byte == 0)
-    })
+    (0..PAGE)
+        .step_by(256)
+        .all(|offset| space.read(virt + offset, &mut page) && page.iter().all(|&byte| byte == 0))
 }
 
 /// Leitura, escrita e escrita sobre a página zero numa região preguiçosa, cada caso de morte e a
@@ -75,13 +75,14 @@ fn resolver_walks_every_case(frames: Frames, map_offset: u64) -> bool {
     ok &= fault(&mut space, LAZY, Access::Read) == Ok(Resolved::ZeroPage)
         && fault(&mut space, LAZY + PAGE, Access::Read) == Ok(Resolved::ZeroPage);
     ok &= space.stats().lazy_backed == 2;
-    ok &= fault(&mut space, LAZY - PAGE, Access::Write) == Err(Unresolved::Region(FaultError::Guard));
+    ok &=
+        fault(&mut space, LAZY - PAGE, Access::Write) == Err(Unresolved::Region(FaultError::Guard));
     ok &= fault(&mut space, LAZY + 8 * PAGE, Access::Read)
         == Err(Unresolved::Region(FaultError::Guard));
     ok &= fault(&mut space, 0x3000_0000, Access::Read)
         == Err(Unresolved::Region(FaultError::NoRegion));
-    ok &= fault(&mut space, IMAGE, Access::Write)
-        == Err(Unresolved::Region(FaultError::Permission));
+    ok &=
+        fault(&mut space, IMAGE, Access::Write) == Err(Unresolved::Region(FaultError::Permission));
     ok &= fault(&mut space, LAZY + 2 * PAGE, Access::Execute)
         == Err(Unresolved::Region(FaultError::Permission));
     ok &= fault(&mut space, IMAGE, Access::Read) == Ok(Resolved::Retried);
@@ -117,7 +118,9 @@ pub fn lazy_program(frames: Frames, map_offset: u64, lazy: &[u8], slack: usize) 
     let result = run_source(frames, map_offset, Source::Elf(lazy), here());
     let kept = before.saturating_sub(frames.free_frames());
     let [zero, fresh, copied, retried] = fault_counts();
-    let backed = last_stats().map_or((0, 0), |(_, stats)| (stats.lazy_backed, stats.lazy_reserved));
+    let backed = last_stats().map_or((0, 0), |(_, stats)| {
+        (stats.lazy_backed, stats.lazy_reserved)
+    });
     kprintln!(
         "[rustos] user: demand paging: {zero} zero-page maps, {fresh} fresh frames, {copied} zero-page copies, {retried} retries; {} of {} lazy pages backed at exit, {kept} frames kept (slack {slack})",
         backed.0,
@@ -155,7 +158,11 @@ struct Pass {
 }
 
 const UNREADABLE: u64 = u64::MAX;
-const FLUSHES: u64 = if cfg!(target_arch = "x86_64") { 200 } else { 2000 };
+const FLUSHES: u64 = if cfg!(target_arch = "x86_64") {
+    200
+} else {
+    2000
+};
 
 fn read_word(at: u64) -> u64 {
     let mut bytes = [0_u8; 8];
@@ -183,8 +190,7 @@ fn watcher(arg: usize) {
     );
     cpu.restore_interrupts(true);
     let first = (read_word(LAZY), read_word(LAZY + PAGE));
-    pass.ok
-        .store(first == (0, OLD_PATTERN), Ordering::Relaxed);
+    pass.ok.store(first == (0, OLD_PATTERN), Ordering::Relaxed);
     pass.stage.store(1, Ordering::Release);
     wait_stage(pass, 2);
     pass.cow_seen.store(read_word(LAZY), Ordering::Relaxed);
@@ -206,7 +212,8 @@ fn driver(arg: usize) {
         return;
     };
     let space_ref = &mut *space;
-    pass.root.store(space_ref.root().as_u64(), Ordering::Release);
+    pass.root
+        .store(space_ref.root().as_u64(), Ordering::Release);
     pass.active
         .store(space_ref.active_addr(), Ordering::Release);
     let spawned = task::spawn(Spawn {

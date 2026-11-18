@@ -15,8 +15,8 @@ use super::{Program, Source, fault_peak, last_event, spawn};
 use crate::frames::Frames;
 use crate::platform::user_blob::{Case, image, offset};
 use crate::uspace::{Resolved, UserSpace, set_frame_budget};
-use rustos_mm::vmar::Access;
 use crate::{loader, platform, scrub, task};
+use rustos_mm::vmar::Access;
 
 /// Quanto o autoteste espera um processo acabar, e o passo da espera.
 const WAIT_NS: u64 = 15_000_000_000;
@@ -267,9 +267,9 @@ fn unaligned_segment_loads_zeroed(frames: Frames, map_offset: u64) -> bool {
     let lazy_tail = [0x40_4000, 0x40_5000]
         .iter()
         .all(|&page| !space.read(page, &mut [0; 1]));
-    let resolved = [0x40_4000, 0x40_5000].iter().all(|&page| {
-        space.resolve_fault(&tree, page, Access::Read) == Ok(Resolved::ZeroPage)
-    });
+    let resolved = [0x40_4000, 0x40_5000]
+        .iter()
+        .all(|&page| space.resolve_fault(&tree, page, Access::Read) == Ok(Resolved::ZeroPage));
     let ok = loaded.is_ok_and(|loaded| loaded.segments == 2)
         && lazy_tail
         && resolved

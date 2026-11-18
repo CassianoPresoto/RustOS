@@ -85,8 +85,7 @@ fn main(_: &Env) -> i64 {
         copy_ns / 10,
         copy_ns % 10
     );
-    checks
-        .iter()
-        .position(|&ok| !ok)
-        .map_or(0, |index| index as i64 + 1)
+    checks.iter().position(|&ok| !ok).map_or(0, |index| {
+        i64::try_from(index).map_or(100, |index| index + 1)
+    })
 }

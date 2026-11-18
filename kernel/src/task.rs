@@ -1027,7 +1027,11 @@ pub fn unbind_user() -> Option<usize> {
     let here = percpu::current();
     let current = slot(here.current.load(Ordering::Relaxed) as usize);
     platform::switch_space(0, 0);
-    mark_active(current.user_active.swap(0, Ordering::Relaxed), here.index(), false);
+    mark_active(
+        current.user_active.swap(0, Ordering::Relaxed),
+        here.index(),
+        false,
+    );
     current.user_root.store(0, Ordering::Relaxed);
     current.user_top.store(0, Ordering::Relaxed);
     let process = current.process.swap(0, Ordering::AcqRel);
