@@ -63,7 +63,8 @@ versão e os alvos certos), QEMU com firmware EDK2, `curl`, `tar` e `make`.
 
 ```sh
 brew install qemu          # macOS; no Debian/Ubuntu: qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
-make smoke ARCH=all        # compila, baixa o Limine, sobe nas duas ISAs e confere o boot
+make smoke ARCH=all        # compila, baixa o Limine, sobe nas duas ISAs e confere o boot (modo de teste)
+make smoke-fast ARCH=all   # o mesmo no boot normal, com o tempo do kernel até o prompt
 make run ARCH=aarch64      # serial no terminal; Ctrl-A X sai
 ```
 

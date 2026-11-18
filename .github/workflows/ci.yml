@@ -44,6 +44,7 @@ jobs:
       - name: Toolchain do rust-toolchain.toml
         run: rustup toolchain install
       - run: make smoke ARCH=${{ matrix.arch }} PROFILE=release
+      - run: make smoke-fast ARCH=${{ matrix.arch }} PROFILE=release
       - run: make smoke-panic ARCH=${{ matrix.arch }} PROFILE=release
       - name: Smoke com bloco de DC ZVA de 256 bytes (pontas do zerar página)
         if: matrix.arch == 'aarch64'

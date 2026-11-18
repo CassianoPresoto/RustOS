@@ -31,7 +31,7 @@ Os pedidos ficam em `boot/limine/src/requests.rs`, nas seções `.requests_start
 | Bootloader performance | Marcos de reset, início do Limine e entrega ao kernel, em µs | linha omitida |
 | Executable address | Base física e virtual da imagem (com o sorteio do KASLR), para o kernel mapear cada seção | `BootError::MissingKernelAddress`, pânico |
 | Framebuffer | O primeiro framebuffer linear: endereço no HHDM, tamanho, pitch e máscaras de cor. Só 32 bpp RGB com canais de 8 bits é aceito | sem tela; a serial continua |
-| Executable cmdline | A linha de comando da entrada do `limine.conf`. Só o build com a feature `panic-tests` a lê (`rustos.panic_early=N`, SDD 06); `BootParams::parse` ignora chave e valor que não entende | sem linha, o kernel sobe normal |
+| Executable cmdline | A linha de comando da entrada do `limine.conf`, lida em todo build: `rustos.selftest=1` liga o [modo de teste](#modos-de-boot); com a feature `panic-tests`, `rustos.panic_early=N` (SDD 06). `BootParams::parse` ignora chave e valor que não entende | sem linha, o kernel sobe no modo normal |
 | MP | Os núcleos: identificador de hardware (LAPIC ID ou `MPIDR`) e o `goto_address` de cada um. No x86_64 o pedido liga o bit de x2APIC. A presença do pedido faz o Limine acordar os núcleos secundários e estacioná-los | sem resposta o kernel roda numa CPU |
 
 O Limine mapeia o framebuffer no HHDM com o cache certo para vídeo:
@@ -87,18 +87,38 @@ os definitivos entram em `interrupts::init` ([SDD 10](10_interrupcoes.md)).
    ([SDD 15](15_tarefas_e_preempcao.md)).
 7. `Memory::reclaim_bootloader` devolve ao buddy as regiões `BootloaderReclaimable`.
 8. `random::init` semeia o gerador ([SDD 09](09_seguranca.md)).
-9. Relatório (com `kaslr:`, `reclaimed:`, `vm:`, `protections:`, `random:` e
-   `random bench:` e `key residue:`, o autoteste de resíduo de chave na pilha), autoteste
-   de um frame (escreve e relê pelo mapa direto), autoteste do heap, `zero bench:` (a
-   medida de zerar), `w^x:` (percorre as tabelas), autoteste de exceção e de timer.
-   `task::init` adota a execução atual como a tarefa `init`, cria a ociosa e liga
-   FPU/SIMD (`fpu:`, `sched:`); o autoteste de preempção e de estado de SIMD
-   (`task self-test:`) e as medidas curtas (`switch:`) rodam, e vem `[rustos] boot ok`.
+9. O que vem depois depende do [modo de boot](#modos-de-boot). **Os dois** imprimem `RustOS`, `boot timeline:`,
+   `kaslr:`, `reclaimed:`, `protections:` e `cpus:`, semeiam o gerador (`random::init`, [SDD 09](09_seguranca.md)), rodam o autoteste de um frame (escreve e relê pelo mapa direto), o `w^x:`
+   (percorre as tabelas) e o autoteste de exceção, ligam as tarefas (`task::init` adota a execução atual como a tarefa `init`,
+   cria a ociosa e liga FPU/SIMD; `smp::release` solta os núcleos), imprimem `boot time:` e `[rustos] boot ok`. **O modo de teste** acrescenta `bootloader:`, `memory:`, `frames:`, `screen:`, `vm:`, `random:`,
+   `fpu:`, `sched:`, o autoteste de resíduo de chave (`key residue:`), o do heap, o do timer (`timer:`, cinco tiques
+   contra o relógio), `random bench:`, `zero bench:`, a janela `idle:`, o autoteste de preempção e de estado de SIMD
+   (`task self-test:`), o de migração (`smp self-test:`) e as medidas curtas (`switch:`, `scale:`, `alloc storm:`).
 10. `system::run_shell`: a tarefa `init` vira a tarefa `shell`. Ela lê a fila que a IRQ
    da serial (e, no x86_64, a do teclado) enche e bloqueia (`park`) quando ela está
    vazia; a ociosa dorme em `hlt`/`wfi` quando ninguém está pronto.
 
 Pânico e exceção, em qualquer passo, saem na serial.
+
+## Modos de boot
+
+O kernel tem dois modos, escolhidos pela linha de comando do Limine (`BootParams::parse` em `core/hal/src/cmdline.rs`):
+
+| | Normal (sem linha de comando) | Teste (`rustos.selftest=1`) |
+| --- | --- | --- |
+| Quem sobe | `make run`, `make screenshot`, o usuário, `make smoke-fast`, `make smoke-panic` | `make smoke` (e o `a64fx` do `make pr`) |
+| Autotestes | frame, `w^x:` e exceção: os três juntos custam 3 ms no x86_64 em TCG (com as linhas) e 1 ms no aarch64 com HVF, e nada além deles exercita o que provam (o mapa direto, as tabelas ativas, a IDT/`VBAR` e o retorno da exceção) | os três, mais heap, resíduo de chave, timer, preempção com estado de SIMD e migração entre núcleos |
+| Medidas | nenhuma | `zero bench:`, `random bench:`, `idle:`, `switch:`, `scale:`, `alloc storm:` |
+| Linhas na serial | as que um gate confere (`kaslr:`, `reclaimed:`, `protections:`, `cpus:`, `w^x:`) ou que avisam (`random: jitter (weak)`) | todas |
+| Tempo no kernel (`release`) | 24 a 31 ms (x86_64, TCG) · 2 ms (aarch64, HVF) | 0,7 a 3,8 s (x86_64, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md)) · 0,45 s (aarch64) |
+
+**Por que dois.** O que mais pesava no boot era espera de relógio e medida, não código de boot: `timer:` (50 ms), `idle:` (50 ms), `task self-test:` (80 ms), `smp self-test:` (140 ms), `switch:`/`scale:`/`alloc storm:` (110 ms no aarch64, 550 ms no x86_64) e, no x86_64 em TCG, o `heap self-test:` (12 ms), o `random bench:` (13 ms) e o `zero bench:` (50 ms). Prova que depende de janela de tempo, ou que mede, não vale a cada boot de quem só quer o shell; vale no `make smoke` e no CI. O que roda sempre é o que custa mil vezes menos e que nada mais exercita (guidelines 05, "Boot normal e boot de teste").
+
+**Cada linha é tempo.** Na serial da QEMU, uma linha custa de 0,3 ms (x86_64) a 0,4 ms (aarch64) e, com a tela, mais 0,7 ms no x86_64 em TCG (o redesenho da linha). Numa UART física de 115 200 baud seria 7 ms por linha de 80 bytes. O modo normal imprime 11 linhas (12 com o aviso de entropia fraca no aarch64), o de teste 31.
+
+**O `bench` do shell** é o mesmo nos dois modos e mede o que o boot de teste mede, com o esforço completo: troca de contexto, IPI, escala, tempestade de alocação, jitter de acordar e, desde esta mudança, o custo de zerar memória e o do gerador aleatório (`Host::micro_bench`).
+
+**O relógio do boot** (`kernel/src/boot_time.rs`) soma, por fase, os ciclos do contador (TSC, `CNTVCT_EL0`) e só converte para tempo no fim, quando o x86_64 já mediu a frequência do TSC contra o PIT. Fases: memória (da entrada do `kmain` até a pilha própria, mais o `reclaim`), console (serial e tela), interrupções (exceções, controlador, calibração do timer), SMP, o resto (`setup`: semente do gerador, linhas de estado, `task::init`), autotestes e medidas. A linha `[rustos] boot time: kernel X ms to prompt (memory A, smp B, self-tests C, benches D)` sai antes de `boot ok`; X é do `kmain` até o `boot ok`, sem o firmware e o Limine (a linha `boot timeline:` os dá). O modo de teste imprime antes dela `boot phases:` com o que a linha não mostra (`console`, `interrupts`, `reclaim`, `setup`, em µs).
 
 ## Pânico e exceção antes do console
 
@@ -179,37 +199,55 @@ timer e fontes, está no [SDD 10](10_interrupcoes.md).
 
 ## Saída de referência
 
-QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB, `-smp 4`, perfil `dev`, x86_64 em TCG (a base e o mapa direto mudam a cada boot e não saem no log, [SDD 09](09_seguranca.md#endereços-do-kernel-no-log)):
+QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB, `-smp 4`, perfil `release`, x86_64 em TCG (a base e o mapa direto mudam a cada boot e não saem no log, [SDD 09](09_seguranca.md#endereços-do-kernel-no-log)). Modo normal (`make smoke-fast`):
+
+```text
+[rustos] RustOS 0.1.0 (x86_64)
+[rustos] boot timeline: firmware 1633044 us, bootloader 265141 us
+[rustos] kaslr: on, image slid by up to 18 bits (4 KiB steps in 2 GiB)
+[rustos] reclaimed: 43804 KiB from the bootloader
+[rustos] protections: +wp +nx +smep +smap +umip
+[rustos] cpus: 4 online (found 4, limit 8)
+[rustos] frame self-test: ok
+[rustos] w^x: ok (65004 pages)
+[rustos] exception self-test: ok
+[rustos] boot time: kernel 31 ms to prompt (memory 5, smp 1, self-tests 3, benches 0)
+[rustos] boot ok
+```
+
+Modo de teste (`make smoke`; as medidas de tarefa do x86_64 em TCG variam muito entre boots, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md)):
 
 ```text
 [rustos] RustOS 0.1.0 (x86_64)
 [rustos] bootloader: Limine 12.10.0
-[rustos] boot timeline: firmware 1295365 us, bootloader 242971 us
+[rustos] boot timeline: firmware 1402005 us, bootloader 258559 us
 [rustos] kaslr: on, image slid by up to 18 bits (4 KiB steps in 2 GiB)
-[rustos] memory: 255532 KiB usable, 12855284 KiB other, 35 regions
-[rustos] reclaimed: 46432 KiB from the bootloader
-[rustos] frames: 63811 free of 65268 tracked, metadata 16728 bytes
-[rustos] screen: 1280x800, grid 158x47
+[rustos] memory: 255336 KiB usable, 12855480 KiB other, 36 regions
+[rustos] reclaimed: 43808 KiB from the bootloader
+[rustos] frames: 63608 free of 65244 tracked, metadata 16728 bytes
+[rustos] screen: 1280x800, grid 158x47, alt on, history 256 lines
 [rustos] protections: +wp +nx +smep +smap +umip
-[rustos] vm: direct map in 122 2M and 2475 4K pages, 64 KiB of tables, stack 64 KiB
+[rustos] vm: direct map in 122 2M and 2451 4K pages, 60 KiB of tables, stack 64 KiB
 [rustos] cpus: 4 online (found 4, limit 8)
 [rustos] random: rdseed
-[rustos] random bench: chacha20 39 MB/s, reseed 288 us, next_u64 1034.1 ns
-[rustos] key residue: 0 chacha states, 0 key copies on the stack, probe 4 of 4: ok
 [rustos] frame self-test: ok
-[rustos] heap self-test: ok
-[rustos] zero bench: 1 KiB 307.9 ns, 4 KiB 1087.3 ns, 4 KiB over 1 MiB 1191.9 ns, 4 KiB alloc+free 2996.5 ns
-[rustos] w^x: ok (64968 pages)
+[rustos] w^x: ok (65004 pages)
 [rustos] exception self-test: ok
-[rustos] timer: 100 Hz, 5 ticks in 37 ms ok
+[rustos] key residue: 0 chacha states, 0 key copies on the stack, probe 4 of 4: ok
+[rustos] heap self-test: ok
+[rustos] timer: 100 Hz, 5 ticks in 48 ms ok
+[rustos] random bench: chacha20 113 MB/s, reseed 263 us, next_u64 481.5 ns
+[rustos] zero bench: 1 KiB 308.3 ns, 4 KiB 1162.0 ns, 4 KiB over 1 MiB 1219.0 ns, 4 KiB alloc+free 1538.8 ns
 [rustos] fpu: xsaveopt, 832 bytes per task, x87 sse avx
 [rustos] sched: fifo+eevdf per cpu, 700 us base slice, 24 tasks max, 4 cpus, timer one-shot
-[rustos] idle: 2 timer irqs in 50 ms (tickless)
+[rustos] idle: 1 timer irqs in 50 ms (tickless)
 [rustos] task self-test: ok (simd state intact, 27 switches)
-[rustos] smp self-test: ok (592 turns, 125 migrations)
-[rustos] switch: 3205 ns (3565 with simd, 10389 cross-core), ipi round trip 7799 ns, pick_next 1333 ns, tick 200 ns, wake: mean 1730865 ns, max 9005193 ns, 20 samples
-[rustos] scale: 8 tasks, 1 cpu: 15186 us, 2 cpu: 8539 us, 4 cpu: 4656 us
-[rustos] alloc storm: 4 cpus x 2000, frames locked 44717 us (51927 contended), cached 5379 us (0), heap 15298 us (11502)
+[rustos] smp self-test: ok (541 turns, 100 migrations)
+[rustos] switch: 25962 ns (1869 with simd, 4582 cross-core), ipi round trip 26174 ns, pick_next 667 ns, tick 93 ns, wake: mean 1338464 ns, max 2020225 ns, 20 samples
+[rustos] scale: 8 tasks, 1 cpu: 451929 us, 2 cpu: 372462 us, 4 cpu: 446807 us
+[rustos] alloc storm: 4 cpus x 2000, frames locked 138821 us (31491 contended), cached 51872 us (0), heap 91602 us (9344)
+[rustos] boot phases: console 3485 us, interrupts 6301 us, reclaim 313 us, setup 11359 us
+[rustos] boot time: kernel 2774 ms to prompt (memory 4, smp 1, self-tests 342, benches 2405)
 [rustos] boot ok
 ```
 

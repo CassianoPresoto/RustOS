@@ -3,8 +3,8 @@
 
 use rustos_hal::{BootInfo, Cpu, PAGE_SIZE, RegionKind};
 use rustos_shell::{
-    BenchReport, CpuInfo, DisplayInfo, FaultTest, Host, MemoryInfo, Shell, SystemInfo, TaskInfo,
-    TaskState,
+    BenchReport, CpuInfo, DisplayInfo, FaultTest, Host, MemoryInfo, MicroBench, Shell, SystemInfo,
+    TaskInfo, TaskState,
 };
 use rustos_term::Layout;
 
@@ -200,16 +200,35 @@ impl<B: BootInfo> Host for System<'_, B> {
     fn bench(&self) -> Option<BenchReport> {
         bench::run(bench::FULL)
     }
+
+    fn micro_bench(&self) -> Option<MicroBench> {
+        let zero = heap::zero_benchmark()?;
+        let random = random::benchmark()?;
+        Some(MicroBench {
+            zero_kib_tenths_ns: zero.kib,
+            zero_page_tenths_ns: zero.page,
+            zero_cold_tenths_ns: zero.cold_page,
+            zero_pair_tenths_ns: zero.pair,
+            random_mb_per_s: random.mb_per_s,
+            random_reseed_ns: random.reseed_ns,
+            random_u64_tenths_ns: random.u64_tenths_ns,
+        })
+    }
 }
 
-/// Breakpoint que volta e tiques do timer contados contra o relógio.
-pub fn interrupt_self_test() -> bool {
+/// Breakpoint que volta: a IDT, o `VBAR` e o retorno da exceção funcionam.
+pub fn exception_self_test() -> bool {
     let breakpoint_ok =
         platform::trigger(interrupts::FaultTest::Breakpoint) && interrupts::breakpoints() == 1;
     kprintln!(
         "[rustos] exception self-test: {}",
         if breakpoint_ok { "ok" } else { "FAILED" }
     );
+    breakpoint_ok
+}
+
+/// Tiques do timer contados contra o relógio: 50 ms de espera, antes de o escalonador ligar.
+pub fn timer_self_test() -> bool {
     let cpu = platform::cpu();
     let elapsed = || platform::now_ns().unwrap_or(0);
     let (start_ticks, start_ns) = (interrupts::ticks(), elapsed());
@@ -227,7 +246,7 @@ pub fn interrupt_self_test() -> bool {
         platform::TIMER_HZ,
         if timer_ok { "ok" } else { "FAILED" }
     );
-    breakpoint_ok && timer_ok
+    timer_ok
 }
 
 /// Laço do shell, a tarefa principal: tira bytes da fila que as IRQs de serial e
