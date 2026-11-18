@@ -145,6 +145,12 @@ write, kernel, not mapped"), conferido com uma recursão numa tarefa, em vez de 
 cascata de faltas na própria entrada.
 `sp` de uma exceção que volta (`brk`) é o `SP_EL1` intocado: o `eret` restaura o `SPSel`.
 
+> **Desenho da fase 4 (ainda não implementado, [SDD 17](17_processos_isolamento_e_syscalls.md#aarch64-svc)):** com EL0, o `SP_EL0` passa a ser a pilha do usuário e o
+> `vector_fault` não pode mais empilhar nele, nem o `brk` e a falta do `usercopy`, que voltam. A ordem passa a ser a do
+> Linux: exceção síncrona e SError de EL1h entram na pilha da tarefa, com teste de estouro, e só o estouro troca para a
+> pilha de falhas, achada pelo `TPIDR_EL1` (posto em `exception::install`); falta dentro da pilha de falhas continua nela.
+> O texto acima descreve o código de hoje.
+
 ## Regra de lock
 
 **Ninguém cede a CPU com `IrqLock` preso.** `yield_now`, `sleep_until`, `park` e `exit`

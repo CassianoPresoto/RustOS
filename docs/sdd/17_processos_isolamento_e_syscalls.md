@@ -159,23 +159,26 @@ kernel).
 | --- | --- | --- |
 | 0 `#DE`, 3 `#BP`, 4 `#OF`, 5 `#BR`, 6 `#UD`, 7 `#NM`, 10 `#TS`, 11 `#NP`, 12 `#SS`, 13 `#GP`, 16 `#MF`, 17 `#AC`, 19 `#XF`, 20 `#VE`, 21 `#CP` | `Fault`: o processo morre. (`#NM` não deveria ocorrer: `CR0.TS = 0`, o estado de SIMD é eager) | Como hoje: relata e para |
 | 14 `#PF` | Resolve (página zero, frame novo) ou `Fault` | Se o `pc` está no `usercopy`, trata como [falta do processo ou *fixup*](#cópia-usuáriokernel); senão como hoje |
-| 1 `#DB` | `Fault` (sem depuração na fase 4). **Ganha IST própria** (IST4, com guarda abaixo) e entrada paranoica, como `#DF`, NMI e `#MC`: pode disparar na primeira instrução da entrada, antes do `swapgs` e da troca de pilha | Entrada paranoica, relata e para |
+| 1 `#DB` | `Fault` (sem depuração na fase 4). **Ganha IST própria** (IST4, com guarda abaixo), porque pode disparar na primeira instrução da entrada, antes do `swapgs` e da troca de pilha. **Vindo do anel 3, o stub da IST4 não trata nada nela:** faz `swapgs` (e o CR3 do kernel sob KPTI), **copia o quadro de hardware para a pilha da tarefa** (`gs:[kernel_rsp]`, a do `TSS.rsp[0]`) e segue como entrada normal, como a `idtentry_mce_db` do Linux ("switch stacks and treat it as a normal entry"). Matar o processo e o `schedule` rodam na pilha da tarefa, **nunca na IST** | Entrada paranoica na IST, relata e para |
 | 2 NMI, 8 `#DF`, 18 `#MC` | Continuam com IST e fatais com relatório, mesmo vindos de usuário | idem |
 | Qualquer outro vetor sem tratador | `Fault` | Como hoje |
 
 **O `IRETQ` de saída pode falhar.** O Linux o diz no `entry_64.S`: "This may fault.
 Non-paranoid faults on return to userspace are handled by fixup_bad_iret. These include
-#SS, #GP, and #NP." Quando ocorre, a CPU já trocou `GS` e CR3 para os do usuário: o
-caminho `.Lerror_bad_iret` faz `swapgs`, volta ao CR3 do kernel e chama `fixup_bad_iret`,
+#SS, #GP, and #NP." Quando ocorre, a CPU já trocou `GS` e CR3 para os do usuário (o
+`swapgs` e a troca de CR3 vêm **antes** do `iretq`), e o `CS` salvo é o do kernel: um stub
+de exceção "do kernel" que confiasse no `CS` usaria o `GS` do usuário. O caminho
+`.Lerror_bad_iret` do Linux faz `swapgs`, volta ao CR3 do kernel e chama `fixup_bad_iret`,
 que monta o quadro "as if we faulted immediately after IRET" (**verificado**, cópia local).
 Desenho do RustOS:
 
 | O que | Como |
 | --- | --- |
-| Por construção | `CS` e `SS` são constantes do kernel; `RFLAGS` é o que a CPU salvou (ou `0x202` numa thread nova); `RIP` vem de `thread_create`, validado (`USER_MIN <= entry < USER_TOP`), ou é o que a CPU salvou |
-| O que sobra | O `RSP` do usuário: ele pode pô-lo não canônico, e a CPU o aceita em anel 3. Se o `IRETQ` o recusar, falha: **NÃO VERIFICADO** no SDM que `IRET` faça `#SS` ou `#GP` por isso |
-| *Fixup* | Uma entrada de tabela de exceção para o endereço do `iretq`. Falha com `RIP` ali e `CS` salvo de kernel: faz `swapgs`, restaura o CR3 do kernel e entrega um `Fault` de usuário, e o processo morre |
-| Teste | `thread_create` com `entry`/`sp` em `0xFFFF_8000_0000_0000`, `0x0000_8000_0000_0000` e `USER_TOP`; e um programa que põe `rsp` não canônico e deixa uma IRQ chegar |
+| Por construção | `CS` e `SS` são constantes do kernel; `RIP` vem de `thread_create`, validado (`USER_MIN <= entry < USER_TOP`), ou é o que a CPU salvou; `RFLAGS` vem da CPU ou, na saída de uma syscall, é `(R11 & 0x3C7FD7) \| 2` **com `NT` limpo** (o usuário põe `NT` e `AC` com `popf`) |
+| O que sobra | O `RSP` do usuário (não canônico, que a CPU aceita em anel 3) e qualquer bit de `RFLAGS` que o `IRETQ` recuse. Que `IRETQ` faça `#GP` com `NT = 1`, e `#SS`/`#GP` com `RSP` não canônico, é **inferência a confirmar no SDM** ([lista](18_fase_4_decisoes_pedidas.md#fontes-lidas-e-o-que-ficou-por-ler)) |
+| Onde se decide | **No stub dos vetores 11 `#NP`, 12 `#SS` e 13 `#GP`, em assembly, antes de tocar em `gs`:** compara o `RIP` do quadro com o endereço do `iretq` (`lea`/`cmp` relativos ao `rip`, que não usam `gs`). Igual: é o caso do *fixup*. Diferente: segue a entrada normal |
+| *Fixup* | Só depois da comparação: `swapgs`; sob KPTI, o CR3 do kernel (o stub e a IDT estão no trampolim, então rodam com o CR3 do usuário); monta o `Fault` de usuário e o processo morre |
+| Teste | `thread_create` com `entry`/`sp` em `0xFFFF_8000_0000_0000`, `0x0000_8000_0000_0000` e `USER_TOP`; usuário com `rsp` não canônico e uma IRQ; usuário que liga `NT = 1` e depois `AC = 1` por `popf` e faz syscall (o quadro sai sanitizado e o processo **não** morre, nem o kernel); e um `iretq` forçado a falhar em `#GP`, `#SS` e `#NP`, com e sem KPTI |
 
 ### aarch64: SVC
 
@@ -207,8 +210,11 @@ estado ilegal.
 | --- | --- |
 | Vetores 8 a 11 | Hoje só param ([DEBT-0012](../tech-debt/0012-excecao-de-usuario-so-para-a-cpu.md)). Passam a salvar o quadro na `SP_EL1` da tarefa (a exceção vinda de EL0 usa `SP_EL1`) e a despachar por `EC` |
 | `SP_EL0` | Na entrada de EL0 o quadro guarda o `SP_EL0` do usuário; a saída o restaura. **Nada do kernel usa `SP_EL0` depois disso** (o kernel roda em EL1h) |
-| Pilha de falhas | **O invariante "`SP_EL0` é sempre a pilha de falhas" é falso:** entre a entrada de EL0 e o prólogo que guarda `SP_EL0`, ele é o do usuário, e o `vector_fault` do [SDD 15](15_tarefas_e_preempcao.md) (`msr spsel, #0` e empilhar) empilharia na pilha do usuário. O desenho **tira o `SP_EL0` do `vector_fault`**: ele pega o topo da pilha de falhas na área por CPU, apontada por `TPIDR_EL1`, e troca de `sp` por ela. Sem registrador livre, guarda um escalar como o `kernel_ventry` do Linux (acima: `tpidr_el0`/`tpidrro_el0`); esse caminho só roda em falha **fatal**, que não volta, então o `TPIDR_EL0` do usuário que ele atropela já não importa |
-| Falta recuperável em EL1 | A falta do `usercopy` ([abaixo](#cópia-usuáriokernel)) volta: roda na `SP_EL1` da tarefa, com o teste de estouro, e **não** na pilha de falhas |
+| Pilha de falhas | **O invariante "`SP_EL0` é sempre a pilha de falhas" é falso:** entre a entrada de EL0 e o prólogo que guarda `SP_EL0`, ele é o do usuário, e o `vector_fault` do [SDD 15](15_tarefas_e_preempcao.md) (`msr spsel, #0` e empilhar) empilharia na pilha do usuário. O desenho **adota a ordem do Linux**: toda exceção síncrona ou SError de EL1h entra **na pilha da tarefa** (`SP_EL1`), com o teste de estouro de pilha do `kernel_ventry` (**verificado**: `add sp, sp, x0` e `sub x0, sp, x0`, sem registrador livre, e `tbnz` no bit `THREAD_SHIFT`); **só no estouro** vai para a pilha de falhas (o `__bad_stack`, que guarda `x0` em `tpidr_el0`/`tpidrro_el0`). O teste por bit do `sp` exige a pilha alinhada ao dobro do tamanho: pilha de 32 KiB em 64 KiB de endereço (custo só de janela, não de memória), ou comparar o `sp` com o limite guardado na área por CPU |
+| Por que a ordem muda | O `vector_fault` de hoje também serve o `brk` que **volta** (`exception.rs`, [SDD 10](10_interrupcoes.md)) e passa a servir a falta recuperável do `usercopy`. Quem volta não pode empilhar numa pilha de falhas que a próxima falha reinicia do topo. Com a ordem do Linux, `brk`, `usercopy` e IRQ usam o mesmo caminho: a pilha da tarefa |
+| Falta aninhada | No `__bad_stack`, se o `sp` já está **dentro** da pilha de falhas (falta enquanto relata uma falta), **continua nela**, sem reiniciar do topo |
+| `TPIDR_EL1` | O ponteiro da área por CPU (com o topo e a base da pilha de falhas) é posto em `exception::install`, **antes de qualquer falha possível**; o caminho de estouro o lê |
+| Efeito nos outros capítulos | O [SDD 15](15_tarefas_e_preempcao.md) e o [SDD 10](10_interrupcoes.md) descrevem o `vector_fault` de hoje ("sempre e sem testar o `sp`"). Os dois ganham uma nota "desenho da fase 4" no mesmo commit deste capítulo; o texto de hoje só muda quando o código mudar |
 | `TPIDR_EL0` e `TPIDRRO_EL0` | O usuário escreve `TPIDR_EL0`: salvo e restaurado por thread (ou zerado ao trocar de processo), senão vaza entre processos. O `Context` do aarch64 cresce 16 bytes |
 | `CNTKCTL_EL1` | Liga o acesso de EL0 ao `CNTVCT_EL0` e desliga o resto, como o Linux. Sem isso, `mrs x, cntvct_el0` em EL0 dá `EC 0x18` e a medida da syscall nula não roda. É a contrapartida do `CR4.TSD = 0` do x86_64 ([SDD 09](09_seguranca.md)) |
 | `TTBR0_EL1` de tarefa só de kernel | Uma **raiz vazia** estática, com ASID reservado: a tarefa do kernel não herda o `TTBR0` do último processo (nem lê memória dele por engano ou por especulação). No x86_64, a tarefa só de kernel usa a raiz do kernel, de metade baixa vazia, como hoje |
@@ -417,9 +423,10 @@ Proposta, sem equivalente verificado no Zircon:
 | Item | Desenho |
 | --- | --- |
 | Valor | `u32` = `geração << 16 \| (índice + 1)`. **`0` nunca é válido** (o índice mais um é no mínimo 1). A geração começa em 0, então o primeiro handle de um processo vale `1` |
-| Geração | 16 bits, sobe a cada reuso do slot. **Aposentadoria:** o slot cuja geração chegaria a `0xFFFF` é aposentado e nunca mais é usado, então a geração nunca dá a volta e handle velho jamais aponta para outro objeto. Custo: um slot serve 65 535 vezes. Teste de propriedade: nenhum valor de handle reaparece |
-| Teto | 4 096 handles vivos por processo (proposta); passar disso é `NoMemory`. O índice vai até 65 534 |
-| Slot | 16 bytes: `Object` (enum fechado de `Arc<Process>`, `Arc<Thread>`, `Arc<Vmo>`, `Arc<Vmar>`, `Arc<ChannelEnd>`, `Arc<Console>`: 8 bytes de ponteiro e 1 de tag), `rights: u32` e `generation: u16`. **Só vale sem `dyn`:** com `Arc<dyn Objeto>` o ponteiro é gordo (16 bytes) e o slot passa de 24 |
+| Geração | 16 bits, sobe a cada reuso do slot. **Aposentadoria:** o slot cuja geração chegaria a `0xFFFF` é aposentado e nunca mais é usado, então a geração nunca dá a volta e handle velho jamais aponta para outro objeto. Teste de propriedade: nenhum valor de handle reaparece |
+| **Orçamento da geração** | Um valor de 32 bits tem 2^32 combinações: **cada processo gasta, na vida inteira, até cerca de 2^32 handles** (65 534 slots × 65 535 usos); depois disso a tabela não tem slot e toda criação dá `NoMemory`. A 1 M de handles por segundo são cerca de 71 minutos: um servidor que cria um handle por pedido esgota. A saída é **contrato** e vai para a [decisão 2](18_fase_4_decisoes_pedidas.md#decisão-2--abi-nativa-lista-números-nomes-e-contrato): lista livre FIFO (**não** aumenta o total, só o gasta por igual), ou **handle de 64 bits antes de congelar a ABI** |
+| Teto | 4 096 handles **em tabela** por processo (proposta); passar disso é `NoMemory`. O índice vai até 65 534. **O handle dentro de uma mensagem em fila não conta nesses 4 096** (por isso há também o [limite de canais](#destruição-de-um-canal)) |
+| Slot | **24 bytes**, não 16. `Object` é um enum fechado de `Arc<Process>`, `Arc<Thread>`, `Arc<Vmo>`, `Arc<Vmar>`, `Arc<ChannelEnd>` e `Arc<Console>`: tag mais ponteiro dão **16 bytes** (medido com `rustc` na revisão); somam-se `rights: u32` e `generation: u16`, e o alinhamento fecha em 24. Chegar a 16 exigiria `tag: u8` e ponteiro como campos separados, com `unsafe` para remontar o `Arc` a cada acesso: **sem ganho medido, fica 24**. **Sem `dyn`** em todo caso: `Arc<dyn Objeto>` tem ponteiro gordo (16) e o slot passa de 24. Pior caso do teto: 4 096 × 24 = 96 KiB por processo, e a tabela cresce por demanda |
 | Tabela | `Vec` de slots mais lista de livres, cresce por demanda; protegida por **um `IrqLock` por processo** |
 | Referências | O `Arc` segura a **memória** do objeto (handle, mapeamento e fila de mensagem); o **ciclo de vida lógico** vem da contagem de handles, abaixo. Filho para pai usa `Weak`: sem ciclo de `Arc` |
 | Contagem de handles | Cada objeto guarda `handle_count`: handles em tabela **e em trânsito** (dentro de uma mensagem). Chega a zero: o objeto recebe `on_zero_handles()` |
@@ -440,13 +447,31 @@ com `h_B` fica na fila de B; `h_B` conta como handle em trânsito, então a cont
 e nunca chegaria a zero: ninguém pode ler a fila de B, e ela segura B. Cada ponta guarda
 `próprios_em_minha_fila`, o número de handles **dela mesma** que estão na fila **dela**.
 Quando `handle_count == próprios_em_minha_fila`, a ponta é **inalcançável** e morre pelo
-passo 1, o que fecha o `h_B` da mensagem e quebra o ciclo. **Teste obrigatório** no host
-(`core/object`).
+passo 1, o que fecha o `h_B` da mensagem e quebra o ciclo.
 
-**Limite documentado:** ciclos entre duas ou mais filas (um handle de B1 dentro da fila de
-B2 e um de B2 dentro da de B1) **não** são coletados. O teto de 16 mensagens e 8 handles
-por mensagem limita o vazamento. Vira dívida com gatilho (primeiro programa que os
-produza, ou os grupos de recursos da fase 9), registrada no PR da 4c.
+**Quando a checagem roda: sempre que um dos dois números muda**, não só no
+`on_zero_handles`. Ela roda (a) quando `handle_count` cai (um `handle_close`, uma
+transferência), e (b) **quando `próprios_em_minha_fila` sobe, isto é, na escrita**: no
+cenário acima, o `channel_write` que põe `h_B` na fila de B é o que deixa B inalcançável
+(a contagem de B é 1, a de próprios é 1), e B morre **na própria escrita**, não no `close`
+de `h_A`. **Testes obrigatórios** no host (`core/object`): o cenário nas duas ordens
+(escrever e fechar; fechar a outra ponta antes de escrever).
+
+**Vazamento entre filas: ilimitado, e o teto não o limita.** Ciclos entre duas ou mais
+filas (um handle de B1 dentro da fila de B2 e um de B2 dentro da de B1) **não** são
+coletados. O teto de 16 mensagens e 8 handles limita o **tamanho** de cada ciclo, não o
+**número** de ciclos; e o handle em fila não conta nos 4 096 da tabela. Um programa que
+crie ciclos em laço vaza sem fim.
+
+| Opção | Custo |
+| --- | --- |
+| Coletar por alcançabilidade (marcar a partir dos handles em tabela) | Percorre todos os canais; é um coletor de lixo no kernel. Mais código e mais tempo de pausa |
+| **Limitar canais e objetos por processo (escolhida para a fase 4)** | Um contador por processo: `channel_create` e `vmo_create` somam, a morte do objeto subtrai; passar de `MAX_CHANNELS` (proposta: 256 pontas) ou de `MAX_VMOS` é `NoMemory`. A ponta continua cobrada ao **criador** enquanto existir, esteja o handle onde estiver (tabela ou fila) |
+
+O limite **não fecha o problema**: um ciclo cobrado a um processo que já morreu segue vivo
+(a cobrança some, o vazamento fica), e muitos processos que criam e morrem somam. O que
+sobra é **dívida da 4c** (a coleta por alcançabilidade), registrada com o gatilho "o
+primeiro programa que produza o ciclo, ou os grupos de recursos da fase 9".
 
 ### Operações sobre handle
 
@@ -455,20 +480,41 @@ tabela**: entre ler o valor e removê-lo, nenhuma outra thread do processo pode 
 substituí-lo ou enviá-lo. Duas threads que fecham o mesmo handle: uma vê `BadHandle`. Vale
 para todas as linhas abaixo.
 
+**Regra geral para toda chamada que move handle** (`channel_write`, e `process_create` com
+`bootstrap` e `events`): (1) o handle que **autoriza** a chamada (`ch`, `parent`) é validado
+primeiro, e erro nele **não consome nada**; (2) os handles **movidos** são tratados como um
+array: validar **todos**, depois remover **todos** de uma vez, sob o lock da tabela;
+(3) o mesmo valor duas vezes (`bootstrap == events`, ou repetido no array) é `BadHandle`;
+(4) a partir da remoção, em erro, os removidos são **fechados**; (5) o handle que o kernel
+guarda (o `events`) entra em `handle_count` **na criação** do processo, senão a ponta
+morreria ali.
+
 | Operação | Regra |
 | --- | --- |
 | `handle_close` | Remove o slot. Não pede direito. Se foi o último handle do objeto, `on_zero_handles` roda **depois** de soltar o lock da tabela |
 | `handle_duplicate(h, rights)` | `h` exige `DUPLICATE`; `rights ⊆ h.rights`; insere o handle novo e devolve o valor |
 | `handle_replace(h, rights)` | Remove `h` **sempre** que ele existe, em sucesso e em erro (**verificado** no Zircon: "handle is always invalidated"). Se `rights ⊄ h.rights`: `InvalidArgs`, com o original já invalidado. `h` que não existe: `BadHandle` (nada a invalidar). **Nenhum direito é exigido** (**verificado**: "Rights: None"); em particular, não pede `DUPLICATE` |
-| `channel_write(ch, bytes, handles)` | Ver abaixo |
+| `process_create(parent, …, bootstrap, events)` | `parent` com `MANAGE_PROCESS` (erro: nada consumido). `bootstrap` (`TRANSFER`) e `events` (`WRITE` e `TRANSFER`) seguem a regra geral. O `bootstrap` vai para a tabela do filho; o `events` fica **no Process**, contado em `handle_count`, e o kernel o fecha depois de escrever o evento final (então o pai vê `PEER_CLOSED` depois do evento) |
+| `channel_write(ch, bytes, handles)` | Abaixo |
+| `channel_read(ch, …)` | Abaixo |
 
 **`channel_write`**, na ordem (o array de handles já foi **copiado** para o kernel, ver
-[cópia usuário↔kernel](#cópia-usuáriokernel)):
+[cópia usuário↔kernel](#cópia-usuáriokernel)). A ordem de locks é **tabela, depois canal**,
+nunca o contrário:
 
 1. Sob o lock da tabela, valida `ch`: existe, é canal, tem `WRITE`. Se não: erro **e nenhum handle consumido** (a página do Zircon não distingue esse caso: **NÃO VERIFICADO**; o RustOS poupa quem errou o handle do canal).
-2. Para cada handle do array: existe (`BadHandle` se não); não repete no array (`BadHandle`); tem `TRANSFER` (`AccessDenied`); não é a **própria ponta** de `ch`, isto é, nem `ch` nem outro handle da mesma ponta (`NotSupported`). Isso é conferido pela identidade da ponta, não pelo valor do handle.
-3. **Remove da tabela todos os handles do array que existem**, no mesmo passo.
-4. Sem erro: os handles seguem **na mensagem**, que entra na fila da ponta oposta. Com erro, **incluindo `PeerClosed` e fila cheia**: os handles removidos são **fechados**, como no Zircon ("discarded … on success or failure"). O chamador não os recupera.
+2. **Sob o lock do canal, antes de tirar qualquer handle da tabela:** a ponta oposta está viva? Se não, `PeerClosed` (a falha **consome** o array, passo 5). Há espaço na fila dela? Se não, **`ShouldWait`: nada é consumido** e nenhum estado muda. Havendo espaço, **reserva o slot** da mensagem.
+3. Para cada handle do array: existe (`BadHandle` se não); não repete no array (`BadHandle`); tem `TRANSFER` (`AccessDenied`); não é a **própria ponta** de `ch`, isto é, nem `ch` nem outro handle da mesma ponta (`NotSupported`). Conferido pela identidade da ponta, não pelo valor do handle.
+4. **Remove da tabela todos os handles do array que existem**, no mesmo passo; sem erro, a mensagem ocupa o slot reservado e `próprios_em_minha_fila` e a [checagem do ciclo](#destruição-de-um-canal) rodam.
+5. Com erro **depois** do passo 2 (inclui `PeerClosed` e os erros do passo 3): os handles removidos são **fechados**, como no Zircon ("discarded … on success or failure"), e a reserva é solta. **`ShouldWait` fica de fora desse descarte**: é uma condição de repetir, não uma falha da mensagem. Consequência: uma fila cheia esconde um erro do array até a repetição.
+
+**`channel_read`**, na ordem. A falha da cópia para o usuário **não perde mensagem nem handle**:
+
+1. Sob o lock do canal, **espia** a mensagem da frente sem retirá-la, anotando o número de sequência dela. Fila vazia: `ShouldWait` (ou `PeerClosed`, se a ponta oposta morreu). Buffer menor que a mensagem: `BufferTooSmall`, com os tamanhos em `actual` e a mensagem **na fila**.
+2. Sob o lock da tabela, **reserva** os slots dos handles da mensagem (`NoMemory` se faltar; a mensagem fica) e calcula os valores deles.
+3. **Sem lock nenhum**, copia os bytes e os valores dos handles para o usuário (`copy_to_user`, que pode faltar e resolver página).
+4. Se a cópia falhou: libera as reservas, devolve `OutOfRange`, e a mensagem **continua na fila**.
+5. Se deu certo, sob os dois locks: confere que a mensagem da frente ainda tem o mesmo número de sequência (outra thread pode tê-la lido: então repete desde o passo 1), **retira-a** e instala os handles nos slots reservados.
 
 **Invariantes e testes** (em `core/object`, host, `forbid(unsafe_code)`):
 
@@ -476,8 +522,12 @@ para todas as linhas abaixo.
 | --- | --- |
 | Direitos só diminuem | Sequências aleatórias de duplicar, substituir e transferir nunca produzem handle com direito fora do conjunto do handle raiz |
 | **Entrelaçamento** | Cada operação é partida em passos (adquirir o lock, validar, remover, inserir) e o teste embaralha, de modo determinístico, os passos de duas ou três threads do mesmo processo sobre os mesmos handles. Nenhum handle é usado duas vezes, nenhum some sem ser fechado, e a soma dos `handle_count` é igual aos handles em tabela mais os em trânsito. **Sem o lock, o teste tem de falhar** |
-| Ciclo da ponta | O cenário acima termina com as duas pontas mortas e `handle_count` zero |
+| Ciclo da ponta | O cenário acima termina com as duas pontas mortas e `handle_count` zero, nas duas ordens |
 | Atomicidade do `channel_write` | Handle repetido, a própria ponta, sem `TRANSFER` e `PeerClosed` consomem o array por inteiro; `ch` inválido não consome nada |
+| **`ShouldWait` não consome** | Encher a fila de uma ponta; escrever com um handle: `ShouldWait`, e o handle **segue na tabela**; esperar `WRITABLE`; reescrever: sucesso, e o handle sai da tabela |
+| `process_create` | `bootstrap == events` é `BadHandle` e consome os dois; o `events` entra em `handle_count` (a ponta do pai não vê `PEER_CLOSED` na criação); erro em `parent` não consome |
+| `channel_read` | Cópia que falha (ponteiro ruim no meio do buffer) deixa a mensagem na fila e a tabela intacta; duas threads lendo o mesmo canal não perdem nem duplicam mensagem |
+| Ciclo, na escrita | Escrever o handle da ponta oposta pela própria ponta mata a oposta já na escrita |
 | Geração | Nenhum valor de handle reaparece, inclusive depois da aposentadoria do slot |
 
 ### Direitos iniciais ([decisão 3](18_fase_4_decisoes_pedidas.md#decisão-3--o-conjunto-inicial-de-bits-de-direito))
@@ -577,7 +627,7 @@ O contrato de como um programa **começa**, igual para o `init` e para qualquer 
 | `NotSupported` | -7 | Número de syscall desconhecido; flag que a fase não implementa; a própria ponta do canal no array de handles |
 | `OutOfRange` | -8 | Ponteiro ou intervalo fora de `UserRange`, ou na faixa nula |
 | `PeerClosed` | -9 | O outro lado do canal sumiu (na leitura, só depois de a fila esvaziar) |
-| `ShouldWait` | -10 | Canal sem mensagem (leitura) ou cheio (escrita): espere e tente de novo |
+| `ShouldWait` | -10 | Canal sem mensagem (leitura) ou cheio (escrita): espere e tente de novo. **Não consome handle** |
 | `TimedOut` | -11 | `object_wait_one` chegou ao prazo |
 | `BufferTooSmall` | -12 | Mensagem maior que o buffer: o tamanho vai em `actual` |
 
@@ -609,7 +659,7 @@ ilegal, falta sem região) mata, pelo [canal de eventos](#falhas-de-usuário).
 | `0x32` | `process_kill` | `process` | — | `process`: `DESTROY` |
 | `0x40` | `channel_create` | `flags` (0) | dois handles (empacotados) | Nenhum |
 | `0x41` | `channel_write` | `ch`, `bytes`, `nbytes`, `handles`, `nhandles` | — | `ch`: `WRITE`; cada handle: `TRANSFER`. [Consome o array](#operações-sobre-handle) |
-| `0x42` | `channel_read` | `ch`, `bytes`, `bytes_cap`, `handles`, `handles_cap`, `actual*` | — (tamanhos em `actual`) | `ch`: `READ` |
+| `0x42` | `channel_read` | `ch`, `bytes`, `bytes_cap`, `handles`, `handles_cap`, `actual*` | — (tamanhos em `actual`) | `ch`: `READ`. Só retira a mensagem **depois** da cópia ([ordem](#operações-sobre-handle)) |
 
 - **`thread_create` e o carregador validam `USER_MIN <= entry < USER_TOP`, `sp <= USER_TOP` e `sp` alinhado a 16** antes de qualquer outra coisa; fora disso, `InvalidArgs`. Teste no host com `0xFFFF_8000_0000_0000`, `0x0000_8000_0000_0000` e `USER_TOP` (o `RIP` que o `IRETQ` restaura vem daqui: [exceções do anel 3](#exceções-vindas-do-anel-3)).
 - **`vmar_map`:** `flags` leva `READ`/`WRITE`/`EXECUTE` e, opcionalmente, `FIXED` (`vmar_off` exato; **recusa** sobrepor mapeamento existente, o equivalente do `MAP_FIXED_NOREPLACE` do Linux, **verificado** em [mmap(2)](https://man7.org/linux/man-pages/man2/mmap.2.html); o `MAP_FIXED` do Linux apaga o que havia, e o RustOS não o oferece). Sem `FIXED` o kernel escolhe o endereço, com o [ASLR](#aslr-quantos-bits), e `vmar_off` tem de ser 0. W+X é `InvalidArgs`. Intervalo na faixa nula ou acima de `USER_TOP` é `OutOfRange`.
@@ -628,7 +678,7 @@ ilegal, falta sem região) mata, pelo [canal de eventos](#falhas-de-usuário).
 | `PEER_CLOSED` | `1 << 2` | Canal: a outra ponta morreu |
 | `TERMINATED` | `1 << 3` | Process e Thread que terminaram |
 
-**Flags:** `vmar_map`: `READ` `1 << 0`, `WRITE` `1 << 1`, `EXECUTE` `1 << 2`, `FIXED` `1 << 3`; o resto é reservado e dá `InvalidArgs`. `vmo_create` e `channel_create`: `flags` tem de ser 0. **Direitos:** o bit `n` da [tabela](#direitos-iniciais-decisão-3) vale `1 << n`.
+**Numeração diferente de propósito:** as flags de `vmar_map` (`READ` `1 << 0`, `WRITE` `1 << 1`, `EXECUTE` `1 << 2`) e os bits de direito (`READ` bit 2, `WRITE` bit 3, `EXECUTE` bit 4) **não coincidem**. Flag é argumento de uma chamada; direito é atributo de um handle. Misturá-los (usar o direito como flag, ou o contrário) seria erro silencioso; a conversão é uma tabela explícita, com teste. **Flags:** `vmar_map`: `READ` `1 << 0`, `WRITE` `1 << 1`, `EXECUTE` `1 << 2`, `FIXED` `1 << 3`; o resto é reservado e dá `InvalidArgs`. `vmo_create` e `channel_create`: `flags` tem de ser 0. **Direitos:** o bit `n` da [tabela](#direitos-iniciais-decisão-3) vale `1 << n`.
 
 **Direitos iniciais de cada handle que o kernel cria:**
 
@@ -643,7 +693,7 @@ ilegal, falta sem região) mata, pelo [canal de eventos](#falhas-de-usuário).
 | Boot do `init` | Console | `DUPLICATE`, `TRANSFER`, `WRITE` |
 | Boot do `init` | Initramfs (VMO físico) | `DUPLICATE`, `TRANSFER`, `READ`, `MAP` (sem `EXECUTE`, sem `WRITE`) |
 
-**Handle:** `u32`, `0` inválido, geração de 16 bits com aposentadoria do slot, teto de 4 096 por processo ([tabela de handles](#tabela-de-handles)).
+**Handle:** `u32`, `0` inválido, geração de 16 bits com aposentadoria do slot, teto de 4 096 em tabela por processo e **orçamento de cerca de 2^32 handles por processo na vida** ([tabela de handles](#tabela-de-handles); a largura é pergunta da decisão 2).
 
 **Limites do canal.** Comparados com o Zircon (**verificado**: 65 536 bytes e 64 handles por mensagem; a profundidade da fila **NÃO VERIFICADO**):
 
@@ -763,7 +813,7 @@ não foi lida).
 
 | Quem | Como |
 | --- | --- |
-| `init` | O **kernel** o carrega: `core/elf` valida; para cada `PT_LOAD` cria um VMO, copia os bytes do arquivo, deixa o resto zerado (`.bss`, inclusive a cauda da última página de arquivo) e mapeia com a permissão do segmento no VMAR raiz. Cópia, não mapa em lugar: os dados do `newc` só alinham a 4 bytes |
+| `init` | O **kernel** o carrega: `core/elf` valida; para cada `PT_LOAD` aloca frames, copia os bytes do arquivo, deixa o resto zerado (`.bss`, inclusive a cauda da última página de arquivo) e os mapeia, com a permissão do segmento, **direto no espaço do processo** pela árvore de regiões de `core/mm` (4b: **sem objeto VMO nem VMAR e sem handle**; o VMO e o VMAR raiz como objetos só existem a partir da 4c, e então o `init` passa a receber o handle do VMAR raiz). Cópia, não mapa em lugar: os dados do `newc` só alinham a 4 bytes |
 | Outros programas | Quem os cria. O `init` lê o ELF do initramfs (que recebeu como VMO), cria o processo, e preenche e mapeia os VMOs com as chamadas da ABI; o `user/rt` usa o mesmo `core/elf` |
 
 Só o `init` está no caminho de confiança do kernel (initramfs do bootloader; boot
@@ -875,7 +925,7 @@ o kernel escreve **uma** mensagem de `ProcessEvent` nela:
 | --- | --- | --- |
 | `kind` | `Exit` | `Fault` |
 | `code` | o argumento de `process_exit` | — |
-| `fault_kind` | — | falta de página, instrução ilegal, acesso desalinhado, aritmética, outro |
+| `fault_kind` | — | falta de página, instrução ilegal, acesso desalinhado, aritmética, breakpoint, outro |
 | `pc`, `sp`, `addr` | — | do usuário |
 | `isa_code` | — | o `code` cru da ISA (vetor e erro; `ESR_EL1`) |
 
@@ -913,13 +963,15 @@ O adaptador Linux da fase 5 traduz o `Fault` em sinal.
 | `rustos-cpio` **(novo)** | `core/cpio` | Leitor `newc`, iterador sem alocação | proibido | nada |
 | `rustos-object` **(novo)** | `core/object` | `Rights`, `HandleTable<T>`, regras de duplicar, substituir e transferir, contagem de handles, fila do canal, sinais | proibido | `rustos-hal` |
 | ABI (números, `Status`, direitos, constantes de layout, `ProcessEvent`, mensagem de boot) | `core/hal/src/abi.rs` (**módulo, não crate**) | O contrato com o programa de usuário, a "primeira porta de entrada" do [SDD 02](02_arquitetura.md) | proibido | nada |
-| `rustos-user-rt` **(novo)** | `user/rt` | Runtime dos programas: ponto de entrada em Rust, `panic`, alocador mínimo, leitor de auxv, carregador de ELF de usuário | nenhum | `hal` (a ABI), `elf`, `cpio`, `arch-<isa>-user` |
-| `rustos-user-init` e programas de teste **(novos)** | `user/init`, `user/tests/*` | O `init`, o teste de falha, o de SIMD, o de syscall nula | proibido | `user-rt` |
+| `rustos-user-rt` **(novo)** | `user/rt` | Runtime dos programas: ponto de entrada em Rust, `panic`, alocador mínimo, leitor de auxv, carregador de ELF de usuário | **mínimo, com `// SAFETY:`**: `GlobalAlloc`, a leitura do auxv e `#[unsafe(no_mangle)]` o exigem; nenhum `asm!` | `hal` (a ABI), `elf`, `cpio`, `arch-<isa>-user` |
+| `rustos-user-init` e programas de teste **(novos)** | `user/init`, `user/tests/*` | O `init`, o teste de falha, o de SIMD, o de syscall nula | proibido (`forbid(unsafe_code)`; o `unsafe` fica no `user/rt`) | `user-rt` |
 | `rustos-arch-x86_64-user`, `rustos-arch-aarch64-user` **(novos)** | `arch/x86_64-user`, `arch/aarch64-user` | **Todo o `asm!` do lado do usuário:** `_start` (alinha o `rsp`, zera o frame pointer e chama o `main` do `user/rt`), os stubs de `syscall`/`svc`, `rdtsc`/`cntvct` e `xmm0`/`v0` do teste | permitido | `rustos-hal` |
 
 O `_start` precisa de `asm!` (o alinhamento do `rsp`, e nenhuma função Rust nasce sem
-prólogo); como o `asm!` só mora em `arch/`, ele vai para `arch/<isa>-user`, e o `user/rt`
-fica sem `unsafe`. Os adaptadores `arch/<isa>-user` cabem nas regras 4 e 8 do guidelines
+prólogo); como o `asm!` só mora em `arch/`, ele vai para `arch/<isa>-user`. O `user/rt`
+não tem `asm!`, mas **tem `unsafe` mínimo, com `// SAFETY:`**: as regras do
+[guidelines 04](../guidelines/04_unsafe_e_asm.md) já permitem (o `forbid(unsafe_code)` é só de
+`core/` e `drivers/`), e o `check-layers` da 4a o confere (sem `asm!` em `user/`). Os adaptadores `arch/<isa>-user` cabem nas regras 4 e 8 do guidelines
 03; o que muda é a pasta `user/` e a regra 5. O **diff está feito** em
 [`guidelines/03`](../guidelines/03_camadas_e_dependencias.md).
 

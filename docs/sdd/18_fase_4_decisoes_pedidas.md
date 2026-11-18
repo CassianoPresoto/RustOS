@@ -65,6 +65,7 @@ não começa sem a resposta.
 | Aleatório | `random_get(ptr, len)` ambiente, até 256 bytes: o `init` precisa dele para `AT_RANDOM` dos filhos |
 | Autoridade sem handle | Só a lista de [Autoridade que não passa por handle](17_processos_isolamento_e_syscalls.md#autoridade-que-não-passa-por-handle) |
 | Valores numéricos (`Status`, sinais, flags, direitos iniciais, limites do canal, `ProcessEvent`, mensagem de boot) | Os das tabelas do [SDD 17](17_processos_isolamento_e_syscalls.md#contrato-numérico) |
+| **Largura do handle e orçamento da geração** | **Handle de 64 bits** (geração de 48 bits, índice de 16), decidido **antes de congelar a ABI**. Com 32 bits, cada processo gasta até cerca de 2^32 handles na vida e depois toda criação dá `NoMemory` (cerca de 71 minutos a 1 M de handles por segundo); a lista livre FIFO só distribui o gasto, não o aumenta. Com 64 bits: `channel_create` e `process_create` devolvem o par por **ponteiro de saída** (dois `u64` não cabem em `rdx`/`x1`); os arrays de handles de `channel_write` e `channel_read` passam a `u64`; o slot sobe de 24 para 32 bytes (pior caso de 4 096: 128 KiB). `ProcessEvent` e a mensagem de boot não mudam de tamanho. O [SDD 17](17_processos_isolamento_e_syscalls.md#tabela-de-handles) está escrito com 32 bits (a base); a escolha reescreve só esses pontos |
 | Estabilidade | Experimental até o fim da fase 5 |
 
 **Recomendação:** A, com as respostas acima.
@@ -159,11 +160,11 @@ o que o sinal precisa), mas a fase 5 paga a suspensão e a retomada.
 
 | Opção | Prós | Contras |
 | --- | --- | --- |
-| **A. `user/` (runtime e programas), com os adaptadores `arch/<isa>-user`** | O `asm!` continua só em `arch/`; o `user/` fica sem `unsafe` quase todo | Uma pasta nova e uma regra alterada |
+| **A. `user/` (runtime e programas), com os adaptadores `arch/<isa>-user`** | O `asm!` continua só em `arch/`; o `unsafe` do `user/` é mínimo e com `// SAFETY:` (só o `user/rt`: `GlobalAlloc`, auxv, `#[unsafe(no_mangle)]`), e os programas ficam em `forbid(unsafe_code)` | Uma pasta nova e uma regra alterada |
 | B. Programas em `kernel/src/bin` | Nada novo | Programa de usuário compila com a árvore do kernel; mistura as camadas |
 | C. O stub dentro de `arch/<isa>` com `cfg` | Sem pasta de crate nova | O programa de usuário liga o crate do kernel inteiro (`global_asm!` de vetores) |
 
-**Recomendação:** A. **O diff está feito em [`docs/guidelines/03_camadas_e_dependencias.md`](../guidelines/03_camadas_e_dependencias.md)** (regra 5 alterada, regras 11 e 12 novas): o merge do Draft o aprova.
+**Recomendação:** A. **O diff está feito em [`docs/guidelines/03_camadas_e_dependencias.md`](../guidelines/03_camadas_e_dependencias.md)** (regra 5 alterada, regras 11 e 12 novas): o merge do Draft o aprova. **O PR da 4a traz o `check-layers` conhecendo `user/` e a regra 12, com o teste vermelho antes do verde:** hoje `arch/x86_64-user` seria classificado como `Adapter` e o `Kernel` poderia depender dele; `user/` não classifica em camada nenhuma.
 
 **O que muda:** `Cargo.toml` (`default-members` sem `user/` nem `arch/*-user`, que só compilam para os alvos bare-metal); `xtask/src/checks/layers.rs` (a camada `User`); [SDD 03](03_mapa_de_codigo.md) e [SDD 05](05_build_e_execucao.md).
 
@@ -203,7 +204,7 @@ fora da lista acima por não serem dos seis casos; cada uma diz o que a faria su
 ## O diff dos guidelines
 
 `docs/guidelines/03_camadas_e_dependencias.md` já traz as regras alteradas e novas
-(`user/`, regra 5, `hal::abi`), como o `AGENTS.md` pede do Draft. As outras decisões não
+(regra 5; regras 11 e 12 para `user/`, `arch/<isa>-user` e o `unsafe` mínimo do `user/rt`), como o `AGENTS.md` pede do Draft. As outras decisões não
 tocam o guidelines. O `make layers-check` só aprende a camada `User` no PR da 4a.
 
 ## Fontes lidas e o que ficou por ler
@@ -229,6 +230,7 @@ tocam o guidelines. O `make layers-check` só aprende a camada `User` no PR da 4
 
 | Item | Fatia |
 | --- | --- |
+| Intel SDM: `IRETQ` com `NT = 1` (inferência: `#GP`) e com `RSP` não canônico (inferência: `#SS`/`#GP`), e os bits de `RFLAGS` que o `IRETQ` recusa | 4a |
 | Arm ARM: `TCR_EL1` (`A1`, `T0SZ`, `TG0`, `EPD0`), `ISS` do SVC, `AP[2:1]`, `nG`, ASID, PAN com `LDTR`/`STTR`, `UAO`, `WXN` sobre EL0, bit de `CNTKCTL_EL1.EL0VCTEN`, `ERET` ilegal | 4a, 4e |
 | Intel SDM: PCID (`CR3` bit 63, `INVPCID`), `IRET` com `RSP` não canônico, `CPUID` em anel 3 | 4a, 4e |
 | Linux `mm/memory.c` (`do_anonymous_page`, `wp_page_copy`) | 4c |
