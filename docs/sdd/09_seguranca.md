@@ -177,6 +177,10 @@ precisa estar de pé para a linha `random bench:`).
      primeiro callee e exige achá-los (`probe 4 of 4`). Sem ela, a varredura tinha uma zona
      cega nos cerca de 64 bytes logo abaixo do `sp` (o quadro da própria varredura caía
      ali): com `count_windows` fora de linha a sonda dá `0 of 4` no x86_64 `release`.
+     **Limite:** a sonda só pega essa regressão onde o quadro da varredura cai sobre o
+     plantio. Com `count_windows` fora de linha, ela reprova no x86_64 `dev` e `release`,
+     mas passa no aarch64 (os três perfis) e no x86_64 `release-small`. Não dá falso
+     "achou": exige exatamente 4, e uma passada sem plantio dá `0 of 4`.
    - **O que cobre:** `Words` e o `Rng` semeado com zero (a chave de `Rng::new(&[])`),
      não a chave real de `replenish` nem o `gather_jitter`.
    - **O que não vê:** o estado de trabalho no meio das rodadas, sem padrão reconhecível.
@@ -186,7 +190,9 @@ precisa estar de pé para a linha `random bench:`).
    - **O `v` do BLAKE2b** (`compress`) passou a ser zerado como o `m`: dava para reconstruir
      o `h` anterior a partir dele. Custo no host: 4 MiB de 1 595–1 606 para 1 554–1 578 MB/s
      (-2%), BLAKE2b-256 com chave de 191 para 200–202 ns (+5%), `reseed` de 164–167 para
-     172–173 ns.
+     172–173 ns. O `v` não tem padrão que a varredura reconheça: tirar o `wipe(&mut v)` não
+     muda a linha do boot. Quem confere é a desmontagem (`memset` de 128 B no aarch64,
+     `rep stosl` ou `movq $0` no x86_64), lida na revisão do PR.
 
 O que se observou rodando, com `-cpu max` salvo nota: x86_64 em TCG, `rdseed`; x86_64
 com `-cpu Haswell` (sem `RDSEED`), `rdrand`; x86_64 com `-cpu qemu64` (sem os dois),

@@ -37,7 +37,7 @@ Os dois alvos são Tier 2 com `core` pré-compilado: não há `build-std` nem ni
 | `make size` | `size` | Lê o ELF e soma `text`, `rodata`, `data`, `bss` |
 | `make check` | `check-layers`, `check-comments`, `check-docs` | Mais `cargo fmt --check` e `cargo clippy -D warnings` no host e nos dois alvos |
 | `make test` | — | `cargo test` dos membros padrão (todos menos o kernel) |
-| `make pr` | — | `check` + `test` + `smoke` nas duas ISAs |
+| `make pr` | — | `check` + `test` + `smoke` nas duas ISAs, mais o aarch64 em TCG com `RUSTOS_CPU=a64fx` (bloco de `DC ZVA` de 256 bytes, [DEBT-0060](../tech-debt/0060-recuo-do-zerar-sem-cobertura-no-smoke.md)) |
 
 `A` é `x86_64` (padrão), `aarch64` ou `all`; `P` é `dev` (padrão), `release` ou
 `release-small`. No `make`: `ARCH=` e `PROFILE=`.
