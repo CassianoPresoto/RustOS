@@ -26,6 +26,7 @@ mod platform;
 mod random;
 mod screen;
 mod smp;
+mod stack;
 mod sync;
 mod system;
 mod task;
@@ -107,6 +108,7 @@ extern "C" fn kmain() -> ! {
         Ok(top) => top,
         Err(error) => panic!("kernel stack: {error:?}"),
     };
+    task::adopt_boot_stack(top, KERNEL_STACK_PAGES);
     let handoff = Box::into_raw(Box::new(Handoff {
         boot,
         memory,
@@ -275,6 +277,7 @@ fn report_tasks(boot: &impl BootInfo, memory: &memory::Memory) -> bool {
         }
         None => kprintln!("[rustos] switch: not measured"),
     }
+    task::log_stacks();
     preempted.is_some() && smp_ok
 }
 

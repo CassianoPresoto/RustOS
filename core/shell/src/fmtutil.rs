@@ -126,6 +126,32 @@ impl fmt::Display for Seconds {
     }
 }
 
+/// Uso de uma pilha: o pico em KiB com uma casa truncada, e o tamanho: `3.4/32K`. Zero é `-`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StackUse {
+    pub peak: u32,
+    pub bytes: u32,
+}
+
+impl fmt::Display for StackUse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.bytes == 0 {
+            return f.pad("-");
+        }
+        let mut text = StackStr::<24>::new();
+        fmt::write(
+            &mut text,
+            format_args!(
+                "{}.{}/{}K",
+                self.peak / 1024,
+                self.peak % 1024 * 10 / 1024,
+                self.bytes / 1024
+            ),
+        )?;
+        f.pad(text.as_str())
+    }
+}
+
 /// Duração em nanossegundos, no formato do `uptime`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Uptime(pub u64);
@@ -276,6 +302,24 @@ mod tests {
         assert_eq!(Seconds(0).to_string(), "0.000");
         assert_eq!(Seconds(12_345_678_901).to_string(), "12.345");
         assert_eq!(Seconds(999_999).to_string(), "0.000");
+    }
+
+    #[test]
+    fn stack_use_shows_the_peak_and_the_size_in_kib() {
+        let use_of = |peak, bytes| StackUse { peak, bytes }.to_string();
+        assert_eq!(use_of(3_500, 32_768), "3.4/32K");
+        assert_eq!(use_of(0, 16_384), "0.0/16K");
+        assert_eq!(use_of(0, 0), "-");
+        assert_eq!(
+            format!(
+                "{:>8}",
+                StackUse {
+                    peak: 1_024,
+                    bytes: 4_096
+                }
+            ),
+            "  1.0/4K"
+        );
     }
 
     #[test]

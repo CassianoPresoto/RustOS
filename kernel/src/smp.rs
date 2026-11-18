@@ -10,6 +10,7 @@ use rustos_hal::{BootInfo, Cpu, MAX_CPUS, PhysAddr, VirtAddr};
 use rustos_sync::SpinLock;
 
 use crate::memory::Memory;
+use crate::stack::Stack;
 use crate::{panic, percpu, platform, task};
 
 /// Pilha do kernel de uma CPU secundária: 32 KiB, a mesma de uma tarefa.
@@ -75,6 +76,7 @@ pub fn start(boot: &impl BootInfo, memory: &mut Memory) -> Started {
                 continue;
             }
         };
+        Stack::new(top, STACK_PAGES).paint();
         *PLANS[index].lock() = Some(Plan { resources });
         STACK_TOPS[index].store(top.as_u64(), Ordering::Release);
         percpu::set_hw_id(index, platform::ipi_target(cpu.hw_id));
@@ -168,5 +170,6 @@ unsafe extern "C" fn ap_main(arg: *mut ()) -> ! {
         panic::stop_if_requested();
         core::hint::spin_loop();
     }
-    task::run_secondary()
+    let top = VirtAddr::new(STACK_TOPS[index].load(Ordering::Acquire));
+    task::run_secondary(Stack::new(top, STACK_PAGES))
 }

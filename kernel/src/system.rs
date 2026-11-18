@@ -172,6 +172,8 @@ impl<B: BootInfo> Host for System<'_, B> {
                 cpu_ns: snapshot.cpu_ns,
                 switches: snapshot.switches,
                 simd: snapshot.simd,
+                stack_peak: u32::try_from(snapshot.stack_peak).unwrap_or(u32::MAX),
+                stack_bytes: u32::try_from(snapshot.stack_bytes).unwrap_or(u32::MAX),
             });
         }
     }

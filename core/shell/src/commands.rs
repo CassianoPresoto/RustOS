@@ -3,7 +3,7 @@
 use core::fmt;
 
 use crate::ansi::{ACCENT, CLEAR_SCREEN, DIM, LOGO, RESET};
-use crate::fmtutil::{Bytes, Micros, Millis, Percent, Seconds, Uptime};
+use crate::fmtutil::{Bytes, Micros, Millis, Percent, Seconds, StackUse, Uptime};
 use crate::history::Entries;
 use rustos_hal::PAGE_SIZE;
 
@@ -328,8 +328,8 @@ fn mem(ctx: &mut Ctx<'_>) -> fmt::Result {
 fn ps(ctx: &mut Ctx<'_>) -> fmt::Result {
     write!(
         ctx.out,
-        "{DIM}{:>3}  {:<8} {:>3} {:<7} {:>10} {:>9}  simd{RESET}\r\n",
-        "id", "name", "cpu", "state", "cpu (s)", "switches"
+        "{DIM}{:>3}  {:<8} {:>3} {:<7} {:>10} {:>9} {:>9}  simd{RESET}\r\n",
+        "id", "name", "cpu", "state", "cpu (s)", "switches", "stack"
     )?;
     let mut result = Ok(());
     ctx.host.tasks(&mut |task| {
@@ -340,16 +340,21 @@ fn ps(ctx: &mut Ctx<'_>) -> fmt::Result {
             TaskState::Blocked => "wait",
         };
         let simd = if task.simd { "yes" } else { "-" };
+        let stack = StackUse {
+            peak: task.stack_peak,
+            bytes: task.stack_bytes,
+        };
         if result.is_ok() {
             result = write!(
                 ctx.out,
-                "{:>3}  {:<8} {:>3} {:<7} {:>10} {:>9}  {simd}\r\n",
+                "{:>3}  {:<8} {:>3} {:<7} {:>10} {:>9} {:>9}  {simd}\r\n",
                 task.id,
                 task.name,
                 task.cpu,
                 state,
                 Seconds(task.cpu_ns),
-                task.switches
+                task.switches,
+                stack
             );
         }
     });
@@ -850,6 +855,7 @@ mod tests {
         assert!(
             rows[0].contains("name") && rows[0].contains("switches") && rows[0].contains("cpu")
         );
+        assert!(rows[0].contains("stack") && rows[1].contains("3.4/32K"));
         assert!(rows[1].contains("idle") && rows[1].contains("ready") && rows[1].contains("0.250"));
         assert!(rows[2].contains("shell") && rows[2].contains("run") && rows[2].contains("12.345"));
         assert!(

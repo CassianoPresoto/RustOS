@@ -19,6 +19,7 @@ use crate::frames::Frames;
 use crate::memory::map_stack;
 use crate::percpu::{self, NO_TASK, PerCpu};
 use crate::platform::{self, FpuSummary, PlatformSpace};
+use crate::stack::Stack;
 use crate::sync::{IrqGuard, IrqLock, bump, locks_held};
 use crate::{bench, interrupts};
 
@@ -134,7 +135,7 @@ struct Meta {
     entry: Option<fn(usize)>,
     arg: usize,
     /// A pilha mapeada fica com o slot: a tarefa nova que o reusa não mapeia outra.
-    stack_top: Option<VirtAddr>,
+    stack: Option<Stack>,
     fpu: Option<FpuArea>,
 }
 
@@ -179,7 +180,7 @@ impl Slot {
                 name: "",
                 entry: None,
                 arg: 0,
-                stack_top: None,
+                stack: None,
                 fpu: None,
             }),
         }
@@ -288,6 +289,17 @@ static SPACE: IrqLock<Option<Space>> = IrqLock::new(None);
 static ACTIVE: AtomicU32 = AtomicU32::new(0);
 /// Quem espera a entrada do teclado ou da serial: slot + 1, ou 0.
 static INPUT_WAITER: AtomicUsize = AtomicUsize::new(0);
+/// O maior pico das tarefas cujo slot já foi reusado: o pico some ao repintar a pilha.
+static TASK_PEAK: AtomicUsize = AtomicUsize::new(0);
+/// A pilha do boot, que a tarefa `init` adota.
+static BOOT_STACK: IrqLock<Option<Stack>> = IrqLock::new(None);
+
+/// Pinta a pilha do kernel, a do boot, e a guarda para `init` adotar como a do shell.
+pub fn adopt_boot_stack(top: VirtAddr, pages: u64) {
+    let stack = Stack::new(top, pages);
+    stack.paint();
+    *BOOT_STACK.lock() = Some(stack);
+}
 
 /// Adota a execução atual como a primeira tarefa da CPU de boot, cria a ociosa dela e liga
 /// FPU/SIMD.
@@ -307,7 +319,11 @@ pub unsafe fn init(frames: Frames, direct_map_offset: u64) -> Result<FpuSummary,
         queue.idle = 0;
         let now = now();
         let task = slot(boot);
-        task.meta.lock().name = "init";
+        {
+            let mut meta = task.meta.lock();
+            meta.name = "init";
+            meta.stack = *BOOT_STACK.lock();
+        }
         task.cpu.store(0, Ordering::Release);
         task.affinity.store(0, Ordering::Relaxed);
         task.set_state(State::Running);
@@ -338,7 +354,7 @@ pub unsafe fn init(frames: Frames, direct_map_offset: u64) -> Result<FpuSummary,
 }
 
 /// Entra no escalonador numa CPU secundária: a execução atual vira a ociosa dela e não volta.
-pub fn run_secondary() -> ! {
+pub fn run_secondary(stack: Stack) -> ! {
     let cpu = percpu::current();
     let index = cpu.index();
     let policy = Box::new(Policy::new());
@@ -347,7 +363,11 @@ pub fn run_secondary() -> ! {
         queue.policy = Some(policy);
         queue.idle = index;
         let idle = slot(index);
-        idle.meta.lock().name = "idle";
+        {
+            let mut meta = idle.meta.lock();
+            meta.name = "idle";
+            meta.stack = Some(stack);
+        }
         idle.cpu.store(slot_u32(index), Ordering::Release);
         idle.affinity.store(1 << index, Ordering::Relaxed);
         idle.set_state(State::Running);
@@ -412,15 +432,24 @@ fn start(id: usize, config: Spawn, stack_pages: u64) -> Result<bool, TaskError> 
     let target = slot(id);
     let (known_stack, has_fpu) = {
         let meta = target.meta.lock();
-        (meta.stack_top, meta.fpu.is_some())
+        (meta.stack, meta.fpu.is_some())
     };
-    let top = if let Some(top) = known_stack {
-        top
+    let stack = if let Some(stack) = known_stack {
+        let used = stack.repaint();
+        if id >= FIRST_TASK {
+            TASK_PEAK.fetch_max(used, Ordering::Relaxed);
+        }
+        stack
     } else {
         let mut space = SPACE.lock();
         let space = space.as_mut().ok_or(TaskError::NoMemory)?;
-        map_stack(&mut space.frames, &mut space.tables, stack_pages).map_err(TaskError::Stack)?
+        let top = map_stack(&mut space.frames, &mut space.tables, stack_pages)
+            .map_err(TaskError::Stack)?;
+        let stack = Stack::new(top, stack_pages);
+        stack.paint();
+        stack
     };
+    let top = stack.top();
     let area = if config.simd && !has_fpu {
         Some(FpuArea::new().ok_or(TaskError::NoMemory)?)
     } else {
@@ -435,7 +464,7 @@ fn start(id: usize, config: Spawn, stack_pages: u64) -> Result<bool, TaskError> 
         meta.name = config.name;
         meta.entry = Some(config.entry);
         meta.arg = config.arg;
-        meta.stack_top = Some(top);
+        meta.stack = Some(stack);
         if area.is_some() {
             meta.fpu = area;
         } else if let Some(existing) = meta.fpu.as_mut() {
@@ -1019,6 +1048,9 @@ pub struct Snapshot {
     pub cpu_ns: u64,
     pub switches: u64,
     pub simd: bool,
+    /// Pico de uso da pilha e o tamanho dela, em bytes; zero sem pilha medida.
+    pub stack_peak: usize,
+    pub stack_bytes: usize,
 }
 
 /// Retrato das tarefas vivas, tirado slot a slot e entregue fora de qualquer lock.
@@ -1037,17 +1069,80 @@ pub fn snapshot() -> [Option<Snapshot>; MAX_TASKS] {
         } else {
             0
         };
+        let (name, stack) = {
+            let meta = task.meta.lock();
+            (meta.name, meta.stack)
+        };
         out[id] = Some(Snapshot {
             id: slot_u32(id),
-            name: task.meta.lock().name,
+            name,
             state,
             cpu: task.cpu.load(Ordering::Relaxed) as usize,
             cpu_ns: task.cpu_ns.load(Ordering::Relaxed) + running,
             switches: task.switches.load(Ordering::Relaxed),
             simd: task.fpu.load(Ordering::Relaxed) != 0,
+            stack_peak: stack.map_or(0, Stack::peak),
+            stack_bytes: stack.map_or(0, Stack::bytes),
         });
     }
     out
+}
+
+/// A linha `stacks:` do boot, que o SDD 15 pede para remedir quando o uso de pilha mudar.
+pub fn log_stacks() {
+    let report = stack_report();
+    let kib = |bytes: usize| (bytes / 1024, bytes % 1024 * 10 / 1024);
+    let (idle, task, shell) = (
+        kib(report.idle_peak),
+        kib(report.task_peak),
+        kib(report.shell_peak),
+    );
+    kprintln!(
+        "[rustos] stacks: idle peak {}.{} KiB of {}, task peak {}.{} KiB of {}, shell peak {}.{} KiB of {}",
+        idle.0,
+        idle.1,
+        report.idle_bytes / 1024,
+        task.0,
+        task.1,
+        report.task_bytes / 1024,
+        shell.0,
+        shell.1,
+        report.shell_bytes / 1024
+    );
+}
+
+/// Pico e tamanho das pilhas por tipo de tarefa, em bytes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StackReport {
+    pub idle_peak: usize,
+    pub idle_bytes: usize,
+    pub task_peak: usize,
+    pub task_bytes: usize,
+    pub shell_peak: usize,
+    pub shell_bytes: usize,
+}
+
+/// O maior pico de cada tipo desde o boot: as ociosas, o shell (a pilha do boot) e as tarefas,
+/// as já encerradas incluídas (o slot guarda a marca até ser reusado).
+pub fn stack_report() -> StackReport {
+    let mut report = StackReport {
+        task_peak: TASK_PEAK.load(Ordering::Relaxed),
+        ..StackReport::default()
+    };
+    for (id, task) in TASKS.iter().enumerate() {
+        let Some(stack) = task.meta.lock().stack else {
+            continue;
+        };
+        let peak = stack.peak();
+        let (max, bytes) = match id {
+            _ if id < FIRST_TASK => (&mut report.idle_peak, &mut report.idle_bytes),
+            FIRST_TASK => (&mut report.shell_peak, &mut report.shell_bytes),
+            _ => (&mut report.task_peak, &mut report.task_bytes),
+        };
+        *max = (*max).max(peak);
+        *bytes = (*bytes).max(stack.bytes());
+    }
+    report
 }
 
 /// O que `ps` e `bench` mostram de uma CPU.
