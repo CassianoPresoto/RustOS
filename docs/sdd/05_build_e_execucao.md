@@ -56,7 +56,7 @@ não há ISO nem `xorriso`.
 | | x86_64 | aarch64 |
 | --- | --- | --- |
 | Máquina | `-machine q35 -cpu max -m 256M` | `-machine virt,gic-version=3 -cpu max -m 256M` |
-| Firmware | EDK2 em `-drive if=pflash,readonly=on` | EDK2 em `-bios` |
+| Firmware | EDK2 em `-drive if=pflash,readonly=on` | EDK2 em `-drive if=pflash,readonly=on` (64 MiB) e uma NVRAM em `-drive if=pflash,snapshot=on` |
 | Disco | AHCI (padrão da q35) | `virtio-blk-pci` |
 | Tela | VGA padrão da q35 (GOP do OVMF) | `-device ramfb` (a `virt` não tem placa de vídeo) |
 | Rede | `-nic none` | `-nic none` |
@@ -79,6 +79,15 @@ QEMU sai antes do boot sem ela. TCG é sempre a reserva (`-accel <nativo> -accel
 (`xtask/src/arch.rs`): serve para rodar o TCG no Mac, o caminho do CI (que não
 tem HVF): `RUSTOS_ACCEL=tcg make smoke ARCH=aarch64`. Valor desconhecido é ignorado, com aviso. `RUSTOS_CPU=<modelo>` troca o `-cpu max` (por exemplo `RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx make smoke ARCH=aarch64`, que tem `DC ZVA` de 256 bytes). O `gic-version=3` é fixo porque, sem ele, a
 `virt` escolhe a versão pelo acelerador (TCG: v2; HVF com o vGIC da Apple: v3).
+
+**NVRAM do aarch64 (`xtask/src/nvram.rs`).** O EDK2 espera `Timeout` segundos (5, o padrão dele) no gerenciador de boot antes de iniciar a
+primeira opção, e só não espera quando o boot é por `-kernel`. Sem NVRAM (o `-bios` de antes) a variável não existe e a espera acontece
+sempre: 5,1 s do reset até o Limine, em HVF e em TCG, com ou sem disco, `ramfb` ou rede. O xtask grava em `target/firmware/aarch64-vars.fd`
+um armazém de variáveis com `Timeout` (UINT16, NV+BS+RT) igual a 0 e o passa em `if=pflash,snapshot=on`: o EDK2 escreve nele (`BootOrder`,
+`Boot0001`), a QEMU descarta ao sair, e todo boot parte do mesmo estado. O boot continua UEFI, com o Limine achado pelo caminho
+`EFI/BOOT/BOOTAA64.EFI` do disco, como numa máquina real com o `Timeout` ajustado. O código do EDK2 também vai em pflash, que exige 64 MiB: um
+`QEMU_EFI.fd` de 2 MiB (Debian/Ubuntu) é completado com zeros em `target/firmware/aarch64-code.fd`. O formato foi conferido contra o
+`edk2-arm-vars.fd` da QEMU ([DEBT-0070](../tech-debt/0070-nvram-do-edk2-do-aarch64-montada-no-xtask.md)).
 
 O firmware é procurado nos
 caminhos do Homebrew, Debian/Ubuntu e Fedora/Arch (`xtask/src/arch.rs`), ou nas

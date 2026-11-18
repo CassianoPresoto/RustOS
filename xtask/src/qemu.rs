@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::arch::Arch;
 use crate::cargo::{self, Profile};
-use crate::{image, leak, png, workspace};
+use crate::{image, leak, nvram, png, workspace};
 
 /// Igual ao `BOOT_OK_MARKER` do kernel; os dois mudam juntos.
 pub const BOOT_OK: &str = "[rustos] boot ok";
@@ -144,7 +144,18 @@ pub fn command_with(
     let esp = image::assemble_with(root, arch, profile, features, cmdline)?;
     let firmware = arch.firmware()?;
     let mut qemu = Command::new(arch.qemu());
-    qemu.args(arch.qemu_machine_args(&firmware.to_string_lossy(), &esp.to_string_lossy()));
+    let (code, vars) = match arch {
+        Arch::X86_64 => (firmware, None),
+        Arch::Aarch64 => {
+            let (code, vars) = nvram::aarch64_flash(root, &firmware)?;
+            (code, Some(vars))
+        }
+    };
+    qemu.args(arch.qemu_machine_args(
+        &code.to_string_lossy(),
+        vars.as_deref().map(Path::to_string_lossy).as_deref(),
+        &esp.to_string_lossy(),
+    ));
     qemu.arg("-no-reboot");
     Ok(qemu)
 }

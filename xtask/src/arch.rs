@@ -110,8 +110,9 @@ impl Arch {
         parse_cpus(std::env::var("RUSTOS_SMP").ok().as_deref())
     }
 
-    /// Máquina, CPU, firmware e aceleração; o disco e a serial ficam com quem chama.
-    pub fn qemu_machine_args(self, firmware: &str, esp: &str) -> Vec<String> {
+    /// Máquina, CPU, firmware e aceleração; o disco e a serial ficam com quem chama. `vars` é a
+    /// NVRAM do aarch64 (o x86_64 não tem).
+    pub fn qemu_machine_args(self, firmware: &str, vars: Option<&str>, esp: &str) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
         let mut push = |items: &[&str]| args.extend(items.iter().map(|&item| item.to_owned()));
         push(&["-smp", &Self::cpus().to_string()]);
@@ -133,9 +134,17 @@ impl Arch {
                     &Self::cpu_model(),
                     "-m",
                     "256M",
-                    "-bios",
-                    firmware,
                 ]);
+                push(&[
+                    "-drive",
+                    &format!("if=pflash,format=raw,readonly=on,file={firmware}"),
+                ]);
+                if let Some(vars) = vars {
+                    push(&[
+                        "-drive",
+                        &format!("if=pflash,format=raw,snapshot=on,file={vars}"),
+                    ]);
+                }
                 push(&[
                     "-drive",
                     &format!("if=none,id=esp,format=raw,file=fat:rw:{esp}"),

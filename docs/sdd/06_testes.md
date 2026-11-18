@@ -10,7 +10,7 @@
 | 1. Unidade da política | Algoritmo de `core/` certo, inclusive bordas (frame parcial, bitmap no limite, fila cheia) | host | `make test` |
 | 2. Adaptador com porta falsa | Driver e caminhada de tabela fazem a sequência certa de acessos, sem hardware | host | `make test` |
 | 3. Fumaça na QEMU, modo de teste | O kernel sobe de verdade, roda todos os autotestes e medidas e chega ao `boot ok` nas duas ISAs | QEMU | `make smoke ARCH=all` |
-| 3c. Fumaça na QEMU, modo normal | O boot que o usuário vê chega ao `boot ok` e imprime o tempo; barato (1,7 s no x86_64, 5,2 s no aarch64 com o firmware) | QEMU | `make smoke-fast ARCH=all` |
+| 3c. Fumaça na QEMU, modo normal | O boot que o usuário vê chega ao `boot ok` e imprime o tempo; barato (1,7 s no x86_64, 0,2 s no aarch64 em HVF com o firmware) | QEMU | `make smoke-fast ARCH=all` |
 | 3b. Tela na QEMU | O que o kernel desenha: fonte, terminal, shell e barra, depois de digitar comandos | QEMU | `make screenshot ARCH=all CMDS="fetch"` |
 | 4. Gates de arquitetura | Camadas, `unsafe`, `asm!`, comentários, docs | host | `make check` |
 
