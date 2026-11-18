@@ -57,7 +57,7 @@
 │   ├── pl011/                  # serial da QEMU virt e de placas ARM (com a IRQ de recepção)
 │   ├── i8042/                  # teclado PS/2 do PC: controlador e decodificador do conjunto 1
 │   └── gicv3/                  # GICv3 da ARM: distribuidor, redistribuidor (achado por afinidade) e SGI, sobre hal::RegisterBus
-├── xtask/                      # ferramenta de host (só std): build, image, run, smoke, screenshot, size, font-preview, check-*
+├── xtask/                      # ferramenta de host (só std): build, image, run, smoke, screenshot, size, font-preview, initramfs, check-*
 ├── docs/                       # sdd/, guidelines/, tech-debt/
 ├── .github/workflows/ci.yml    # gates, testes e smoke nas duas ISAs
 ├── Makefile                    # atalhos para cargo e xtask

@@ -1129,11 +1129,11 @@ Sem crate novo (decisão do agente, [`AGENTS.md`](../../AGENTS.md)):
 
 ### Como o xtask compila e empacota, sem crate externo
 
-| Passo | Comando (proposta) | O quê |
+| Passo | Comando | O quê |
 | --- | --- | --- |
-| 1 | `cargo xtask user --arch A` | Compila cada crate de `user/` com a lista inteira de flags de usuário em `CARGO_ENCODED_RUSTFLAGS` (as do `config.toml` **não** somam: [linker e alvo](#o-que-muda-no-linker-e-no-alvo)) e `--target-dir target/user/<isa>` |
-| 2 | `cargo xtask initramfs --arch A` | Escreve `target/initramfs/<isa>.cpio` em `newc`, com um escritor em Rust puro dentro do `xtask` (cerca de 60 linhas; o `xtask` não depende de crate do workspace, regra 6, então não reaproveita o `core/cpio`) e testado contra bytes de ouro; sem o binário `cpio` do host |
-| 3 | `cargo xtask image` | Copia o cpio para `boot/initramfs.cpio` na ESP e acrescenta o módulo ao `limine.conf` |
+| 1 | `cargo xtask user --arch A` (proposta) | Compila cada crate de `user/` com a lista inteira de flags de usuário em `CARGO_ENCODED_RUSTFLAGS` (as do `config.toml` **não** somam: [linker e alvo](#o-que-muda-no-linker-e-no-alvo)) e `--target-dir target/user/<isa>` |
+| 2 | `cargo xtask initramfs --arch A [--out caminho] [nome=]arquivo...` | Escreve `target/initramfs/<isa>.cpio` em `newc`, com um escritor em Rust puro em `xtask/src/initramfs.rs` (o `xtask` não depende de crate do workspace, regra 6, então não reaproveita o `core/cpio`), sem o binário `cpio` do host. Recebe `(nome, bytes, modo)`; a linha de comando põe o modo `0755`. Grava `070701`, os 13 campos em 8 dígitos hexadecimais, o nome com NUL, os dados e o `TRAILER!!!`; nome e dados alinham a 4 bytes a partir do início do arquivo, que não é preenchido até 512. Campos fixos: `c_ino` sequencial a partir de 1, `c_mtime`, `uid`, `gid`, `dev`, `rdev` e `c_chksum` em 0, `c_nlink` 1; a mesma entrada dá o mesmo arquivo, byte a byte. Recusa nome vazio, com NUL, repetido ou com componente vazio, `.` ou `..` (isso pega `/` inicial, `./` e `/` final), nome de 4096 bytes ou mais, dado de 4 GiB ou mais e modo com bit fora de `0o7777`. **Não gera diretórios**: o leitor compara o nome inteiro (`bin/sh` é um nome) e o `init` é plano. Testado contra bytes de ouro escritos à mão, todos os restos de nome módulo 4, arquivo vazio e grande, e, só em desenvolvimento, contra o `bsdcpio` (`cpio -it` e `cpio -idv` listam e extraem os mesmos bytes) |
+| 3 | `cargo xtask image` (proposta) | Copia o cpio para `boot/initramfs.cpio` na ESP e acrescenta o módulo ao `limine.conf` |
 | 4 | `make smoke` | Exige as linhas novas ([abaixo](#linhas-que-o-smoke-passa-a-exigir)) |
 
 A ordem de build é usuário, initramfs, imagem; o kernel **não** depende dos programas de
