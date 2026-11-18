@@ -141,6 +141,8 @@ impl Arch {
                     &format!("if=none,id=esp,format=raw,file=fat:rw:{esp}"),
                 ]);
                 push(&["-device", "virtio-blk-pci,drive=esp"]);
+                // Sem isto o EDK2 espera 5 s no gerenciador de boot (SDD 05).
+                push(&["-boot", "menu=on,splash-time=0"]);
                 // A `virt` não tem placa de vídeo; o ramfb vira o GOP do EDK2.
                 push(&["-device", "ramfb"]);
             }
