@@ -30,13 +30,24 @@ pub fn lowest_dirty_below(
 ) -> usize {
     let (mut index, mut lowest, mut clean) = (from, from, 0);
     while index > 0 && clean < run {
-        index -= 1;
-        if read(index) == pattern {
-            clean += 1;
+        let base = index.saturating_sub(GROUP);
+        let differs = (base..index).fold(0, |acc, at| acc | (read(at) ^ pattern));
+        if differs == 0 {
+            clean += index - base;
         } else {
-            lowest = index;
-            clean = 0;
+            for at in (base..index).rev() {
+                if clean >= run {
+                    return lowest;
+                }
+                if read(at) == pattern {
+                    clean += 1;
+                } else {
+                    lowest = at;
+                    clean = 0;
+                }
+            }
         }
+        index = base;
     }
     lowest
 }

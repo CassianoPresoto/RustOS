@@ -583,3 +583,8 @@ pub const HAS_FAST_RETURN: bool = false;
 
 /// Sem efeito no aarch64.
 pub fn set_fast_return(_on: bool) {}
+
+/// Liga ou desliga a limpeza da pilha do kernel na volta ao usuário (o `arch/` pula o gancho).
+pub fn set_stack_clean(on: bool) {
+    rustos_arch_aarch64::exception::set_scrub(on);
+}

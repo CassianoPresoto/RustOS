@@ -108,19 +108,51 @@ fn faulted(result: Option<(u32, ProcessEvent)>) -> Option<ProcessEvent> {
         .filter(|event| event.kind == event_kind::FAULT)
 }
 
-/// Nanossegundos por chamada, em décimos, de `RUNS` execuções do laço; a mediana.
-fn median_tenths_ns(frames: Frames, map_offset: u64) -> Option<u64> {
-    let mut samples = [0_u64; RUNS];
-    for sample in &mut samples {
-        let (_, event) = run_case(frames, map_offset, Case::NullLoop, LOOP_CALLS, 0)?;
-        if event.kind != event_kind::EXIT {
-            return None;
-        }
-        let ns = platform::cycles_to_ns(event.code.cast_unsigned());
-        *sample = ns * 10 / LOOP_CALLS;
+/// Décimos de ns por chamada de uma execução do laço, na CPU `cpu` (sem migração no meio).
+fn sample_tenths_ns(frames: Frames, map_offset: u64, cpu: usize) -> Option<u64> {
+    let (_, event) = run_case(frames, map_offset, Case::NullLoop, LOOP_CALLS, 1 << cpu)?;
+    if event.kind != event_kind::EXIT {
+        return None;
     }
+    Some(platform::cycles_to_ns(event.code.cast_unsigned()) * 10 / LOOP_CALLS)
+}
+
+/// As medianas, em décimos de ns, do laço com a limpeza ligada e desligada e, onde a ISA tem, com
+/// a saída lenta. As configurações se alternam a cada rodada, para a deriva da máquina cair
+/// igual nelas.
+#[derive(Clone, Copy, Debug)]
+struct Medians {
+    clean: u64,
+    dirty: u64,
+    slow_return: Option<u64>,
+}
+
+fn median(mut samples: [u64; RUNS]) -> u64 {
     samples.sort_unstable();
-    Some(samples[RUNS / 2])
+    samples[RUNS / 2]
+}
+
+fn null_loop_medians(frames: Frames, map_offset: u64) -> Option<Medians> {
+    let cpu = usize::from(task::active_cpus() & 2 != 0);
+    let (mut clean, mut dirty, mut slow) = ([0; RUNS], [0; RUNS], [0; RUNS]);
+    for round in 0..RUNS {
+        scrub::set_enabled(true);
+        clean[round] = sample_tenths_ns(frames, map_offset, cpu)?;
+        scrub::set_enabled(false);
+        dirty[round] = sample_tenths_ns(frames, map_offset, cpu)?;
+        scrub::set_enabled(true);
+        if platform::HAS_FAST_RETURN {
+            platform::set_fast_return(false);
+            let sample = sample_tenths_ns(frames, map_offset, cpu);
+            platform::set_fast_return(true);
+            slow[round] = sample?;
+        }
+    }
+    Some(Medians {
+        clean: median(clean),
+        dirty: median(dirty),
+        slow_return: platform::HAS_FAST_RETURN.then(|| median(slow)),
+    })
 }
 
 /// O resíduo achado depois de plantar na primeira chamada e varrer na segunda.
@@ -158,32 +190,25 @@ pub fn self_test(frames: Frames, map_offset: u64) -> bool {
     let clean_found = residue(frames, map_offset);
     scrub::set_enabled(false);
     let dirty_found = residue(frames, map_offset);
-    let off = median_tenths_ns(frames, map_offset);
     scrub::set_enabled(true);
-    let on = median_tenths_ns(frames, map_offset);
-    let slow_return = platform::HAS_FAST_RETURN.then(|| {
-        platform::set_fast_return(false);
-        let slow = median_tenths_ns(frames, map_offset);
-        platform::set_fast_return(true);
-        slow
-    });
+    let medians = null_loop_medians(frames, map_offset);
     scrub::set_measuring(true);
     let scrub_ok = clean_found == Some(0) && dirty_found.is_some_and(|found| found > 0);
-    if let (Some(on), Some(off)) = (on, off) {
+    if let Some(medians) = medians {
         kprintln!(
-            "[rustos] user: null syscall {}.{} ns with the stack clean, {}.{} ns without ({LOOP_CALLS} calls, median of {RUNS})",
-            on / 10,
-            on % 10,
-            off / 10,
-            off % 10
+            "[rustos] user: null syscall {}.{} ns with the stack clean, {}.{} ns without ({LOOP_CALLS} calls, median of {RUNS} alternating runs)",
+            medians.clean / 10,
+            medians.clean % 10,
+            medians.dirty / 10,
+            medians.dirty % 10
         );
-    }
-    if let Some(Some(slow)) = slow_return {
-        kprintln!(
-            "[rustos] user: null syscall {}.{} ns leaving by iretq instead of sysret",
-            slow / 10,
-            slow % 10
-        );
+        if let Some(slow) = medians.slow_return {
+            kprintln!(
+                "[rustos] user: null syscall {}.{} ns leaving by iretq instead of sysret",
+                slow / 10,
+                slow % 10
+            );
+        }
     }
     kprintln!(
         "[rustos] user: stack clean left {} marked words, {} without it; kernel stack depth {} B on syscall, {} B on fault",
@@ -192,7 +217,7 @@ pub fn self_test(frames: Frames, map_offset: u64) -> bool {
         syscall_depth,
         fault_depth
     );
-    let ok = hello && kernel_ok && privileged && trap && scrub_ok && on.is_some() && off.is_some();
+    let ok = hello && kernel_ok && privileged && trap && stack && scrub_ok && medians.is_some();
     kprintln!(
         "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, stack clean {scrub_ok})",
         if ok { "ok" } else { "FAILED" }

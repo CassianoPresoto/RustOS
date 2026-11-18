@@ -79,7 +79,7 @@ pub use sysreg::{features as cpu_features, rdtsc};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use traps::{
     CpuTables, IstStacks, breakpoint, install as install_traps,
-    install_early as install_early_traps, load_cpu as load_cpu_tables, set_sysret,
+    install_early as install_early_traps, load_cpu as load_cpu_tables, set_scrub, set_sysret,
 };
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use user::{enter_user, set_kernel_root, switch_space};

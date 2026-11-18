@@ -708,3 +708,8 @@ pub const HAS_FAST_RETURN: bool = true;
 pub fn set_fast_return(on: bool) {
     rustos_arch_x86_64::set_sysret(on);
 }
+
+/// Liga ou desliga a limpeza da pilha do kernel na volta ao usuário (o `arch/` pula o gancho).
+pub fn set_stack_clean(on: bool) {
+    rustos_arch_x86_64::set_scrub(on);
+}

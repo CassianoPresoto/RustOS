@@ -5,7 +5,7 @@
 
 use core::arch::{asm, global_asm};
 use core::ptr;
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use rustos_hal::abi::SyscallArgs;
 use rustos_hal::{Fault, FaultKind, Handlers, Irq, STACK_PAINT, VirtAddr};
@@ -35,7 +35,7 @@ const _: () = assert!(ELR_AT == 248 && SPSR_AT == 256 && SP_EL0_AT == 264);
 /// `BRK` tem 4 bytes e o `ELR_EL1` aponta para ele: retornar exige somar isto.
 const BRK_LEN: u64 = 4;
 /// Bytes abaixo do quadro que a saída para EL0 repinta, sem usar pilha.
-const SCRUB_WINDOW_BYTES: usize = 512;
+const SCRUB_WINDOW_BYTES: usize = 256;
 /// As quatro metades de 16 bits do padrão de pintura, para o `movz`/`movk`.
 const PAINT_0: u64 = STACK_PAINT & 0xFFFF;
 const PAINT_1: u64 = STACK_PAINT >> 16 & 0xFFFF;
@@ -133,6 +133,9 @@ rustos_exception_common:
     ldr x3, [sp, #{spsr_at}]
     tst x3, #0xf
     b.ne 2f
+    adrp x0, {scrub_on}
+    ldrb w0, [x0, :lo12:{scrub_on}]
+    cbz w0, 4f
     mov x0, sp
     bl {leave_user}
     sub x0, sp, #{window}
@@ -145,6 +148,7 @@ rustos_exception_common:
     stp x1, x1, [x0], #16
     subs x2, x2, #1
     b.ne 3b
+4:
     ldp x4, x5, [sp, #{sp_el0_at}]
     msr sp_el0, x4
     msr tpidr_el0, x5
@@ -185,7 +189,17 @@ rustos_exception_common:
     paint_3 = const PAINT_3,
     dispatch = sym dispatch,
     leave_user = sym leave_user,
+    scrub_on = sym SCRUB_ON,
 );
+
+/// A volta a EL0 chama `leave_user` e repinta a janela abaixo do quadro. Só o autoteste a desliga,
+/// para medir o custo.
+static SCRUB_ON: AtomicBool = AtomicBool::new(true);
+
+/// Liga ou desliga a limpeza da pilha do kernel na volta a EL0.
+pub fn set_scrub(on: bool) {
+    SCRUB_ON.store(on, Ordering::Relaxed);
+}
 
 /// Vetores antes de haver memória: `handlers.fault` não volta. `install` os troca.
 ///

@@ -10,11 +10,11 @@ use rustos_mm::watermark::lowest_dirty_below;
 
 use crate::task::STACK_PAGES;
 
-/// Palavras limpas seguidas que encerram a varredura: 1 KiB. Um quadro com mais que isso de
+/// Palavras limpas seguidas que encerram a varredura: 128 bytes. Um quadro com mais que isso de
 /// locais sem escrever esconderia o que está abaixo dele; as chamadas não têm um assim.
-const CLEAN_RUN_WORDS: usize = 128;
+const CLEAN_RUN_WORDS: usize = 16;
 /// O que o `arch/` repinta sem usar pilha, abaixo do quadro (igual ao do `asm`).
-const ARCH_WINDOW_BYTES: usize = 512;
+const ARCH_WINDOW_BYTES: usize = 256;
 const WORD: usize = 8;
 #[allow(
     clippy::cast_possible_truncation,
@@ -40,6 +40,7 @@ static DEEPEST: AtomicUsize = AtomicUsize::new(0);
 )]
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
+    crate::platform::set_stack_clean(on);
 }
 
 #[cfg_attr(
@@ -77,7 +78,8 @@ fn top_of(frame: usize) -> usize {
 pub fn leave_user(frame: usize) {
     let top = top_of(frame);
     let bottom = top - STACK_BYTES;
-    let from = (frame - bottom) / WORD;
+    let window = ARCH_WINDOW_BYTES / WORD;
+    let from = (frame - bottom) / WORD - window;
     let lowest = lowest_dirty_below(from, STACK_PAINT, CLEAN_RUN_WORDS, |index| {
         // SAFETY: `[bottom, top)` é a pilha desta tarefa, mapeada para sempre; só se lê abaixo
         // do quadro, onde nenhum quadro vivo desta CPU escreve.
@@ -91,8 +93,7 @@ pub fn leave_user(frame: usize) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    let end = from.saturating_sub(ARCH_WINDOW_BYTES / WORD);
-    for index in lowest..end {
+    for index in lowest..from {
         // SAFETY: idem; fica abaixo da janela que a função e o `arch/` ocupam.
         unsafe { word(bottom + index * WORD).write_volatile(STACK_PAINT) };
     }

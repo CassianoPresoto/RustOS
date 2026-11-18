@@ -35,7 +35,7 @@ pub struct IstStacks {
 /// O que vai em `TrapFrame::vector` numa entrada por `SYSCALL` (nenhum vetor da IDT chega a isso).
 pub const SYSCALL_VECTOR: u64 = 0x100;
 /// Bytes abaixo do quadro que a saída para o usuário repinta, sem usar pilha.
-const SCRUB_WINDOW_BYTES: usize = 512;
+const SCRUB_WINDOW_BYTES: usize = 256;
 
 /// Registradores salvos pela entrada comum, na ordem em que ficam na pilha.
 #[derive(Clone, Copy, Debug)]
@@ -166,12 +166,15 @@ rustos_isr_common_swapped:
     call {dispatch}
     test byte ptr [rsp + {CS_AT}], 3
     jz 3f
+    cmp byte ptr [rip + {SCRUB_ON}], 0
+    je 2f
     mov rdi, rsp
     call {leave_user}
     lea rdi, [rsp - {WINDOW}]
     mov ecx, {WINDOW} / 8
     mov rax, {PAINT}
     rep stosq
+2:
     mov rax, [rsp + {RSP_AT}]
     mov rcx, rax
     shl rcx, 16
@@ -346,6 +349,7 @@ rustos_debug_entry:
     SS_AT = const core::mem::offset_of!(TrapFrame, ss),
     SYSCALL_VECTOR = const SYSCALL_VECTOR,
     SYSRET_ON = sym SYSRET_ON,
+    SCRUB_ON = sym SCRUB_ON,
     RF_TF = const RF | TF,
     USER_CS = const USER_CODE,
     USER_SS = const USER_DATA,
@@ -355,6 +359,15 @@ rustos_debug_entry:
 /// A saída de syscall pode usar `SYSRET` quando a conferência de `sysret::can_sysret` passa; sem
 /// isto, sempre `IRETQ`. O autoteste liga e desliga para medir.
 static SYSRET_ON: AtomicBool = AtomicBool::new(true);
+
+/// A volta ao usuário chama `leave_user` e repinta a janela abaixo do quadro. Só o autoteste a
+/// desliga, para medir o custo.
+static SCRUB_ON: AtomicBool = AtomicBool::new(true);
+
+/// Liga ou desliga a limpeza da pilha do kernel na volta ao usuário.
+pub fn set_scrub(on: bool) {
+    SCRUB_ON.store(on, Ordering::Relaxed);
+}
 
 /// Liga ou desliga a saída por `SYSRET`.
 pub fn set_sysret(on: bool) {
