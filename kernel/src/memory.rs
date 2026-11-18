@@ -283,11 +283,12 @@ pub fn sync_code_frame(phys: PhysAddr) {
     platform::sync_icache(frame_ptr(phys).addr(), FRAME_BYTES);
 }
 
-/// Copia `bytes` para o início do frame (que o chamador zerou), pelo mapa direto.
+/// Copia `bytes` para o frame (que o chamador zerou) a partir de `offset`, pelo mapa direto.
 ///
 /// # Safety
-/// `bytes.len() <= PAGE_SIZE` e o frame é só do chamador.
-pub unsafe fn fill_frame(phys: PhysAddr, bytes: &[u8]) {
+/// `offset + bytes.len() <= PAGE_SIZE` e o frame é só do chamador.
+pub unsafe fn fill_frame(phys: PhysAddr, offset: usize, bytes: &[u8]) {
+    let target = frame_ptr(phys).wrapping_add(offset);
     // SAFETY: o contrato desta função; os dois não se sobrepõem.
-    unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), frame_ptr(phys), bytes.len()) };
+    unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), target, bytes.len()) };
 }

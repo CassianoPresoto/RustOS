@@ -1,6 +1,7 @@
 //! O autoteste de usuário (só na imagem com a feature `selftest`): o programa embutido no kernel
 //! roda em anel 3 ou EL0 nos casos `hello`, falha contida e laço de syscall nula, e a limpeza da
-//! pilha do kernel na volta ao usuário se confere por um resíduo plantado (SDD 17, fatia 4a).
+//! pilha do kernel na volta ao usuário se confere por um resíduo plantado (4a); o programa `big` do
+//! initramfs passa o carregador por segmentos grandes e o carregador recusa o que é inválido (4b).
 
 use core::hint::black_box;
 use core::ptr;
@@ -8,10 +9,10 @@ use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use rustos_hal::abi::{ProcessEvent, event_kind, fault_kind};
 
-use super::{Program, fault_peak, last_event, spawn};
+use super::{Program, Source, fault_peak, last_event, spawn};
 use crate::frames::Frames;
 use crate::platform::user_blob::{Case, image, offset};
-use crate::{platform, scrub, task};
+use crate::{loader, platform, scrub, task};
 
 /// Quanto o autoteste espera um processo acabar, e o passo da espera.
 const WAIT_NS: u64 = 15_000_000_000;
@@ -23,6 +24,9 @@ const LOOP_CALLS: u64 = if cfg!(target_arch = "x86_64") {
     200_000
 };
 const RUNS: usize = 5;
+/// Frames que ficam fora da conta de "voltou tudo": a pilha de kernel que o slot da tarefa guarda e
+/// as páginas que o heap ganhou.
+const SLACK_FRAMES: usize = 64;
 
 /// Um endereço do kernel que o processo tenta ler: a página existe e é do kernel.
 static KERNEL_PROBE: u64 = 0x5253_5441_434b_2121;
@@ -111,16 +115,56 @@ fn run_case(
         entry_offset: offset(case),
         arg0,
     };
-    let (id, pid) = spawn(frames, offset_of_map, program, affinity).ok()?;
+    run_source(frames, offset_of_map, Source::Flat(program), affinity)
+}
+
+/// Roda `source` até o processo acabar e devolve o evento dele.
+fn run_source(
+    frames: Frames,
+    map_offset: u64,
+    source: Source<'_>,
+    affinity: u32,
+) -> Option<(u32, ProcessEvent)> {
+    let spawned = spawn(frames, map_offset, source, affinity).ok()?;
     let deadline = platform::now_ns()? + WAIT_NS;
-    while !task::has_exited(id) {
+    while !task::has_exited(spawned.task) {
         let now = platform::now_ns()?;
         if now > deadline {
             return None;
         }
         task::sleep_until(now + POLL_NS);
     }
-    last_event().filter(|(last, _)| *last == pid)
+    last_event().filter(|(last, _)| *last == spawned.pid)
+}
+
+/// O `big` do initramfs (mais de 2 MiB, com `.rodata`, `.data` e `.bss` de muitas páginas) roda e sai
+/// com 0: o carregador copia, zera e mapeia segmentos grandes e o `-C code-model=small` aguenta.
+fn big_program_runs(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
+    let Some(file) = archive.and_then(|archive| loader::find(archive, b"big").ok()) else {
+        return false;
+    };
+    let free_before = frames.free_frames();
+    let result = run_source(frames, map_offset, Source::Elf(file), 0);
+    let returned = frames.free_frames() + SLACK_FRAMES >= free_before;
+    kprintln!("[rustos] user: big ran ({} KiB of file)", file.len() >> 10);
+    exited_with(result, 0) && returned
+}
+
+/// O carregador recusa o que o `core/elf` recusa e não deixa frame para trás: arquivo cortado,
+/// máquina de outra ISA e arquivo que não é ELF. `frames` volta ao que era.
+fn loader_refuses_bad_executables(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
+    let Some(good) = archive.and_then(|archive| loader::find(archive, b"init").ok()) else {
+        return false;
+    };
+    let mut other_machine = good.to_vec();
+    other_machine[18] ^= 0xFF;
+    let mut bad_magic = good.to_vec();
+    bad_magic[0] = 0;
+    let free_before = frames.free_frames();
+    let refused = [&good[..good.len() / 2], &other_machine, &bad_magic, &[]]
+        .into_iter()
+        .all(|file| spawn(frames, map_offset, Source::Elf(file), 0).is_err());
+    refused && frames.free_frames() + SLACK_FRAMES >= free_before
 }
 
 fn exited_with(result: Option<(u32, ProcessEvent)>, code: i64) -> bool {
@@ -208,7 +252,7 @@ fn hello_on_every_cpu(frames: Frames, map_offset: u64) -> bool {
 }
 
 /// Os casos do programa embutido. `false` se algum falhou.
-pub fn self_test(frames: Frames, map_offset: u64) -> bool {
+pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
     let hello = hello_on_every_cpu(frames, map_offset) && copy_fixup_ran_with_ac_clear();
     let probe = ptr::addr_of!(KERNEL_PROBE).expose_provenance() as u64;
     let kernel = faulted(run_case(frames, map_offset, Case::FaultMemory, probe, 0));
@@ -219,6 +263,8 @@ pub fn self_test(frames: Frames, map_offset: u64) -> bool {
     let trap = faulted(run_case(frames, map_offset, Case::FaultTrap, 0, 0)).is_some();
     let stack = faulted(run_case(frames, map_offset, Case::FaultBadStack, 0, 0)).is_some();
     let flags = flags_survive(frames, map_offset);
+    let big = big_program_runs(frames, map_offset, archive);
+    let refused = loader_refuses_bad_executables(frames, map_offset, archive);
     let (syscall_depth, fault_depth) = (scrub::deepest(), fault_peak());
     scrub::set_measuring(false);
     let clean_found = residue(frames, map_offset);
@@ -251,10 +297,18 @@ pub fn self_test(frames: Frames, map_offset: u64) -> bool {
         syscall_depth,
         fault_depth
     );
-    let ok =
-        hello && kernel_ok && privileged && trap && stack && flags && scrub_ok && medians.is_some();
+    let ok = hello
+        && kernel_ok
+        && privileged
+        && trap
+        && stack
+        && flags
+        && scrub_ok
+        && big
+        && refused
+        && medians.is_some();
     kprintln!(
-        "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, flags {flags}, stack clean {scrub_ok})",
+        "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, flags {flags}, stack clean {scrub_ok}, big {big}, bad executables {refused})",
         if ok { "ok" } else { "FAILED" }
     );
     ok

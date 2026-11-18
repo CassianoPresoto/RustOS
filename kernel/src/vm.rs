@@ -263,7 +263,7 @@ impl Vm {
         not(feature = "selftest"),
         allow(
             dead_code,
-            reason = "lido só pelo modo de teste, até o init da fase 4b"
+            reason = "lido só pelo modo de teste, até o init rodar no boot normal"
         )
     )]
     pub fn initramfs(&self) -> Option<&'static [u8]> {

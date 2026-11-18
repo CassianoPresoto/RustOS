@@ -20,7 +20,10 @@ mod early;
 mod fmt;
 mod frames;
 mod heap;
+#[cfg(feature = "selftest")]
+mod init;
 mod interrupts;
+mod loader;
 mod memory;
 mod panic;
 mod percpu;
@@ -211,7 +214,7 @@ fn boot_kernel(handoff: Handoff) -> ! {
     let initramfs_ok = !selftest || selftest::initramfs(&vm);
     let exception_ok = interrupts_on && system::exception_self_test();
     let full_ok = !selftest || selftest::before_tasks();
-    let tasks_ok = exception_ok && full_ok && report_tasks(&boot, &memory, selftest);
+    let tasks_ok = exception_ok && full_ok && report_tasks(&boot, &memory, &vm, selftest);
     if !frames_ok || !wx_ok || !initramfs_ok || !tasks_ok || !cpus_ok {
         rustos_hal::Cpu::halt_forever(&platform::cpu());
     }
@@ -260,7 +263,12 @@ fn report_cpus(started: smp::Started) -> bool {
 
 /// Liga as tarefas e, no modo de teste, confere a preempção e o estado de SIMD de cada uma, e
 /// mede a troca de contexto e o jitter de acordar (as medidas curtas do boot).
-fn report_tasks(boot: &impl BootInfo, memory: &memory::Memory, selftest: bool) -> bool {
+fn report_tasks(
+    boot: &impl BootInfo,
+    memory: &memory::Memory,
+    vm: &vm::Vm,
+    selftest: bool,
+) -> bool {
     boot_time::enter(boot_time::Phase::Setup);
     // SAFETY: o mapa direto cobre todo frame do alocador; só `task` mapeia pilhas daqui em diante.
     let summary = match unsafe { task::init(memory.frames, boot.direct_map_offset()) } {
@@ -271,7 +279,7 @@ fn report_tasks(boot: &impl BootInfo, memory: &memory::Memory, selftest: bool) -
         }
     };
     smp::release();
-    !selftest || selftest::after_tasks(summary, memory.frames, boot.direct_map_offset())
+    !selftest || selftest::after_tasks(summary, memory.frames, boot.direct_map_offset(), vm)
 }
 
 /// O que o boot tem de impredizível: contadores de ciclo e os tempos do bootloader.
