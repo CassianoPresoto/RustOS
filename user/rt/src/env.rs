@@ -5,8 +5,8 @@ use core::ptr;
 
 use rustos_hal::abi::{AT_RANDOM_LEN, auxv};
 
-/// Palavras que a leitura percorre antes de desistir: uma pilha sem fim de `argv`, `envp` ou auxv
-/// não prende o programa.
+/// Palavras que a leitura percorre antes de desistir. É só um teto de sanidade: o `rt` não sabe
+/// onde a pilha acaba e confia que o kernel a montou com os zeros de `argv`, `envp` e o `AT_NULL`.
 const WALK_LIMIT: usize = 4096;
 /// `PT_LOAD`.
 const PT_LOAD: u32 = 1;
@@ -27,17 +27,16 @@ pub struct Auxv {
     pub has_random: bool,
 }
 
-/// O ambiente do programa: o que o `_start` recebeu.
+/// O ambiente do programa: o que o `_start` recebeu. Só `from_stack` o preenche e os campos são
+/// privados, para o programa em Rust seguro não forjar um ponteiro que o `rt` leria.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Env {
-    /// O handle de boot de `rdi`/`x0`: `0` até a 4c.
-    pub boot_handle: u64,
-    /// O ponteiro de pilha da entrada.
-    pub initial_sp: u64,
-    pub argc: u64,
-    pub auxv: Auxv,
-    /// Os 16 bytes de `AT_RANDOM`, copiados da pilha.
-    pub random: [u8; AT_RANDOM_LEN],
+    boot_handle: u64,
+    initial_sp: u64,
+    argc: u64,
+    auxv: Auxv,
+    random: [u8; AT_RANDOM_LEN],
+    loads: Option<usize>,
 }
 
 impl Env {
@@ -83,9 +82,44 @@ impl Env {
                 _ => {}
             }
         }
+        // SAFETY: o contrato da função: se o auxv traz `AT_PHDR`, a tabela inteira está num `PT_LOAD`.
+        env.loads = unsafe { env.count_loads() };
         env
     }
 
+    /// O handle de boot de `rdi`/`x0`: `0` até a 4c.
+    pub const fn boot_handle(&self) -> u64 {
+        self.boot_handle
+    }
+
+    /// O ponteiro de pilha da entrada.
+    pub const fn initial_sp(&self) -> u64 {
+        self.initial_sp
+    }
+
+    pub const fn argc(&self) -> u64 {
+        self.argc
+    }
+
+    pub const fn auxv(&self) -> &Auxv {
+        &self.auxv
+    }
+
+    /// Os 16 bytes de `AT_RANDOM`, copiados da pilha.
+    pub const fn random(&self) -> &[u8; AT_RANDOM_LEN] {
+        &self.random
+    }
+
+    /// Quantos `PT_LOAD` a tabela de program headers do `AT_PHDR` tem; `None` sem `AT_PHDR` ou com
+    /// `AT_PHENT` que não é o de um ELF64.
+    pub const fn load_segments(&self) -> Option<usize> {
+        self.loads
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "o usuário só existe em 64 bits"
+    )]
     fn read_random(&mut self, address: u64) {
         let source = ptr::with_exposed_provenance::<u8>(address as usize);
         // SAFETY: o kernel aponta `AT_RANDOM` para 16 bytes legíveis no topo da pilha.
@@ -93,9 +127,9 @@ impl Env {
         self.auxv.has_random = true;
     }
 
-    /// Quantos program headers `PT_LOAD` a tabela do `AT_PHDR` tem; `None` sem `AT_PHDR` ou com
-    /// `AT_PHENT` que não é o de um ELF64.
-    pub fn load_segments(&self) -> Option<usize> {
+    /// # Safety
+    /// Se `AT_PHDR` existe, a tabela de `AT_PHNUM` entradas de `AT_PHENT` bytes está mapeada.
+    unsafe fn count_loads(&self) -> Option<usize> {
         if self.auxv.phdr == 0 || self.auxv.phent != PHDR_LEN as u64 {
             return None;
         }
@@ -103,8 +137,7 @@ impl Env {
         let count = usize::try_from(self.auxv.phnum).ok()?;
         let loads = (0..count).filter(|&index| {
             let entry = table.wrapping_add(index * PHDR_LEN).cast::<[u8; 4]>();
-            // SAFETY: o kernel só publica `AT_PHDR` se a tabela inteira está num `PT_LOAD`; o
-            // campo `p_type` abre cada entrada.
+            // SAFETY: o contrato da função; o campo `p_type` abre cada entrada.
             let raw = unsafe { entry.read_unaligned() };
             u32::from_le_bytes(raw) == PT_LOAD
         });
@@ -133,7 +166,7 @@ mod tests {
             random,
         };
         let stack = InitialStack::build(top, &info).unwrap();
-        let start = (stack.sp() - memory.as_ptr().addr() as u64) as usize / 8;
+        let start = usize::try_from(stack.sp() - memory.as_ptr().addr() as u64).unwrap() / 8;
         for (index, chunk) in stack.bytes().as_chunks::<8>().0.iter().enumerate() {
             memory[start + index] = u64::from_le_bytes(*chunk);
         }
@@ -143,29 +176,50 @@ mod tests {
     #[test]
     fn it_reads_the_stack_the_kernel_builds() {
         let random = *b"fedcba9876543210";
-        let (memory, start) = fake_stack(Some(0x40_0040), random);
-        // SAFETY: o vetor tem a forma de uma pilha inicial; `AT_RANDOM` aponta para dentro dele.
+        let mut table = [0_u8; 3 * PHDR_LEN];
+        table[0..4].copy_from_slice(&6_u32.to_le_bytes());
+        table[PHDR_LEN..PHDR_LEN + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+        table[2 * PHDR_LEN..2 * PHDR_LEN + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+        let (memory, start) = fake_stack(Some(table.as_ptr().addr() as u64), random);
+        // SAFETY: o vetor tem a forma de uma pilha inicial; `AT_RANDOM` e `AT_PHDR` apontam para
+        // memória viva do teste.
         let env = unsafe { Env::from_stack(memory[start..].as_ptr(), 0) };
-        assert_eq!((env.argc, env.boot_handle), (0, 0));
-        assert_eq!(env.auxv.pagesz, 4096);
-        assert_eq!(env.auxv.entry, 0x40_1000);
-        assert_eq!(
-            (env.auxv.phdr, env.auxv.phent, env.auxv.phnum),
-            (0x40_0040, 56, 3)
-        );
-        assert_eq!((env.auxv.hwcap, env.auxv.hwcap2), (0, 0));
-        assert!(env.auxv.has_random);
-        assert_eq!(env.random, random);
-        assert_eq!(env.initial_sp % 16, 0);
+        assert_eq!((env.argc(), env.boot_handle()), (0, 0));
+        let aux = env.auxv();
+        assert_eq!((aux.pagesz, aux.entry), (4096, 0x40_1000));
+        assert_eq!((aux.phent, aux.phnum), (56, 3));
+        assert_eq!((aux.hwcap, aux.hwcap2), (0, 0));
+        assert!(aux.has_random);
+        assert_eq!(env.random(), &random);
+        assert_eq!(env.initial_sp() % 16, 0);
+        assert_eq!(env.load_segments(), Some(2));
     }
 
     #[test]
-    fn a_stack_without_phdr_leaves_it_zero() {
+    fn a_stack_without_phdr_has_no_load_count() {
         let (memory, start) = fake_stack(None, [7; AT_RANDOM_LEN]);
         // SAFETY: o mesmo vetor de pilha inicial.
         let env = unsafe { Env::from_stack(memory[start..].as_ptr(), 9) };
-        assert_eq!((env.auxv.phdr, env.auxv.phnum), (0, 0));
-        assert_eq!(env.boot_handle, 9);
+        assert_eq!((env.auxv().phdr, env.auxv().phnum), (0, 0));
+        assert_eq!(env.boot_handle(), 9);
+        assert_eq!(env.load_segments(), None);
+    }
+
+    #[test]
+    fn a_phent_that_is_not_an_elf64_entry_gives_no_load_count() {
+        let memory = [
+            0,
+            0,
+            0,
+            auxv::AT_PHDR,
+            0x1000,
+            auxv::AT_PHENT,
+            32,
+            auxv::AT_NULL,
+            0,
+        ];
+        // SAFETY: o vetor tem a forma de uma pilha inicial; `AT_PHENT` errado impede a leitura da tabela.
+        let env = unsafe { Env::from_stack(memory.as_ptr(), 0) };
         assert_eq!(env.load_segments(), None);
     }
 
@@ -185,8 +239,8 @@ mod tests {
         ];
         // SAFETY: o vetor tem a forma de uma pilha inicial, sem `AT_RANDOM`.
         let env = unsafe { Env::from_stack(memory.as_ptr(), 0) };
-        assert_eq!((env.argc, env.auxv.pagesz), (1, 4096));
-        assert!(!env.auxv.has_random);
+        assert_eq!((env.argc(), env.auxv().pagesz), (1, 4096));
+        assert!(!env.auxv().has_random);
     }
 
     #[test]
@@ -204,29 +258,14 @@ mod tests {
         ];
         // SAFETY: o vetor tem a forma de uma pilha inicial, sem `AT_RANDOM`.
         let env = unsafe { Env::from_stack(memory.as_ptr(), 0) };
-        assert_eq!(env.auxv.entry, 0x40_2000);
+        assert_eq!(env.auxv().entry, 0x40_2000);
     }
 
     #[test]
-    fn the_load_segments_come_from_the_program_header_table() {
-        let mut table = [0_u8; 3 * PHDR_LEN];
-        table[0..4].copy_from_slice(&PT_LOAD.to_le_bytes());
-        table[PHDR_LEN..PHDR_LEN + 4].copy_from_slice(&6_u32.to_le_bytes());
-        table[2 * PHDR_LEN..2 * PHDR_LEN + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
-        let mut env = Env::default();
-        env.auxv.phdr = table.as_ptr().addr() as u64;
-        env.auxv.phent = PHDR_LEN as u64;
-        env.auxv.phnum = 3;
-        assert_eq!(env.load_segments(), Some(2));
-        env.auxv.phent = 32;
-        assert_eq!(env.load_segments(), None);
-    }
-
-    #[test]
-    fn a_stack_without_the_end_marks_does_not_run_away() {
+    fn the_walk_gives_up_at_the_limit_on_a_stack_without_end_marks() {
         let memory = vec![1_u64; WALK_LIMIT + 16];
         // SAFETY: o vetor é maior que o limite da leitura, que pára nele.
         let env = unsafe { Env::from_stack(memory.as_ptr(), 0) };
-        assert_eq!(env.auxv, Auxv::default());
+        assert_eq!(env.auxv(), &Auxv::default());
     }
 }

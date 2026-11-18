@@ -37,6 +37,10 @@ pub fn nop() -> Result<()> {
 
 /// `debug_write`: escreve `bytes` no console, no máximo `DEBUG_WRITE_MAX`. Devolve os bytes
 /// escritos.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "o usuário só existe em 64 bits"
+)]
 pub fn debug_write(bytes: &[u8]) -> Result<usize> {
     let args = [bytes.as_ptr().addr() as u64, bytes.len() as u64, 0, 0, 0, 0];
     checked(call(Syscall::DebugWrite, args)).map(|written| written as usize)

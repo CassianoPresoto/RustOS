@@ -13,5 +13,5 @@ bench = false
 [lints]
 workspace = true
 
-[dependencies]
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 rustos-hal.workspace = true

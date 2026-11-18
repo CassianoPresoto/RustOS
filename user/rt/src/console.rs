@@ -5,6 +5,10 @@ use core::fmt::{self, Write};
 
 use rustos_hal::abi::DEBUG_WRITE_MAX;
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "o usuário só existe em 64 bits"
+)]
 const CAPACITY: usize = DEBUG_WRITE_MAX as usize;
 
 /// Um buffer de uma `debug_write`: o que passa de `DEBUG_WRITE_MAX` bytes é cortado.
@@ -71,7 +75,7 @@ mod tests {
     #[test]
     fn pieces_of_one_message_stay_in_one_buffer() {
         let mut line = LineBuffer::new();
-        write!(line, "a {:#x} b {}", 255, "c").unwrap();
-        assert_eq!(line.as_bytes(), b"a 0xff b c");
+        write!(line, "a {:#x} b {}", 255, 7).unwrap();
+        assert_eq!(line.as_bytes(), b"a 0xff b 7");
     }
 }

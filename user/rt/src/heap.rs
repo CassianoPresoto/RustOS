@@ -68,13 +68,17 @@ static HEAP: Bump<HEAP_BYTES> = Bump::new();
 mod tests {
     use super::*;
 
+    fn take<const N: usize>(heap: &Bump<N>, size: usize, align: usize) -> *mut u8 {
+        let layout = Layout::from_size_align(size, align).unwrap();
+        // SAFETY: o `GlobalAlloc` só pede que o layout não tenha tamanho zero; o teste do tamanho
+        // zero é o único que o faz e o alocador de avanço o aceita.
+        unsafe { heap.alloc(layout) }
+    }
+
     #[test]
     fn allocations_are_aligned_inside_the_arena_and_do_not_overlap() {
         let heap = Bump::<64>::new();
-        let one = Layout::from_size_align(3, 1).unwrap();
-        let eight = Layout::from_size_align(8, 8).unwrap();
-        // SAFETY: layouts de tamanho não nulo.
-        let (a, b) = unsafe { (heap.alloc(one), heap.alloc(eight)) };
+        let (a, b) = (take(&heap, 3, 1), take(&heap, 8, 8));
         assert!(!a.is_null() && !b.is_null());
         assert_eq!(b.addr() % 8, 0);
         assert!(b.addr() >= a.addr() + 3);
@@ -84,30 +88,20 @@ mod tests {
     #[test]
     fn a_request_that_does_not_fit_gets_null_and_leaves_the_arena_alone() {
         let heap = Bump::<16>::new();
-        let big = Layout::from_size_align(17, 1).unwrap();
-        let fits = Layout::from_size_align(16, 1).unwrap();
-        // SAFETY: layouts de tamanho não nulo.
-        unsafe {
-            assert!(heap.alloc(big).is_null());
-            assert!(!heap.alloc(fits).is_null());
-            assert!(heap.alloc(Layout::from_size_align(1, 1).unwrap()).is_null());
-        }
+        assert!(take(&heap, 17, 1).is_null());
+        assert!(!take(&heap, 16, 1).is_null());
+        assert!(take(&heap, 1, 1).is_null());
     }
 
     #[test]
     fn a_big_alignment_is_honoured() {
         let heap = Bump::<8192>::new();
-        let layout = Layout::from_size_align(8, 1024).unwrap();
-        // SAFETY: layout de tamanho não nulo.
-        let pointer = unsafe { heap.alloc(layout) };
-        assert_eq!(pointer.addr() % 1024, 0);
+        assert_eq!(take(&heap, 8, 1024).addr() % 1024, 0);
     }
 
     #[test]
     fn a_zero_size_request_is_not_null() {
         let heap = Bump::<16>::new();
-        // SAFETY: tamanho zero é permitido ao implementador (quem chama não pede zero ao `GlobalAlloc`).
-        let pointer = unsafe { heap.alloc(Layout::from_size_align(0, 1).unwrap()) };
-        assert!(!pointer.is_null());
+        assert!(!take(&heap, 0, 1).is_null());
     }
 }

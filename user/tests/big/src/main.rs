@@ -5,10 +5,6 @@
 #![no_std]
 #![no_main]
 #![forbid(unsafe_code)]
-#![allow(
-    clippy::cast_possible_truncation,
-    reason = "o usuário só existe em 64 bits e as contas cabem em u32"
-)]
 
 use core::hint::black_box;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -17,9 +13,12 @@ use rustos_user_rt::{Env, entry, println};
 
 entry!(main);
 
-const RODATA_WORDS: usize = 256 * 1024;
-const DATA_WORDS: usize = 64 * 1024 + 100;
-const BSS_WORDS: usize = 256 * 1024;
+const RODATA_COUNT: u32 = 256 * 1024;
+const DATA_COUNT: u32 = 64 * 1024 + 100;
+const BSS_COUNT: u32 = 256 * 1024;
+const RODATA_WORDS: usize = RODATA_COUNT as usize;
+const DATA_WORDS: usize = DATA_COUNT as usize;
+const BSS_WORDS: usize = BSS_COUNT as usize;
 const PATTERN: u32 = 0x1234_5678;
 
 static TABLE: [u32; RODATA_WORDS] = [PATTERN; RODATA_WORDS];
@@ -43,9 +42,9 @@ fn main(_: &Env) -> i64 {
     let rodata = rodata_sum();
     let data = bump(&DATA, 2);
     let bss = bump(&BSS, 3);
-    let ok = rodata == PATTERN.wrapping_mul(RODATA_WORDS as u32)
-        && data == 3 * DATA_WORDS as u32
-        && bss == 3 * BSS_WORDS as u32
+    let ok = rodata == PATTERN.wrapping_mul(RODATA_COUNT)
+        && data == 3 * DATA_COUNT
+        && bss == 3 * BSS_COUNT
         && black_box(&BSS)[BSS_WORDS - 1].load(Ordering::Relaxed) == 3;
     println!("big: rodata {rodata:#x}, data {data:#x}, bss {bss:#x}");
     i64::from(!ok)

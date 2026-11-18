@@ -3,10 +3,6 @@
 //! `unsafe` do lado do usuário mora aqui, com `// SAFETY:`.
 
 #![cfg_attr(not(test), no_std)]
-#![allow(
-    clippy::cast_possible_truncation,
-    reason = "o usuário só existe em 64 bits"
-)]
 
 mod console;
 mod env;

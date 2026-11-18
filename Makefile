@@ -22,6 +22,7 @@ fmt-check: ## confere a formatação
 clippy: ## lint no host e nos dois alvos bare-metal (kernel com e sem `selftest` e as features de depuração; `user/` e `arch/*-user`); aviso é erro
 	cargo clippy --all-targets -- -D warnings
 	cargo clippy --package rustos-shell --no-default-features --all-targets -- -D warnings
+	cargo clippy --package rustos-user-rt --all-targets -- -D warnings
 	@for target in $(TARGETS); do \
 		for features in "" selftest debug-addrs,panic-tests selftest,debug-addrs,panic-tests; do \
 			cargo clippy --package rustos-kernel --target $$target $${features:+--features $$features} -- -D warnings || exit 1; \
