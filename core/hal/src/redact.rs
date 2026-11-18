@@ -110,8 +110,8 @@ impl fmt::Display for Redacted<'_> {
     }
 }
 
-/// `0x` mais 16 dígitos: o maior literal que cabe num `u64`.
-const MAX_LITERAL: usize = 18;
+/// `0x` mais 32 dígitos: o `{:#034x}` mais largo que se vê; zeros à esquerda não mudam o valor.
+const MAX_LITERAL: usize = 34;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -162,7 +162,7 @@ impl<'a, W: Write> Scrubber<'a, W> {
             acc.checked_mul(16)?.checked_add(u64::from(nibble))
         });
         match value {
-            Some(addr) if digits.len() >= 9 && (HIGH_HALF..CEILING).contains(&addr) => {
+            Some(addr) if (HIGH_HALF..CEILING).contains(&addr) => {
                 self.len = 0;
                 self.state = State::Text;
                 write!(self.out, "{}", self.regions.display(addr))
@@ -189,7 +189,10 @@ impl<W: Write> Write for Scrubber<'_, W> {
         while at < bytes.len() {
             let byte = bytes[at];
             match self.state {
-                State::Text if byte == b'0' => {
+                // Um `0` só abre candidato se o `x` vem junto ou o pedaço acaba nele.
+                State::Text
+                    if byte == b'0' && bytes.get(at + 1).is_none_or(|&next| next == b'x') =>
+                {
                     self.out.write_str(&text[clean_from..at])?;
                     self.push(byte);
                     self.state = State::Zero;
@@ -344,7 +347,7 @@ mod tests {
             "random 0x00000000000000ff\n",
             "0xffffffffffffffff\n",
             "0x7fffffff1000 user\n",
-            "0xffff8468400010001 too long\n",
+            "0xffff84684000100010001000100010001 too long\n",
             "100 0x 05 0y 00x1\n",
             "ação 0xé\n",
         ] {
@@ -359,6 +362,36 @@ mod tests {
     }
 
     #[test]
+    fn leading_zeros_do_not_hide_an_address() {
+        assert_eq!(scrub(&["0x00000000ffffffff9b7a5000 "]), "kernel+0x0 ");
+        assert_eq!(
+            scrub(&["0x0000000000000000ffffffff9b7a5010"]),
+            "kernel+0x10"
+        );
+        assert_eq!(
+            scrub(&["0x0000000000000000000000000000000000ffffffff9b7a5000"]),
+            "0x0000000000000000000000000000000000ffffffff9b7a5000"
+        );
+    }
+
+    #[test]
+    fn a_zero_not_followed_by_x_costs_no_extra_write() {
+        let regions = regions();
+        let mut sink = Counting(0);
+        {
+            let mut scrubber = Scrubber::new(&mut sink, &regions);
+            scrubber.write_str("a 100 b 007 c\n").unwrap();
+        }
+        assert_eq!(sink.0, 1);
+    }
+
+    #[test]
+    fn a_zero_at_the_end_of_a_chunk_still_joins_the_x_of_the_next() {
+        assert_eq!(scrub(&["pc 0", "xffffffff9b7a5000\n"]), "pc kernel+0x0\n");
+        assert_eq!(scrub(&["10", "0\n"]), "100\n");
+    }
+
+    #[test]
     fn a_zero_before_the_literal_does_not_hide_it() {
         assert_eq!(scrub(&["00xffffffff9b7a5000"]), "0kernel+0x0");
     }
@@ -368,5 +401,50 @@ mod tests {
         assert_eq!(slide_bits(180 * 1024), 18);
         assert_eq!(slide_bits(0), 19);
         assert_eq!(slide_bits(SLIDE_WINDOW), 0);
+    }
+
+    /// Conta as chamadas ao destino, que no kernel viram um desenho da tela cada.
+    struct Counting(usize);
+
+    impl Write for Counting {
+        fn write_str(&mut self, _text: &str) -> fmt::Result {
+            self.0 += 1;
+            Ok(())
+        }
+    }
+
+    const LINE: [&str; 9] = [
+        "[rustos] random bench: chacha20 ",
+        "36",
+        " MB/s, reseed ",
+        "100",
+        " us, next_u64 ",
+        "941",
+        ".",
+        "5",
+        " ns\n",
+    ];
+
+    #[test]
+    #[ignore = "medida: cargo test --release -p rustos-hal -- --ignored --nocapture"]
+    fn the_scrubber_cost_on_a_typical_line() {
+        let regions = regions();
+        let started = std::time::Instant::now();
+        let mut calls = 0;
+        for _ in 0..1_000_000 {
+            let mut sink = Counting(0);
+            {
+                let mut scrubber = Scrubber::new(&mut sink, &regions);
+                for piece in LINE {
+                    scrubber.write_str(core::hint::black_box(piece)).unwrap();
+                }
+            }
+            calls = sink.0;
+        }
+        let ns = started.elapsed().as_nanos() / 1_000_000;
+        std::println!(
+            "{ns} ns por linha, {calls} write_str por linha (de {})",
+            LINE.len()
+        );
     }
 }

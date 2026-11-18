@@ -63,8 +63,15 @@ fn regions() -> Regions {
 }
 
 /// Endereço virtual do kernel para `{}`: `kernel+0x1234`, `direct+0x40` ou `<kernel>`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct Addr(pub u64);
+
+/// Como o `Display`: o `derive` escreveria o número em decimal, que o filtro não reconhece.
+impl fmt::Debug for Addr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
 
 impl fmt::Display for Addr {
     #[cfg(not(feature = "debug-addrs"))]

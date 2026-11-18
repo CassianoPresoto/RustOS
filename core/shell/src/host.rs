@@ -161,6 +161,8 @@ pub enum FaultTest {
     ConsoleLock,
     /// Pânico dentro da mensagem do pânico.
     NestedPanic,
+    /// Pânico em todas as CPUs ao mesmo tempo.
+    Simultaneous,
 }
 
 /// Retrato do sistema no momento da consulta.

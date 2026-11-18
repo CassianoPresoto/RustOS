@@ -19,10 +19,11 @@ fmt: ## formata o código
 fmt-check: ## confere a formatação
 	cargo fmt --all --check
 
-clippy: ## lint no host e nos dois alvos bare-metal; aviso é erro
+clippy: ## lint no host e nos dois alvos bare-metal, com e sem as features de depuração; aviso é erro
 	cargo clippy --all-targets -- -D warnings
 	@for target in $(TARGETS); do \
 		cargo clippy --package rustos-kernel --target $$target -- -D warnings || exit 1; \
+		cargo clippy --package rustos-kernel --target $$target --features debug-addrs,panic-tests -- -D warnings || exit 1; \
 	done
 
 layers-check: ## dependências entre camadas, crates externos, unsafe e asm no lugar certo

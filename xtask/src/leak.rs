@@ -1,22 +1,18 @@
-//! Confere que o log do kernel não entrega endereço do kernel (SDD 09). Vale para as
-//! linhas `[rustos]`: o firmware e o Limine imprimem o que quiserem antes delas.
+//! Confere que o log do kernel não entrega endereço do kernel (SDD 09). Vale do primeiro
+//! `[rustos]` em diante, com o corpo do pânico e a saída do shell; antes dele, o firmware
+//! e o Limine imprimem o que quiserem.
 
 /// Primeiro endereço da metade alta canônica (4 níveis): igual a `HIGH_HALF` de `core/hal`.
 const HIGH_HALF: u64 = 0xffff_8000_0000_0000;
 /// Do último 64 KiB em diante é `-1` ou `u64::MAX`, não endereço (igual ao de `core/hal`).
 const CEILING: u64 = 0xffff_ffff_ffff_0000;
-/// Literal de menos dígitos que isto não chega à metade alta com folga.
-const MIN_DIGITS: usize = 9;
-
-/// O primeiro literal `0x…` de endereço do kernel nas linhas `[rustos]` de `log`.
+/// O primeiro literal `0x…` de endereço do kernel em `log`, do primeiro `[rustos]` em diante.
 pub fn find_kernel_address(log: &str) -> Option<&str> {
-    log.lines()
-        .filter_map(|line| line.find("[rustos]").map(|at| &line[at..]))
-        .find_map(address_in)
+    address_in(&log[log.find("[rustos]")?..])
 }
 
-fn address_in(line: &str) -> Option<&str> {
-    let mut rest = line;
+fn address_in(text: &str) -> Option<&str> {
+    let mut rest = text;
     while let Some(at) = rest.find("0x") {
         let literal = &rest[at..];
         let digits = literal[2..]
@@ -24,7 +20,7 @@ fn address_in(line: &str) -> Option<&str> {
             .take_while(u8::is_ascii_hexdigit)
             .count();
         let value = u64::from_str_radix(&literal[2..2 + digits], 16).ok();
-        if digits >= MIN_DIGITS && value.is_some_and(|v| (HIGH_HALF..CEILING).contains(&v)) {
+        if value.is_some_and(|v| (HIGH_HALF..CEILING).contains(&v)) {
             return Some(&literal[..2 + digits]);
         }
         rest = &literal[2..];
@@ -63,6 +59,21 @@ mod tests {
         ] {
             assert_eq!(find_kernel_address(line), None, "{line}");
         }
+    }
+
+    #[test]
+    fn the_body_of_a_panic_on_the_next_line_is_checked() {
+        let log =
+            "[rustos] panic: panicked at k.rs:1:2:\r\nheap: dealloc de 0xffffffff9b7a7000\r\n";
+        assert_eq!(find_kernel_address(log), Some("0xffffffff9b7a7000"));
+        let shell = "[rustos] boot ok\r\nrustos ~ % mem\r\nbase 0xffff846840000000\r\n";
+        assert_eq!(find_kernel_address(shell), Some("0xffff846840000000"));
+    }
+
+    #[test]
+    fn leading_zeros_do_not_hide_an_address() {
+        let log = "[rustos] x 0x00000000ffffffff9b7a5000\n";
+        assert_eq!(find_kernel_address(log), Some("0x00000000ffffffff9b7a5000"));
     }
 
     #[test]

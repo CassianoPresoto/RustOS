@@ -84,8 +84,18 @@ para o boot, o relatório de `fault` e o pânico, na serial e na tela.
 | Base da imagem | Não aparece. `[rustos] kaslr: on, image slid by up to N bits (4 KiB steps in 2 GiB)`, ou `kaslr: off` se a base é a do linker script |
 | Mapa direto | Só o tamanho (`vm: direct map in N 2M and M 4K pages`) |
 | `pc` do `fault`, endereço do page fault, ponteiro do heap | `Addr`: `kernel+0x1234` na imagem (confere com `nm` no ELF), `direct+0x40` no mapa direto, `mmio+…` e `stack+…` nas janelas, `<kernel>` em qualquer outro endereço da metade alta; o resto (metade baixa, `-1`) sai como veio |
-| Mensagem do pânico e do `kprintln!` | Passa por um filtro (`Scrubber`, `core/hal::redact`) que troca todo literal `0x…` de endereço do kernel pela mesma forma. É a rede para `{:p}`, `{:#x}` e o `Debug` de `VirtAddr`; o código novo usa `Addr` |
+| Mensagem do pânico e do `kprintln!` | Passa por um filtro (`Scrubber`, `core/hal::redact`) que troca todo literal `0x…` de endereço do kernel pela mesma forma. É a rede para `{:p}`, `{:#x}` e o `Debug` de `VirtAddr`; o código novo usa `Addr` (o `Debug` dele escreve como o `Display`) |
 | Saída do shell | Sem filtro: é o que o usuário pediu (`random` imprime um `u64` qualquer) |
+
+**O que o filtro não pega.** Só o literal com prefixo `0x`, de até 32 dígitos (zeros à esquerda valem; mais de 16 dígitos
+significativos não é `u64` e sai como veio). Escapam o hexadecimal sem prefixo (`{:x}`), o decimal, o binário e o octal, e o
+endereço que um tipo escreva por conta própria sem `Addr` nem `0x`; por isso o tipo que carrega endereço escreve em
+hexadecimal com prefixo (`Violation`, `VirtAddr`) e o review confere o resto. Decimal de 19 dígitos ou mais acima de `i64::MAX` não é tratado.
+`HIGH_HALF` (`0xffff_8000_0000_0000`) supõe paginação de 4 níveis, como o resto do kernel. `direct+0x…` é o endereço
+**físico** do objeto do heap (o mapa direto soma um deslocamento fixo), não um deslocamento do KASLR. Custo do filtro, medido
+no host em `release` (`cargo test --release -p rustos-hal -- --ignored --nocapture`, uma linha típica do boot): 94 a 97 ns e 11
+chamadas a `write_str` por linha, contra 110 ns e 15 antes de o `0` só abrir candidato quando o `x` vem junto no mesmo pedaço
+(a linha tem 9 pedaços; no kernel, cada chamada vira um desenho da tela).
 
 **O teto de entropia vem do Limine, não do kernel.** Em `common/lib/elf.c` (`elf64_load`, lido em
 2026-11-17) o sorteio é `rand32() & ~(max_align - 1)` somado à base do linker, e o Limine tenta
@@ -105,8 +115,8 @@ o endereço cru, o `kernel base: 0x… (physical 0x…)` e desliga o filtro. For
 O `make smoke` com ela só confere que a base não é a do linker script.
 
 **Como se verifica.** O `make smoke` exige a linha `kaslr: on` e reprova qualquer literal `0x…` entre
-`0xffff_8000_0000_0000` e `0xffff_ffff_ffff_0000` nas linhas `[rustos]` do boot (`xtask/src/leak.rs`, com
-teste). O corte de cima deixa passar `-1`/`u64::MAX`, e a de baixo, endereço de usuário e máscara.
+`0xffff_8000_0000_0000` e `0xffff_ffff_ffff_0000` do primeiro `[rustos]` em diante, o corpo do pânico e a saída do shell incluídos (`xtask/src/leak.rs`, com
+teste); o `make smoke-panic` roda `mem`, `ps` e `fetch` e passa a saída pelo mesmo conferidor. O corte de cima deixa passar `-1`/`u64::MAX`, e a de baixo, endereço de usuário e máscara.
 
 ## Aleatório do kernel
 

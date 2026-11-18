@@ -22,60 +22,94 @@ struct Scenario {
     name: &'static str,
     /// Linha de comando do Limine; sem ela, o kernel sobe normal.
     cmdline: Option<&'static str>,
-    /// Comando do shell, digitado depois do boot; sem ele, o pânico vem antes do shell.
-    command: Option<&'static str>,
+    /// Comandos do shell, digitados um a um depois do boot; sem eles, o pânico vem antes do shell.
+    commands: &'static [&'static str],
     /// Trechos que têm de aparecer, todos.
     expect: &'static [&'static str],
+    /// Trecho que tem de aparecer exatamente uma vez (relatório único de vários pânicos).
+    once: Option<&'static str>,
+    /// Trechos que não podem aparecer.
+    forbid: &'static [&'static str],
+    /// Espera o prompt voltar depois do último comando (comando que não derruba o kernel).
+    prompt_after: bool,
 }
 
-const SCENARIOS: [Scenario; 6] = [
+const NONE: Scenario = Scenario {
+    name: "",
+    cmdline: None,
+    commands: &[],
+    expect: &[],
+    once: None,
+    forbid: &[],
+    prompt_after: false,
+};
+
+const SCENARIOS: [Scenario; 8] = [
     Scenario {
         name: "panic at entry, before memory",
         cmdline: Some("rustos.panic_early=1"),
-        command: None,
         expect: &["[rustos] panic:", "panic_early: Entry"],
+        ..NONE
     },
     Scenario {
         name: "fault at entry, before the kernel vectors",
         cmdline: Some("rustos.panic_early=2"),
-        command: None,
         expect: &[
-            "[rustos] fault: page fault at 0x700000000000 (read, kernel,",
+            "[rustos] fault: page fault at 0x1000 (read, kernel,",
             "at pc kernel+0x",
         ],
+        ..NONE
     },
     Scenario {
         name: "panic with the new tables on, before the console",
         cmdline: Some("rustos.panic_early=3"),
-        command: None,
         expect: &["[rustos] panic:", "panic_early: Activated"],
+        ..NONE
     },
     Scenario {
         name: "fault with the console locks held",
-        cmdline: None,
-        command: Some("fault lock"),
+        commands: &["fault lock"],
         expect: &[
             "faulting with the console locks held",
             "[rustos] fault: page fault at ",
         ],
+        ..NONE
     },
     Scenario {
         name: "panic inside the panic message",
-        cmdline: None,
-        command: Some("fault nested"),
+        commands: &["fault nested"],
         expect: &[
             "panicking inside the panic message",
             "nested: the message of the first panic panicked",
         ],
+        ..NONE
+    },
+    Scenario {
+        name: "panic on every core at once, one clean report",
+        commands: &["fault all"],
+        expect: &[
+            "panicking on every core at once",
+            "simultaneous panic on cpu",
+        ],
+        once: Some("[rustos] panic:"),
+        forbid: &["failed again", "[[rustos]"],
+        ..NONE
     },
     Scenario {
         name: "write to .text shows the offset, not the address",
-        cmdline: None,
-        command: Some("fault text"),
+        commands: &["fault text"],
         expect: &[
             "[rustos] fault: page fault at kernel+0x",
             "(write, kernel, protection)",
         ],
+        ..NONE
+    },
+    Scenario {
+        name: "shell output carries no address",
+        commands: &["mem", "ps", "fetch"],
+        expect: &["idle", "RustOS"],
+        prompt_after: true,
+        ..NONE
     },
 ];
 
@@ -126,7 +160,7 @@ fn run_scenario(
     let outcome = observe(&receiver, stdin, scenario);
     child.kill().ok();
     child.wait().ok();
-    let log = outcome.log;
+    let log = outcome.log.clone();
     let fail = |reason: &str| {
         Err(qemu::failure(
             arch,
@@ -134,8 +168,8 @@ fn run_scenario(
             &log,
         ))
     };
-    if let Some(missing) = outcome.missing {
-        return fail(&format!("faltou `{missing}` na serial"));
+    if let Some(problem) = &outcome.problem {
+        return fail(problem);
     }
     if let Some(address) = leak::find_kernel_address(&log) {
         return fail(&format!("endereço do kernel na mensagem: `{address}`"));
@@ -153,16 +187,34 @@ fn report_line(line: &str) -> Option<&str> {
 
 struct Observed {
     log: String,
-    /// O primeiro trecho esperado que não apareceu, se faltou algum.
-    missing: Option<&'static str>,
+    /// O que deu errado, se algo deu.
+    problem: Option<String>,
 }
 
 fn first_missing(log: &str, expect: &[&'static str]) -> Option<&'static str> {
     expect.iter().copied().find(|text| !log.contains(text))
 }
 
-/// Lê a serial até todos os trechos aparecerem (e mais um instante), ou o tempo acabar.
-/// Com comando, espera o prompt do shell antes de digitá-lo.
+/// O que o log tem de errado para o cenário: trecho que falta, que repete ou que não podia vir.
+fn verdict(log: &str, scenario: &Scenario) -> Option<String> {
+    if let Some(missing) = first_missing(log, scenario.expect) {
+        return Some(format!("faltou `{missing}` na serial"));
+    }
+    if let Some(text) = scenario.once {
+        let count = log.matches(text).count();
+        if count != 1 {
+            return Some(format!("`{text}` apareceu {count} vezes, não uma"));
+        }
+    }
+    scenario
+        .forbid
+        .iter()
+        .find(|text| log.contains(**text))
+        .map(|text| format!("apareceu `{text}` na serial"))
+}
+
+/// Lê a serial até o cenário se completar (e mais um instante), ou o tempo acabar. Digita
+/// cada comando quando o prompt do shell volta depois do anterior.
 fn observe(
     receiver: &mpsc::Receiver<String>,
     mut stdin: Option<std::process::ChildStdin>,
@@ -170,7 +222,9 @@ fn observe(
 ) -> Observed {
     let started = Instant::now();
     let mut log = String::new();
-    let mut typed = scenario.command.is_none();
+    let mut typed = 0;
+    // Tamanho do log quando o último comando foi digitado: o prompt tem de vir depois do eco.
+    let mut mark = 0;
     let mut complete_at: Option<Instant> = None;
     loop {
         let limit = complete_at.unwrap_or(started + SCENARIO_TIMEOUT);
@@ -181,27 +235,51 @@ fn observe(
             Ok(chunk) => log.push_str(&chunk),
             Err(_) => break,
         }
-        if !typed && qemu::ends_with_prompt(&log) {
-            typed = true;
-            let line = format!("{}\r", scenario.command.unwrap_or_default());
+        let prompt = qemu::ends_with_prompt(&log) && log.len() > mark;
+        if prompt && let Some(command) = scenario.commands.get(typed) {
+            let line = format!("{command}\r");
             if let Some(input) = stdin.as_mut() {
                 input
                     .write_all(line.as_bytes())
                     .and_then(|()| input.flush())
                     .ok();
             }
+            typed += 1;
+            mark = log.len() + line.len();
         }
-        if complete_at.is_none() && typed && first_missing(&log, scenario.expect).is_none() {
+        let all_typed = typed == scenario.commands.len();
+        let settled = !scenario.prompt_after || (prompt && all_typed && typed > 0);
+        if complete_at.is_none()
+            && all_typed
+            && settled
+            && first_missing(&log, scenario.expect).is_none()
+        {
             complete_at = Some(Instant::now() + DRAIN);
         }
     }
-    let missing = first_missing(&log, scenario.expect);
-    Observed { log, missing }
+    let problem = verdict(&log, scenario);
+    Observed { log, problem }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_verdict_wants_one_report_and_none_of_the_forbidden_text() {
+        let scenario = Scenario {
+            expect: &["panic:"],
+            once: Some("[rustos] panic:"),
+            forbid: &["failed again"],
+            ..NONE
+        };
+        assert_eq!(verdict("[rustos] panic: x", &scenario), None);
+        assert!(verdict("nada", &scenario).unwrap().contains("faltou"));
+        let twice = "[[rustos] panic:[[rustos] panic:";
+        assert!(verdict(twice, &scenario).unwrap().contains("2 vezes"));
+        let again = "[rustos] panic: x failed again";
+        assert!(verdict(again, &scenario).unwrap().contains("failed again"));
+    }
 
     #[test]
     fn the_first_missing_text_is_reported() {
@@ -223,7 +301,7 @@ mod tests {
     fn every_scenario_expects_something_and_the_shell_ones_name_a_command() {
         for scenario in &SCENARIOS {
             assert!(!scenario.expect.is_empty(), "{}", scenario.name);
-            assert_ne!(scenario.cmdline.is_some(), scenario.command.is_some());
+            assert_ne!(scenario.cmdline.is_some(), !scenario.commands.is_empty());
         }
     }
 

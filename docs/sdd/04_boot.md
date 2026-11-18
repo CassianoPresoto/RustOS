@@ -109,7 +109,7 @@ escreve direto na serial, sem lock, sem memória e sem tela, e passa pelo mesmo 
 
 | | x86_64 | aarch64 |
 | --- | --- | --- |
-| Vetores (primeira linha do `kmain`) | `install_early`: a IDT estática, com os mesmos stubs de `install`, sobre o seletor de `CS` do Limine; sem IST nem TSS | `install_early`: o `VBAR_EL1` da tabela de sempre, e `SP_EL1` 8 KiB abaixo da pilha viva (EL1t) para o quadro caber; ninguém volta dali |
+| Vetores (primeira linha do `kmain`) | `install_early`: a IDT estática, com os mesmos stubs de `install`, sobre o seletor de `CS` do Limine; sem IST nem TSS | `install_early`: o `VBAR_EL1` da tabela de sempre, e a pilha que a exceção usa (`SP_EL1` em EL1t, `SP_EL0` em EL1h) 8 KiB abaixo da viva, para o quadro caber; ninguém volta dali |
 | Serial | COM1 por `in`/`out`, que funciona desde a entrada; sem programar a UART | PL011 em `TTBR0_EL1` (abaixo) até `Vm::activate`, depois na janela de dispositivos |
 | Troca para a definitiva | `install_traps` refaz a IDT sobre a GDT própria | `early_serial_map` mapeia a PL011 no espaço novo **antes** de ativá-lo; `early_serial_switch` aponta a serial precoce para lá e devolve o `TTBR0_EL1` |
 
@@ -118,8 +118,8 @@ diante, só `Usable`, `Bootloader reclaimable`, `Executable and modules` e `Fram
 PL011 (`0x0900_0000`) não está no mapa de memória. Medido na QEMU `virt`: uma escrita em
 `HHDM + 0x0900_0000` na entrada do `kmain` trava sem saída.
 O mesmo PROTOCOL.md deixa o `TTBR0_EL1` livre para o kernel (revisão 1 em diante), então
-`arch/aarch64/src/early.rs` monta nele um bloco de 1 GiB de dispositivo com endereço virtual igual
-ao físico (duas páginas, 8 KiB, num local do `kmain` na pilha do Limine, que vive até o `early_serial_switch`; o endereço físico delas vem do `AT S1E1R`) e confere que o `TCR_EL1` é
+`arch/aarch64/src/early.rs` monta nele (níveis 0, 1 e 2) um bloco de 2 MiB de dispositivo, com endereço virtual igual
+ao físico, em `0x0900_0000` (múltiplo de 2 MiB); o endereço 0 volta a dar page fault. As três páginas (12 KiB) são um local do `kmain`, na pilha do Limine, que vive até o `early_serial_switch`; o endereço físico delas vem do `AT S1E1R`, e a escrita é volátil porque a MMU as lê fora do compilador e confere que o `TCR_EL1` é
 o de 4 níveis do Limine (`T0SZ` 16, `EPD0` 0); sem isso, a serial precoce fica desligada. O `Vm::activate`
 liga `EPD0` e o `TTBR0_EL1` volta ao valor do Limine. Alternativas descartadas: semihosting (só a QEMU
 com `-semihosting`, e a saída não vai para a serial que o `smoke` lê) e o framebuffer (exige o renderizador
@@ -127,12 +127,19 @@ de texto antes de haver memória).
 
 **Pânico dentro do pânico.** `panic::begin` chamado de novo pela CPU dona do pânico toma de volta os
 locks do console, e `print_panic` cai para `early::print` quando a serial não está instalada ou está presa.
-Do terceiro pânico em diante o handler só escreve uma linha fixa em `early::print_str` e para.
+Só a dona conta (`DEPTH`, depois de `begin`): do terceiro relatório dela em diante, pânico ou falta
+(`on_fault` também passa por `begin`), só sai uma linha fixa em `early::print_str` e a CPU para. As outras CPUs
+param em silêncio e contam em `STOPPED`, como sempre. O relatório precoce de falta (`early::on_fault`) tem o
+mesmo limite: a segunda falta escreve uma linha fixa e a terceira só para.
+
+**Margem de pilha no aarch64** (medida em `dev`, pintando a pilha do Limine de `0xAA` e varrendo: 6 KiB abaixo do quadro do
+`kmain` até antes de `Vm::activate`, que já inclui `Memory::init` e `Vm::build`; o quadro tem as 12 KiB das tabelas e
+até 4 KiB de alinhamento): cerca de 24 KiB de 64 KiB em uso, margem de uns 40 KiB. No relatório precoce de
+falta, 0,5 KiB até o handler mais 1,6 KiB da impressão, de 8 KiB: margem de 6 KiB.
 
 **O que ficou de fora.** Núcleo secundário, até `secondary_init`, ainda usa os vetores e as tabelas do
 Limine ([DEBT-0063](../tech-debt/0063-nucleo-secundario-sem-vetores-nem-serial-precoce.md)); a serial precoce
 não programa a UART e, no aarch64, é a da QEMU `virt` ([DEBT-0064](../tech-debt/0064-serial-precoce-so-confia-no-firmware.md)).
-Enquanto o `TTBR0_EL1` está ligado, os endereços de 0 a 1 GiB leem dispositivo em vez de dar page fault.
 
 ## Núcleos secundários
 

@@ -70,7 +70,7 @@ Sem rede de propósito: a placa padrão da `virt` (virtio-net) carrega a option 
 `efi-virtio.rom` do iPXE, que o Ubuntu só instala com o pacote `ipxe-qemu`, e a
 QEMU sai antes do boot sem ela. TCG é sempre a reserva (`-accel <nativo> -accel tcg`).
 
-**Features do kernel:** `RUSTOS_FEATURES=a,b` vira `--features a,b` em todo build do xtask. `debug-addrs` imprime endereço cru ([SDD 09](09_seguranca.md#endereços-do-kernel-no-log)); `panic-tests` liga a leitura de `rustos.panic_early` na linha de comando (o `smoke-panic` a põe sozinho).
+**Features do kernel:** `RUSTOS_FEATURES=a,b` vira `--features a,b` em todo build do xtask. `debug-addrs` imprime endereço cru ([SDD 09](09_seguranca.md#endereços-do-kernel-no-log)); `panic-tests` liga a leitura de `rustos.panic_early` na linha de comando e os testes `fault lock`, `fault nested` e `fault all` (o `smoke-panic` a põe sozinho); a imagem de produção não os tem. O `make clippy` roda também com `debug-addrs,panic-tests`.
 
 **Núcleos:** a QEMU sobe com `-smp 4`; `RUSTOS_SMP=N` troca o número (o kernel guarda estado para 8, `MAX_CPUS` de `core/hal`; o resto fica parado). O `make smoke` exige `[rustos] cpus: N online` com esse N. No TCG, neste QEMU 11.1.3 em Apple Silicon, os vCPUs do x86_64 rodam em threads do hospedeiro (observado: 10 threads e cerca de 280% de CPU durante o `bench`); `RUSTOS_ACCEL=tcg-multi` força `-accel tcg,thread=multi`.
 

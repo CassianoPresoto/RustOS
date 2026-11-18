@@ -1,21 +1,23 @@
 //! Um dispositivo alcançável antes de o kernel ter memória e tabelas próprias: o `TTBR0_EL1`
-//! (que o Limine deixa livre) recebe um mapa de 1:1 de 1 GiB, em duas páginas da pilha do chamador.
+//! (que o Limine deixa livre) recebe um bloco de 2 MiB de 1:1, em três páginas da pilha do chamador.
 
 use core::arch::asm;
+use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use rustos_hal::{PageFlags, PhysAddr};
 
-use crate::descriptor::{OUTPUT_ADDRESS, gib_block_descriptor, table_descriptor};
+use crate::descriptor::{OUTPUT_ADDRESS, block_descriptor, table_descriptor};
 use crate::mmu::prepare_space;
 
-/// As duas páginas de tabela, alinhadas como a MMU exige. Quem as cria as mantém vivas até
+/// As três páginas de tabela (níveis 0, 1 e 2), alinhadas como a MMU exige. Quem as cria as mantém vivas até
 /// `release_identity_map`: a MMU as lê sem que o compilador saiba.
 #[derive(Debug)]
 #[repr(C, align(4096))]
 pub struct EarlyTables {
     level0: [u64; 512],
     level1: [u64; 512],
+    level2: [u64; 512],
 }
 
 impl EarlyTables {
@@ -23,6 +25,7 @@ impl EarlyTables {
         Self {
             level0: [0; 512],
             level1: [0; 512],
+            level2: [0; 512],
         }
     }
 }
@@ -41,6 +44,8 @@ const T0SZ_MASK: u64 = 0x3f;
 /// `TCR_EL1.EPD0`: desliga a caminhada de `TTBR0_EL1`.
 const EPD0: u64 = 1 << 7;
 const GIB_SHIFT: u32 = 30;
+const MIB2_SHIFT: u32 = 21;
+const INDEX_MASK: u64 = 0x1ff;
 const LEVEL0_SHIFT: u32 = 39;
 
 /// Endereço físico de um endereço virtual mapeado, pela própria MMU (`AT S1E1R`).
@@ -60,7 +65,7 @@ fn translate(virt: u64) -> Option<u64> {
     (par & 1 == 0).then_some(par & OUTPUT_ADDRESS)
 }
 
-/// Mapeia 1:1 o GiB de `device`; `false` sem os 4 níveis do Limine no `TCR_EL1`.
+/// Mapeia 1:1 o bloco de 2 MiB de `device`; `false` sem os 4 níveis do Limine no `TCR_EL1`.
 ///
 /// # Safety
 /// Em EL1, na entrada do kernel, antes de `Vm::activate`; o `TTBR0_EL1` não tem outro dono.
@@ -71,20 +76,40 @@ pub unsafe fn identity_map_device(tables: &mut EarlyTables, device: u64) -> bool
     if tcr & T0SZ_MASK != T0SZ_FOUR_LEVELS || tcr & EPD0 != 0 || device >> LEVEL0_SHIFT != 0 {
         return false;
     }
-    let (Some(level0), Some(level1)) = (
+    let (Some(level0), Some(level1), Some(level2)) = (
         translate(tables.level0.as_ptr().addr() as u64),
         translate(tables.level1.as_ptr().addr() as u64),
+        translate(tables.level2.as_ptr().addr() as u64),
     ) else {
         return false;
     };
     // SAFETY: o índice 7 do `MAIR_EL1` é do kernel e nenhum mapeamento o usa ainda.
     unsafe { prepare_space() };
-    let slot = usize::try_from(device >> GIB_SHIFT).unwrap_or(0);
-    tables.level0[0] = table_descriptor(PhysAddr::new(level1));
-    tables.level1[slot] = gib_block_descriptor(
-        PhysAddr::new(device >> GIB_SHIFT << GIB_SHIFT),
-        PageFlags::DEVICE,
-    );
+    let slot1 = usize::try_from(device >> GIB_SHIFT & INDEX_MASK).unwrap_or(0);
+    let slot2 = usize::try_from(device >> MIB2_SHIFT & INDEX_MASK).unwrap_or(0);
+    let block = PhysAddr::new(device >> MIB2_SHIFT << MIB2_SHIFT);
+    // SAFETY: os três índices são menores que 512 e as páginas são de `tables`; a MMU as
+    // vê só depois do `TTBR0_EL1`, e a escrita é volátil porque ela as lê fora do compilador.
+    unsafe {
+        ptr::write_volatile(
+            &raw mut tables.level0[0],
+            table_descriptor(PhysAddr::new(level1)),
+        );
+    }
+    // SAFETY: idem.
+    unsafe {
+        ptr::write_volatile(
+            &raw mut tables.level1[slot1],
+            table_descriptor(PhysAddr::new(level2)),
+        );
+    }
+    // SAFETY: idem.
+    unsafe {
+        ptr::write_volatile(
+            &raw mut tables.level2[slot2],
+            block_descriptor(block, PageFlags::DEVICE),
+        );
+    }
     let saved: u64;
     // SAFETY: troca só a metade baixa; `dsb` publica as tabelas antes de a MMU as ler.
     unsafe {

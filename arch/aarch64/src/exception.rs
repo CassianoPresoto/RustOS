@@ -123,21 +123,27 @@ rustos_exception_common:
 /// Vetores antes de haver memória: `handlers.fault` não volta. `install` os troca.
 ///
 /// # Safety
-/// Em EL1 com IRQ mascarada, na entrada, com 8 KiB livres abaixo da pilha (`SP_EL1` vai ali).
+/// Em EL1 com IRQ mascarada, na entrada, com 8 KiB livres abaixo da pilha viva.
 pub unsafe fn install_early(handlers: &'static Handlers) {
+    // A pilha que a exceção usa (`SP_EL1` em EL1t, `SP_EL0` em EL1h) vai para esses 8 KiB.
     HANDLERS.store(ptr::from_ref(handlers).cast_mut(), Ordering::Release);
     // SAFETY: `SP_EL1` só se escreve com `SPSel` em 1; sem acesso à pilha entre as trocas.
     // `isb` publica o `VBAR`.
     unsafe {
         asm!(
             "mrs {sel}, spsel",
-            "cbnz {sel}, 1f",
             "mov {top}, sp",
             "sub {top}, {top}, #0x2000",
+            "cbnz {sel}, 1f",
             "msr spsel, #1",
             "mov sp, {top}",
             "msr spsel, #0",
+            "b 2f",
             "1:",
+            "msr spsel, #0",
+            "mov sp, {top}",
+            "msr spsel, #1",
+            "2:",
             "adrp {top}, rustos_vectors",
             "add {top}, {top}, :lo12:rustos_vectors",
             "msr vbar_el1, {top}",

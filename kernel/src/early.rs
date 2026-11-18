@@ -2,6 +2,7 @@
 //! escreve direto na serial, sem lock, sem memória e sem tela (SDD 04).
 
 use core::fmt;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use rustos_hal::{Console, Cpu, Fault, Handlers, Irq};
 
@@ -37,9 +38,19 @@ pub fn print_str(text: &str) {
     }
 }
 
+/// Faltas que o relatório precoce tenta imprimir: a primeira e uma dentro dela.
+static FAULTS: AtomicU32 = AtomicU32::new(0);
+
 fn on_fault(fault: &Fault) {
     if fault.kind.is_recoverable() {
         return;
+    }
+    let seen = FAULTS.fetch_add(1, Ordering::Relaxed);
+    if seen == 1 {
+        print_str("[rustos] fault: failed again while reporting a fault\n");
+    }
+    if seen >= 1 {
+        platform::cpu().halt_forever();
     }
     print(format_args!("{}", FaultLine(fault)));
     platform::cpu().halt_forever();
@@ -49,9 +60,9 @@ fn ignore_irq(_irq: Irq) {}
 
 fn ignore_preempt() {}
 
-/// Endereço de usuário sem mapa em nenhuma fase do boot (o mapa de 1:1 da serial cobre só o 1 GiB do zero).
+/// Perto do nulo e sem mapa em nenhuma fase do boot (o de 1:1 da serial cobre 2 MiB em `0x0900_0000`).
 #[cfg(feature = "panic-tests")]
-const UNMAPPED: usize = 0x7000_0000_0000;
+const UNMAPPED: usize = 0x1000;
 
 /// Ponto de falha que a linha de comando pede (`rustos.panic_early`), só no build de teste.
 #[cfg(feature = "panic-tests")]

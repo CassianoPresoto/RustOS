@@ -2,7 +2,7 @@
 //! os outros nunca mais escrevem na tela (SDD 15).
 
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use rustos_hal::{Cpu, Ipi, IpiKind};
 
@@ -45,12 +45,12 @@ pub fn begin() {
         .is_err()
     {
         if OWNER.load(Ordering::Acquire) == me {
-            // SAFETY: esta CPU é a dona do pânico: quem segurava o console era ela mesma.
-            unsafe { console::break_locks() };
+            nested();
             return;
         }
         stop_this_cpu();
     }
+    DEPTH.store(1, Ordering::Relaxed);
     let others = u32::try_from(percpu::online_count() - 1).unwrap_or(0);
     if others > 0 {
         // SAFETY: há outras CPUs online, então a interface de interrupção desta está ligada.
@@ -67,24 +67,32 @@ pub fn begin() {
     unsafe { console::break_locks() };
 }
 
-#[panic_handler]
-fn panic(info: &PanicInfo<'_>) -> ! {
+/// A dona entrou em pânico de novo: toma o console de volta, e do terceiro relatório em
+/// diante (pânico ou falta) só escreve uma linha fixa e para.
+fn nested() {
     if DEPTH.fetch_add(1, Ordering::Relaxed) >= MAX_DEPTH {
-        early::print_str("[rustos] panic: panicked again while reporting a panic\n");
+        early::print_str("[rustos] panic: failed again while reporting a panic\n");
         platform::cpu().halt_forever()
     }
+    // SAFETY: esta CPU é a dona do pânico: quem segurava o console era ela mesma.
+    unsafe { console::break_locks() };
+}
+
+#[panic_handler]
+fn panic(info: &PanicInfo<'_>) -> ! {
     begin();
     console::print_panic(format_args!("[rustos] panic: {info}\n"));
     platform::cpu().halt_forever()
 }
 
-/// Pânicos dentro do relatório de pânico que ainda se tentam imprimir; o seguinte só avisa.
+/// Relatórios que a dona tenta imprimir (o primeiro e um dentro dele); só ela os conta.
 const MAX_DEPTH: u32 = 2;
 static DEPTH: AtomicU32 = AtomicU32::new(0);
 
 /// Teste do pânico: a mensagem do primeiro pânico entra em pânico ao ser impressa.
+#[cfg(feature = "panic-tests")]
 pub fn nested_test() -> ! {
-    static ARMED: AtomicBool = AtomicBool::new(false);
+    static ARMED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
     struct Message;
     impl core::fmt::Display for Message {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -97,4 +105,45 @@ pub fn nested_test() -> ! {
     }
     ARMED.store(true, Ordering::Relaxed);
     panic!("{}", Message)
+}
+
+/// Teste do pânico: uma tarefa por CPU ativa, todas entram em pânico juntas (a do shell também).
+/// Só um relatório pode sair.
+#[cfg(feature = "panic-tests")]
+pub fn simultaneous_test() -> bool {
+    use core::sync::atomic::AtomicU32;
+
+    use rustos_sched::SchedParams;
+
+    use crate::task::{self, Spawn};
+
+    static READY: AtomicU32 = AtomicU32::new(0);
+    static TOTAL: AtomicU32 = AtomicU32::new(0);
+
+    fn together(_: usize) {
+        READY.fetch_add(1, Ordering::AcqRel);
+        while READY.load(Ordering::Acquire) < TOTAL.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+        panic!("simultaneous panic on cpu {}", percpu::current().index());
+    }
+
+    let here = percpu::pinned(PerCpu::index);
+    let active = task::active_cpus();
+    TOTAL.store(active.count_ones(), Ordering::Release);
+    for cpu in (0..rustos_hal::MAX_CPUS).filter(|&cpu| cpu != here && active >> cpu & 1 != 0) {
+        let spawned = task::spawn(Spawn {
+            name: "panicker",
+            entry: together,
+            arg: 0,
+            simd: false,
+            params: SchedParams::fair(0),
+            affinity: 1 << cpu,
+        });
+        if spawned.is_err() {
+            return false;
+        }
+    }
+    together(0);
+    false
 }

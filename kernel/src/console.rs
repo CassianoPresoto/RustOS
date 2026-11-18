@@ -7,10 +7,9 @@ use rustos_hal::{ByteSource, Console, KeyEvent};
 
 use crate::addr;
 use crate::early;
-use crate::interrupts::FaultTest;
 use crate::memory::Memory;
 use crate::panic;
-use crate::platform::{self, PlatformConsole};
+use crate::platform::PlatformConsole;
 use crate::screen::Screen;
 use crate::sync::IrqLock;
 
@@ -141,10 +140,11 @@ pub fn print_panic(args: fmt::Arguments<'_>) {
 }
 
 /// Teste do pânico: segura a serial e a tela, como um `print` no meio, e provoca um page fault.
+#[cfg(feature = "panic-tests")]
 pub fn fault_while_locked() -> bool {
     let _serial = SERIAL.lock();
     let _screen = SCREEN.lock();
-    platform::trigger(FaultTest::PageFault)
+    crate::platform::trigger(crate::interrupts::FaultTest::PageFault)
 }
 
 /// Escreve na serial e na grade da tela, cada uma com o próprio lock, nessa
