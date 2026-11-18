@@ -85,7 +85,7 @@ const BENCH_REFUSED: &str = "bench: not in this build";
 
 /// O que só o modo de teste imprime: se uma destas faltar, a linha de comando se perdeu e o
 /// boot que passou foi o normal.
-const SELFTEST_LINES: [(&str, &str); 18] = [
+const SELFTEST_LINES: [(&str, &str); 21] = [
     (
         "[rustos] user: entered ring3/el0",
         "a entrada do primeiro programa em anel 3 ou EL0",
@@ -119,8 +119,20 @@ const SELFTEST_LINES: [(&str, &str); 18] = [
         "o autoteste dos casos de usuário",
     ),
     (
-        "[rustos] initramfs: 2 files, ",
-        "a leitura do initramfs (o `init` e o `big`)",
+        "[rustos] initramfs: 3 files, ",
+        "a leitura do initramfs (o `init`, o `big` e o `lazy`)",
+    ),
+    (
+        "[user] lazy: ok (",
+        "o `lazy`: pilha e `.bss` sob demanda, com a página zero e a cópia dela",
+    ),
+    (
+        "[rustos] user: demand paging: ",
+        "as faltas de página resolvidas pelo kernel (página zero, frame novo, cópia)",
+    ),
+    (
+        "[rustos] tlb shootdown: ok (cpu ",
+        "o teste de invalidação do TLB entre CPUs",
     ),
 ];
 /// O que o boot normal confere, além do que o `REQUIRED` tem de comum aos dois modos.

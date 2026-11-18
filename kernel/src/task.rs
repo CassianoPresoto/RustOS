@@ -167,6 +167,8 @@ struct Slot {
     user_top: AtomicU64,
     /// O `Process` da tarefa (`Box::into_raw`), ou zero.
     process: AtomicUsize,
+    /// O endereço da máscara de CPUs do espaço que a tarefa roda (`UserSpace::active_addr`), ou zero.
+    user_active: AtomicUsize,
     meta: IrqLock<Meta>,
 }
 
@@ -186,6 +188,7 @@ impl Slot {
             user_root: AtomicU64::new(0),
             user_top: AtomicU64::new(0),
             process: AtomicUsize::new(0),
+            user_active: AtomicUsize::new(0),
             meta: IrqLock::new(Meta {
                 name: "",
                 entry: None,
@@ -489,6 +492,7 @@ fn start(id: usize, config: Spawn) -> Result<bool, TaskError> {
     target.user_root.store(0, Ordering::Relaxed);
     target.user_top.store(0, Ordering::Relaxed);
     target.process.store(0, Ordering::Relaxed);
+    target.user_active.store(0, Ordering::Relaxed);
     target.cpu_ns.store(0, Ordering::Relaxed);
     target.switches.store(0, Ordering::Relaxed);
     target.wake_at_ns.store(u64::MAX, Ordering::Relaxed);
@@ -735,14 +739,42 @@ fn switch_from(cpu: &PerCpu, mut queue: IrqGuard<'static, Queue>, now_ns: u64) {
         // SAFETY: a área é da tarefa que entra, viva, e foi preparada ou salva antes.
         unsafe { platform::fpu_restore(area.as_ptr()) };
     }
+    let (leaving, entering) = (
+        outgoing.user_active.load(Ordering::Relaxed),
+        incoming.user_active.load(Ordering::Relaxed),
+    );
+    let index = cpu.index();
+    if leaving != entering {
+        mark_active(entering, index, true);
+    }
     platform::switch_space(
         incoming.user_root.load(Ordering::Relaxed),
         incoming.user_top.load(Ordering::Relaxed),
     );
+    if leaving != entering {
+        mark_active(leaving, index, false);
+    }
     // SAFETY: `to` foi preparada por `start` ou guardada por uma troca anterior; a IRQ está
     // mascarada, nenhum lock está preso e nenhuma outra CPU a usa (`on_cpu`).
     unsafe { platform::switch(CONTEXTS.0[from].get(), CONTEXTS.0[to].get()) };
     finish_switch();
+}
+
+/// Sobe ou baixa o bit de `cpu` na máscara de CPUs do espaço em `mask` (zero: tarefa sem espaço).
+/// O bit sobe antes de a raiz entrar nesta CPU e baixa depois de ela sair: quem invalida o TLB lê a
+/// máscara e nunca perde uma CPU que ainda pode ter a tradução.
+fn mark_active(mask: usize, cpu: usize, on: bool) {
+    if mask == 0 {
+        return;
+    }
+    // SAFETY: o endereço é o do `AtomicU32` de um `UserSpace` ligado por `bind_user`, que vive até
+    // `unbind_user` e não se move enquanto a tarefa o roda.
+    let mask = unsafe { &*core::ptr::with_exposed_provenance::<AtomicU32>(mask) };
+    if on {
+        mask.fetch_or(1 << cpu, Ordering::SeqCst);
+    } else {
+        mask.fetch_and(!(1 << cpu), Ordering::SeqCst);
+    }
 }
 
 /// Depois de uma troca, já na pilha de quem entrou: libera a tarefa que saiu desta CPU para
@@ -962,8 +994,9 @@ pub fn current() -> TaskId {
 
 /// Liga a tarefa corrente ao processo de usuário `process` (o `Box::into_raw` de um `Process`) com
 /// a raiz `root`: o espaço e a pilha de entrada desta CPU passam a ser os dele e as próximas trocas
-/// os repõem. Deixa a IRQ mascarada, para a entrada no usuário. Devolve o topo da pilha do kernel.
-pub fn bind_user(root: u64, process: usize) -> u64 {
+/// os repõem. `active` é o endereço da máscara de CPUs do espaço, que vale até `unbind_user`. Deixa a
+/// IRQ mascarada, para a entrada no usuário. Devolve o topo da pilha do kernel.
+pub fn bind_user(root: u64, process: usize, active: usize) -> u64 {
     platform::cpu().save_and_disable_interrupts();
     let here = percpu::current();
     let current = slot(here.current.load(Ordering::Relaxed) as usize);
@@ -975,8 +1008,17 @@ pub fn bind_user(root: u64, process: usize) -> u64 {
     current.user_top.store(top, Ordering::Relaxed);
     current.user_root.store(root, Ordering::Relaxed);
     current.process.store(process, Ordering::Release);
+    current.user_active.store(active, Ordering::Relaxed);
+    mark_active(active, here.index(), true);
     platform::switch_space(root, top);
     top
+}
+
+/// O `Process` da tarefa corrente, ou `None` se ela não roda um. Para o tratador de falta de página.
+pub fn current_process() -> Option<usize> {
+    let here = percpu::current();
+    let current = slot(here.current.load(Ordering::Relaxed) as usize);
+    Some(current.process.load(Ordering::Acquire)).filter(|&process| process != 0)
 }
 
 /// Desliga a tarefa corrente do processo: volta ao espaço do kernel nesta CPU e devolve o
@@ -985,6 +1027,7 @@ pub fn unbind_user() -> Option<usize> {
     let here = percpu::current();
     let current = slot(here.current.load(Ordering::Relaxed) as usize);
     platform::switch_space(0, 0);
+    mark_active(current.user_active.swap(0, Ordering::Relaxed), here.index(), false);
     current.user_root.store(0, Ordering::Relaxed);
     current.user_top.store(0, Ordering::Relaxed);
     let process = current.process.swap(0, Ordering::AcqRel);

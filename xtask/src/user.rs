@@ -18,7 +18,7 @@ pub struct Program {
 }
 
 /// Todos os programas de `user/`. O `init` vai em toda imagem; os de teste, só com `selftest`.
-pub const PROGRAMS: [Program; 2] = [
+pub const PROGRAMS: [Program; 3] = [
     Program {
         package: "rustos-user-init",
         file: "init",
@@ -27,6 +27,11 @@ pub const PROGRAMS: [Program; 2] = [
     Program {
         package: "rustos-user-test-big",
         file: "big",
+        selftest_only: true,
+    },
+    Program {
+        package: "rustos-user-test-lazy",
+        file: "lazy",
         selftest_only: true,
     },
 ];
@@ -243,7 +248,7 @@ mod tests {
         let plain: Vec<&str> = programs_for(false).iter().map(|p| p.file).collect();
         let tested: Vec<&str> = programs_for(true).iter().map(|p| p.file).collect();
         assert_eq!(plain, ["init"]);
-        assert_eq!(tested, ["init", "big"]);
+        assert_eq!(tested, ["init", "big", "lazy"]);
     }
 
     #[test]

@@ -14,6 +14,7 @@ use crate::{addr, platform};
 /// Vetores de exceção do começo do boot: imprime na serial e para.
 static HANDLERS: Handlers = Handlers {
     fault: on_fault,
+    copy_fault: ignore_copy_fault,
     irq: ignore_irq,
     preempt: ignore_preempt,
     syscall: ignore_syscall,
@@ -57,6 +58,10 @@ fn on_fault(fault: &Fault) {
     }
     print(format_args!("{}", FaultLine(fault)));
     platform::cpu().halt_forever();
+}
+
+fn ignore_copy_fault(_address: u64, _write: bool) -> bool {
+    false
 }
 
 fn ignore_irq(_irq: Irq) {}

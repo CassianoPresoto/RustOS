@@ -168,5 +168,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-user-test-lazy"
+version = "0.1.0"
+dependencies = [
+ "rustos-user-rt",
+]
+
+[[package]]
 name = "xtask"
 version = "0.1.0"

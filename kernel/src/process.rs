@@ -18,6 +18,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use rustos_hal::abi::{ProcessEvent, USER_TOP, event_kind, fault_access, fault_kind};
 use rustos_hal::{Cpu, Fault, FaultKind};
+use rustos_mm::vmar::Access;
 use rustos_sched::SchedParams;
 
 use crate::frames::Frames;
@@ -44,10 +45,6 @@ impl<E: Into<LoadError>> From<E> for ProcessError {
 pub struct Process {
     pid: u32,
     space: UserSpace,
-    #[allow(
-        dead_code,
-        reason = "lido pelo `vmar_map` e pela falta de página da 4c"
-    )]
     regions: RegionTree,
     entry: u64,
     sp: u64,
@@ -93,6 +90,9 @@ static FAULT_PEAK: AtomicUsize = AtomicUsize::new(0);
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 /// O último evento de fim de processo, para o modo de teste conferir.
 static LAST_EVENT: IrqLock<Option<(u32, ProcessEvent)>> = IrqLock::new(None);
+/// Os frames do último processo que morreu, no instante da morte (só o modo de teste).
+#[cfg(feature = "selftest")]
+static LAST_STATS: IrqLock<Option<(u32, SpaceStats)>> = IrqLock::new(None);
 /// A primeira syscall do boot já foi vista: o usuário entrou e voltou.
 static FIRST_SYSCALL: AtomicBool = AtomicBool::new(false);
 /// O contador de ciclos na primeira syscall do boot e na última entrada em usuário.
@@ -217,15 +217,43 @@ pub fn spawn(
 fn process_main(arg: usize) {
     let process = ptr::with_exposed_provenance_mut::<Process>(arg);
     // SAFETY: `arg` é o `Box::into_raw` de `spawn`, entregue só a esta tarefa.
-    let (root, entry, sp, arg0) = unsafe {
+    let (root, entry, sp, arg0, active) = unsafe {
         let p = &*process;
-        (p.space.root().as_u64(), p.entry, p.sp, p.arg0)
+        (
+            p.space.root().as_u64(),
+            p.entry,
+            p.sp,
+            p.arg0,
+            p.space.active_addr(),
+        )
     };
-    let top = task::bind_user(root, arg);
+    let top = task::bind_user(root, arg, active);
     ENTRY_CYCLES.store(platform::cycles(), Ordering::Relaxed);
     // SAFETY: `bind_user` mascarou a IRQ e já pôs o espaço e a pilha de entrada desta CPU; `entry` e
     // `sp` vêm de `load`, dentro de `[USER_MIN, USER_TOP)`, `sp` alinhado a 16.
     unsafe { platform::enter_user(entry, sp, arg0, 0, top) }
+}
+
+/// Resolve a falta de página de usuário da tarefa corrente: região, permissão e guarda pelo `Vmar`, e
+/// então página zero, frame novo ou cópia da página zero. `false`: o processo morre.
+pub fn resolve_user_fault(address: u64, write: bool, execute: bool) -> bool {
+    let Some(raw) = task::current_process() else {
+        return false;
+    };
+    // SAFETY: `raw` é o `Box::into_raw` de `spawn`, vivo até `terminate`; só a thread do processo
+    // (a que falta) o toca, e roda mascarada (DEBT-0120).
+    let process = unsafe { &mut *ptr::with_exposed_provenance_mut::<Process>(raw) };
+    let access = if execute {
+        Access::Execute
+    } else if write {
+        Access::Write
+    } else {
+        Access::Read
+    };
+    process
+        .space
+        .resolve_fault(&process.regions, address, access)
+        .is_ok()
 }
 
 /// Ocorreu a primeira chamada de usuário do boot: diz, uma vez, que o anel 3 ou EL0 ficou de pé.
@@ -302,7 +330,12 @@ fn terminate(event: ProcessEvent) -> ! {
     let process = unsafe { Box::from_raw(ptr::with_exposed_provenance_mut::<Process>(raw)) };
     let pid = process.pid;
     let cpu = crate::percpu::pinned(crate::percpu::PerCpu::index);
+    process.space.wait_inactive();
     let Process { space, regions, .. } = *process;
+    #[cfg(feature = "selftest")]
+    {
+        *LAST_STATS.lock() = Some((pid, space.stats()));
+    }
     space.destroy();
     drop(regions);
     if event.kind == event_kind::EXIT {
@@ -362,6 +395,12 @@ pub fn entry_and_first_syscall_cycles() -> (u64, u64) {
 #[cfg(feature = "selftest")]
 pub fn fault_peak() -> usize {
     FAULT_PEAK.load(Ordering::Relaxed)
+}
+
+/// Os frames de dados e de tabelas do último processo que morreu, e de que processo foi.
+#[cfg(feature = "selftest")]
+pub fn last_stats() -> Option<(u32, SpaceStats)> {
+    *LAST_STATS.lock()
 }
 
 /// O último evento de fim de processo e de que processo foi.

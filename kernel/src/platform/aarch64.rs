@@ -609,3 +609,9 @@ pub fn set_fast_return(_on: bool) {}
 pub fn set_stack_clean(on: bool) {
     rustos_arch_aarch64::exception::set_scrub(on);
 }
+
+/// Liga ou desliga a invalidação só local do `entry_removed` (modo de teste do *shootdown*).
+#[cfg(feature = "selftest")]
+pub fn set_local_only(on: bool) {
+    rustos_arch_aarch64::set_local_only(on);
+}

@@ -47,6 +47,12 @@ pub use aarch64::{clock_error_ppm, fpu_read_probe, fpu_write_probe, timer_mode};
 #[cfg(all(feature = "selftest", target_arch = "x86_64"))]
 pub use x86_64::{clock_error_ppm, fpu_read_probe, fpu_write_probe, timer_mode};
 
+#[cfg(target_arch = "x86_64")]
+pub use x86_64::{flush_pages, send_shootdown};
+
+#[cfg(all(feature = "selftest", target_arch = "aarch64"))]
+pub use aarch64::set_local_only;
+
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::zero_aligned;
 #[cfg(target_arch = "x86_64")]
