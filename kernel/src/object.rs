@@ -168,7 +168,6 @@ impl Drop for Charge {
     }
 }
 
-#[cfg(feature = "selftest")]
 /// O par de pontas: um lock para as duas filas e a espera de cada ponta.
 #[derive(Debug)]
 pub struct Pair {
