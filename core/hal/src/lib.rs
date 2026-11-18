@@ -1,5 +1,6 @@
 //! Portas do hexágono: os contratos que o núcleo usa para falar com o hardware.
-//! Só tipos e traits; quem implementa mora em `arch/`, `boot/` e `drivers/`.
+//! Tipos, traits e lógica pura sem estado de hardware (`clock`, `cmdline`, `redact`);
+//! quem implementa as portas mora em `arch/`, `boot/` e `drivers/`.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]

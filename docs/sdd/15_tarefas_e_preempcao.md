@@ -382,7 +382,7 @@ ISAs (`make smoke` sai com erro); `[rustos] task self-test: ok` é linha exigida
 - **Autoteste de acordar** (`wake self-test:`, dentro do `smp_self_test`): a mesma medida com 20 amostras. Passa se em 90%
   delas o dorminhoco já tinha rodado quando `unpark` voltou (`direct`); sem a troca no fim do `unpark` são 0 de 20. O critério
   é contar, não um tempo: o x86_64 em TCG `dev` com uma CPU tem dois modos por boot, com a troca de contexto em 3 µs ou em 30 µs
-  (medido pelo revisor com `RUSTOS_SMP=1`: `dev`, 9 de 64 boots neste código e 8 de 64 na `main`; `release`, 10 de 12 neste código
+  (medido na revisão do PR, com `RUSTOS_SMP=1`: `dev`, 9 de 64 boots neste código e 8 de 64 na `main`; `release`, 10 de 12 neste código
   com ~10 µs e 9 de 12 na `main` com ~13 µs; não é regressão; sem IRQ por troca nem `rdtsc` lento, a causa não foi isolada, e a hipótese
   é a TLB do TCG batendo no layout sorteado pelo KASLR), e um limite em µs reprovava o modo lento. Imprime média, mediana, máximo e `direct`. Uma amostra em
   umas 350 chega a esperar o fim da fatia (350 µs no HVF: lag negativo do dorminhoco, a regra do EEVDF); a amostra que passa de 5 ms

@@ -349,9 +349,10 @@ fn start_clocks(apic: &ApicAccess) -> Result<(), PlatformError> {
     .ok_or(PlatformError::MissingFeature("pit"))?;
     TSC_HZ.store(measured.tsc_hz, Ordering::Relaxed);
     let (mult, shift) = TickScale::new(measured.tsc_hz).map_or((0, 0), TickScale::parts);
-    TSC_SHIFT.store(shift, Ordering::Relaxed);
-    TSC_MULT.store(mult, Ordering::Release);
     TSC_ORIGIN.store(rdtsc(), Ordering::Relaxed);
+    TSC_SHIFT.store(shift, Ordering::Relaxed);
+    // O `mult` publica o relógio: gravado por último, quem o vê já vê origem e `shift`.
+    TSC_MULT.store(mult, Ordering::Release);
     APIC_HZ.store(measured.apic_hz, Ordering::Relaxed);
     let deadline = cpu_features().tsc_deadline;
     TSC_DEADLINE.store(deadline, Ordering::Relaxed);

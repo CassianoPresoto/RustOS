@@ -38,10 +38,11 @@ pub unsafe fn start() -> Result<u64, TimerError> {
     }
     FREQUENCY_HZ.store(frequency, Ordering::Relaxed);
     let (mult, shift) = TickScale::new(frequency).map_or((0, 0), TickScale::parts);
-    SCALE_SHIFT.store(shift, Ordering::Relaxed);
-    SCALE_MULT.store(mult, Ordering::Release);
     let now = counter();
     EPOCH_TICKS.store(now, Ordering::Relaxed);
+    SCALE_SHIFT.store(shift, Ordering::Relaxed);
+    // O `mult` publica o relógio: gravado por último, quem o vê já vê época e `shift`.
+    SCALE_MULT.store(mult, Ordering::Release);
     // Desarmado: o comparador no futuro distante, antes de o timer ligar.
     write_deadline(now.wrapping_add(frequency.saturating_mul(3600)));
     // SAFETY: EL1+; o `isb` garante que o disparo vale antes de a IRQ ser destravada.
