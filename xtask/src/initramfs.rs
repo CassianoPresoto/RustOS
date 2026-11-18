@@ -121,7 +121,7 @@ struct Options {
 }
 
 const USAGE: &str = "uso: initramfs [--arch A] [--out caminho] [nome=]arquivo...\n\
-  `nome=` só vale se o trecho antes do primeiro `=` não tiver `/`; caminho com `=` sem `/` antes pede `nome=` explícito";
+  argumento que existe como arquivo é caminho; senão o primeiro `=` separa o nome (pode ter `/`) do caminho";
 
 fn parse(args: &[String]) -> Result<Options, String> {
     let mut options = Options {
@@ -157,12 +157,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
     Ok(options)
 }
 
-/// `nome=caminho` grava `nome` se o `nome` não tem `/`; senão o nome é o último
-/// componente do caminho inteiro.
+/// Argumento que existe como arquivo é caminho (nome = último componente); senão
+/// corta no primeiro `=`: nome antes, caminho depois.
 fn split_input(input: &str) -> Result<(String, &str), String> {
     if let Some((name, path)) = input
         .split_once('=')
-        .filter(|(name, _)| !name.contains('/'))
+        .filter(|_| !Path::new(input).is_file())
     {
         return Ok((name.to_owned(), path));
     }
@@ -400,17 +400,12 @@ mod tests {
             ("init".to_owned(), "/tmp/a")
         );
         assert_eq!(
+            split_input("bin/sh=/tmp/a").unwrap(),
+            ("bin/sh".to_owned(), "/tmp/a")
+        );
+        assert_eq!(
             split_input("/tmp/dir/prog").unwrap(),
             ("prog".to_owned(), "/tmp/dir/prog")
-        );
-        assert_eq!(
-            split_input("/tmp/a=b/prog").unwrap(),
-            ("prog".to_owned(), "/tmp/a=b/prog")
-        );
-        assert_eq!(split_input("v=1/prog").unwrap(), ("v".to_owned(), "1/prog"));
-        assert_eq!(
-            split_input("x=/tmp/a=b").unwrap(),
-            ("x".to_owned(), "/tmp/a=b")
         );
         assert!(parse(&args(&["--arch", "all", "--out", "x", "f"])).is_err());
         assert!(parse(&args(&["--arch", "x86_64"])).is_err());
@@ -421,5 +416,51 @@ mod tests {
     fn the_default_path_is_per_arch() {
         let path = default_path(Path::new("/r"), Arch::Aarch64);
         assert_eq!(path, Path::new("/r/target/initramfs/aarch64.cpio"));
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("rustos-initramfs-{tag}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_argument_that_exists_as_a_file_is_a_path_even_with_an_equals_sign() {
+        let dir = scratch_dir("equals");
+        let file = dir.join("a=b");
+        fs::write(&file, b"x").unwrap();
+        let input = file.to_str().unwrap();
+        assert_eq!(split_input(input).unwrap(), ("a=b".to_owned(), input));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_named_input_with_a_missing_path_reports_that_path() {
+        let dir = scratch_dir("missing");
+        let missing = dir.join("nope");
+        let out = dir.join("out.cpio");
+        let input = format!("bin/sh={}", missing.display());
+        let args = ["--out", out.to_str().unwrap(), &input].map(str::to_owned);
+        let error = run(&dir, &args).unwrap_err();
+        assert!(error.contains(&missing.display().to_string()), "{error}");
+        assert!(!error.contains("bin/sh="), "{error}");
+        assert!(!out.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_nested_name_reaches_the_archive_from_the_command_line() {
+        let dir = scratch_dir("nested");
+        let file = dir.join("busybox");
+        let out = dir.join("out.cpio");
+        fs::write(&file, b"elf").unwrap();
+        let input = format!("bin/sh={}", file.display());
+        let args = ["--out", out.to_str().unwrap(), &input].map(str::to_owned);
+        run(&dir, &args).unwrap();
+        let parsed = parse_back(&fs::read(&out).unwrap());
+        assert_eq!(parsed[0].0, "bin/sh");
+        assert_eq!(parsed[0].1, b"elf");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
