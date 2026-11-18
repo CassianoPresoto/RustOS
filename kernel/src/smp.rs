@@ -164,6 +164,7 @@ unsafe extern "C" fn ap_main(arg: *mut ()) -> ! {
         FAILED.fetch_or(1 << index, Ordering::Relaxed);
         platform::cpu().halt_forever();
     };
+    crate::mitigation::note_cpu();
     percpu::mark_online(index);
     while !GO.load(Ordering::Acquire) {
         panic::stop_if_requested();

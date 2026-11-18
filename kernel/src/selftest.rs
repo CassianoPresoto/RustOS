@@ -50,6 +50,7 @@ pub fn details(
     if let random::Source::Hardware(name) = source {
         kprintln!("[rustos] random: {name}");
     }
+    crate::mitigation::details();
 }
 
 /// O `init` e o programa de teste que o `xtask image` põe no initramfs da imagem com `selftest`.

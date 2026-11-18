@@ -54,9 +54,12 @@ código.
 | Espaço de endereçamento por processo | Um processo ler outro | 4 | A medir: troca de tabela a cada troca de contexto | Desenho do RustOS (SDD 08, fase 4) |
 | ASLR de usuário | Endereço fixo de pilha, heap e bibliotecas facilitando ROP | 4 | A medir | [sysctl kernel](https://docs.kernel.org/admin-guide/sysctl/kernel.html) (`randomize_va_space`) |
 | Handles com direitos | Autoridade ambiente | 4 | A medir | [Fuchsia handles](https://fuchsia.dev/fuchsia-src/concepts/kernel/handles) |
-| KPTI (só CPU vulnerável a Meltdown) | Meltdown | 4 | ~100 ciclos por troca de CR3; sem PCID, esvazia a TLB | [Linux PTI](https://docs.kernel.org/arch/x86/pti.html) |
-| Retpoline/eIBRS, IBPB, STIBP | Spectre v2 | 4 | Sem número na fonte | [Linux spectre](https://docs.kernel.org/admin-guide/hw-vuln/spectre.html) |
-| Limpeza de buffers da CPU na troca de privilégio | MDS | 4 | Desligar SMT tem "impacto significativo", sem número na fonte | [Linux MDS](https://docs.kernel.org/admin-guide/hw-vuln/mds.html) |
+| Clamp de índice, `array_index_nospec` | Spectre v1: leitura especulativa fora da tabela | 4 (**ligado** no número da syscall) | `asm!` em `arch/<isa>` com a sequência do Linux (`cmp; sbb` e `cmp; sbc; csdb`); no aarch64 a `CSDB` custa cerca de 10 ns por syscall no HVF, o resto fica no ruído ([SDD 07](07_desempenho_e_recursos.md)) | [`nospec.h` e `barrier.h` do Linux](https://github.com/torvalds/linux/blob/v6.12/include/linux/nospec.h) (v6.12) |
+| Detecção de vulnerabilidade e a linha `mitigations:` | Saber o que a CPU precisa e dizer o que o kernel liga | 4 (**ligada**) | Uma linha no boot, cerca de 1 ms no x86_64 em TCG (o CPUID por núcleo é emulado) | `common.c`, `proton-pack.c` e `cpufeature.c` do Linux na v6.12 ([SDD 17](17_processos_isolamento_e_syscalls.md#mitigações-de-cpu)) |
+| KPTI (só CPU vulnerável a Meltdown) | Meltdown | 4 (detectado e relatado; **não implementado**, [DEBT-0100](../tech-debt/0100-kpti-nao-implementado.md)) | ~100 ciclos por troca de CR3; sem PCID, esvazia a TLB | [Linux PTI](https://docs.kernel.org/arch/x86/pti.html) |
+| Retpoline/eIBRS, IBPB, STIBP | Spectre v2 | 4 (detectado; **não implementado**, [DEBT-0101](../tech-debt/0101-spectre-v2-nao-implementado.md)) | Sem número na fonte | [Linux spectre](https://docs.kernel.org/admin-guide/hw-vuln/spectre.html) |
+| Limpeza de buffers da CPU na troca de privilégio | MDS | 4 (detectado; **não implementado**, [DEBT-0103](../tech-debt/0103-mds-nao-implementado.md)) | Desligar SMT tem "impacto significativo", sem número na fonte | [Linux MDS](https://docs.kernel.org/admin-guide/hw-vuln/mds.html) |
+| SSBD/SSBS, BHI/Spectre-BHB | Spectre v4 e injeção de histórico de desvio | 4 (detectados; **não implementados**, [DEBT-0102](../tech-debt/0102-ssb-nao-implementado.md) e [DEBT-0104](../tech-debt/0104-bhb-nao-implementado.md)) | A medir | `proton-pack.c` e `common.c` do Linux na v6.12 |
 | Credenciais Linux (uid/gid, capabilities(7)) | Programa Linux esperar o modelo Unix | 5 | — | [capabilities(7)](https://man7.org/linux/man-pages/man7/capabilities.7.html) |
 | Permissões de arquivo em disco (dono, grupo, modo) | Usuário ler arquivo de outro | 6 | A medir | POSIX (não lido nesta rodada) |
 | Argon2id para senha | Quebra de senha vazada por força bruta | 7 | ~64 MiB e t=3 por login no perfil de memória limitada; em máquina com menos RAM, menos memória e mais passadas (seção 4 do RFC) | [RFC 9106](https://www.rfc-editor.org/rfc/rfc9106.html) |
@@ -73,6 +76,21 @@ código.
 | Boot verificado e medido | Kernel ou bootloader trocados | 12 | Tempo de boot a medir | [TPM 2.0](https://trustedcomputinggroup.org/resource/tpm-library-specification/) |
 
 Levantamento de novembro de 2026.
+
+## Mitigações de CPU no boot
+
+A linha `[rustos] mitigations:` fecha a regra do [guidelines 09](../guidelines/09_seguranca.md)
+("o relatório de boot diz o que ficou ligado") para as vulnerabilidades de execução especulativa. Ela
+sai nos dois modos, logo depois de `protections:`, e o `make smoke` e o `make smoke-fast` a exigem
+nas duas ISAs. **O que ela promete:** `on` quer dizer que o kernel liga a mitigação **agora**
+(hoje só o `v1`, o clamp do Spectre v1); `on (hardware)` que a CPU é afetada e o próprio hardware a mitiga, sem ação do kernel (o BHB com `ECBHB` no aarch64; não é `not needed`); `off (not needed)` que a regra do Linux diz que a CPU não
+tem a vulnerabilidade; `off (not implemented)` que a CPU a tem e o kernel não a mitiga, o que é o
+caso de v2, ssb, mds, bhb e kpti em CPU vulnerável (cada um com uma dívida, DEBT-0100 a DEBT-0104);
+`off (untested)` que está ligada e nenhum ambiente a exercita. **O que ela não promete:** que a
+detecção esteja completa (as listas de CPU são parte das do Linux,
+[DEBT-0106](../tech-debt/0106-listas-de-cpu-do-linux-so-em-parte.md)) nem que a QEMU mostre o que o
+metal mostraria (a TCG não anuncia `SPEC_CTRL` nem `ARCH_CAPABILITIES`). A regra de cada
+vulnerabilidade, a fonte e o formato inteiro estão no [SDD 17](17_processos_isolamento_e_syscalls.md#mitigações-de-cpu).
 
 ## Endereços do kernel no log
 
