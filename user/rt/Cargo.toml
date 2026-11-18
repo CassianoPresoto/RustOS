@@ -13,6 +13,10 @@ bench = false
 [lints]
 workspace = true
 
+[features]
+# Syscalls com valores crus, só para `user/tests/*` (SDD 17).
+raw-syscalls = []
+
 [dependencies]
 rustos-hal.workspace = true
 

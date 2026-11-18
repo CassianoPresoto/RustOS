@@ -2,8 +2,9 @@
 //! `debug_write` só, porque o kernel põe `[user] ` na frente de cada chamada.
 
 use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicU64, Ordering};
 
-use rustos_hal::abi::DEBUG_WRITE_MAX;
+use rustos_hal::abi::{DEBUG_WRITE_MAX, Handle};
 
 #[allow(
     clippy::cast_possible_truncation,
@@ -47,12 +48,22 @@ impl Write for LineBuffer {
     }
 }
 
-/// Formata `args` e escreve numa `debug_write`. Erro do console não tem a quem ser dito: some.
+/// O handle de console de `println!`; zero até `set_console`.
+static CONSOLE: AtomicU64 = AtomicU64::new(0);
+
+/// Passa a escrever por `console` (um handle de console com `WRITE`, da mensagem de boot).
+pub fn set_console(console: Handle) {
+    CONSOLE.store(console.raw(), Ordering::Relaxed);
+}
+
+/// Formata `args` e escreve numa `debug_write`. Sem console ou com erro, não tem a quem dizer: some.
 pub fn print_line(args: fmt::Arguments<'_>) {
     let mut line = LineBuffer::new();
     let _ = line.write_fmt(args);
     #[cfg(target_os = "none")]
-    let _ = crate::sys::debug_write(line.as_bytes());
+    if let Some(console) = Handle::from_raw(CONSOLE.load(Ordering::Relaxed)) {
+        let _ = crate::sys::debug_write(console, line.as_bytes());
+    }
 }
 
 #[cfg(test)]
