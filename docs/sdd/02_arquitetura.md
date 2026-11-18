@@ -76,7 +76,7 @@ terminal, o desenho e o shell são deste repositório.
 
 Com a tela alternativa e o histórico, a grade que `render` lê é a da visão: a
 principal, a alternativa ou, rolada para trás, linhas do histórico ([SDD 16](16_terminal.md)).
-Shift+PageUp e Shift+PageDown rolam a visão dentro de `Screen::key_event`, que redesenha ali.
+Shift+PageUp e Shift+PageDown só marcam a visão suja em `Screen::key_event`; o `flush` do laço do shell desenha, fora da IRQ.
 
 A grade do terminal é o buffer-sombra: quem precisa saber o que está na tela lê a
 grade, nunca a memória de vídeo, que no x86_64 é write-combining e lenta de ler.
