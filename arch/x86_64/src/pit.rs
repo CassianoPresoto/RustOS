@@ -12,9 +12,10 @@ const COMMAND: usize = 0x03;
 const PORT_B: usize = 0x21;
 /// Canal 2, acesso baixo/alto, modo 0 (fim de contagem), binário.
 const CHANNEL2_MODE0: u8 = 0xB0;
+/// Trava a contagem atual do canal 2 para leitura (comando de latch: canal 2, acesso 0).
+const CHANNEL2_LATCH: u8 = 0x80;
 const GATE: u8 = 1 << 0;
 const SPEAKER_DATA: u8 = 1 << 1;
-const OUT2: u8 = 1 << 5;
 
 #[derive(Debug)]
 pub struct Pit<B> {
@@ -26,27 +27,34 @@ impl<B: RegisterBus> Pit<B> {
         Self { bus }
     }
 
-    /// Dispara a contagem de `count` ticks sem som; `expired` vira verdadeiro no fim.
-    pub fn arm(&self, count: u16) {
+    /// Dispara o canal 2 em modo 0 a partir de 0xFFFF (54,9 ms), sem som.
+    pub fn start(&self) {
         let port_b = (self.bus.read8(PORT_B) & !SPEAKER_DATA) | GATE;
         self.bus.write8(PORT_B, port_b);
         self.bus.write8(COMMAND, CHANNEL2_MODE0);
-        let [low, high] = count.to_le_bytes();
-        self.bus.write8(CHANNEL2_DATA, low);
-        self.bus.write8(CHANNEL2_DATA, high);
+        self.bus.write8(CHANNEL2_DATA, 0xFF);
+        self.bus.write8(CHANNEL2_DATA, 0xFF);
     }
 
-    pub fn expired(&self) -> bool {
-        self.bus.read8(PORT_B) & OUT2 != 0
+    /// Trava a contagem; o instante da amostra é o do comando de latch.
+    fn latch(&self) {
+        self.bus.write8(COMMAND, CHANNEL2_LATCH);
+    }
+
+    /// Lê a contagem travada (baixo, depois alto).
+    fn read_latched(&self) -> u16 {
+        let low = self.bus.read8(CHANNEL2_DATA);
+        let high = self.bus.read8(CHANNEL2_DATA);
+        u16::from_le_bytes([low, high])
     }
 
     /// Fecha o gate do canal 2.
-    pub fn disarm(&self) {
+    pub fn stop(&self) {
         self.bus.write8(PORT_B, self.bus.read8(PORT_B) & !GATE);
     }
 }
 
-/// Duas leituras dos contadores, uma de cada lado de um intervalo do PIT.
+/// Duas leituras dos contadores, uma de cada lado de um instante.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reading {
     pub tsc: u64,
@@ -58,74 +66,211 @@ pub struct Reading {
 pub struct Calibration {
     pub tsc_hz: u64,
     pub apic_hz: u64,
+    /// Limite do erro da medida, em partes por milhão: a largura das duas amostras das pontas (o
+    /// TSC lido de cada lado do comando de latch) sobre o intervalo, mais 1 tick do PIT de quantização.
+    pub error_ppm: u64,
+    /// Ticks do PIT que a janela durou.
+    pub ticks: u32,
 }
 
-/// Espera `count` ticks do PIT lendo os contadores nas pontas. `None` se o PIT
-/// não terminar em `max_polls` consultas (sem PIT, ou clock parado).
-pub fn measure<B: RegisterBus>(
-    pit: &Pit<B>,
+/// Quando parar e quando recusar (SDD 10).
+#[derive(Clone, Copy, Debug)]
+pub struct Policy {
+    /// Janela em que se aceita a incerteza que houver, se a extrapolação mostra que mais tempo não
+    /// chegaria ao alvo (ticks do PIT).
+    pub min_ticks: u32,
+    /// Teto da janela (ticks do PIT).
+    pub max_ticks: u32,
+    /// Incerteza em que a medida fecha na hora.
+    pub target_ppm: u64,
+    /// Acima disto a medida é recusada.
+    pub refuse_ppm: u64,
+    /// Tempo máximo, em ciclos de TSC, para o PIT andar: sem ele, o PIT está parado ou ausente.
+    pub max_cycles: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// O contador do PIT não andou dentro de `max_cycles`, ou não partiu de perto de 0xFFFF.
+    Stuck,
+    /// A janela chegou ao teto e a incerteza segue acima de `refuse_ppm`.
+    TooUncertain(u64),
+}
+
+#[derive(Clone, Copy)]
+struct Sample {
     count: u16,
-    max_polls: u32,
-    mut read: impl FnMut() -> Reading,
-) -> Option<Calibration> {
-    pit.arm(count);
-    let start = read();
-    let mut polls = 0;
-    while !pit.expired() {
-        polls += 1;
-        if polls > max_polls {
-            pit.disarm();
-            return None;
+    before: Reading,
+    after: Reading,
+}
+
+impl Sample {
+    fn take<B: RegisterBus>(pit: &Pit<B>, read: &mut impl FnMut() -> Reading) -> Self {
+        let before = read();
+        pit.latch();
+        let after = read();
+        Self {
+            count: pit.read_latched(),
+            before,
+            after,
         }
     }
-    let end = read();
-    pit.disarm();
-    let tsc_delta = end.tsc.checked_sub(start.tsc)?;
-    let apic_delta = end.apic_ticks.checked_sub(start.apic_ticks)?;
-    Some(Calibration {
-        tsc_hz: per_second(tsc_delta, count)?,
-        apic_hz: per_second(u64::from(apic_delta), count)?,
-    })
+
+    /// Largura da amostra em ciclos de TSC: onde, entre as duas leituras, o latch caiu.
+    fn width(&self) -> u64 {
+        self.after.tsc.saturating_sub(self.before.tsc)
+    }
+
+    fn tsc(&self) -> u128 {
+        u128::midpoint(u128::from(self.before.tsc), u128::from(self.after.tsc))
+    }
+
+    fn apic(&self) -> u128 {
+        u128::midpoint(
+            u128::from(self.before.apic_ticks),
+            u128::from(self.after.apic_ticks),
+        )
+    }
 }
 
-/// `delta` ticks em `count` ticks do PIT, convertidos para ticks por segundo.
-fn per_second(delta: u64, count: u16) -> Option<u64> {
-    if count == 0 || delta == 0 {
-        return None;
+/// Número de amostras iniciais, de que se guarda a mais estreita como origem.
+const ORIGINS: usize = 3;
+/// A origem tem de estar a no máximo isto de ticks de 0xFFFF (3,4 ms): mais longe é contagem
+/// velha, que o PIT não recarregou.
+const ORIGIN_SLACK: u16 = 4_096;
+
+/// Liga o PIT e amostra o contador dele (com latch) junto do TSC e do contador do APIC, numa janela
+/// única que cresce até a incerteza fechar (`Policy`, SDD 10). Sempre fecha o gate.
+pub fn calibrate<B: RegisterBus>(
+    pit: &Pit<B>,
+    policy: Policy,
+    mut read: impl FnMut() -> Reading,
+) -> Result<Calibration, Failure> {
+    pit.start();
+    let result = run(pit, policy, &mut read);
+    pit.stop();
+    result
+}
+
+fn run<B: RegisterBus>(
+    pit: &Pit<B>,
+    policy: Policy,
+    read: &mut impl FnMut() -> Reading,
+) -> Result<Calibration, Failure> {
+    // A primeira leitura depois de `start` pode trazer a contagem de antes (o Linux também a
+    // descarta: `pit_verify_msb(0)`).
+    Sample::take(pit, read);
+    let mut origin = Sample::take(pit, read);
+    for _ in 1..ORIGINS {
+        let next = Sample::take(pit, read);
+        if next.width() < origin.width() {
+            origin = next;
+        }
     }
-    let hz = u128::from(delta) * u128::from(PIT_HZ) / u128::from(count);
-    u64::try_from(hz).ok()
+    if origin.count < 0xFFFF - ORIGIN_SLACK {
+        return Err(Failure::Stuck);
+    }
+    loop {
+        let sample = Sample::take(pit, read);
+        let ticks = u32::from(origin.count.wrapping_sub(sample.count));
+        let delta = sample.tsc().saturating_sub(origin.tsc());
+        if ticks == 0 || delta == 0 {
+            let spent = sample.after.tsc.saturating_sub(origin.before.tsc);
+            if spent > policy.max_cycles {
+                return Err(Failure::Stuck);
+            }
+            continue;
+        }
+        let error = u128::from(origin.width() + sample.width()) / 2;
+        let quantization = 1_000_000 / u64::from(ticks);
+        let ppm = u64::try_from(error * 1_000_000 / delta)
+            .unwrap_or(u64::MAX)
+            .saturating_add(quantization);
+        let projected = u128::from(ppm) * u128::from(ticks) / u128::from(policy.max_ticks.max(1));
+        let capped = ticks >= policy.max_ticks;
+        let hopeless = ticks >= policy.min_ticks && projected > u128::from(policy.target_ppm);
+        let overdue = sample.after.tsc.saturating_sub(origin.before.tsc) > policy.max_cycles;
+        if ppm <= policy.target_ppm || hopeless || capped || overdue {
+            if ppm > policy.refuse_ppm {
+                if capped || overdue {
+                    return Err(Failure::TooUncertain(ppm));
+                }
+                continue;
+            }
+            let apic = sample.apic().saturating_sub(origin.apic());
+            return Ok(Calibration {
+                tsc_hz: per_second(delta, ticks)?,
+                apic_hz: per_second(apic, ticks)?,
+                error_ppm: ppm,
+                ticks,
+            });
+        }
+    }
+}
+
+/// `delta` ticks em `ticks` ticks do PIT, convertidos para ticks por segundo.
+fn per_second(delta: u128, ticks: u32) -> Result<u64, Failure> {
+    if ticks == 0 || delta == 0 {
+        return Err(Failure::Stuck);
+    }
+    let hz = delta * u128::from(PIT_HZ) / u128::from(ticks);
+    u64::try_from(hz).map_err(|_| Failure::TooUncertain(u64::MAX))
 }
 
 #[cfg(test)]
 mod tests {
     use core::cell::{Cell, RefCell};
+    use std::rc::Rc;
 
     use super::*;
 
+    /// Um PIT que gasta `ns_per_latch` de tempo entre dois comandos de latch (a 1 GHz, ciclos
+    /// iguais a ns) e devolve a contagem travada.
     #[derive(Default)]
     struct FakeBus {
         writes: RefCell<Vec<(usize, u8)>>,
         port_b: Cell<u8>,
-        polls_until_expired: Cell<u32>,
+        /// Tempo desde o início da contagem, em ns vezes `PIT_HZ`: dividido por 1e9 dá os ticks.
+        elapsed: Cell<u64>,
+        latched: Cell<u16>,
+        /// Contagem em que o canal 2 parte quando se escreve o valor inicial (0xFFFF num PIT são).
+        reload: Cell<u16>,
+        /// Se houver, o primeiro latch devolve isto: a contagem velha de antes do `start`.
+        stale: Cell<Option<u16>>,
+        ns_per_latch: Cell<u64>,
+        /// Atraso que o relógio sofreu depois do último latch e que o PIT também viveu.
+        pending_ns: Rc<Cell<u64>>,
+        read_high: Cell<bool>,
     }
 
     impl RegisterBus for FakeBus {
         fn read8(&self, offset: usize) -> u8 {
-            assert_eq!(offset, PORT_B);
-            let left = self.polls_until_expired.get();
-            if left == 0 {
-                return self.port_b.get() | OUT2;
+            match offset {
+                PORT_B => self.port_b.get(),
+                CHANNEL2_DATA => {
+                    let [low, high] = self.latched.get().to_le_bytes();
+                    let high_turn = self.read_high.replace(!self.read_high.get());
+                    if high_turn { high } else { low }
+                }
+                _ => unreachable!(),
             }
-            self.polls_until_expired.set(left - 1);
-            self.port_b.get()
         }
 
         fn write8(&self, offset: usize, value: u8) {
-            if offset == PORT_B {
-                self.port_b.set(value);
-            }
             self.writes.borrow_mut().push((offset, value));
+            match (offset, value) {
+                (PORT_B, _) => self.port_b.set(value),
+                (COMMAND, CHANNEL2_LATCH) => {
+                    let ticks = u16::try_from(self.elapsed.get() / 1_000_000_000).unwrap();
+                    let fresh = self.reload.get().wrapping_sub(ticks);
+                    self.latched.set(self.stale.take().unwrap_or(fresh));
+                    let ns = self.ns_per_latch.get() + self.pending_ns.replace(0);
+                    self.elapsed.set(self.elapsed.get() + ns * PIT_HZ);
+                    self.read_high.set(false);
+                }
+                (CHANNEL2_DATA, 0xFF) => self.elapsed.set(0),
+                _ => {}
+            }
         }
 
         fn read32(&self, _: usize) -> u32 {
@@ -137,77 +282,165 @@ mod tests {
         }
     }
 
+    const POLICY: Policy = Policy {
+        min_ticks: 5_966,
+        max_ticks: 23_864,
+        target_ppm: 400,
+        refuse_ppm: 10_000,
+        max_cycles: 300_000_000,
+    };
+
+    /// Um relógio de 1 GHz que gasta `call_ns` por leitura; `spike` é a chamada (de 1) que gasta
+    /// `spike_ns` a mais. O PIT do `bus` anda o tempo de duas leituras por amostra.
+    fn clock(
+        call_ns: u64,
+        spike: Option<(u64, u64)>,
+        pending: &Rc<Cell<u64>>,
+    ) -> impl FnMut() -> Reading {
+        let pending = Rc::clone(pending);
+        let (mut calls, mut tsc) = (0_u64, 5_000_u64);
+        move || {
+            calls += 1;
+            tsc += call_ns;
+            if let Some((at, extra)) = spike
+                && calls == at
+            {
+                tsc += extra;
+                pending.set(extra);
+            }
+            Reading {
+                tsc,
+                apic_ticks: u32::try_from(tsc / 16).unwrap(),
+            }
+        }
+    }
+
+    /// Duas leituras de `call_ns` separam dois latches.
+    fn bus_for(call_ns: u64) -> Pit<FakeBus> {
+        let bus = FakeBus::default();
+        bus.ns_per_latch.set(2 * call_ns);
+        bus.reload.set(0xFFFF);
+        Pit::new(bus)
+    }
+
+    fn within(hz: u64, expected: u64, ppm: u64) -> bool {
+        hz.abs_diff(expected) * 1_000_000 <= expected * ppm
+    }
+
     #[test]
-    fn arm_opens_the_gate_then_programs_mode_0_and_the_count() {
+    fn start_programs_channel_2_from_ffff_and_stop_closes_the_gate() {
         let pit = Pit::new(FakeBus::default());
         pit.bus.port_b.set(SPEAKER_DATA | 0x0C);
-        pit.bus.polls_until_expired.set(10);
-        pit.arm(0x2E9C);
+        pit.start();
         assert_eq!(
             *pit.bus.writes.borrow(),
             [
                 (PORT_B, 0x0C | GATE),
                 (COMMAND, 0xB0),
-                (CHANNEL2_DATA, 0x9C),
-                (CHANNEL2_DATA, 0x2E),
+                (CHANNEL2_DATA, 0xFF),
+                (CHANNEL2_DATA, 0xFF),
             ]
         );
-    }
-
-    #[test]
-    fn measure_converts_deltas_to_hz() {
-        let bus = FakeBus::default();
-        bus.polls_until_expired.set(3);
-        let pit = Pit::new(bus);
-        let mut readings = [
-            Reading {
-                tsc: 1_000,
-                apic_ticks: 0,
-            },
-            Reading {
-                tsc: 1_000 + 29_830_000,
-                apic_ticks: 625_000,
-            },
-        ]
-        .into_iter();
-        let result = measure(&pit, 11_932, 100, || readings.next().unwrap()).unwrap();
-        assert_eq!(result.tsc_hz, 29_830_000 * PIT_HZ / 11_932);
-        assert_eq!(result.apic_hz, 625_000 * PIT_HZ / 11_932);
+        pit.stop();
         assert_eq!(pit.bus.port_b.get() & GATE, 0);
     }
 
     #[test]
-    fn measure_gives_up_when_the_pit_never_expires() {
+    fn a_fast_reader_closes_at_the_target_before_the_minimum_window() {
+        let pit = bus_for(500);
+        let result = calibrate(&pit, POLICY, clock(500, None, &pit.bus.pending_ns)).unwrap();
+        assert!(result.error_ppm <= 400, "{result:?}");
+        assert!(result.ticks < POLICY.min_ticks, "{result:?}");
+        assert!(within(result.tsc_hz, 1_000_000_000, 1_000), "{result:?}");
+        assert_eq!(pit.bus.port_b.get() & GATE, 0);
+    }
+
+    #[test]
+    fn a_slow_reader_gives_up_extending_at_the_minimum_window() {
+        // 14 us por leitura (o inb do TCG): a incerteza a 5 ms é de uns 2 800 ppm e, a 20 ms,
+        // ainda seria de 700: não chega a 400, então fecha com a janela mínima.
+        let pit = bus_for(14_000);
+        let result = calibrate(&pit, POLICY, clock(14_000, None, &pit.bus.pending_ns)).unwrap();
+        assert!(result.ticks >= POLICY.min_ticks, "{result:?}");
+        assert!(result.ticks < POLICY.min_ticks + 100, "{result:?}");
+        assert!(
+            result.error_ppm > 400 && result.error_ppm < 10_000,
+            "{result:?}"
+        );
+        assert!(within(result.tsc_hz, 1_000_000_000, 5_000), "{result:?}");
+    }
+
+    #[test]
+    fn a_latency_spike_in_the_last_pair_does_not_spoil_the_result() {
+        let pit = bus_for(2_000);
+        // Uma leitura que demora 2 ms a mais, perto de onde o intervalo fecharia: a amostra
+        // larga empurra a incerteza para cima e a medida continua até a próxima, estreita.
+        let spiked = calibrate(
+            &pit,
+            POLICY,
+            clock(2_000, Some((900, 2_000_000)), &pit.bus.pending_ns),
+        )
+        .unwrap();
+        let quiet = bus_for(2_000);
+        let calm = calibrate(&quiet, POLICY, clock(2_000, None, &quiet.bus.pending_ns)).unwrap();
+        assert!(within(spiked.tsc_hz, 1_000_000_000, 5_000), "{spiked:?}");
+        assert!(spiked.ticks >= calm.ticks, "{spiked:?} {calm:?}");
+    }
+
+    #[test]
+    fn a_reader_too_slow_for_one_percent_is_refused_at_the_cap() {
+        // 300 us por leitura: 15 000 ppm no teto de 20 ms.
+        let pit = bus_for(300_000);
+        let result = calibrate(&pit, POLICY, clock(300_000, None, &pit.bus.pending_ns));
+        assert!(
+            matches!(result, Err(Failure::TooUncertain(ppm)) if ppm > 10_000),
+            "{result:?}"
+        );
+        assert_eq!(pit.bus.port_b.get() & GATE, 0);
+    }
+
+    #[test]
+    fn the_error_includes_one_tick_of_quantization() {
+        let pit = bus_for(500);
+        let result = calibrate(&pit, POLICY, clock(500, None, &pit.bus.pending_ns)).unwrap();
+        // 1 000 000 / ticks é o piso do limite: a diferença entre dois latches erra até 1 tick.
+        assert!(
+            result.error_ppm >= 1_000_000 / u64::from(result.ticks),
+            "{result:?}"
+        );
+        assert!(result.ticks >= 2_500, "{result:?}");
+    }
+
+    #[test]
+    fn the_first_stale_sample_is_discarded() {
+        let pit = bus_for(2_000);
+        pit.bus.stale.set(Some(0x1234));
+        let result = calibrate(&pit, POLICY, clock(2_000, None, &pit.bus.pending_ns)).unwrap();
+        assert!(within(result.tsc_hz, 1_000_000_000, 5_000), "{result:?}");
+    }
+
+    #[test]
+    fn a_counter_that_did_not_restart_near_ffff_is_refused() {
+        let pit = bus_for(2_000);
+        pit.bus.reload.set(0x8000);
+        let result = calibrate(&pit, POLICY, clock(2_000, None, &pit.bus.pending_ns));
+        assert_eq!(result, Err(Failure::Stuck));
+    }
+
+    #[test]
+    fn a_stuck_pit_is_refused_by_time_not_by_polls() {
         let bus = FakeBus::default();
-        bus.polls_until_expired.set(u32::MAX);
+        bus.ns_per_latch.set(0);
+        bus.reload.set(0xFFFF);
         let pit = Pit::new(bus);
-        let result = measure(&pit, 100, 10, || Reading {
-            tsc: 0,
-            apic_ticks: 0,
-        });
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn measure_rejects_a_counter_that_went_backwards() {
-        let pit = Pit::new(FakeBus::default());
-        let mut readings = [
-            Reading {
-                tsc: 500,
-                apic_ticks: 10,
-            },
-            Reading {
-                tsc: 100,
-                apic_ticks: 20,
-            },
-        ]
-        .into_iter();
-        assert_eq!(measure(&pit, 100, 10, || readings.next().unwrap()), None);
-    }
-
-    #[test]
-    fn zero_count_or_delta_is_not_a_measurement() {
-        assert_eq!(per_second(0, 100), None);
-        assert_eq!(per_second(100, 0), None);
+        let result = calibrate(&pit, POLICY, clock(1_000_000, None, &pit.bus.pending_ns));
+        assert_eq!(result, Err(Failure::Stuck));
+        let writes = pit.bus.writes.borrow();
+        let latches = writes
+            .iter()
+            .filter(|w| **w == (COMMAND, CHANNEL2_LATCH))
+            .count();
+        // 300 ms a 1 us por leitura de 2 leituras por amostra: algumas centenas de amostras.
+        assert!(latches < 1_000, "{latches}");
     }
 }

@@ -173,6 +173,9 @@ impl Screen {
         };
         screen.surface.fill(screen.palette.background);
         screen.draw_bar();
+        // O `fill` já pintou o que a grade vazia desenharia: sem isto o primeiro `render`
+        // repinta a tela inteira (15 ms no x86_64 em TCG, SDD 07).
+        screen.terminal.take_dirty().for_each(drop);
         Ok(screen)
     }
 
@@ -234,14 +237,18 @@ impl Screen {
     }
 
     /// Desenha as linhas sujas desde o último `render`. Rolar suja a grade inteira.
+    /// Células sem tinta (espaço sem sublinhado) da mesma cor viram um retângulo só.
     pub fn render(&mut self) {
         let cursor = self.terminal.cursor();
         let (cell_w, cell_h) = (font::WIDTH * self.scale, font::HEIGHT * self.scale);
         for row in self.terminal.take_dirty() {
             let y = self.grid_y + row * cell_h;
-            for (col, &cell) in self.terminal.row(row).iter().enumerate() {
-                let on_cursor = cursor.visible && cursor.row == row && cursor.col == col;
-                let (fg, bg) = self.palette.colors(cell, on_cursor);
+            let cells = self.terminal.row(row);
+            let at_cursor = |col: usize| cursor.visible && cursor.row == row && cursor.col == col;
+            let mut col = 0;
+            while col < cells.len() {
+                let cell = cells[col];
+                let (fg, bg) = self.palette.colors(cell, at_cursor(col));
                 let style = Style {
                     bold: cell.flags.contains(Flags::BOLD),
                     underline: cell.flags.contains(Flags::UNDERLINE),
@@ -249,9 +256,34 @@ impl Screen {
                 };
                 let rows = style.apply(font::glyph(cell.ch));
                 let x = self.grid_x + col * cell_w;
-                self.surface.draw_glyph(x, y, &rows, self.scale, fg, bg);
+                if rows.iter().any(|&bits| bits != 0) {
+                    self.surface.draw_glyph(x, y, &rows, self.scale, fg, bg);
+                    col += 1;
+                    continue;
+                }
+                let mut end = col + 1;
+                while end < cells.len() && !at_cursor(end) && self.is_solid(cells[end], bg) {
+                    end += 1;
+                }
+                let rect = Rect::new(x, y, (end - col) * cell_w, cell_h);
+                self.surface.fill_rect(rect, bg);
+                col = end;
             }
         }
+    }
+
+    /// A célula sai como um bloco liso de `bg`: o glifo não tem tinta e a cor de fundo é a mesma.
+    fn is_solid(&self, cell: Cell, bg: Pixel) -> bool {
+        let style = Style {
+            bold: false,
+            underline: cell.flags.contains(Flags::UNDERLINE),
+            strike: cell.flags.contains(Flags::STRIKE),
+        };
+        style
+            .apply(font::glyph(cell.ch))
+            .iter()
+            .all(|&bits| bits == 0)
+            && self.palette.colors(cell, false).1 == bg
     }
 
     /// Barra no topo, no estilo da barra de menus do macOS.

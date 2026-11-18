@@ -9,7 +9,8 @@
 | --- | --- | --- | --- |
 | 1. Unidade da política | Algoritmo de `core/` certo, inclusive bordas (frame parcial, bitmap no limite, fila cheia) | host | `make test` |
 | 2. Adaptador com porta falsa | Driver e caminhada de tabela fazem a sequência certa de acessos, sem hardware | host | `make test` |
-| 3. Fumaça na QEMU | O kernel sobe de verdade e chega ao `boot ok` nas duas ISAs | QEMU | `make smoke ARCH=all` |
+| 3. Fumaça na QEMU, modo de teste | O kernel sobe de verdade, roda todos os autotestes e medidas e chega ao `boot ok` nas duas ISAs | QEMU | `make smoke ARCH=all` |
+| 3c. Fumaça na QEMU, modo normal | O boot que o usuário vê chega ao `boot ok` e imprime o tempo; barato (1,7 s no x86_64, 5,2 s no aarch64 com o firmware) | QEMU | `make smoke-fast ARCH=all` |
 | 3b. Tela na QEMU | O que o kernel desenha: fonte, terminal, shell e barra, depois de digitar comandos | QEMU | `make screenshot ARCH=all CMDS="fetch"` |
 | 4. Gates de arquitetura | Camadas, `unsafe`, `asm!`, comentários, docs | host | `make check` |
 
@@ -51,7 +52,7 @@ O que tem `asm!` só compila com `target_os = "none"`; a parte pura do mesmo cra
 
 ## Andar 3 — fumaça
 
-`cargo xtask smoke` monta a ESP, sobe a QEMU sem tela e lê a serial. Passa ao ver
+`cargo xtask smoke` monta a ESP com a linha de comando `rustos.selftest=1` (o [modo de teste](04_boot.md#modos-de-boot)), sobe a QEMU sem tela e lê a serial. Passa ao ver
 `[rustos] boot ok`; falha com pânico (`[rustos] panic`), com a QEMU saindo antes,
 ou em 120 s. O marcador é a constante `BOOT_OK_MARKER` do kernel e `BOOT_OK` do
 xtask: os dois mudam juntos. O kernel só imprime o marcador se os autotestes de
@@ -61,11 +62,19 @@ passarem; o `smoke` exige a linha `task self-test: ok`, a `smp self-test: ok` (m
 W^X percorre as tabelas novas ([SDD 13](13_memoria_virtual.md)); `fault text` no shell
 confere que a CPU recusa a escrita em `.text`.
 
+Como o modo de teste imprime o que o normal não imprime, o `smoke` exige também a linha de cada autoteste e medida (`frame`, `heap` e `exception self-test: ok`, `timer:`, `idle:`, `key residue:`, `zero bench:`, `random bench:`, `switch:`, `scale:`, `alloc storm:`, `stacks:`) e a `boot time:`: se a linha de comando se perder, o boot normal não passa por boot de teste.
+
 Três linhas do boot são medida e heurística, não gate: `stacks:` (pico de pilha por tipo de thread e uma prova da marca d'água; vira `FAILED` se um pico passa de 75% da pilha, [SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)), `key residue:` (varredura da pilha
 atrás de cópias da chave, com uma sonda que planta 4 estados e exige achá-los; [SDD 09](09_seguranca.md))
 e `zero bench:` ([SDD 07](07_desempenho_e_recursos.md)). O kernel as imprime e segue;
 o `smoke` reprova o `FAILED` de qualquer linha. O autoteste do heap confere que o zerar
 rápido mexe só na faixa pedida ([SDD 13](13_memoria_virtual.md), "Zerar").
+
+## Andar 3c — modo normal (`make smoke-fast`)
+
+`cargo xtask smoke-fast` sobe a mesma QEMU sem linha de comando. Exige o `boot ok`, a `boot time: kernel N ms to prompt`, as linhas que os dois modos têm (`protections:`, `w^x: ok`, `reclaimed:`, `kaslr: on`, `cpus: N online`, `frame self-test: ok`, `exception self-test: ok`) e que nenhuma linha do modo de teste apareça (a lista é a do modo de teste menos a do normal, mais `task`, `smp` e `wake self-test:`): um modo normal que volta a rodar o que o de teste roda é regressão de tempo. Imprime o tempo do kernel até o prompt (X ms) e o de parede, e reprova se o kernel passar de um teto folgado (50 ms com `RUSTOS_ACCEL=hvf` ou `kvm` forçado, 500 ms no resto: a QEMU pode cair no TCG sem avisar, como no runner do CI; o boot normal leva 2 a 40 ms). Entra no `make pr` e no CI.
+
+O que o modo normal deixa de provar (heap, timer, preempção, SIMD por tarefa, migração) só o `make smoke` prova.
 
 ## Andar 3a — pânico (`make smoke-panic`)
 
@@ -87,7 +96,7 @@ aparece na serial e que nenhum endereço do kernel vem junto (o log inteiro depo
 O boot que roda `mem`, `ps` e `fetch` reprova também se o `ps` mostra o pico de pilha do shell acima de 48 KiB (75% de 64), na coluna `stack` ([SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)); vale o perfil do `make smoke-panic PROFILE=…`.
 
 A linha de comando vem do `cmdline:` da entrada do `limine.conf` (`xtask/src/image.rs`); `core/hal`
-`BootParams::parse` a traduz e tem teste de entrada inválida. Custa nove boots por ISA (cerca de
+`BootParams::parse` a traduz e tem teste de entrada inválida. Os cenários de shell (`fault lock`, `fault all`…) sobem no modo normal. Custa nove boots por ISA (cerca de
 27 s no x86_64 e 54 s no aarch64 neste host); `fault lock`, `fault nested`, `fault all` e `fault held` só existem no build com `panic-tests`, por isso é alvo à parte; entra no `make pr` e no CI,
 não no `make smoke`. Com `debug-addrs` ele recusa rodar: os cenários conferem o endereço relativo.
 

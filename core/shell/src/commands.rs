@@ -426,6 +426,7 @@ fn bench(ctx: &mut Ctx<'_>) -> fmt::Result {
     }
     scale_rows(out, &report)?;
     storm_rows(out, &report.storm)?;
+    micro_rows(out, ctx.host.micro_bench())?;
     write!(
         out,
         "{DIM}Wake-up jitter (sleep_until, {} samples){RESET}\r\n",
@@ -520,6 +521,34 @@ fn storm_rows(out: &mut dyn fmt::Write, storm: &crate::StormSample) -> fmt::Resu
         storm.cached_contention,
     )?;
     row(out, "heap", storm.heap_ns, storm.heap_contention)
+}
+
+/// Zerar memória e o gerador aleatório; sem medida, nenhuma linha.
+fn micro_rows(out: &mut dyn fmt::Write, micro: Option<crate::MicroBench>) -> fmt::Result {
+    let Some(micro) = micro else {
+        return Ok(());
+    };
+    let tenths = |value: u64| (value / 10, value % 10);
+    write!(out, "{DIM}Zeroing memory (per call){RESET}\r\n")?;
+    for (label, value) in [
+        ("1 KiB", micro.zero_kib_tenths_ns),
+        ("4 KiB", micro.zero_page_tenths_ns),
+        ("4 KiB in 1 MiB", micro.zero_cold_tenths_ns),
+        ("4 KiB heap pair", micro.zero_pair_tenths_ns),
+    ] {
+        let (whole, tenth) = tenths(value);
+        write!(out, "  {label:<16}{whole:>6}.{tenth} ns\r\n")?;
+    }
+    let (whole, tenth) = tenths(micro.random_u64_tenths_ns);
+    write!(
+        out,
+        "{DIM}Random numbers{RESET}\r\n  {:<16}{:>6} MB/s\r\n  {:<16}{:>6} us\r\n  {:<16}{whole:>6}.{tenth} ns\r\n",
+        "chacha20",
+        micro.random_mb_per_s,
+        "reseed",
+        micro.random_reseed_ns / 1000,
+        "next_u64"
+    )
 }
 
 /// O tempo total de N tarefas de CPU em 1, 2 e 4 núcleos, e quantas vezes mais rápido que 1.
@@ -934,6 +963,17 @@ mod tests {
         let out = run("bench", &[], &host);
         assert!(!out.contains("cross-core") && !out.contains("Scale"));
         assert!(out.contains("plain"));
+    }
+
+    #[test]
+    fn bench_prints_the_zeroing_and_random_rows_when_the_host_measures_them() {
+        let out = run("bench", &[], &FakeHost::new());
+        assert!(out.contains("4 KiB in 1 MiB") && out.contains("20.5 ns"));
+        assert!(out.contains("chacha20") && out.contains("640 MB/s"));
+        assert!(out.contains("reseed") && out.contains("next_u64") && out.contains("96.3 ns"));
+        let mut host = FakeHost::new();
+        host.micro = None;
+        assert!(!run("bench", &[], &host).contains("Zeroing"));
     }
 
     #[test]

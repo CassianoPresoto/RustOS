@@ -11,7 +11,7 @@
 │   ├── build.rs                # escolhe o linker script da ISA alvo
 │   ├── linker/                 # x86_64.ld, aarch64.ld: metade alta, um segmento por permissão, símbolos de cada seção e PT_DYNAMIC (KASLR)
 │   └── src/
-│       ├── main.rs             # kmain: boot → memória → serial → tela → relatório → tarefas → boot ok → shell
+│       ├── main.rs             # kmain: boot → memória → serial → tela → relatório → tarefas → boot ok → shell; modo normal ou de teste (`rustos.selftest=1`); `boot_time.rs`: o relógio por fase do boot
 │       ├── boot.rs             # BootRecord: o que o Limine entregou, copiado para o heap (BootInfo)
 │       ├── vm.rs               # Vm: tabelas próprias, W^X por seção, mapa direto, conferência e fault text
 │       ├── memory.rs           # Memory::init: buddy e heap; janelas de dispositivos e de pilhas; map_stack; devolução da memória do bootloader

@@ -97,9 +97,9 @@ Linux: o que a thread reservou e **não escreveu** abaixo da palavra mais funda 
 Pintar só sob demanda não é possível: o pico de uma tarefa se mede *depois* que ela rodou, e a pilha precisava estar pintada antes. O que se evitou
 foi repintar tudo a cada `spawn`.
 
-O pico aparece no `ps` (coluna `stack`, `3.4/16K`: pico e tamanho) e no boot, na linha
+A pintura vale nos dois [modos de boot](04_boot.md#modos-de-boot) (são 5 pilhas no normal: a do boot, as 3 dos secundários com 4 CPUs e a ociosa). O pico aparece no `ps` (coluna `stack`, `3.4/16K`: pico e tamanho), nos dois modos, e, **só no modo de teste**, no boot, na linha
 `[rustos] stacks: idle peak X KiB of 16, task peak Y KiB of 16, shell peak Z KiB of 64, probe N of 3000 B ok`: o maior pico de cada tipo desde o boot,
-incluídas as tarefas já encerradas (`idle`: as de todas as CPUs; `shell`: a tarefa `init`, que corre na pilha de 64 KiB do boot). A linha é **gate**: termina em
+incluídas as tarefas já encerradas (`idle`: as de todas as CPUs; `shell`: a tarefa `init`, que corre na pilha de 64 KiB do boot). A linha (e o `stack_probe`, que faz `spawn`) é do modo de teste: o `smoke-fast` a proíbe. Ela é **gate** do `make smoke`: termina em
 `FAILED` (que o `make smoke` recusa) se algum pico passa de 75% da pilha ou se a prova falha. A prova (`stack_probe`) é uma tarefa que escreve 3 000 bytes
 na pilha e encerra; o pico lido depois tem de ser pelo menos isso, como o `probe 4 of 4` do resíduo de chave. O `make smoke-panic` reprova o shell acima de 48 KiB no cenário do `ps`.
 

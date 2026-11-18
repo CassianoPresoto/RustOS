@@ -331,6 +331,11 @@ pub fn keyboard_event() -> Option<KeyEvent> {
     None
 }
 
+/// O relógio do aarch64 não se calibra: a frequência vem do `CNTFRQ_EL0`.
+pub fn clock_error_ppm() -> Option<u64> {
+    None
+}
+
 /// Nanossegundos desde que `init_interrupts` ligou o relógio; `None` antes.
 pub fn now_ns() -> Option<u64> {
     timer::now_ns()
