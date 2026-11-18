@@ -19,7 +19,10 @@
   `make smoke ARCH=all`** antes do review, e diz isso no PR.
 - **Concorrência se testa com threads de verdade no host**: `SpinLock` tem teste de
   N threads incrementando.
-- **Código de teste não entra no binário do kernel**: só em `#[cfg(test)]`.
+- **Código de teste não entra na imagem de produção do kernel.** Teste de host fica em
+  `#[cfg(test)]`; autoteste e medida que rodam no boot ficam atrás da feature `selftest`
+  do kernel, que a `release-small` (a imagem que se entrega) não liga. O `smoke-fast` da
+  `release-small` confere que o modo de teste é recusado.
 
 ## Como se verifica
 
