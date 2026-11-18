@@ -11,8 +11,8 @@ paid_date:
 
 ## O que falta
 
-- **Calibração do PIT:** desiste depois de `PIT_MAX_POLLS` (50 milhões de leituras
-  de porta). Em metal, isso pode ser 50 s ou mais de espera antes do erro.
+- **Calibração do PIT:** desiste por tempo (`Policy::max_cycles`, 300 M ciclos de TSC), não
+  por número de leituras; o valor nunca foi conferido em metal.
 - **TSC:** o relógio usa o TSC sem conferir a invariância (`CPUID.80000007H`). Numa
   CPU sem TSC invariante, o relógio anda errado quando a frequência muda.
 - **Interrupção mascarada por muito tempo:** o `IrqLock` mascara a IRQ durante a

@@ -5,8 +5,8 @@ use core::fmt;
 use rustos_hal::{BootTimeline, BootloaderId};
 
 use crate::{
-    BenchReport, CpuInfo, DisplayInfo, Host, MemoryInfo, ScaleSample, StormSample, SystemInfo,
-    TaskInfo, TaskState,
+    BenchReport, CpuInfo, DisplayInfo, Host, MemoryInfo, MicroBench, ScaleSample, StormSample,
+    SystemInfo, TaskInfo, TaskState,
 };
 
 pub(crate) fn info() -> SystemInfo<'static> {
@@ -50,6 +50,7 @@ pub(crate) struct FakeHost {
     pub(crate) keymap: core::cell::Cell<Option<&'static str>>,
     pub(crate) random: Option<u64>,
     pub(crate) bench: Option<BenchReport>,
+    pub(crate) micro: Option<MicroBench>,
     pub(crate) alternate: bool,
 }
 
@@ -63,6 +64,15 @@ impl FakeHost {
             keymap: core::cell::Cell::new(Some("us")),
             random: Some(0x0123_4567_89ab_cdef),
             alternate: true,
+            micro: Some(MicroBench {
+                zero_kib_tenths_ns: 153,
+                zero_page_tenths_ns: 205,
+                zero_cold_tenths_ns: 206,
+                zero_pair_tenths_ns: 566,
+                random_mb_per_s: 640,
+                random_reseed_ns: 38_000,
+                random_u64_tenths_ns: 963,
+            }),
             bench: Some(BenchReport {
                 storm: StormSample {
                     cpus: 4,
@@ -81,6 +91,9 @@ impl FakeHost {
                 wake_max_ns: 45_678,
                 wake_loaded_mean_ns: 20_000,
                 wake_loaded_max_ns: 99_999,
+                wake_task_median_ns: 84,
+                wake_task_mean_ns: 97,
+                wake_task_max_ns: 250,
                 pick_next_ns: 88,
                 tick_ns: 31,
                 switch_cross_ns: 3_210,
@@ -169,6 +182,10 @@ impl Host for FakeHost {
 
     fn bench(&self) -> Option<BenchReport> {
         self.bench
+    }
+
+    fn micro_bench(&self) -> Option<MicroBench> {
+        self.micro
     }
 
     fn keymap(&self) -> Option<&'static str> {

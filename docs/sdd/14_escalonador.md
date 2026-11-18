@@ -31,7 +31,7 @@ e passa sempre o relógio monotônico em ns. O trait é compatível com objeto
 
 Dois métodos além dos do pedido original: `needs_resched` (o `TIF_NEED_RESCHED` do
 Linux: `wake`, `add` e `sleep` não devolvem "preempte", só levantam o sinal, que o
-kernel confere na saída da interrupção) e `current`. `pick_next` baixa o sinal.
+kernel confere na saída da interrupção e no fim de `unpark` e `spawn`) e `current`. `pick_next` baixa o sinal.
 
 `SchedParams` escolhe a classe: `Fair { nice, slice_ns }` (nice de -20 a 19, preso;
 `slice_ns: None` usa a fatia base) ou `Fifo { priority }` (1 a 99; maior vence).
@@ -280,11 +280,11 @@ corrente) faz a propriedade falhar, e foi como se conferiu que o teste pega.
 - **Uma CPU por instância**, sem lock interno: o kernel guarda cada instância atrás do `IrqLock` da fila da CPU ([SDD 15](15_tarefas_e_preempcao.md)).
 - **Medida no alvo:** `pick_next` e `tick` no `bench` do kernel (34 a 35 e 2 ns no aarch64
   HVF, com 8 tarefas prontas), a latência de acordar e a troca de contexto, no
-  [SDD 07](07_desempenho_e_recursos.md). O custo da política na troca de contexto:
+  [SDD 07](07_desempenho_e_recursos.md). O custo da política na troca de contexto (18 ns de 41 no ping-pong, aarch64 HVF):
   [DEBT-0042](../tech-debt/0042-troca-de-contexto-lenta-com-eevdf-e-relogio.md).
 - **Como o kernel o usa:** `add` em `spawn`, `sleep` em `park` e `sleep_until`, `wake` em
   `unpark` e no acordar do timer, `remove` em `exit`, `tick` na IRQ do timer, `needs_resched`
-  no fim de toda IRQ e `next_deadline_ns` junto com o próximo acordar no disparo do timer.
+  no fim de toda IRQ, de `unpark` e de `spawn`, e `next_deadline_ns` junto com o próximo acordar no disparo do timer.
   A ociosa fica fora da política; o shell pede fatia de 200 µs.
 - **Cobrança pelo relógio:** a precisão do `vruntime` é a do `now_ns` que o kernel
   passa. Quantum menor que 1 ns virtual por peso arredonda para baixo; com o peso

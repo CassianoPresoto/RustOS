@@ -1,5 +1,6 @@
 //! A linha de comando do kernel (`cmdline:` do Limine) traduzida para o que o boot entende.
 //! Chave desconhecida ou valor inválido é ignorado: o boot nunca falha por causa dela.
+//! As chaves e o que cada uma liga estão no SDD 04.
 
 /// Onde `rustos.panic_early` derruba o boot, para provar que o pânico sai sem console.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +28,8 @@ impl EarlyPanic {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BootParams {
     pub early_panic: Option<EarlyPanic>,
+    /// `rustos.selftest=1`: o boot roda os autotestes e os benchmarks completos.
+    pub selftest: bool,
 }
 
 impl BootParams {
@@ -34,8 +37,12 @@ impl BootParams {
     pub fn parse(line: &str) -> Self {
         let mut params = Self::default();
         for word in line.split_ascii_whitespace() {
-            if let Some(("rustos.panic_early", value)) = word.split_once('=') {
-                params.early_panic = EarlyPanic::from_value(value);
+            match word.split_once('=') {
+                Some(("rustos.panic_early", value)) => {
+                    params.early_panic = EarlyPanic::from_value(value);
+                }
+                Some(("rustos.selftest", value)) => params.selftest = value == "1",
+                _ => {}
             }
         }
         params
@@ -76,7 +83,33 @@ mod tests {
     }
 
     #[test]
+    fn the_self_test_mode_is_off_unless_asked_for() {
+        assert!(!BootParams::parse("").selftest);
+        assert!(BootParams::parse("rustos.selftest=1").selftest);
+        assert!(BootParams::parse("quiet rustos.selftest=1 rustos.panic_early=2").selftest);
+        for line in [
+            "rustos.selftest",
+            "rustos.selftest=",
+            "rustos.selftest=0",
+            "rustos.selftest=true",
+            "rustos.selftest=11",
+            "xrustos.selftest=1",
+            "rustos.selftest =1",
+        ] {
+            assert!(!BootParams::parse(line).selftest, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn the_self_test_key_does_not_disturb_the_early_panic_key() {
+        let params = BootParams::parse("rustos.selftest=1 rustos.panic_early=3");
+        assert_eq!(params.early_panic, Some(EarlyPanic::Activated));
+        assert!(params.selftest);
+    }
+
+    #[test]
     fn the_last_occurrence_wins_even_when_it_is_invalid() {
+        assert!(!BootParams::parse("rustos.selftest=1 rustos.selftest=x").selftest);
         let params = BootParams::parse("rustos.panic_early=1 rustos.panic_early=x");
         assert_eq!(params.early_panic, None);
         let params = BootParams::parse("rustos.panic_early=x rustos.panic_early=3");

@@ -4,9 +4,9 @@
 use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use rustos_arch_x86_64::clock::{elapsed_ns, ns_to_ticks, ticks_to_ns};
+use rustos_arch_x86_64::clock::ns_to_ticks;
 pub use rustos_arch_x86_64::fpu::{
     AREA_ALIGN as FPU_AREA_ALIGN, restore as fpu_restore, save as fpu_save,
 };
@@ -29,7 +29,7 @@ use rustos_driver_i8042::I8042;
 use rustos_driver_uart16550::{DIVISOR_115200, Uart16550};
 use rustos_hal::{
     BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, MmuControl, PAGE_SIZE, PageMapper,
-    PhysAddr,
+    PhysAddr, TickScale,
 };
 use rustos_mm::PageTables;
 use rustos_sync::SpinLock;
@@ -86,10 +86,17 @@ pub const TIMER_HZ: u32 = 100;
 
 /// Páginas de cada pilha de exceção (#DF, NMI, #MC); a de guarda fica abaixo.
 const IST_STACK_PAGES: u64 = 4;
-/// Janela de calibração: 20 ms de PIT (1 193 182 Hz × 0,02 s).
-const PIT_WINDOW_TICKS: u16 = 23_864;
-/// Consultas à porta B antes de desistir do PIT.
-const PIT_MAX_POLLS: u32 = 50_000_000;
+/// Calibração pelo PIT (SDD 10, DEBT-0066): fecha em 400 ppm, aceita o que houver aos 5 ms se
+/// mais tempo não chega lá, para em 20 ms, recusa acima de 1% e desiste do PIT parado em 300 M ciclos.
+const PIT_POLICY: pit::Policy = pit::Policy {
+    min_ticks: 5_966,
+    max_ticks: 23_864,
+    target_ppm: 400,
+    refuse_ppm: 10_000,
+    max_cycles: 300_000_000,
+};
+/// Incerteza acima da qual o boot avisa: 0,5%. O limite é de 3 a 5 vezes o erro visto em TCG.
+const PIT_WARN_PPM: u64 = 5_000;
 /// Pinos do I/O APIC da QEMU `q35`: as ISA 1 (teclado) e 4 (COM1) vão direto,
 /// sem redirecionamento do MADT (DEBT-0009).
 const IOAPIC_PIN_KEYBOARD: u8 = 1;
@@ -106,7 +113,12 @@ static READY: AtomicBool = AtomicBool::new(false);
 /// Primeira página, sem mapeamento, da pilha de #DF: lê-la provoca um #PF.
 static GUARD_PAGE: AtomicU64 = AtomicU64::new(0);
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+/// Limite do erro da calibração do TSC, em ppm; 0 antes dela.
+static CLOCK_ERROR_PPM: AtomicU64 = AtomicU64::new(0);
 static TSC_ORIGIN: AtomicU64 = AtomicU64::new(0);
+/// `TickScale` do TSC, em dois atômicos: `now_ns` não divide.
+static TSC_MULT: AtomicU64 = AtomicU64::new(0);
+static TSC_SHIFT: AtomicU32 = AtomicU32::new(0);
 /// Frequência do contador do timer do APIC, já com o divisor.
 static APIC_HZ: AtomicU64 = AtomicU64::new(0);
 static TSC_DEADLINE: AtomicBool = AtomicBool::new(false);
@@ -339,13 +351,29 @@ fn start_clocks(apic: &ApicAccess) -> Result<(), PlatformError> {
     // SAFETY: as portas do PIT são só desta função, no boot.
     let pit = Pit::new(unsafe { PortBus::new(PIT_PORTS) });
     local.start_countdown();
-    let measured = pit::measure(&pit, PIT_WINDOW_TICKS, PIT_MAX_POLLS, || Reading {
+    let measured = pit::calibrate(&pit, PIT_POLICY, || Reading {
         tsc: rdtsc(),
         apic_ticks: local.elapsed_ticks(),
     })
-    .ok_or(PlatformError::MissingFeature("pit"))?;
+    .map_err(|failure| match failure {
+        pit::Failure::Stuck => PlatformError::MissingFeature("pit: the counter does not move"),
+        pit::Failure::TooUncertain(_) => {
+            PlatformError::MissingFeature("pit: calibration error above 1%")
+        }
+    })?;
+    CLOCK_ERROR_PPM.store(measured.error_ppm, Ordering::Relaxed);
+    if measured.error_ppm > PIT_WARN_PPM {
+        kprintln!(
+            "[rustos] tsc: calibrated to within {} ppm (target {PIT_WARN_PPM})",
+            measured.error_ppm
+        );
+    }
     TSC_HZ.store(measured.tsc_hz, Ordering::Relaxed);
+    let (mult, shift) = TickScale::new(measured.tsc_hz).map_or((0, 0), TickScale::parts);
     TSC_ORIGIN.store(rdtsc(), Ordering::Relaxed);
+    TSC_SHIFT.store(shift, Ordering::Relaxed);
+    // O `mult` publica o relógio: gravado por último, quem o vê já vê origem e `shift`.
+    TSC_MULT.store(mult, Ordering::Release);
     APIC_HZ.store(measured.apic_hz, Ordering::Relaxed);
     let deadline = cpu_features().tsc_deadline;
     TSC_DEADLINE.store(deadline, Ordering::Relaxed);
@@ -355,6 +383,15 @@ fn start_clocks(apic: &ApicAccess) -> Result<(), PlatformError> {
         TimerMode::OneShot
     });
     Ok(())
+}
+
+/// Limite do erro da calibração do relógio contra o PIT, em ppm.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "mesma assinatura em todas as ISAs"
+)]
+pub fn clock_error_ppm() -> Option<u64> {
+    Some(CLOCK_ERROR_PPM.load(Ordering::Relaxed))
 }
 
 /// Como o timer dispara: `tsc-deadline` ou `one-shot` (contador do APIC).
@@ -382,7 +419,7 @@ pub fn arm_timer(deadline_ns: u64) {
 
 /// Nanossegundos que `ticks` do contador de ciclos valem.
 pub fn cycles_to_ns(ticks: u64) -> u64 {
-    ticks_to_ns(ticks, TSC_HZ.load(Ordering::Relaxed))
+    tsc_scale().convert(ticks)
 }
 
 /// Liga x87, SSE e XSAVE; o relatório diz o que a troca de contexto salva.
@@ -437,8 +474,20 @@ pub fn keyboard_event() -> Option<KeyEvent> {
 
 /// Nanossegundos desde que `init_interrupts` ligou o relógio; `None` antes.
 pub fn now_ns() -> Option<u64> {
-    let hz = TSC_HZ.load(Ordering::Relaxed);
-    (hz != 0).then(|| elapsed_ns(rdtsc(), TSC_ORIGIN.load(Ordering::Relaxed), hz))
+    let scale = tsc_scale();
+    (!scale.is_zero())
+        .then(|| scale.convert(rdtsc().saturating_sub(TSC_ORIGIN.load(Ordering::Relaxed))))
+}
+
+/// Lê o `mult` primeiro (acquire): quem o vê diferente de zero vê o `shift` já gravado.
+fn tsc_scale() -> TickScale {
+    let mult = TSC_MULT.load(Ordering::Acquire);
+    TickScale::from_parts(mult, TSC_SHIFT.load(Ordering::Relaxed))
+}
+
+/// `now_ns` do escalonador: o `rdtsc` já não é ordenado, como no `sched_clock` do Linux.
+pub fn sched_clock_ns() -> Option<u64> {
+    now_ns()
 }
 
 /// Contador de ciclos (TSC): o relógio da semente de reserva.

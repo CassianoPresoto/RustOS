@@ -72,7 +72,7 @@ terminal, o desenho e o shell são deste repositório.
 | 1 | `kernel/src/console.rs` (`Sink`) | Manda cada texto para a serial e para a tela, cada uma com o próprio lock |
 | 2 | `kernel/src/screen.rs` (`Screen::write`) | Traduz `\n` em `\r\n` (o `onlcr` de um tty) e entrega os bytes ao terminal |
 | 3 | `core/term` (`Terminal::write`) | Interpreta UTF-8 e as sequências VT/xterm sobre a grade de células, e marca as linhas sujas |
-| 4 | `kernel/src/screen.rs` (`render`) | Para cada célula das linhas sujas: cor pelo tema, estilo (`gfx::Style`) e glifo (`gfx::font`) |
+| 4 | `kernel/src/screen.rs` (`render`) | Para cada célula das linhas sujas: cor pelo tema, estilo (`gfx::Style`) e glifo (`gfx::font`); células sem tinta e da mesma cor viram um retângulo só (`fill_rect`). `Screen::new` pinta o fundo e descarta as linhas sujas iniciais: o primeiro `render` não repinta uma grade vazia |
 | 5 | `core/gfx` (`Surface::draw_glyph`) | Escreve os pixels em ordem, linha a linha, sem nunca ler o framebuffer |
 
 Com a tela alternativa e o histórico, a grade que `render` lê é a da visão: a
@@ -129,8 +129,9 @@ da política, rearmar o disparo que ela pede) → o `arch/` dá o EOI e chama
 `Handlers::preempt` (`task::preempt`) na pilha da tarefa interrompida → se o `Composite`
 de `core/sched` pede troca (`needs_resched`), `schedule()` pede a ele a próxima tarefa
 (`pick_next`) → `platform::fpu_save`/`fpu_restore` (só tarefa marcada SIMD) →
-`arch/<isa>::switch` troca os registradores callee-saved e o `sp`. O mesmo `schedule()`
-atende `yield_now`, `sleep_until`, `park` e `exit`. Desenho completo no [SDD 15](15_tarefas_e_preempcao.md).
+`arch/<isa>::switch` troca os registradores callee-saved e o `sp`. O mesmo `switch_from`
+atende `yield_now`, `sleep_until`, `park` e `exit`, e `unpark` e `spawn` o chamam ao fim quando
+a acordada deve preemptar a corrente. Desenho completo no [SDD 15](15_tarefas_e_preempcao.md).
 
 ## Portas de entrada que virão
 

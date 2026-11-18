@@ -331,9 +331,19 @@ pub fn keyboard_event() -> Option<KeyEvent> {
     None
 }
 
+/// O relógio do aarch64 não se calibra: a frequência vem do `CNTFRQ_EL0`.
+pub fn clock_error_ppm() -> Option<u64> {
+    None
+}
+
 /// Nanossegundos desde que `init_interrupts` ligou o relógio; `None` antes.
 pub fn now_ns() -> Option<u64> {
     timer::now_ns()
+}
+
+/// `now_ns` do escalonador: sem o `isb` no aarch64 (SDD 15, "Tempo").
+pub fn sched_clock_ns() -> Option<u64> {
+    timer::sched_clock_ns()
 }
 
 /// Contador virtual (`CNTVCT_EL0`): o relógio da semente de reserva.

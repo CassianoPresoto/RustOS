@@ -21,7 +21,12 @@ pub struct Effort {
     pub task_ms: u64,
     /// Voltas de alocação de cada CPU na medida de contenção da memória.
     pub storm: u32,
+    /// Quanto a CPU gira antes da primeira medida (ver `warm_up`).
+    pub warmup_ms: u64,
 }
+
+/// Amostras do autoteste de acordar entre tarefas.
+const WAKE_SELF_TEST_SAMPLES: u32 = 20;
 
 /// O acordar entre CPUs custa dezenas de vezes o da mesma CPU: menos voltas para a medida caber.
 const CROSS_DIVISOR: u32 = 20;
@@ -35,12 +40,14 @@ pub const BOOT: Effort = Effort {
     samples: 20,
     task_ms: 2,
     storm: 2_000,
+    warmup_ms: 0,
 };
 pub const FULL: Effort = Effort {
     rounds: 20_000,
     samples: 200,
     task_ms: 10,
     storm: 20_000,
+    warmup_ms: 300,
 };
 
 static PING: AtomicUsize = AtomicUsize::new(0);
@@ -201,6 +208,173 @@ pub fn wake_jitter_ns(samples: u32, loaded: bool) -> Option<(u64, u64)> {
         wait_exited(&[hog_id]);
     }
     Some((sum / u64::from(samples.max(1)), max))
+}
+
+/// Amostras de latência de acordar entre tarefas que o acordador guarda na pilha (a mediana as ordena).
+const WAKE_TASK_MAX_SAMPLES: usize = 200;
+/// Fatia curta do dorminhoco: menor que a do acordador, para `PREEMPT_SHORT` valer.
+const SLEEPER_SLICE_NS: u64 = 100_000;
+/// Acertos seguidos que encerram o aquecimento, e o teto de rodadas que ele pode gastar.
+const WAKE_WARM_UP_HITS: u32 = 2;
+const WAKE_WARM_UP_MAX: usize = 20;
+/// Quanto o acordador espera o dorminhoco rodar antes de desistir da amostra.
+const WAKE_TASK_GIVE_UP_NS: u64 = 5_000_000;
+
+static LAT_RAN_AT: AtomicU64 = AtomicU64::new(0);
+static LAT_SEQ: AtomicU32 = AtomicU32::new(0);
+static LAT_SAMPLES: AtomicU32 = AtomicU32::new(0);
+/// Mediana, média e máximo que o acordador calcula com as amostras na pilha dele.
+static LAT_MEDIAN: AtomicU64 = AtomicU64::new(0);
+static LAT_MEAN: AtomicU64 = AtomicU64::new(0);
+static LAT_MAX: AtomicU64 = AtomicU64::new(0);
+static LAT_SLEEPER: AtomicUsize = AtomicUsize::new(0);
+/// Quantas amostras o dorminhoco já tinha rodado quando `unpark` voltou.
+static LAT_DIRECT: AtomicU32 = AtomicU32::new(0);
+
+/// Dorme em `park` e, ao acordar, carimba o relógio: o fim da latência de acordar.
+fn latency_sleeper(_: usize) {
+    while !STOP.load(Ordering::Acquire) {
+        task::park();
+        LAT_RAN_AT.store(platform::now_ns().unwrap_or(0), Ordering::Relaxed);
+        LAT_SEQ.fetch_add(1, Ordering::Release);
+    }
+    finish();
+}
+
+/// Acorda o dorminhoco `LAT_SAMPLES` vezes, de uma tarefa da mesma CPU, e guarda o tempo entre
+/// o `unpark` e ele rodar. Espera girando. As primeiras rodadas aquecem e não contam.
+fn latency_waker(_: usize) {
+    let sleeper = id(&LAT_SLEEPER);
+    let samples = (LAT_SAMPLES.load(Ordering::Relaxed) as usize).min(WAKE_TASK_MAX_SAMPLES);
+    let mut kept = [0_u64; WAKE_TASK_MAX_SAMPLES];
+    let (mut warm, mut hits, mut counted) = (0, 0, 0);
+    while counted < samples {
+        while !task::is_blocked(sleeper) {
+            task::yield_now();
+        }
+        let seq = LAT_SEQ.load(Ordering::Acquire);
+        let start = platform::now_ns().unwrap_or(0);
+        task::unpark(sleeper);
+        let mut direct = LAT_SEQ.load(Ordering::Acquire) != seq;
+        let mut late = WAKE_TASK_GIVE_UP_NS;
+        while LAT_SEQ.load(Ordering::Acquire) == seq {
+            if platform::now_ns().unwrap_or(u64::MAX) > start + WAKE_TASK_GIVE_UP_NS {
+                direct = false;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if LAT_SEQ.load(Ordering::Acquire) != seq {
+            late = LAT_RAN_AT.load(Ordering::Relaxed).saturating_sub(start);
+        }
+        if hits < WAKE_WARM_UP_HITS && warm < WAKE_WARM_UP_MAX {
+            warm += 1;
+            hits = if direct { hits + 1 } else { 0 };
+            continue;
+        }
+        LAT_DIRECT.fetch_add(u32::from(direct), Ordering::Relaxed);
+        kept[counted] = late;
+        counted += 1;
+    }
+    let kept = &mut kept[..samples];
+    insertion_sort(kept);
+    LAT_MEDIAN.store(kept[samples / 2], Ordering::Relaxed);
+    LAT_MEAN.store(
+        kept.iter().sum::<u64>() / samples.max(1) as u64,
+        Ordering::Relaxed,
+    );
+    LAT_MAX.store(kept[samples - 1], Ordering::Relaxed);
+    finish();
+}
+
+/// Ordena até `WAKE_TASK_MAX_SAMPLES` valores (SDD 07, "Otimização da troca").
+fn insertion_sort(values: &mut [u64]) {
+    for next in 1..values.len() {
+        let mut at = next;
+        while at > 0 && values[at - 1] > values[at] {
+            values.swap(at - 1, at);
+            at -= 1;
+        }
+    }
+}
+
+/// Quanto custa acordar uma tarefa de fatia curta a partir de outra, na mesma CPU, em ns.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WakeLatency {
+    pub mean_ns: u64,
+    pub median_ns: u64,
+    pub max_ns: u64,
+    /// Quantas vezes o dorminhoco já tinha rodado quando `unpark` voltou.
+    pub direct: u32,
+    pub samples: u32,
+}
+
+impl WakeLatency {
+    /// Em 90% das amostras o dorminhoco já tinha rodado quando `unpark` voltou.
+    pub const fn passes(&self) -> bool {
+        self.samples > 0 && self.direct * 10 >= self.samples * 9
+    }
+}
+
+/// Latência de acordar entre tarefas na mesma CPU (SDD 15): o acordador cria um
+/// dorminhoco de fatia curta e o acorda `samples` vezes. `None` se faltou slot.
+pub fn wake_task_latency(samples: u32) -> Option<WakeLatency> {
+    let count = usize::try_from(samples)
+        .unwrap_or(WAKE_TASK_MAX_SAMPLES)
+        .clamp(1, WAKE_TASK_MAX_SAMPLES);
+    let samples = u32::try_from(count).unwrap_or(1);
+    STOP.store(false, Ordering::Relaxed);
+    FINISHED.store(0, Ordering::Relaxed);
+    LAT_SEQ.store(0, Ordering::Relaxed);
+    LAT_SAMPLES.store(samples, Ordering::Relaxed);
+    LAT_DIRECT.store(0, Ordering::Relaxed);
+    MAIN.store(task::current().as_u32() as usize, Ordering::Relaxed);
+    let here = percpu::pinned(percpu::PerCpu::index);
+    let spawn = |name, entry, params| Spawn {
+        name,
+        entry,
+        arg: 0,
+        simd: false,
+        params,
+        affinity: 1 << here,
+    };
+    let sleeper = task::spawn(spawn(
+        "sleeper",
+        latency_sleeper,
+        SchedParams::fair_with_slice(0, SLEEPER_SLICE_NS),
+    ))
+    .ok()?;
+    LAT_SLEEPER.store(sleeper.as_u32() as usize, Ordering::Relaxed);
+    let waker = task::spawn(spawn("waker", latency_waker, SchedParams::fair(0))).ok()?;
+    wait_finished(1);
+    STOP.store(true, Ordering::Release);
+    task::unpark(sleeper);
+    wait_finished(2);
+    wait_exited(&[waker, sleeper]);
+    Some(WakeLatency {
+        mean_ns: LAT_MEAN.load(Ordering::Relaxed),
+        median_ns: LAT_MEDIAN.load(Ordering::Relaxed),
+        max_ns: LAT_MAX.load(Ordering::Relaxed),
+        direct: LAT_DIRECT.load(Ordering::Relaxed),
+        samples,
+    })
+}
+
+/// Autoteste: acordar uma tarefa de fatia curta troca na hora, sem esperar a IRQ. Imprime a
+/// linha do boot e devolve se passou.
+fn wake_self_test() -> bool {
+    let Some(latency) = wake_task_latency(WAKE_SELF_TEST_SAMPLES) else {
+        crate::console::print(format_args!(
+            "[rustos] wake self-test: FAILED (no sample)\n"
+        ));
+        return false;
+    };
+    let verdict = if latency.passes() { "ok" } else { "FAILED" };
+    crate::console::print(format_args!(
+        "[rustos] wake self-test: {verdict} (task to task: mean {} ns, median {} ns, max {} ns, {} of {} direct)\n",
+        latency.mean_ns, latency.median_ns, latency.max_ns, latency.direct, latency.samples
+    ));
+    latency.passes()
 }
 
 /// Interrupções do timer numa janela em que só a ociosa roda: sem tique periódico, só a
@@ -473,7 +647,16 @@ pub fn memory_storm(iterations: u32) -> StormSample {
     }
 }
 
+/// Gira a CPU por `ms` antes da primeira medida (SDD 15, "Medidas").
+fn warm_up(ms: u64) {
+    let end = platform::now_ns().unwrap_or(0) + ms * 1_000_000;
+    while platform::now_ns().unwrap_or(u64::MAX) < end {
+        core::hint::black_box(burn(1_000));
+    }
+}
+
 pub fn run(effort: Effort) -> Option<BenchReport> {
+    warm_up(effort.warmup_ms);
     let plain = context_switch_ns(effort.rounds, false, Placement::SameCpu)?;
     let simd = context_switch_ns(effort.rounds, true, Placement::SameCpu)?;
     let cross =
@@ -481,6 +664,7 @@ pub fn run(effort: Effort) -> Option<BenchReport> {
     let ipi_rtt_ns = ipi_round_trip_ns(effort.rounds / CROSS_DIVISOR).unwrap_or(0);
     let (idle_mean, idle_max) = wake_jitter_ns(effort.samples, false)?;
     let (load_mean, load_max) = wake_jitter_ns(effort.samples, true)?;
+    let wake_task = wake_task_latency(effort.samples).unwrap_or_default();
     let (pick_next_ns, tick_ns) = policy_ns(effort.rounds);
     let mut scale = [ScaleSample::default(); 3];
     for (sample, cpus) in scale.iter_mut().zip([1_usize, 2, 4]) {
@@ -506,6 +690,9 @@ pub fn run(effort: Effort) -> Option<BenchReport> {
         wake_max_ns: idle_max,
         wake_loaded_mean_ns: load_mean,
         wake_loaded_max_ns: load_max,
+        wake_task_median_ns: wake_task.median_ns,
+        wake_task_mean_ns: wake_task.mean_ns,
+        wake_task_max_ns: wake_task.max_ns,
         pick_next_ns,
         tick_ns,
     })
@@ -693,6 +880,7 @@ pub fn smp_self_test() -> Option<(u64, u64)> {
     }
     wait_exited(&ids);
     preempt_by_timer()?;
+    wake_self_test().then_some(())?;
     (CHURN_DOUBLE_RUNS.load(Ordering::Relaxed) == 0).then(|| {
         (
             CHURN_MIGRATIONS.load(Ordering::Relaxed),
