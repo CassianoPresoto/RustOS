@@ -26,8 +26,9 @@
 | Pilha de falhas (aarch64) | `Memory::map_stack`: 4 páginas mapeadas e uma de guarda, por CPU; é o `SP_EL0` do EL1h (SDD 15) | 16 384 bytes de RAM, mais as tabelas de página que faltarem |
 | Custo por CPU | SDD 15, "Custo por tarefa e por CPU": `PerCpu`, a política no heap, a pilha e as pilhas de exceção | ~500 bytes de `PerCpu` (`.bss`, por CPU possível) mais 3 680 de política no heap por CPU que entra no escalonador; núcleo secundário: 32 KiB de pilha mais 48 KiB de IST (x86_64) ou 16 KiB de pilha de falhas (aarch64); cache de frames: 256 bytes |
 | Custo por tarefa | SDD 15, "Custo por tarefa e por CPU": `Slot`, `Context`, pilha e área de FPU/SIMD | ~140 bytes de `Slot` e 96 de entidade na política justa; 8 (x86_64) ou 104 (aarch64) de `Context`; 32 768 de pilha (mais as tabelas de página); 832 (x86_64 da QEMU, `xsaveopt` com AVX) ou 528 (aarch64) de FPU/SIMD, só da tarefa que usa |
-| Troca de contexto | `bench` e a linha `switch:`: ping-pong de `unpark`/`park` entre duas tarefas, ns por troca, aquecimento e melhor de 3 | aarch64 HVF `release`, com o EEVDF: 99 a 116 ns no boot e 131 a 164 no comando; com o rodízio eram 42 e 77 a 84 (tabela abaixo); x86_64 e aarch64 em TCG só para comparar o RustOS consigo mesmo |
+| Troca de contexto | `bench` e a linha `switch:`: ping-pong de `unpark`/`park` entre duas tarefas, ns por troca, aquecimento e melhor de 3 | aarch64 HVF `release`, 5 boots: **41 a 44 ns** na linha do boot (antes 68 a 75) e **42 ns** no comando (antes 73 a 158); a tabela e a decomposição estão em "Otimização da troca e do acordar", abaixo; x86_64 e aarch64 em TCG só para comparar o RustOS consigo mesmo |
 | Jitter de acordar | `bench`: `agora − pedido` depois de `sleep_until`, 200 amostras | aarch64 HVF, com o EEVDF: 0,49 a 0,52 ms (ociosa em `wfi`) e 4,1 µs (CPU ocupada) de média; igual ao do rodízio (tabela abaixo) |
+| Latência de acordar entre tarefas | `bench` (linha `task to task`) e a linha `wake self-test:` do boot: `unpark` de uma tarefa de fatia curta por outra, na mesma CPU, até ela rodar  | aarch64 HVF: mediana **42 a 83 ns** (um a dois tiques do contador de 24 MHz), antes 102 µs (o fim da fatia da corrente) |
 | Timer (aarch64) | linha `timer:` do boot; `CNTV` com `CVAL` absoluto, 100 Hz só até `task::init`; depois não há tique periódico (linha `idle:`) | 50 tiques em 497 ms (HVF) e 488 ms (TCG) no autoteste; ociosa com o EEVDF: 2 IRQs do timer em 50 ms, contra 5 a 100 Hz (HVF, TCG e x86_64 iguais). No x86_64 com o contador do APIC (sem TSC-deadline) a ociosa ainda acorda a cada ~69 s, o que a contagem de 32 bits a 62,5 MHz alcança; no aarch64 e no TSC-deadline o prazo é de uma hora |
 | Estado do gerador aleatório | `size_of::<Rng>()` (teste em `core/crypto/src/rng.rs`) | 40 bytes: chave de 32 e contador de 8 |
 | Resíduo de chave na pilha | linha `key residue:` do boot (`random::stack_residue`), `make smoke ARCH=all PROFILE=dev\|release\|release-small` | 0 estados do ChaCha20 e 0 cópias da chave nas duas ISAs e nos três perfis; antes, de 0 a 2 e de 1 a 3 (tabela abaixo, no gerador) |
@@ -59,7 +60,8 @@ máquina; a faixa são as rodadas do `bench`.
 
 - **A troca com o EEVDF custa cerca de 2x a do rodízio no HVF** (77–84 para 156–164 no
   comando, 41 para 110 no boot) e de 2,5 a 3,5x em TCG. Cada ida e volta do ping-pong faz
-  `wake`, `sleep`, `pick_next` e três leituras do relógio. Fora da política, medido à
+  `wake`, `sleep`, `pick_next` e duas leituras do relógio por troca (uma em `unpark`, outra em `park`;
+  a "três por ida e volta" que a dívida dizia era a conta velha, antes do `schedule_at`). Fora da política, medido à
   parte com um patch temporário que não entrou (HVF): `now_ns` 23 ns (`isb`, `mrs` e a
   conversão), `cycles` 15, `sleep` + `wake` 39, `next_deadline_ns` 2. Uma otimização que
   entrou: o `schedule` passou a receber o relógio que o `park` e o `yield` já leram, e o
@@ -94,6 +96,65 @@ máquina; a faixa são as rodadas do `bench`.
   máquina, e o `lat_ctx` passa o token por pipe; o ping-pong daqui o faz por
   `unpark` e `park`, então não é o mesmo teste. As fontes publicadas (1,2 a 2,2 µs em
   Haswell, pesquisa `scheduler.md`) são de outro hardware.
+
+### Otimização da troca e do acordar 
+
+Comandos, os mesmos antes e depois (`perf/scheduler-switch` contra a `main` `29882df`, `release`, QEMU 11.1.3, macOS, 4 CPUs):
+`make smoke ARCH=aarch64 PROFILE=release` (linha `switch:` do boot) e, na mesma subida, o comando `bench` digitado na serial
+9 s depois (scripts descartáveis; 5 boots por árvore, mínimo e mediana). Só o HVF vale como latência; o TCG só mostra a tendência.
+
+| aarch64 HVF | antes (mín. / mediana) | depois (mín. / mediana) |
+| --- | --- | --- |
+| Troca, linha do boot (ns) | 68 / 72 | **41 / 41** |
+| Troca com SIMD, linha do boot (ns) | 83 / 90 | 41 / 42 (um boot com 76) |
+| Troca, comando `bench` (ns) | 73 / 132 | **42 / 42** |
+| Troca com SIMD, comando `bench` (ns) | 91 / 125 | 43 / 45 |
+| Acordar entre tarefas, mediana (`wake self-test:`) | 102 µs | **42 a 83 ns** |
+| Acordar de `sleep_until`, ociosa (média, µs) | 472 a 514 | 504 a 562 (igual: é o `wfi` do HVF) |
+| `pick_next` e `tick` da política, 8 prontas (ns) | 34 a 39 e 2 | 35 a 39 e 2 |
+| x86_64 TCG, troca, linha do boot (ns), 3 boots | 1 398 / 1 519 | 1 294 / 1 307 |
+| x86_64 TCG, troca, comando `bench` (ns), 3 boots | 1 595 / 1 603 | 1 276 / 1 282 |
+| x86_64 TCG, acordar entre tarefas, mediana (`wake self-test:`) | não medido | 1 a 2 µs (a resolução do relógio do TCG) |
+
+O "antes" do comando varia de 73 a 158 ns porque ele chega depois de segundos ociosos e o hospedeiro mantém a vCPU em
+frequência baixa (a árvore de antes não tem aquecimento); o "depois" mede com 300 ms de aquecimento (SDD 15, "Medidas"). O
+ganho do comando mistura o aquecimento e a otimização; a linha do boot, que já vem quente nas duas árvores, é a comparação limpa.
+
+**Decomposição do custo de uma troca** (código de antes, HVF; sonda descartável que mede cada peça em laço, 200 mil
+voltas, melhor de 4; não está no código):
+
+| Peça | ns |
+| --- | --- |
+| `now_ns`: `isb` + `mrs` (8,5) + atômicos + conversão por divisão de 128 bits (1,3) | 12,6 por leitura, duas por troca |
+| `IrqLock` pegar e soltar (2,2 são o mascarar e desmascarar a IRQ) | 5,6, três por troca |
+| Política por troca no ping-pong (`wake` + `sleep` + `pick_next`, duas tarefas) | 18 |
+| `needs_resched`, `next_deadline_ns` | < 1 |
+| Soma medida do ping-pong (o resto é `switch`, estado por tarefa, contadores) | 71 |
+
+Passo a passo, o ping-pong na mediana de 9 medidas por boot (`context_switch_ns`, 20 000 voltas), aarch64 HVF:
+
+| Passo | ns por troca | O que mudou |
+| --- | --- | --- |
+| Início | 71 a 75 | |
+| Relógio do escalonador sem o `isb` | 48 | `platform::sched_clock_ns`: -23, mais que as duas leituras de 8,5 ns, porque o `isb` esvazia o pipeline no meio do caminho |
+| Um lock da decisão à escolha; `wake_target` pinado | 46 | `park`, `sleep_until`, `yield_now` e `exit` passam o lock a `switch_from`; tarefa presa a uma CPU não varre as 8 cargas |
+| Conversão por multiplicação e deslocamento | 42 | `TickScale`: -4 (isolado: `now_ns` 12,6 para 9,8 ns e `sched_clock_ns` 1,2 para 0,5) |
+| `place` com divisão de 64 bits | (dentro do ruído) | no host, `sleep` + `wake` com 8 tarefas: 39 para 33 ns (`bench_round_robin_against_eevdf`) |
+
+Tentado e **não** entrou, sem ganho medido: `recenter` sem divisão quando a soma já é o resto (host: 33 ns, igual), atalho
+de `real_to_virtual` para o peso 1024 (HVF e host iguais), um `IrqLock` que não salva a máscara de IRQ já mascarada
+(-1 a -2 ns, e pediria uma consulta nova à porta `Cpu`), e o `CNTVCTSS_EL0` (ECV zero no HVF, não se mede).
+
+**O que restou da troca (41 ns):** a política ainda é 18 (o EEVDF faz `wake`, `sleep` e `pick_next` em árvore; o rodízio
+faz o mesmo em ~6 no host), 11 dos dois locks, e o `switch`. [DEBT-0042](../tech-debt/0042-troca-de-contexto-lenta-com-eevdf-e-relogio.md)
+fica aberta com o gatilho do `lat_ctx`.
+
+**Acordar entre tarefas:** antes, `unpark` só levantava o `needs_resched` e a corrente seguia até a próxima IRQ (100 µs
+medidos, mediana de três boots: 102 375, 102 458 e 102 417 ns; máximo de 107 a 172 µs). Agora troca no fim do `unpark`: 42 a 83 ns
+de mediana, média de 54 a 72 ns e máximo de 125 a 250 ns nos boots medidos; uma amostra em umas 350 (4 em ~1 700) passa
+de 350 µs (lag negativo do dorminhoco: o EEVDF não o deixa preemptar). O piso é o tique do contador (41,7 ns).
+**O que não mudou e não é do escalonador:** o `wake:` do boot (`sleep_until` com a ociosa) continua em 0,5 ms (0,26 a 0,54 ms
+conforme o estado do hospedeiro): é o `wfi` da vCPU no HVF (acima), e com uma CPU só e uma tarefa ocupando a outra, 3,7 µs.
 
 ### Criptografia do núcleo (host)
 
