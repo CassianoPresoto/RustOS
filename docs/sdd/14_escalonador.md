@@ -274,7 +274,7 @@ corrente) faz a propriedade falhar, e foi como se conferiu que o teste pega.
   com o kernel ligado: `__divti3` e `__udivti3` linkam no x86_64 e no aarch64, em `release`
   e `release-small`, e `make smoke ARCH=all` passa. Em TCG a divisão é emulada e pesa
   ([DEBT-0041](../tech-debt/0041-escalonador-do-x86-sem-medida-fora-do-tcg.md)).
-- **Uma CPU por instância**, sem lock interno ([DEBT-0039](../tech-debt/0039-escalonador-de-uma-cpu.md)).
+- **Uma CPU por instância**, sem lock interno: o kernel guarda cada instância atrás do `IrqLock` da fila da CPU ([SDD 15](15_tarefas_e_preempcao.md)).
 - **Medida no alvo:** `pick_next` e `tick` no `bench` do kernel (34 a 35 e 2 ns no aarch64
   HVF, com 8 tarefas prontas), a latência de acordar e a troca de contexto, no
   [SDD 07](07_desempenho_e_recursos.md). O custo da política na troca de contexto:

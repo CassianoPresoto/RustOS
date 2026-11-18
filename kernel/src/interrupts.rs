@@ -1,13 +1,14 @@
 //! Exceções e interrupções do lado do núcleo: relatório de falha, tique do timer
 //! e a fila de entrada que a IRQ enche e o laço do shell esvazia.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
-use rustos_hal::{BootInfo, Cpu, Fault, FaultKind, Handlers, Irq};
+use rustos_hal::{BootInfo, Cpu, Fault, FaultKind, Handlers, Irq, MAX_CPUS};
 use rustos_sync::ByteRing;
 
 use crate::memory::Memory;
-use crate::{console, platform, task};
+use crate::sync::bump;
+use crate::{console, panic, percpu, platform, task};
 
 /// De onde veio uma IRQ, na visão do núcleo; o `platform` traduz o número.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +20,10 @@ pub enum IrqSource {
         allow(dead_code, reason = "a `virt` não tem teclado")
     )]
     Keyboard,
+    /// IPI: refazer a decisão de escalonamento desta CPU.
+    Reschedule,
+    /// IPI: outro núcleo entrou em pânico, pare.
+    Stop,
     Spurious,
     Unknown,
 }
@@ -41,12 +46,7 @@ static HANDLERS: Handlers = Handlers {
 const TICK_NS: u64 = 1_000_000_000 / platform::TIMER_HZ as u64;
 /// Prazo do timer quando nada o exige: longe, como o `start` do `CNTV` o deixa.
 const PARKED_NS: u64 = 3_600_000_000_000;
-/// Interrupções do timer desde o boot.
-static TICKS: AtomicU64 = AtomicU64::new(0);
 static NEXT_TICK_NS: AtomicU64 = AtomicU64::new(0);
-/// O prazo que está no timer de um tiro agora.
-static ARMED_NS: AtomicU64 = AtomicU64::new(u64::MAX);
-static IN_IRQ: AtomicBool = AtomicBool::new(false);
 static BREAKPOINTS: AtomicU64 = AtomicU64::new(0);
 /// Produtor: só `on_irq`. Consumidor: só `pop_input`, no laço do shell.
 static INPUT: ByteRing<256> = ByteRing::new();
@@ -70,21 +70,21 @@ pub fn init(boot: &impl BootInfo, memory: &mut Memory) -> bool {
 }
 
 fn arm(deadline_ns: u64) {
-    ARMED_NS.store(deadline_ns, Ordering::Relaxed);
+    percpu::current().set_armed_ns(deadline_ns);
     platform::arm_timer(deadline_ns);
 }
 
-/// Adianta o timer de um tiro se `deadline_ns` vem antes do prazo armado.
+/// Adianta o timer de um tiro desta CPU se `deadline_ns` vem antes do prazo armado.
 /// Chamar com a interrupção mascarada.
 pub fn arm_no_later_than(deadline_ns: u64) {
-    if deadline_ns < ARMED_NS.load(Ordering::Relaxed) {
+    if deadline_ns < percpu::current().armed_ns() {
         arm(deadline_ns);
     }
 }
 
-/// Se a CPU está dentro de um handler de IRQ.
+/// Se esta CPU está dentro de um handler de IRQ.
 pub fn in_irq() -> bool {
-    IN_IRQ.load(Ordering::Relaxed)
+    percpu::current().in_irq()
 }
 
 /// IRQ do timer. Antes do escalonador, o tique periódico do autoteste. Depois, só o
@@ -92,7 +92,7 @@ pub fn in_irq() -> bool {
 /// dois o timer fica longe e a CPU ociosa não acorda por ele. A troca vem no fim da IRQ.
 fn on_timer() {
     let now = platform::now_ns().unwrap_or(0);
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    bump(&percpu::current().stats.timer_irqs, 1);
     if task::is_ready() {
         match task::timer_irq(now) {
             Some(at) => arm(at),
@@ -112,9 +112,11 @@ const fn next_tick(previous: u64, now: u64) -> u64 {
     if next > now { next } else { now + TICK_NS }
 }
 
-/// Interrupções do timer desde o boot.
+/// Interrupções do timer desde o boot, de todas as CPUs.
 pub fn ticks() -> u64 {
-    TICKS.load(Ordering::Relaxed)
+    (0..MAX_CPUS)
+        .map(|index| percpu::get(index).stats.timer_irqs.load(Ordering::Relaxed))
+        .sum()
 }
 
 pub fn breakpoints() -> u64 {
@@ -140,7 +142,7 @@ pub fn read_input_blocking() -> u8 {
         // Desenha sob a mesma máscara do sono: a tecla de rolagem não traz byte,
         // e um flush fora daqui perderia a IRQ que chegasse antes de dormir.
         console::flush();
-        task::wait_for_input();
+        task::wait_for_input(|| !INPUT.is_empty());
         cpu.restore_interrupts(were_enabled);
     }
 }
@@ -155,6 +157,7 @@ fn on_fault(fault: &Fault) {
         BREAKPOINTS.fetch_add(1, Ordering::Relaxed);
         return;
     }
+    panic::begin();
     console::print_panic(format_args!(
         "[rustos] fault: {} at pc {:#x} (code {:#x})\n",
         Described(fault.kind),
@@ -165,7 +168,9 @@ fn on_fault(fault: &Fault) {
 }
 
 fn on_irq(irq: Irq) {
-    IN_IRQ.store(true, Ordering::Relaxed);
+    let cpu = percpu::current();
+    cpu.set_in_irq(true);
+    bump(&cpu.stats.irqs, 1);
     match platform::irq_source(irq) {
         IrqSource::Timer => on_timer(),
         IrqSource::Serial => {
@@ -181,9 +186,11 @@ fn on_irq(irq: Irq) {
             }
             task::notify_input();
         }
+        IrqSource::Reschedule => task::on_reschedule_ipi(),
+        IrqSource::Stop => panic::stop_this_cpu(),
         IrqSource::Spurious | IrqSource::Unknown => {}
     }
-    IN_IRQ.store(false, Ordering::Relaxed);
+    cpu.set_in_irq(false);
 }
 
 struct Described(FaultKind);
