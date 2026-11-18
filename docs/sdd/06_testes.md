@@ -53,6 +53,8 @@ cargo test --release -p rustos-mm bench -- --ignored --nocapture --test-threads=
 | `drivers/gicv3` | Os frames do GICR percorridos até `Last` (frames de GICv3 e de GICv4), a SGI habilitada antes do `ISENABLER` |
 | `core/sched/src/migration.rs` | Duas filas, 200 sementes: a tarefa está em exatamente uma, o lag viaja, a corrente recusa `detach` ([SDD 14](14_escalonador.md)) |
 | `core/mm/src/heap.rs` | `FakeMemory: FrameMemory`, uma faixa de palavras que derruba o teste em acesso fora dela, desalinhado ou abaixo da base |
+| `core/cpio` | `newc` montado no teste (todas as combinações de nome e dado de 0 a 9 bytes, NUL a mais no nome) e o de um `cpio -o -H newc` real colado como constante; uma recusa por regra, truncação em todo comprimento, os 13 campos com dígito inválido e os de tamanho em 0xffffffff e vizinhos |
+| `core/elf` | ELF montado no teste, com cada campo escrito como está; uma recusa por linha da tabela de validação, estouro em `p_offset`, `p_vaddr`, `p_filesz`, `p_memsz`, `e_phoff` e `e_entry`, truncação em todo comprimento, corrupção de cada byte do cabeçalho; e dois ELF reais (x86_64 e aarch64) só com cabeçalho e program headers |
 | `core/shell` | `Host` falso e um terminal VT mínimo (`testing.rs`) que confere prompt, linha e cursor depois de cada tecla, nas duas regras de última coluna |
 | `core/term` | Fuzz determinístico (xorshift, 300 mil bytes por tamanho de grade) que confere cursor, região e anel; o mesmo fluxo em bloco e byte a byte dá a mesma grade. Um segundo fuzz, com tela alternativa e histórico, mistura trocas de tela, `ED 3`, conjuntos G0/G1, tabulação e rolagem da visão a bytes soltos e a CSI bem formado, e confere também o histórico e a visão |
 
