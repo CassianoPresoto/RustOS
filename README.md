@@ -31,9 +31,9 @@ make run ARCH=x86_64           # janela com a tela; digite nela ou no terminal
 make screenshot ARCH=all CMDS="fetch;mem"   # grava target/screenshots/<isa>.png
 ```
 
-O kernel carregado ocupa ~180 KiB (x86_64) e ~150 KiB (aarch64) em `release`, e
-~119 KiB e ~101 KiB em `release-small`
-(medição no [SDD 07](docs/sdd/07_desempenho_e_recursos.md)). O que vem depois está
+O kernel carregado ocupa 338 KiB (x86_64) e 285 KiB (aarch64) em `release`, e
+179 KiB e 163 KiB em `release-small`, a imagem de produção, sem o modo de teste
+(`make size`; antes e depois no [SDD 07](docs/sdd/07_desempenho_e_recursos.md)). O que vem depois está
 no [roadmap](docs/sdd/08_roadmap.md).
 
 ## Arquitetura
