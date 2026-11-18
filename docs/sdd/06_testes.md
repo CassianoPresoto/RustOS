@@ -23,6 +23,19 @@ faixas recortadas, palavras parciais), `core/mm/src/buddy.rs` e `heap.rs` (400 m
 sobrevive e tudo volta ao estado de partida), `lib/sync/src/spin.rs` (4 threads × 10 000
 incrementos — foi esse teste que achou o `then_some` que soltava o lock alheio).
 
+`core/mm/src/vmar.rs`: 30 000 operações aleatórias (`reserve`, `allocate` nas duas
+colocações, `unmap`, `find`) em cinco configurações de capacidade e tamanho, com semente
+fixa, contra um modelo ingênuo (lista ordenada, candidatos achados página a página); a cada
+passo as duas árvores são iguais, sem sobreposição e sem W+X. Mais as bordas: faixa no topo
+do espaço (`base + len` estoura), alinhamento de `2^63`, espaço cheio, fragmentação, partir
+sem vaga, uniformidade do sorteio (16 000 sorteios em 8 posições), o viés da rejeição e
+`aslr_base` com intervalo menor que uma página.
+`core/mm/src/asid.rs`: 100 000 trocas aleatórias em 4 CPUs e 40 espaços, com uma
+**simulação de TLB por CPU** que falha se uma CPU carrega um índice com entrada de outro
+espaço, e que o índice carregado numa CPU que ainda roda o espaço seja o do valor atual dele
+(a CPU 0 quase não troca); o mesmo roteiro sem esvaziar tem de falhar. O roteiro
+`double_rollover_idle_cpu_keeps_index` fixa o caso de dois esgotamentos com uma CPU ociosa.
+
 Medição de `core/mm` no host, fora do `make test` (testes `#[ignore]`):
 
 ```sh
