@@ -44,7 +44,8 @@ mod traps;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use apic::{
     ApicAccess, ApicMode, TimerMode, X86Ipi, arm_oneshot, arm_tsc_deadline, detect as detect_apic,
-    eoi, publish as publish_apic, set_timer_mode,
+    enable_secondary as enable_secondary_apic, eoi, local_id as local_apic_id,
+    publish as publish_apic, set_timer_mode,
 };
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use context::{Context, switch};
