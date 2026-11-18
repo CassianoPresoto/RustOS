@@ -147,6 +147,71 @@ fn a_sleeper_does_not_starve_the_hogs_nor_get_more_than_its_demand() {
 
 type Rt = Composite<8, 16>;
 
+const WAKER: TaskId = TaskId::new(1);
+const SLEEPER: TaskId = TaskId::new(2);
+
+/// O que o kernel faz em `unpark`: acorda, e quem confere `needs_resched` troca na hora.
+/// Devolve em quantas de `rounds` voltas a acordada pediu a troca de imediato.
+fn immediate_wake_preemptions(waker: SchedParams, sleeper: SchedParams, rounds: u32) -> u32 {
+    let mut sched = Rt::new();
+    sched.add(WAKER, waker, 0).unwrap();
+    sched.add(SLEEPER, sleeper, 0).unwrap();
+    sched.sleep(SLEEPER, 0);
+    assert_eq!(sched.pick_next(0), Some(WAKER));
+    let (mut now, mut immediate) = (0, 0);
+    for round in 0..rounds {
+        now += 50_000;
+        sched.wake(SLEEPER, now);
+        if round >= 2 && sched.needs_resched() {
+            immediate += 1;
+            assert_eq!(sched.pick_next(now + 100), Some(SLEEPER));
+            sched.sleep(SLEEPER, now + 200);
+            assert_eq!(sched.pick_next(now + 200), Some(WAKER));
+        } else if sched.needs_resched() {
+            sched.pick_next(now + 100);
+            sched.sleep(SLEEPER, now + 200);
+            sched.pick_next(now + 200);
+        } else {
+            sched.sleep(SLEEPER, now + 200);
+        }
+    }
+    immediate
+}
+
+#[test]
+fn a_short_slice_wakeup_asks_for_the_switch_at_once_even_inside_the_current_slice() {
+    let rounds = 500;
+    let immediate = immediate_wake_preemptions(
+        SchedParams::fair(0),
+        SchedParams::fair_with_slice(0, 100_000),
+        rounds,
+    );
+    assert!(
+        immediate >= rounds - 2 - rounds / 20,
+        "{immediate} de {rounds}"
+    );
+}
+
+/// O ping-pong do `bench`: cada um acorda o outro e dorme, gastando o mesmo tempo. Conta quantas
+/// vezes o acordar pediu a troca antes de a corrente dormir.
+#[test]
+fn an_equal_ping_pong_never_asks_for_a_switch_before_the_waker_sleeps() {
+    let mut sched = Rt::new();
+    sched.add(WAKER, SchedParams::fair(0), 0).unwrap();
+    sched.add(SLEEPER, SchedParams::fair(0), 0).unwrap();
+    sched.sleep(SLEEPER, 0);
+    let (mut current, mut other, mut now) = (WAKER, SLEEPER, 0);
+    assert_eq!(sched.pick_next(now), Some(current));
+    for _ in 0..1_000 {
+        now += 70;
+        sched.wake(other, now);
+        assert!(!sched.needs_resched(), "o acordar pediu a troca em {now}");
+        sched.sleep(current, now);
+        assert_eq!(sched.pick_next(now), Some(other));
+        core::mem::swap(&mut current, &mut other);
+    }
+}
+
 #[test]
 fn a_fifo_wakeup_preempts_the_fair_class_at_once() {
     let mut sched = Rt::new();
