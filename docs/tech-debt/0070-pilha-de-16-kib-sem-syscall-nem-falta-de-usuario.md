@@ -1,5 +1,5 @@
 ---
-id: DEBT-0066
+id: DEBT-0070
 title: Pilha de 16 KiB medida só com tarefas do kernel, sem syscall nem falta de usuário
 status: Open
 date: 2026-11-18
@@ -7,7 +7,7 @@ trigger: A primeira syscall ou falta de página de usuário rodando na pilha do 
 paid_date:
 ---
 
-# DEBT 0066 — Pilha de 16 KiB medida só com tarefas do kernel, sem syscall nem falta de usuário
+# DEBT 0070 — Pilha de 16 KiB medida só com tarefas do kernel, sem syscall nem falta de usuário
 
 ## O que falta
 

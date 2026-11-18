@@ -114,9 +114,9 @@ estão no pico; bytes, o máximo de cada tipo; `dev` e `release`):
 `release-small` (`opt-level = "z"`, `make smoke`): tarefa 2,2 (aarch64) e 2,1 KiB (x86_64), ociosa da CPU de boot 0,8, núcleo secundário **8,8 KiB** (o maior de todos os perfis), shell 15,5 no boot e 33,8 depois do `bench`.
 
 `dev` (`opt-level = 1`) usa **mais** pilha que `release` nas tarefas e nas ociosas (2,5 contra 2,3 KiB; 6,7 contra 3,9 KiB), e **bem menos** no shell:
-no `release` o `ps` já leva a pilha do shell a 38 KiB e o `bench` a 42,6 de 64 ([DEBT-0067](../tech-debt/0067-shell-usa-dois-tercos-da-pilha-no-release.md)). O
+no `release` o `ps` já leva a pilha do shell a 38 KiB e o `bench` a 42,6 de 64 ([DEBT-0071](../tech-debt/0071-shell-usa-dois-tercos-da-pilha-no-release.md)). O
 `fault page` no x86_64 roda na pilha do shell e não separa o relatório do resto; o `#BP`, o `#PF` e o pânico do x86_64 não usam as pilhas IST (pico zero
-nas três de cada CPU, [DEBT-0068](../tech-debt/0068-pilhas-de-excecao-sem-medida-permanente.md)). Não existe falta de página tratada ainda: a única
+nas três de cada CPU, [DEBT-0072](../tech-debt/0072-pilhas-de-excecao-sem-medida-permanente.md)). Não existe falta de página tratada ainda: a única
 é a que vira relatório.
 
 **Decisão: 4 páginas (16 KiB) para toda thread do kernel que não é o boot**, tarefas, ociosa de cada CPU e pilha de cada núcleo secundário (eram 8, 4 e 8).
@@ -129,7 +129,7 @@ Ganho, medido pelo `mem` (`used`, aarch64 `release`, depois do boot e do `bench`
 por núcleo secundário, 16 KiB; os 24 slots de tarefa cheios custariam 384 KiB a menos que antes.
 
 **A fase 4 remede.** Uma syscall e uma falta de página de usuário vão rodar na pilha do kernel da thread, e nenhuma das duas existe neste número
-([DEBT-0066](../tech-debt/0066-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md)). A medida se repete com o mesmo comando: `make screenshot ARCH=… CMDS="ps;bench"` e a linha `stacks:` do
+([DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md)). A medida se repete com o mesmo comando: `make screenshot ARCH=… CMDS="ps;bench"` e a linha `stacks:` do
 `make smoke`; para o pânico, uma linha de depuração na pilha onde ele corre (não está no código). O 4a decide se 16 KiB seguem ou se a pilha passa a pedir mais.
 
 ## O escalonador

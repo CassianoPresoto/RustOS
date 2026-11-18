@@ -1,5 +1,5 @@
 ---
-id: DEBT-0067
+id: DEBT-0071
 title: Shell usa dois terços da pilha do boot em release
 status: Open
 date: 2026-11-18
@@ -7,7 +7,7 @@ trigger: O `ps` em `release` mostrar o pico do shell acima de 48 KiB dos 64, ou 
 paid_date:
 ---
 
-# DEBT 0067 — Shell usa dois terços da pilha do boot em release
+# DEBT 0071 — Shell usa dois terços da pilha do boot em release
 
 ## O que falta
 

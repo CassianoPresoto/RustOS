@@ -1,5 +1,5 @@
 ---
-id: DEBT-0068
+id: DEBT-0072
 title: Pilhas de exceção (IST e de falhas) sem medida permanente de pico
 status: Open
 date: 2026-11-18
@@ -7,7 +7,7 @@ trigger: A 4a acrescentar a IST do `#DB` ou fazer o aarch64 usar a pilha de falh
 paid_date:
 ---
 
-# DEBT 0068 — Pilhas de exceção (IST e de falhas) sem medida permanente de pico
+# DEBT 0072 — Pilhas de exceção (IST e de falhas) sem medida permanente de pico
 
 ## O que falta
 

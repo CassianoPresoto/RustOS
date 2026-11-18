@@ -151,7 +151,7 @@ direto, por exemplo) parte a página grande então. **1 GiB não entra:** exigir
 `Memory::map_stack(vm.space_mut(), 16)`: 16 páginas (64 KiB) e uma de guarda abaixo, na
 janela de pilhas. 64 KiB é o mínimo que o Limine garante e com que o kernel rodou até
 aqui. O pico medido (`ps`, linha `stacks:` do boot) é de 13,5 a 16,8 KiB no boot e de 23 (`dev`) a 42,6 KiB (`release`, depois do `bench`) no shell:
-a pilha **não encolhe** ([SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha), [DEBT-0067](../tech-debt/0067-shell-usa-dois-tercos-da-pilha-no-release.md)). A troca é um `asm!` por ISA
+a pilha **não encolhe** ([SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha), [DEBT-0071](../tech-debt/0071-shell-usa-dois-tercos-da-pilha-no-release.md)). A troca é um `asm!` por ISA
 (`call_on_stack(top, entry, arg)`): grava `sp`, zera o frame pointer e chama `entry(arg)`,
 que nunca volta. Os dados passam por `Box::into_raw`, não pela pilha antiga.
 
