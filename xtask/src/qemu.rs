@@ -124,7 +124,7 @@ fn normal_ceiling_ms(forced: Option<&str>) -> u64 {
 
 /// Teto do `firmware` do `boot timeline:` no aarch64, em ms, com qualquer aceleração (HVF 0,1 s,
 /// TCG 0,5 s). A espera de 5 s do EDK2 (SDD 05) estoura.
-const FIRMWARE_CEILING_MS: u64 = 2000;
+const FIRMWARE_CEILING_MS: u64 = 4000;
 
 /// Os microssegundos de `boot timeline: firmware N us`.
 fn firmware_boot_us(log: &str) -> Option<u64> {
@@ -600,7 +600,7 @@ mod tests {
         let slow = normal_log_with(2, 5_100_000, "");
         let result = report(Arch::Aarch64, BootMode::Normal, outcome, &slow);
         assert!(result.unwrap_err().contains("espera do EDK2"));
-        let fast = normal_log_with(2, 1_999_000, "");
+        let fast = normal_log_with(2, 3_999_000, "");
         assert!(report(Arch::Aarch64, BootMode::Normal, outcome, &fast).is_ok());
         let missing = normal_log(2, "").replace("boot timeline", "boot tl");
         let result = report(Arch::Aarch64, BootMode::Normal, outcome, &missing);

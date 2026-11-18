@@ -81,12 +81,12 @@ tem HVF): `RUSTOS_ACCEL=tcg make smoke ARCH=aarch64`. Valor desconhecido é igno
 `virt` escolhe a versão pelo acelerador (TCG: v2; HVF com o vGIC da Apple: v3).
 
 **Espera do EDK2 no aarch64 (`-boot menu=on,splash-time=0`).** O EDK2 do `ArmVirtQemu` espera 5 s no gerenciador de boot antes de iniciar a
-primeira opção (`PcdPlatformBootTimeOut|5` em `ArmVirtPkg/ArmVirtQemu.dsc`; o laço é o `BdsWait` de `BdsEntry.c`). O `PlatformBm.c` pergunta o
+primeira opção (`PcdPlatformBootTimeOut|5` em `ArmVirtPkg/ArmVirtQemu.dsc`; o laço é o `BdsWait` de `BdsEntry.c`). O `OvmfPkg/Library/PlatformBootManagerLibLight/PlatformBm.c` pergunta o
 tempo à QEMU por `GetFrontPageTimeoutFromQemu()` (`OvmfPkg/Library/QemuBootOrderLib/QemuBootOrderLib.c`), que lê `etc/boot-menu-wait` do
 fw_cfg e devolve `splash-time/1000`, arredondado para cima. Com `menu=off`, o padrão da QEMU, ele devolve o PCD (5 s). Medido (HVF): o
 `firmware` do `boot timeline:` vai de 5,1 s a 0,10 s e a parede do `smoke-fast` de 5,2 s a 0,17 s (TCG: 5,7 s a 0,6 s). O boot continua UEFI e
 Limine. O `-kernel` do Linux já pulava a espera. No x86_64 a flag não muda nada (OVMF: `firmware` 1,32 s com e sem ela), e ela só vai no
-aarch64. O `smoke-fast` do aarch64 falha se o `firmware` passar de 2 s (`xtask/src/qemu.rs`).
+aarch64. O `smoke-fast` do aarch64 falha se o `firmware` passar de 4 s (`xtask/src/qemu.rs`): a espera que ele pega vale 5 s ou mais, e o CI (TCG num runner x86) dá 0,6 a 0,9 s.
 
 **Por que não uma NVRAM com `Timeout = 0`.** Também zera a espera, mas é um armazém de variáveis do EDK2 montado à mão no xtask (pflash,
 `snapshot=on`, código completado até 64 MiB): depende do layout do EDK2 do pacote e, se ele diferir, o EDK2 refaz a NVRAM e a espera volta
