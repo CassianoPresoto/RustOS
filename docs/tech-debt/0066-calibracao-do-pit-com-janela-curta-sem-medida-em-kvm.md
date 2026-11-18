@@ -21,6 +21,13 @@ do PIT é outra e o latch do canal 2 nunca rodou lá: ninguém mediu erro nem te
 Cortou o boot do x86_64 em TCG (20 ms fixos viraram 5), onde o relógio já é só para comparar o RustOS consigo mesmo. A frequência do TSC
 não decide nenhuma correção hoje (o `timer:` aceita de 25 a 200 ms para 50).
 
+## O que conferir primeiro em KVM e em metal
+
+- A primeira amostra do PIT logo depois de `start()` pode trazer a contagem velha: o código a descarta e exige a origem a até 4 096 ticks de 0xFFFF
+  (como o `pit_verify_msb(0)` do Linux), mas só o PIT falso do host exercitou isso.
+- O `rdtsc` não tem `lfence`: em metal ele não garante o bracket do latch (o Linux usa `rdtsc_ordered`). Em TCG não importa; em hardware
+  fora de ordem a largura das amostras pode mentir.
+
 ## Gatilho
 
 O primeiro boot do x86_64 com KVM ou em metal, onde o TSC deixa de ser o relógio virtual do TCG e

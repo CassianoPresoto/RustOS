@@ -66,8 +66,8 @@ pub struct Reading {
 pub struct Calibration {
     pub tsc_hz: u64,
     pub apic_hz: u64,
-    /// Incerteza máxima da medida, em partes por milhão: a largura das duas amostras das pontas
-    /// (o TSC lido de cada lado do comando de latch) sobre o intervalo.
+    /// Limite do erro da medida, em partes por milhão: a largura das duas amostras das pontas (o
+    /// TSC lido de cada lado do comando de latch) sobre o intervalo, mais 1 tick do PIT de quantização.
     pub error_ppm: u64,
     /// Ticks do PIT que a janela durou.
     pub ticks: u32,
@@ -91,7 +91,7 @@ pub struct Policy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
-    /// O contador do PIT não andou dentro de `max_cycles`.
+    /// O contador do PIT não andou dentro de `max_cycles`, ou não partiu de perto de 0xFFFF.
     Stuck,
     /// A janela chegou ao teto e a incerteza segue acima de `refuse_ppm`.
     TooUncertain(u64),
@@ -135,6 +135,9 @@ impl Sample {
 
 /// Número de amostras iniciais, de que se guarda a mais estreita como origem.
 const ORIGINS: usize = 3;
+/// A origem tem de estar a no máximo isto de ticks de 0xFFFF (3,4 ms): mais longe é contagem
+/// velha, que o PIT não recarregou.
+const ORIGIN_SLACK: u16 = 4_096;
 
 /// Liga o PIT e amostra o contador dele (com latch) junto do TSC e do contador do APIC, numa janela
 /// única que cresce até a incerteza fechar (`Policy`, SDD 10). Sempre fecha o gate.
@@ -154,12 +157,18 @@ fn run<B: RegisterBus>(
     policy: Policy,
     read: &mut impl FnMut() -> Reading,
 ) -> Result<Calibration, Failure> {
+    // A primeira leitura depois de `start` pode trazer a contagem de antes (o Linux também a
+    // descarta: `pit_verify_msb(0)`).
+    Sample::take(pit, read);
     let mut origin = Sample::take(pit, read);
     for _ in 1..ORIGINS {
         let next = Sample::take(pit, read);
         if next.width() < origin.width() {
             origin = next;
         }
+    }
+    if origin.count < 0xFFFF - ORIGIN_SLACK {
+        return Err(Failure::Stuck);
     }
     loop {
         let sample = Sample::take(pit, read);
@@ -173,7 +182,10 @@ fn run<B: RegisterBus>(
             continue;
         }
         let error = u128::from(origin.width() + sample.width()) / 2;
-        let ppm = u64::try_from(error * 1_000_000 / delta).unwrap_or(u64::MAX);
+        let quantization = 1_000_000 / u64::from(ticks);
+        let ppm = u64::try_from(error * 1_000_000 / delta)
+            .unwrap_or(u64::MAX)
+            .saturating_add(quantization);
         let projected = u128::from(ppm) * u128::from(ticks) / u128::from(policy.max_ticks.max(1));
         let capped = ticks >= policy.max_ticks;
         let hopeless = ticks >= policy.min_ticks && projected > u128::from(policy.target_ppm);
@@ -221,6 +233,10 @@ mod tests {
         /// Tempo desde o início da contagem, em ns vezes `PIT_HZ`: dividido por 1e9 dá os ticks.
         elapsed: Cell<u64>,
         latched: Cell<u16>,
+        /// Contagem em que o canal 2 parte quando se escreve o valor inicial (0xFFFF num PIT são).
+        reload: Cell<u16>,
+        /// Se houver, o primeiro latch devolve isto: a contagem velha de antes do `start`.
+        stale: Cell<Option<u16>>,
         ns_per_latch: Cell<u64>,
         /// Atraso que o relógio sofreu depois do último latch e que o PIT também viveu.
         pending_ns: Rc<Cell<u64>>,
@@ -246,7 +262,8 @@ mod tests {
                 (PORT_B, _) => self.port_b.set(value),
                 (COMMAND, CHANNEL2_LATCH) => {
                     let ticks = u16::try_from(self.elapsed.get() / 1_000_000_000).unwrap();
-                    self.latched.set(0xFFFF_u16.wrapping_sub(ticks));
+                    let fresh = self.reload.get().wrapping_sub(ticks);
+                    self.latched.set(self.stale.take().unwrap_or(fresh));
                     let ns = self.ns_per_latch.get() + self.pending_ns.replace(0);
                     self.elapsed.set(self.elapsed.get() + ns * PIT_HZ);
                     self.read_high.set(false);
@@ -302,6 +319,7 @@ mod tests {
     fn bus_for(call_ns: u64) -> Pit<FakeBus> {
         let bus = FakeBus::default();
         bus.ns_per_latch.set(2 * call_ns);
+        bus.reload.set(0xFFFF);
         Pit::new(bus)
     }
 
@@ -382,9 +400,38 @@ mod tests {
     }
 
     #[test]
+    fn the_error_includes_one_tick_of_quantization() {
+        let pit = bus_for(500);
+        let result = calibrate(&pit, POLICY, clock(500, None, &pit.bus.pending_ns)).unwrap();
+        // 1 000 000 / ticks é o piso do limite: a diferença entre dois latches erra até 1 tick.
+        assert!(
+            result.error_ppm >= 1_000_000 / u64::from(result.ticks),
+            "{result:?}"
+        );
+        assert!(result.ticks >= 2_500, "{result:?}");
+    }
+
+    #[test]
+    fn the_first_stale_sample_is_discarded() {
+        let pit = bus_for(2_000);
+        pit.bus.stale.set(Some(0x1234));
+        let result = calibrate(&pit, POLICY, clock(2_000, None, &pit.bus.pending_ns)).unwrap();
+        assert!(within(result.tsc_hz, 1_000_000_000, 5_000), "{result:?}");
+    }
+
+    #[test]
+    fn a_counter_that_did_not_restart_near_ffff_is_refused() {
+        let pit = bus_for(2_000);
+        pit.bus.reload.set(0x8000);
+        let result = calibrate(&pit, POLICY, clock(2_000, None, &pit.bus.pending_ns));
+        assert_eq!(result, Err(Failure::Stuck));
+    }
+
+    #[test]
     fn a_stuck_pit_is_refused_by_time_not_by_polls() {
         let bus = FakeBus::default();
         bus.ns_per_latch.set(0);
+        bus.reload.set(0xFFFF);
         let pit = Pit::new(bus);
         let result = calibrate(&pit, POLICY, clock(1_000_000, None, &pit.bus.pending_ns));
         assert_eq!(result, Err(Failure::Stuck));

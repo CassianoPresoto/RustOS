@@ -324,10 +324,25 @@ fn wait_for_boot(receiver: &mpsc::Receiver<String>, started: Instant) -> (Outcom
             break Outcome::Booted(started.elapsed());
         }
         if log.contains(PANIC) || FATAL.iter().any(|mark| log.contains(mark)) {
+            drain(receiver, &mut log, FATAL_DRAIN);
             break Outcome::Panicked;
         }
     };
     (outcome, log)
+}
+
+/// Quanto o xtask ainda lê depois de casar uma linha fatal: o resto dela (a mensagem inteira) chega
+/// depois do prefixo que casou.
+const FATAL_DRAIN: Duration = Duration::from_millis(200);
+
+fn drain(receiver: &mpsc::Receiver<String>, log: &mut String, window: Duration) {
+    let deadline = Instant::now() + window;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match receiver.recv_timeout(left) {
+            Ok(chunk) => log.push_str(&chunk),
+            Err(_) => return,
+        }
+    }
 }
 
 /// As linhas que o modo exige, na ordem: as comuns do `REQUIRED` (sem os autotestes de tarefa,
@@ -543,6 +558,23 @@ mod tests {
             result.is_err(),
             "o modo de teste segue exigindo as linhas dele"
         );
+    }
+
+    #[test]
+    fn a_fatal_line_is_read_to_its_end_before_the_report() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send("[rustos] interrupts: Missing".to_owned())
+            .unwrap();
+        let late = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            sender.send("Feature(\"pit\")\n".to_owned()).unwrap();
+            sender
+        });
+        let (outcome, log) = wait_for_boot(&receiver, Instant::now());
+        assert!(matches!(outcome, Outcome::Panicked));
+        assert!(log.ends_with("Feature(\"pit\")\n"), "{log}");
+        drop(late.join());
     }
 
     #[test]

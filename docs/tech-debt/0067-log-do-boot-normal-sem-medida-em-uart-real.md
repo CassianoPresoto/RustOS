@@ -11,7 +11,7 @@ paid_date:
 
 ## O que falta
 
-O boot normal imprime 11 a 12 linhas (cerca de 700 bytes) e o de teste, 30. Na serial da QEMU uma linha custa de
+O boot normal imprime 11 linhas (12 com um aviso; cerca de 700 bytes) e o de teste, 31. Na serial da QEMU uma linha custa de
 0,3 a 0,4 ms; numa UART de 115 200 baud seria cerca de 7 ms por linha de 80 bytes, ou 80 ms só de log. O
 número de linhas do modo normal foi escolhido pelo que os gates conferem, não por uma medida em UART real.
 

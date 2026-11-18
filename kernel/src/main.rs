@@ -33,6 +33,8 @@ mod task;
 mod vm;
 
 use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
 
 use rustos_boot_limine::LimineBoot;
 use rustos_hal::redact;
@@ -225,8 +227,10 @@ fn report_boot_time(selftest: bool) {
     let time = boot_time::finish();
     let ms = |us: u64| (us + 500) / 1000;
     if selftest {
+        let tsc = platform::clock_error_ppm()
+            .map_or_else(String::new, |ppm| format!(", tsc error at most {ppm} ppm"));
         kprintln!(
-            "[rustos] boot phases: console {} us, interrupts {} us, reclaim {} us, setup {} us",
+            "[rustos] boot phases: console {} us, interrupts {} us, reclaim {} us, setup {} us{tsc}",
             time.console,
             time.interrupts,
             time.reclaim,
