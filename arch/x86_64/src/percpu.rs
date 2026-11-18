@@ -2,8 +2,11 @@
 //! devolve o endereço dele sem `rdmsr`.
 
 use core::arch::asm;
+use core::ptr;
 
 use rustos_hal::CpuLocal;
+
+use crate::prefix::CpuPrefix;
 
 use crate::sysreg::{MSR_GS_BASE, MSR_KERNEL_GS_BASE, wrmsr};
 
@@ -38,4 +41,13 @@ impl CpuLocal for X86CpuLocal {
         }
         block
     }
+}
+
+/// O começo do bloco desta CPU: o `PerCpu` do kernel o embute como primeiro campo.
+pub(crate) fn prefix() -> &'static CpuPrefix {
+    let block: usize;
+    // SAFETY: `gs:[0]` é o endereço do bloco, posto por `install`; leitura sem efeito colateral.
+    unsafe { asm!("mov {}, gs:[0]", out(reg) block, options(nostack, preserves_flags, readonly)) };
+    // SAFETY: o bloco existe para sempre e começa por um `CpuPrefix` (contrato do kernel).
+    unsafe { &*ptr::with_exposed_provenance::<CpuPrefix>(block) }
 }
