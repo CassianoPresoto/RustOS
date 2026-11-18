@@ -21,6 +21,8 @@ pub struct Effort {
     pub task_ms: u64,
     /// Voltas de alocação de cada CPU na medida de contenção da memória.
     pub storm: u32,
+    /// Quanto a CPU gira antes da primeira medida (ver `warm_up`).
+    pub warmup_ms: u64,
 }
 
 /// O acordar entre CPUs custa dezenas de vezes o da mesma CPU: menos voltas para a medida caber.
@@ -35,12 +37,14 @@ pub const BOOT: Effort = Effort {
     samples: 20,
     task_ms: 2,
     storm: 2_000,
+    warmup_ms: 0,
 };
 pub const FULL: Effort = Effort {
     rounds: 20_000,
     samples: 200,
     task_ms: 10,
     storm: 20_000,
+    warmup_ms: 300,
 };
 
 static PING: AtomicUsize = AtomicUsize::new(0);
@@ -473,7 +477,17 @@ pub fn memory_storm(iterations: u32) -> StormSample {
     }
 }
 
+/// Gira a CPU por `ms`: o `bench` do shell chega depois de segundos ociosos e mede a troca na
+/// frequência baixa do hospedeiro (2x o valor do boot, que já vem quente; SDD 07).
+fn warm_up(ms: u64) {
+    let end = platform::now_ns().unwrap_or(0) + ms * 1_000_000;
+    while platform::now_ns().unwrap_or(u64::MAX) < end {
+        core::hint::black_box(burn(1_000));
+    }
+}
+
 pub fn run(effort: Effort) -> Option<BenchReport> {
+    warm_up(effort.warmup_ms);
     let plain = context_switch_ns(effort.rounds, false, Placement::SameCpu)?;
     let simd = context_switch_ns(effort.rounds, true, Placement::SameCpu)?;
     let cross =
