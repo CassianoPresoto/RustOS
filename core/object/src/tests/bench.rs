@@ -102,6 +102,12 @@ fn bench_handle_table_and_channel() {
         write_read,
     );
     show("só preparar e fechar os 4 handles", setup_only);
+    println!(
+        "bytes: Slot {}, Message {}, Channel {}",
+        core::mem::size_of::<crate::Slot<TestObj>>(),
+        core::mem::size_of::<crate::Message<TestObj>>(),
+        core::mem::size_of::<crate::Channel<TestObj>>(),
+    );
 }
 
 fn show(what: &str, tenths: u128) {
