@@ -17,11 +17,6 @@ pub fn ns_to_ticks(ns: u64, hz: u64) -> u64 {
     u64::try_from(ticks).unwrap_or(u64::MAX)
 }
 
-/// Nanossegundos desde `origin`, para um TSC que nunca deve andar para trás.
-pub fn elapsed_ns(now: u64, origin: u64, hz: u64) -> u64 {
-    ticks_to_ns(now.saturating_sub(origin), hz)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,11 +48,5 @@ mod tests {
     #[test]
     fn zero_frequency_reads_as_zero() {
         assert_eq!(ticks_to_ns(1_000, 0), 0);
-    }
-
-    #[test]
-    fn elapsed_clamps_a_tsc_behind_the_origin() {
-        assert_eq!(elapsed_ns(10, 20, 1_000_000_000), 0);
-        assert_eq!(elapsed_ns(1_020, 20, 1_000_000_000), 1_000);
     }
 }

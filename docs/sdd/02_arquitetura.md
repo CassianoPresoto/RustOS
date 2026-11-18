@@ -129,8 +129,9 @@ da política, rearmar o disparo que ela pede) → o `arch/` dá o EOI e chama
 `Handlers::preempt` (`task::preempt`) na pilha da tarefa interrompida → se o `Composite`
 de `core/sched` pede troca (`needs_resched`), `schedule()` pede a ele a próxima tarefa
 (`pick_next`) → `platform::fpu_save`/`fpu_restore` (só tarefa marcada SIMD) →
-`arch/<isa>::switch` troca os registradores callee-saved e o `sp`. O mesmo `schedule()`
-atende `yield_now`, `sleep_until`, `park` e `exit`. Desenho completo no [SDD 15](15_tarefas_e_preempcao.md).
+`arch/<isa>::switch` troca os registradores callee-saved e o `sp`. O mesmo `switch_from`
+atende `yield_now`, `sleep_until`, `park` e `exit`, e `unpark` e `spawn` o chamam ao fim quando
+a acordada deve preemptar a corrente. Desenho completo no [SDD 15](15_tarefas_e_preempcao.md).
 
 ## Portas de entrada que virão
 

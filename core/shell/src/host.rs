@@ -163,6 +163,11 @@ pub struct BenchReport {
     /// O mesmo, com uma tarefa ocupando a CPU.
     pub wake_loaded_mean_ns: u64,
     pub wake_loaded_max_ns: u64,
+    /// Acordar de uma tarefa, a partir de outra na mesma CPU, uma de fatia curta que deve
+    /// preemptar a corrente: mediana, média e máximo. Zero se não se mediu.
+    pub wake_task_median_ns: u64,
+    pub wake_task_mean_ns: u64,
+    pub wake_task_max_ns: u64,
     /// Custo de uma chamada à política de escalonamento, com 8 tarefas prontas.
     pub pick_next_ns: u64,
     pub tick_ns: u64,

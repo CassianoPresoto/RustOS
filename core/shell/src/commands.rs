@@ -437,6 +437,16 @@ fn bench(ctx: &mut Ctx<'_>) -> fmt::Result {
         report.wake_loaded_mean_ns,
         report.wake_loaded_max_ns,
     )?;
+    if report.wake_task_max_ns > 0 {
+        write!(
+            out,
+            "{DIM}Wake-up latency (unpark of a short-slice task, same CPU){RESET}\r\n  {:<14}median {:>5} ns  mean {:>5} ns  max {:>6} ns\r\n",
+            "task to task",
+            report.wake_task_median_ns,
+            report.wake_task_mean_ns,
+            report.wake_task_max_ns
+        )?;
+    }
     write!(
         out,
         "{DIM}Scheduler policy (8 ready tasks, per call){RESET}\r\n"
@@ -899,6 +909,22 @@ mod tests {
         assert!(out.contains("one busy task"));
         assert!(out.contains("pick_next") && out.contains("88 ns"));
         assert!(out.contains("tick") && out.contains("31 ns"));
+    }
+
+    #[test]
+    fn bench_prints_the_task_to_task_wake_latency_in_nanoseconds() {
+        let out = run("bench", &[], &FakeHost::new());
+        assert!(out.contains("task to task"));
+        assert!(out.contains("median    84 ns") && out.contains("max    250 ns"));
+    }
+
+    #[test]
+    fn bench_leaves_out_the_task_wake_row_when_it_was_not_measured() {
+        let mut host = FakeHost::new();
+        let mut report = host.bench.unwrap();
+        report.wake_task_max_ns = 0;
+        host.bench = Some(report);
+        assert!(!run("bench", &[], &host).contains("task to task"));
     }
 
     #[test]
