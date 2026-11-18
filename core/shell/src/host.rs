@@ -35,6 +35,11 @@ pub trait Host {
     }
     /// Chama `visit` uma vez por tarefa viva, em ordem de id; é o que `ps` lista.
     fn tasks(&self, _visit: &mut dyn FnMut(&TaskInfo<'_>)) {}
+    /// Chama `visit` uma vez por CPU ativa, em ordem; é o que `ps` e `bench` mostram por CPU.
+    fn cpus(&self, _visit: &mut dyn FnMut(&CpuInfo)) {}
+    /// Chama `visit` com o nome de cada lock global e quantas tentativas de pegá-lo o acharam
+    /// preso, desde o boot: a medida de disputa entre CPUs.
+    fn lock_contention(&self, _visit: &mut dyn FnMut(&str, u64)) {}
     /// Roda as medidas de tarefa (troca de contexto e jitter de acordar) e devolve
     /// o resultado; `None` quando o sistema ainda não tem tarefas. Leva centenas de ms.
     fn bench(&self) -> Option<BenchReport> {
@@ -53,12 +58,31 @@ pub enum TaskState {
     Blocked,
 }
 
+/// Uma CPU ativa, como `ps` e `bench` a mostram.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CpuInfo {
+    pub index: u8,
+    /// Tarefas prontas e correndo na fila dela agora.
+    pub load: u32,
+    /// Tempo que a ociosa dela acumulou, em nanossegundos.
+    pub idle_ns: u64,
+    /// Trocas de contexto feitas nela.
+    pub switches: u64,
+    /// IPIs de reescalonar que ela mandou e que recebeu.
+    pub ipis_sent: u64,
+    pub ipis_received: u64,
+    /// Tarefas que ela puxou de outra fila.
+    pub pulled: u64,
+}
+
 /// Uma linha do `ps`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TaskInfo<'a> {
     pub id: u32,
     pub name: &'a str,
     pub state: TaskState,
+    /// A CPU dona da tarefa (a fila em que ela está).
+    pub cpu: u8,
     /// Tempo de CPU acumulado, em nanossegundos.
     pub cpu_ns: u64,
     /// Quantas vezes o escalonador a escolheu para rodar.
@@ -67,13 +91,50 @@ pub struct TaskInfo<'a> {
     pub simd: bool,
 }
 
+/// Uma linha da medida de escala: o tempo total de `tasks` tarefas de CPU em `cpus` núcleos.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScaleSample {
+    pub cpus: u8,
+    pub tasks: u8,
+    /// Zero quando a máquina não tem tantos núcleos.
+    pub total_ns: u64,
+}
+
+/// A medida de contenção da memória: todas as CPUs alocando e devolvendo ao mesmo tempo.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StormSample {
+    pub cpus: u8,
+    /// Voltas de cada CPU.
+    pub iterations: u32,
+    /// Tempo total de frames soltos pelo lock do buddy, e com o cache por CPU, em ns.
+    pub locked_ns: u64,
+    pub cached_ns: u64,
+    /// Disputas pelo lock do buddy nas duas rodadas.
+    pub locked_contention: u32,
+    pub cached_contention: u32,
+    /// O heap (um lock global): tempo total em ns e disputas.
+    pub heap_ns: u64,
+    pub heap_contention: u32,
+}
+
 /// Resultado do `bench`: tudo em nanossegundos.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BenchReport {
-    /// Custo de uma troca de contexto entre duas tarefas, sem estado de SIMD.
+    /// Contenção da memória com todas as CPUs alocando.
+    pub storm: StormSample,
+    /// Custo de uma troca de contexto entre duas tarefas na mesma CPU, sem estado de SIMD.
     pub switch_ns: u64,
     /// O mesmo, com as duas tarefas salvando e restaurando FPU/SIMD.
     pub switch_simd_ns: u64,
+    /// O mesmo com as duas tarefas em CPUs diferentes: cada passagem de vez é um acordar
+    /// remoto, com IPI. Zero com uma CPU só.
+    pub switch_cross_ns: u64,
+    /// Uma ida e volta de IPI entre duas CPUs. Zero com uma CPU só.
+    pub ipi_rtt_ns: u64,
+    /// Tempo total de tarefas de CPU em 1, 2 e 4 núcleos.
+    pub scale: [ScaleSample; 3],
+    /// CPUs ativas.
+    pub cpus: u8,
     /// Quantas vezes se mediu o atraso de `sleep_until`.
     pub wake_samples: u32,
     /// Atraso médio e máximo de acordar, com o resto do sistema parado.
@@ -94,6 +155,8 @@ pub enum FaultTest {
     PageFault,
     /// Escrever em `.text`, que a proteção do kernel deve recusar.
     WriteText,
+    /// Pânico numa tarefa de outro núcleo: o sistema todo para e o pânico aparece uma vez.
+    CpuPanic,
 }
 
 /// Retrato do sistema no momento da consulta.

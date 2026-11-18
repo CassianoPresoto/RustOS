@@ -4,7 +4,10 @@ use core::fmt;
 
 use rustos_hal::{BootTimeline, BootloaderId};
 
-use crate::{BenchReport, DisplayInfo, Host, MemoryInfo, SystemInfo, TaskInfo, TaskState};
+use crate::{
+    BenchReport, CpuInfo, DisplayInfo, Host, MemoryInfo, ScaleSample, StormSample, SystemInfo,
+    TaskInfo, TaskState,
+};
 
 pub(crate) fn info() -> SystemInfo<'static> {
     SystemInfo {
@@ -61,6 +64,16 @@ impl FakeHost {
             random: Some(0x0123_4567_89ab_cdef),
             alternate: true,
             bench: Some(BenchReport {
+                storm: StormSample {
+                    cpus: 4,
+                    iterations: 20_000,
+                    locked_ns: 90_000_000,
+                    cached_ns: 9_000_000,
+                    locked_contention: 5_000,
+                    cached_contention: 40,
+                    heap_ns: 50_000_000,
+                    heap_contention: 3_000,
+                },
                 switch_ns: 412,
                 switch_simd_ns: 530,
                 wake_samples: 200,
@@ -70,6 +83,26 @@ impl FakeHost {
                 wake_loaded_max_ns: 99_999,
                 pick_next_ns: 88,
                 tick_ns: 31,
+                switch_cross_ns: 3_210,
+                ipi_rtt_ns: 4_560,
+                cpus: 4,
+                scale: [
+                    ScaleSample {
+                        cpus: 1,
+                        tasks: 8,
+                        total_ns: 80_000_000,
+                    },
+                    ScaleSample {
+                        cpus: 2,
+                        tasks: 8,
+                        total_ns: 40_000_000,
+                    },
+                    ScaleSample {
+                        cpus: 4,
+                        tasks: 8,
+                        total_ns: 20_500_000,
+                    },
+                ],
             }),
         }
     }
@@ -105,6 +138,7 @@ impl Host for FakeHost {
             id,
             name,
             state,
+            cpu: u8::try_from(id).unwrap(),
             cpu_ns,
             switches: 7,
             simd,
@@ -112,6 +146,25 @@ impl Host for FakeHost {
         visit(&task(0, "idle", TaskState::Ready, 250_000_000, false));
         visit(&task(1, "shell", TaskState::Running, 12_345_678_901, false));
         visit(&task(2, "worker", TaskState::Sleeping, 1_000_000, true));
+    }
+
+    fn cpus(&self, visit: &mut dyn FnMut(&CpuInfo)) {
+        for index in 0..2 {
+            visit(&CpuInfo {
+                index,
+                load: 2 - u32::from(index),
+                idle_ns: 32_500_000_000 * u64::from(index),
+                switches: 1_000 + u64::from(index),
+                ipis_sent: 7,
+                ipis_received: 9,
+                pulled: 3,
+            });
+        }
+    }
+
+    fn lock_contention(&self, visit: &mut dyn FnMut(&str, u64)) {
+        visit("heap", 12);
+        visit("frames", 3);
     }
 
     fn bench(&self) -> Option<BenchReport> {
