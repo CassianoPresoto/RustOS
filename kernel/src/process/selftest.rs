@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use rustos_hal::abi::{ProcessEvent, event_kind, fault_kind};
 
-use super::{Program, Source, fault_peak, last_event, spawn};
+use super::{Program, Source, fault_peak, last_event, spawn, spawn_keeping};
 use crate::frames::Frames;
 use crate::platform::user_blob::{Case, image, offset};
 use crate::uspace::{UserSpace, set_frame_budget};
@@ -124,6 +124,11 @@ fn run_source(
     affinity: u32,
 ) -> Option<(u32, ProcessEvent)> {
     let spawned = spawn(frames, map_offset, source, affinity).ok()?;
+    finish(&spawned)
+}
+
+/// Espera o processo acabar e devolve o evento dele.
+fn finish(spawned: &super::Spawned) -> Option<(u32, ProcessEvent)> {
     let deadline = platform::now_ns()? + WAIT_NS;
     while !task::has_exited(spawned.task) {
         let now = platform::now_ns()?;
@@ -169,6 +174,50 @@ fn big_program_runs(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> 
         big.len() >> 10
     );
     exited_with(result, 0) && kept == slack
+}
+
+/// Espera a mensagem `want` na ponta do kernel do canal de boot, até 10 s.
+fn wait_for_message(peer: &super::boot::BootPeer, want: &[u8]) -> bool {
+    let Some(start) = platform::now_ns() else {
+        return false;
+    };
+    while platform::now_ns().is_some_and(|now| now < start + WAIT_NS) {
+        if peer.read().is_ok_and(|got| got == want) {
+            return true;
+        }
+        task::sleep_until(platform::now_ns().unwrap_or(0) + POLL_NS);
+    }
+    false
+}
+
+/// O programa `handles` roda os casos hostis e sai com 0. No fim, com a ponta do canal de boot na
+/// mão do kernel, o programa bloqueia em `object_wait_one` e só volta quando o kernel escreve e
+/// depois fecha a ponta: a espera acorda por sinal, não pelo prazo de 10 s.
+fn handles_program_runs(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
+    let Some(file) = archive.and_then(|archive| loader::find(archive, b"handles").ok()) else {
+        return false;
+    };
+    let Some(started) = platform::now_ns() else {
+        return false;
+    };
+    let Ok((spawned, Some(peer))) = spawn_keeping(frames, map_offset, Source::Elf(file), 0, true)
+    else {
+        return false;
+    };
+    let wake = |message: &[u8], then: &dyn Fn()| {
+        let ready = wait_for_message(&peer, message);
+        task::sleep_until(platform::now_ns().unwrap_or(0) + 20_000_000);
+        then();
+        ready
+    };
+    let first = wake(b"ready", &|| {
+        let _ = peer.write(b"go");
+    });
+    let second = wake(b"ready2", &|| {});
+    peer.close();
+    let result = finish(&spawned);
+    let seconds = platform::now_ns().unwrap_or(0).saturating_sub(started) / 1_000_000_000;
+    exited_with(result, 0) && first && second && seconds < 5
 }
 
 /// Escreve `value` em `bytes` bytes little-endian a partir de `at`.
@@ -392,6 +441,7 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
     let stack = faulted(run_case(frames, map_offset, Case::FaultBadStack, 0, 0)).is_some();
     let flags = flags_survive(frames, map_offset);
     let big = big_program_runs(frames, map_offset, archive);
+    let handles = handles_program_runs(frames, map_offset, archive);
     let refused = loader_leaves_no_frame_behind(frames, map_offset, archive);
     let unaligned = unaligned_segment_loads_zeroed(frames, map_offset);
     let (syscall_depth, fault_depth) = (scrub::deepest(), fault_peak());
@@ -434,11 +484,12 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
         && flags
         && scrub_ok
         && big
+        && handles
         && refused
         && unaligned
         && medians.is_some();
     kprintln!(
-        "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, flags {flags}, stack clean {scrub_ok}, big {big}, bad executables {refused}, unaligned segment {unaligned})",
+        "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, flags {flags}, stack clean {scrub_ok}, big {big}, handles {handles}, bad executables {refused}, unaligned segment {unaligned})",
         if ok { "ok" } else { "FAILED" }
     );
     ok

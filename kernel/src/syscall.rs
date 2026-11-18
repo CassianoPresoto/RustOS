@@ -1,6 +1,6 @@
-//! O despacho das chamadas de sistema da ABI nativa (`hal::abi`, SDD 17). Na fatia 4a só atende
-//! `nop`, `clock_get_monotonic`, `random_get`, `process_exit` e a `debug_write` provisória, sem
-//! handle; o resto devolve `NotSupported` e o processo segue. Roda mascarado, na pilha da tarefa.
+//! O despacho das chamadas de sistema da ABI nativa (`hal::abi`, SDD 17). Atende as da 4a, as de
+//! handle, canal e espera da 4c (`handles`) e a `debug_write` com console; o que falta (VMO, VMAR,
+//! processo e thread) devolve `NotSupported` e o processo segue. Roda mascarado, na pilha da tarefa.
 
 use core::fmt::Write as _;
 use rustos_hal::abi::{
@@ -10,6 +10,8 @@ use rustos_hal::abi::{
 use rustos_mm::UserRange;
 
 use crate::{console, platform, process, random};
+
+mod handles;
 
 #[allow(
     clippy::cast_possible_truncation,
@@ -86,7 +88,7 @@ pub fn dispatch(args: &SyscallArgs) -> SyscallReturn {
     let Some(call) = lookup(args.number) else {
         return SyscallReturn::err(Status::NotSupported);
     };
-    let [a0, a1, ..] = args.args;
+    let [a0, a1, a2, ..] = args.args;
     match call {
         Syscall::Nop => {
             #[cfg(feature = "selftest")]
@@ -94,19 +96,36 @@ pub fn dispatch(args: &SyscallArgs) -> SyscallReturn {
             SyscallReturn::ok(0)
         }
         Syscall::ProcessExit => process::exit(a0.cast_signed()),
-        Syscall::DebugWrite => debug_write(a0, a1),
+        Syscall::DebugWrite => debug_write(a0, a1, a2),
+        Syscall::HandleClose => handles::reply(handles::handle_close(a0)),
+        Syscall::HandleDuplicate => handles::reply(handles::handle_duplicate(a0, a1)),
+        Syscall::HandleReplace => handles::reply(handles::handle_replace(a0, a1)),
+        Syscall::ObjectWaitOne => handles::reply(handles::object_wait_one(a0, a1, a2)),
+        Syscall::ChannelCreate => handles::reply(handles::channel_create(a0, a1)),
+        Syscall::ChannelWrite => handles::reply(handles::channel_write_call(&args.args)),
+        Syscall::ChannelRead => handles::reply(handles::channel_read_call(&args.args)),
         Syscall::ClockGetMonotonic => {
             platform::now_ns().map_or(SyscallReturn::err(Status::NotSupported), SyscallReturn::ok)
         }
         Syscall::RandomGet => random_get(a0, a1),
-        _ => SyscallReturn::err(Status::NotSupported),
+        Syscall::ThreadExit
+        | Syscall::VmoCreate
+        | Syscall::VmarMap
+        | Syscall::VmarUnmap
+        | Syscall::ProcessCreate
+        | Syscall::ThreadCreate
+        | Syscall::ProcessKill => SyscallReturn::err(Status::NotSupported),
     }
 }
 
-/// `debug_write(ptr, len)`: escreve no console até `DEBUG_WRITE_MAX` bytes, sem ESC nem controle
-/// (menos `\n` e `\t`), cada linha com o prefixo do processo. Devolve os bytes escritos.
+/// `debug_write(console, ptr, len)`: o handle é de console com `WRITE`. Escreve no console até
+/// `DEBUG_WRITE_MAX` bytes, sem ESC nem controle (menos `\n` e `\t`), cada linha com o prefixo do
+/// processo. Devolve os bytes escritos.
 #[inline(never)]
-fn debug_write(ptr: u64, len: u64) -> SyscallReturn {
+fn debug_write(console: u64, ptr: u64, len: u64) -> SyscallReturn {
+    if let Err(status) = handles::check_console(console) {
+        return SyscallReturn::err(status);
+    }
     if len == 0 {
         return SyscallReturn::err(Status::InvalidArgs);
     }

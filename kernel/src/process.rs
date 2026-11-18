@@ -11,17 +11,19 @@
 )]
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::ptr;
 #[cfg(feature = "selftest")]
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use rustos_hal::abi::{ProcessEvent, USER_TOP, event_kind, fault_access, fault_kind};
+use rustos_hal::abi::{ProcessEvent, Status, USER_TOP, event_kind, fault_access, fault_kind};
 use rustos_hal::{Cpu, Fault, FaultKind};
 use rustos_sched::SchedParams;
 
 use crate::frames::Frames;
 use crate::loader::{self, LoadError, Loaded, RegionTree};
+use crate::object::{ProcessObj, Quota, Table, VecSlots, Work};
 use crate::platform;
 use crate::sync::IrqLock;
 use crate::task::{self, Spawn, TaskError};
@@ -31,6 +33,7 @@ use crate::uspace::{SpaceStats, UserSpace};
 pub enum ProcessError {
     Load(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] LoadError),
     Task(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] TaskError),
+    Handles(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] Status),
 }
 
 impl<E: Into<LoadError>> From<E> for ProcessError {
@@ -51,8 +54,14 @@ pub struct Process {
     regions: RegionTree,
     entry: u64,
     sp: u64,
-    /// O handle de boot de `rdi`/`x0`: `0` até a 4c.
+    /// O handle de boot de `rdi`/`x0`: a ponta do canal de boot no `init`.
     arg0: u64,
+    /// O processo como objeto, que os handles de fora apontam e `TERMINATED` espera.
+    object: Arc<ProcessObj>,
+    /// A tabela de handles; só a tarefa do processo e a morte dele a tocam.
+    table: IrqLock<Table>,
+    /// Pontas de canal cobradas a este processo.
+    channels: Arc<Quota>,
 }
 
 /// De onde vem o código do processo: um ELF do initramfs ou, no modo de teste, um programa plano.
@@ -105,7 +114,8 @@ impl Process {
         frames: Frames,
         direct_map_offset: u64,
         source: Source<'_>,
-    ) -> Result<(Self, Loaded), ProcessError> {
+        keep_peer: bool,
+    ) -> Result<(Self, Loaded, Option<boot::BootPeer>), ProcessError> {
         // SAFETY: o mapa direto cobre todo frame do alocador, e o kernel já roda nas próprias tabelas.
         let mut space = unsafe { UserSpace::new(frames, direct_map_offset) }?;
         let built = Self::populate(&mut space, source);
@@ -120,15 +130,28 @@ impl Process {
             space.destroy();
             return Err(rustos_hal::MapError::Unsupported("kernel half out of sync").into());
         }
+        let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+        let object = ProcessObj::new();
+        let table = IrqLock::new(Table::new(VecSlots::default()));
+        let (arg0, peer) = match boot::handles_of(&object, &table, source, arg0, keep_peer) {
+            Ok(handed) => handed,
+            Err(status) => {
+                space.destroy();
+                return Err(ProcessError::Handles(status));
+            }
+        };
         let process = Self {
-            pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
+            pid,
             space,
             regions,
             entry: loaded.entry,
             sp,
             arg0,
+            object,
+            table,
+            channels: Arc::default(),
         };
-        Ok((process, loaded))
+        Ok((process, loaded, peer))
     }
 
     fn populate(
@@ -144,6 +167,39 @@ impl Process {
         let sp = loader::map_stack(space, &mut regions, &loaded)?;
         Ok((regions, loaded, sp, arg0))
     }
+}
+
+impl Process {
+    /// A tabela de handles do processo.
+    pub const fn table(&self) -> &IrqLock<Table> {
+        &self.table
+    }
+
+    /// As pontas de canal cobradas ao processo.
+    pub const fn channels(&self) -> &Arc<Quota> {
+        &self.channels
+    }
+}
+
+/// Roda `f` com o processo da tarefa corrente; `None` numa tarefa só de kernel. `f` não pode matar
+/// o processo: só `terminate` o solta, e ele roda na própria tarefa, fora desta chamada.
+pub fn with_current<R>(f: impl FnOnce(&Process) -> R) -> Option<R> {
+    let raw = task::current_process();
+    if raw == 0 {
+        return None;
+    }
+    // SAFETY: `raw` é o `Box::into_raw` de `spawn`, vivo até `terminate` rodar nesta mesma tarefa.
+    let process = unsafe { &*ptr::with_exposed_provenance::<Process>(raw) };
+    Some(f(process))
+}
+
+/// Esvazia a tabela e fecha cada handle (SDD 17, a morte do processo): os objetos recebem os
+/// eventos, e uma ponta de canal que perde o último handle levanta `PEER_CLOSED` na outra.
+fn close_handles(table: &IrqLock<Table>) {
+    let mut work = Work::new();
+    work.reserve(table.lock().len());
+    table.lock().drain(&mut work);
+    rustos_object::close_pending(&mut work);
 }
 
 /// O programa plano: o código em `USER_IMAGE_BASE`, só leitura e execução.
@@ -186,7 +242,19 @@ pub fn spawn(
     source: Source<'_>,
     affinity: u32,
 ) -> Result<Spawned, ProcessError> {
-    let (process, loaded) = Process::load(frames, direct_map_offset, source)?;
+    spawn_keeping(frames, direct_map_offset, source, affinity, false).map(|(spawned, _)| spawned)
+}
+
+/// Como `spawn`; com `keep_peer`, devolve também a ponta do kernel do canal de boot, que fica
+/// aberta até quem a recebe fechá-la.
+pub fn spawn_keeping(
+    frames: Frames,
+    direct_map_offset: u64,
+    source: Source<'_>,
+    affinity: u32,
+    keep_peer: bool,
+) -> Result<(Spawned, Option<boot::BootPeer>), ProcessError> {
+    let (process, loaded, peer) = Process::load(frames, direct_map_offset, source, keep_peer)?;
     let (pid, stats) = (process.pid, process.space.stats());
     let raw = Box::into_raw(Box::new(process));
     let started = task::spawn(Spawn {
@@ -198,12 +266,15 @@ pub fn spawn(
         affinity,
     });
     match started {
-        Ok(task) => Ok(Spawned {
-            task,
-            pid,
-            segments: loaded.segments,
-            stats,
-        }),
+        Ok(task) => Ok((
+            Spawned {
+                task,
+                pid,
+                segments: loaded.segments,
+                stats,
+            },
+            peer,
+        )),
         Err(error) => {
             // SAFETY: `raw` veio de `Box::into_raw` acima e a tarefa não chegou a existir.
             let process = unsafe { Box::from_raw(raw) };
@@ -302,9 +373,18 @@ fn terminate(event: ProcessEvent) -> ! {
     let process = unsafe { Box::from_raw(ptr::with_exposed_provenance_mut::<Process>(raw)) };
     let pid = process.pid;
     let cpu = crate::percpu::pinned(crate::percpu::PerCpu::index);
-    let Process { space, regions, .. } = *process;
+    let Process {
+        space,
+        regions,
+        object,
+        table,
+        ..
+    } = *process;
+    close_handles(&table);
+    drop(table);
     space.destroy();
     drop(regions);
+    object.terminate();
     if event.kind == event_kind::EXIT {
         kprintln!(
             "[rustos] user: pid {pid} exited (code {}, cpu {cpu})",
@@ -369,6 +449,7 @@ pub fn last_event() -> Option<(u32, ProcessEvent)> {
     *LAST_EVENT.lock()
 }
 
+mod boot;
 #[cfg(feature = "selftest")]
 mod selftest;
 #[cfg(feature = "selftest")]

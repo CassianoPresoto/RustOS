@@ -36,6 +36,7 @@ rustos-term.workspace = true
 rustos-shell.workspace = true
 rustos-cpio.workspace = true
 rustos-elf.workspace = true
+rustos-object.workspace = true
 rustos-sync.workspace = true
 rustos-boot-limine.workspace = true
 

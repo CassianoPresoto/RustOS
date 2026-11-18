@@ -26,6 +26,7 @@ mod interrupts;
 mod loader;
 mod memory;
 mod mitigation;
+mod object;
 mod panic;
 mod percpu;
 mod platform;

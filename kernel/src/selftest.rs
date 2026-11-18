@@ -54,7 +54,7 @@ pub fn details(
 }
 
 /// O `init` e o programa de teste que o `xtask image` põe no initramfs da imagem com `selftest`.
-const PROBE_NAMES: [&[u8]; 2] = [b"init", b"big"];
+const PROBE_NAMES: [&[u8]; 3] = [b"init", b"big", b"handles"];
 const ELF_MAGIC: &[u8] = b"\x7fELF";
 
 /// Lê o initramfs pelo `core/cpio`, confere que cada programa esperado está nele e é um ELF, e que
