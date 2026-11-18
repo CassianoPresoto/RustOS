@@ -210,7 +210,7 @@ pub fn wake_jitter_ns(samples: u32, loaded: bool) -> Option<(u64, u64)> {
     Some((sum / u64::from(samples.max(1)), max))
 }
 
-/// Amostras de latência de acordar entre tarefas que o `bench` guarda (a mediana as ordena).
+/// Amostras de latência de acordar entre tarefas que o acordador guarda na pilha (a mediana as ordena).
 const WAKE_TASK_MAX_SAMPLES: usize = 200;
 /// Fatia curta do dorminhoco: menor que a do acordador, para `PREEMPT_SHORT` valer.
 const SLEEPER_SLICE_NS: u64 = 100_000;
@@ -226,8 +226,10 @@ const WAKE_TASK_GIVE_UP_NS: u64 = 5_000_000;
 static LAT_RAN_AT: AtomicU64 = AtomicU64::new(0);
 static LAT_SEQ: AtomicU32 = AtomicU32::new(0);
 static LAT_SAMPLES: AtomicU32 = AtomicU32::new(0);
-static LAT_NS: [AtomicU64; WAKE_TASK_MAX_SAMPLES] =
-    [const { AtomicU64::new(0) }; WAKE_TASK_MAX_SAMPLES];
+/// Mediana, média e máximo que o acordador calcula com as amostras na pilha dele.
+static LAT_MEDIAN: AtomicU64 = AtomicU64::new(0);
+static LAT_MEAN: AtomicU64 = AtomicU64::new(0);
+static LAT_MAX: AtomicU64 = AtomicU64::new(0);
 static LAT_SLEEPER: AtomicUsize = AtomicUsize::new(0);
 /// Quantas amostras o dorminhoco já tinha rodado quando `unpark` voltou.
 static LAT_DIRECT: AtomicU32 = AtomicU32::new(0);
@@ -248,7 +250,8 @@ fn latency_sleeper(_: usize) {
 /// o `unpark` e ele rodar. Espera girando. As primeiras rodadas aquecem e não contam.
 fn latency_waker(_: usize) {
     let sleeper = id(&LAT_SLEEPER);
-    let samples = LAT_SAMPLES.load(Ordering::Relaxed) as usize;
+    let samples = (LAT_SAMPLES.load(Ordering::Relaxed) as usize).min(WAKE_TASK_MAX_SAMPLES);
+    let mut kept = [0_u64; WAKE_TASK_MAX_SAMPLES];
     for round in 0..WAKE_WARM_UP + samples {
         while !task::is_blocked(sleeper) {
             task::yield_now();
@@ -270,9 +273,28 @@ fn latency_waker(_: usize) {
         }
         LAT_DIRECT.fetch_add(u32::from(direct), Ordering::Relaxed);
         let late = LAT_RAN_AT.load(Ordering::Relaxed).saturating_sub(start);
-        LAT_NS[round - WAKE_WARM_UP].store(late, Ordering::Relaxed);
+        kept[round - WAKE_WARM_UP] = late;
     }
+    let kept = &mut kept[..samples];
+    insertion_sort(kept);
+    LAT_MEDIAN.store(kept[samples / 2], Ordering::Relaxed);
+    LAT_MEAN.store(
+        kept.iter().sum::<u64>() / samples.max(1) as u64,
+        Ordering::Relaxed,
+    );
+    LAT_MAX.store(kept[samples - 1], Ordering::Relaxed);
     finish();
+}
+
+/// Ordena até `WAKE_TASK_MAX_SAMPLES` valores: o `sort_unstable` da `core` custa alguns KiB de código.
+fn insertion_sort(values: &mut [u64]) {
+    for next in 1..values.len() {
+        let mut at = next;
+        while at > 0 && values[at - 1] > values[at] {
+            values.swap(at - 1, at);
+            at -= 1;
+        }
+    }
 }
 
 /// Quanto custa acordar uma tarefa de fatia curta a partir de outra, na mesma CPU, em ns.
@@ -329,16 +351,10 @@ pub fn wake_task_latency(samples: u32) -> Option<WakeLatency> {
     task::unpark(sleeper);
     wait_finished(2);
     wait_exited(&[waker, sleeper]);
-    let mut ordered = [0_u64; WAKE_TASK_MAX_SAMPLES];
-    for (slot, sample) in ordered.iter_mut().zip(&LAT_NS).take(count) {
-        *slot = sample.load(Ordering::Relaxed);
-    }
-    let ordered = &mut ordered[..count];
-    ordered.sort_unstable();
     (LAT_MISSED.load(Ordering::Relaxed) == 0).then(|| WakeLatency {
-        mean_ns: ordered.iter().sum::<u64>() / u64::from(samples),
-        median_ns: ordered[count / 2],
-        max_ns: ordered[count - 1],
+        mean_ns: LAT_MEAN.load(Ordering::Relaxed),
+        median_ns: LAT_MEDIAN.load(Ordering::Relaxed),
+        max_ns: LAT_MAX.load(Ordering::Relaxed),
         direct: LAT_DIRECT.load(Ordering::Relaxed),
         samples,
     })
