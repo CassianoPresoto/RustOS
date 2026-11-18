@@ -456,7 +456,7 @@ pub const INITIAL_STACK_MAX: usize = 256;
 const MAX_WORDS: usize = 3 + 9 * 2;
 
 /// O que o kernel sabe do programa que vai começar, para o auxv.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct StartInfo {
     pub entry: u64,
     /// Endereço dos program headers na memória, se a tabela cai dentro de um `PT_LOAD`.
@@ -468,11 +468,35 @@ pub struct StartInfo {
 
 /// Os bytes que o kernel grava no topo da pilha do primeiro programa. `bytes()` ocupa
 /// `[sp, top)`: `argc = 0`, `argv` e `envp` vazios, o auxv e, no fim, os bytes de `AT_RANDOM`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct InitialStack {
     sp: u64,
     len: usize,
     bytes: [u8; INITIAL_STACK_MAX],
+}
+
+/// Sem os bytes de `AT_RANDOM` (guidelines 09).
+impl core::fmt::Debug for StartInfo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StartInfo")
+            .field("entry", &self.entry)
+            .field("phdr", &self.phdr)
+            .field("phent", &self.phent)
+            .field("phnum", &self.phnum)
+            .field("random", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Sem os bytes da pilha, que levam os de `AT_RANDOM` (guidelines 09).
+impl core::fmt::Debug for InitialStack {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("InitialStack")
+            .field("sp", &self.sp)
+            .field("len", &self.len)
+            .field("bytes", &"<redacted>")
+            .finish()
+    }
 }
 
 impl InitialStack {
@@ -522,6 +546,11 @@ impl InitialStack {
     /// Os bytes de `[sp, top)`.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
+    }
+
+    /// Todo o armazenamento, para o chamador apagá-lo depois de copiar `bytes()` para o frame.
+    pub fn storage_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
     }
 }
 
@@ -888,5 +917,18 @@ mod tests {
     #[test]
     fn the_executable_limit_is_64_mib() {
         assert_eq!(EXEC_MAX_LOADS_BYTES, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn debug_never_prints_the_random_bytes() {
+        let info = start(Some(0x40_0040));
+        let stack = InitialStack::build(TOP, &info).unwrap();
+        for text in [format!("{info:?}"), format!("{stack:?}")] {
+            assert!(text.contains("<redacted>"), "{text}");
+            assert!(
+                !text.contains("0123456789abcdef") && !text.contains("48, 49, 50"),
+                "{text}"
+            );
+        }
     }
 }
