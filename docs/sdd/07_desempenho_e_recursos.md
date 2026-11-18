@@ -34,7 +34,8 @@
 | Código de `core/crypto` | `.text` do crate sem LTO, com todas as funções públicas (`llvm-size`); no kernel, com LTO, só entra o que se usa | `release`: 8 202 (x86_64) e 7 866 (aarch64) bytes · `release-small`: 6 216 e 7 349 bytes |
 | Vazão de ChaCha20, BLAKE2b e do gerador | `cargo run --release -p rustos-crypto --example bench`, no host (Apple M5, `rustc` 1.100.0), melhor de 15 rodadas, sem SIMD (o compilador não vetorizou: o resultado com `-vectorize-loops=false -vectorize-slp=false` é o mesmo) | Ver tabela abaixo. **Números do host**; os do alvo estão abaixo |
 | Escalonador (`core/sched`) | `cargo test --release -p rustos-sched bench -- --ignored --nocapture --test-threads=1` (`core/sched/src/bench.rs`), no host | Host: `pick_next` do EEVDF em 41 a 136 ns com 8 a 512 tarefas; 96 bytes por tarefa ([SDD 14](14_escalonador.md)). No alvo (`bench`, 8 prontas): `pick_next` 34 a 35 ns e `tick` 2 ns no aarch64 HVF; 320 e 36 ns em TCG; 670 a 730 e 85 a 89 ns no x86_64 em TCG (tabela abaixo) |
-| Boot de parede | `make smoke` | inclui firmware EDK2: ~2–5 s, dominado pelo firmware |
+| Boot de parede | `make smoke-fast` (modo normal) e `make smoke` (modo de teste) | inclui firmware EDK2: 1,7 a 1,9 s (x86_64, TCG) e 5,2 s (aarch64, HVF) no modo normal, dominado pelo firmware; a tabela de [Tempo de boot](#tempo-de-boot) separa firmware, Limine e kernel |
+| Tempo do kernel até o prompt | linha `boot time:` do boot (`make smoke-fast ARCH=all PROFILE=release`) | modo normal: 24 a 31 ms (x86_64, TCG) e 2 ms (aarch64, HVF); antes, com os autotestes e medidas no caminho: 964 e 453 ms ([Tempo de boot](#tempo-de-boot)) |
 
 ### Troca de contexto e jitter de acordar (fase 3)
 
@@ -549,6 +550,92 @@ base deixar de ser a de uma distro; se ele ficar bem abaixo, o alvo acima aperta
 - **Sem disco, ramfb nem rede no Linux.** O RustOS sobe com o disco FAT e, no aarch64, com o `ramfb`;
   o Linux subiu sem nenhum dos dois.
 
+## Tempo de boot
+
+Medido em 2026-11-18, `release`, QEMU 11.1.3 no macOS 26.4 (Apple M5), 256 MiB, `-smp 4`, `-nic none`, firmware EDK2 do pacote da QEMU, Limine 12.10.0. As flags são as de `xtask/src/arch.rs`; a aceleração é a do SDD 05: **TCG no x86_64, HVF no aarch64**. Cada número é a mediana de 3 boots (Linux) ou de 5 (RustOS), de processos novos da QEMU. O host dividia a máquina com outras cargas (carga média de 5 a 9 durante as medidas do RustOS): em silêncio o modo normal do x86_64 deu 24 ms, e as medianas abaixo são as de 5 boots sob carga.
+
+### Como se mede
+
+- **RustOS, kernel:** a linha `[rustos] boot time: kernel X ms to prompt (memory A, smp B, self-tests C, benches D)`. O relógio de `kernel/src/boot_time.rs` conta do `kmain` (depois do Limine) até o `boot ok`, que vem logo antes do prompt, em ciclos do contador, e converte no fim. No modo de teste, `boot phases:` dá o que a linha não mostra. `memory` soma as fases de memória e de `reclaim`.
+- **RustOS, firmware e Limine:** a linha `boot timeline:` (pedido *bootloader performance* do Limine): do reset ao Limine e do Limine ao kernel.
+- **RustOS, de parede:** do `spawn` da QEMU ao `boot ok` na serial (`make smoke`), ou ao prompt do shell (`rustos ~ % `) no script de comparação.
+- **Linux:** Alpine 3.24.4, kernel `6.18.60-0-virt`, com a **raiz mínima** (só o `busybox`) do SDD 07 acima, `-append "console=… rdinit=/bin/sh"`. Kernel sozinho: o carimbo de tempo do `printk` em `Run /bin/sh as init process` (o relógio dele começa no `start_kernel`; o carregamento do `bzImage` e o *stub* EFI ficam de fora, como o Limine fica de fora do RustOS). De parede: do `spawn` da QEMU até o shell **responder** a um `echo` digitado na serial.
+- **Os dois pelo EDK2** (`-bios` / `pflash`), como o RustOS; o Linux entra pelo `-kernel`, que o EDK2 entrega pelo `fw_cfg`. Também sem firmware (`-kernel` direto, sem EDK2), para isolar o que o EDK2 custa.
+
+Os scripts de medida não estão no repositório (viram `xtask` quando a comparação passar a rodar no CI); o método acima os reproduz com o `time.monotonic()` do host em volta de cada leitura da serial.
+
+### Antes e depois, por fase (kernel, ms)
+
+"Antes" é a `main` `5fe47b4` só com o relógio por fase. "Depois, teste" é o `make smoke` (modo de teste); "depois, normal" é o `make smoke-fast`. O x86_64 em TCG é número do RustOS contra ele mesmo (guidelines 05).
+
+| Fase | x86_64 antes | x86_64 teste | x86_64 normal | aarch64 antes | aarch64 teste | aarch64 normal |
+| --- | --- | --- | --- | --- | --- | --- |
+| Memória e VM (`memory`, com o `reclaim`) | 4 | 5 | 5 | 0,0 | 0,0 | 0,0 |
+| Console (serial e tela) | 3,5 | 3,6 | ~3,6 | 0,1 | 0,1 | ~0,1 |
+| Interrupções e calibração do timer | 21,3 | 6,9 | ~6,9 | 0,1 | 0,1 | ~0,1 |
+| SMP (`wait_online`) | 1 | 1 | 1 | 0,0 | 0,0 | 0,0 |
+| Estado: gerador, linhas, `task::init` (`setup`) | 32,0 | 17,3 | ~10 | 4,7 | 3,4 | ~1 |
+| Autotestes (`self-tests`) | 346 | 339 | 3 | 338 | 332 | 1 |
+| Medidas (`benches`) | 553 | 328 a 3 389 (bimodal) | 0 | 110 | 116 | 0 |
+| **Kernel até o prompt** | **964** | **707 a 3 774** (mediana 2 965) | **30** (24 em silêncio) | **453** | **450** | **2** |
+| Parede até o `boot ok` | 2 700 | 4 857 | 1 915 | 5 650 | 5 619 | 5 169 |
+| Do qual firmware + Limine (`boot timeline:`) | 1 650 | 1 850 | 1 850 | 5 130 | 5 130 | 5 120 |
+
+As colunas "normal" têm `setup` e `console` derivados: o modo normal não imprime `boot phases:` (cada linha custa tempo, [SDD 04](04_boot.md#modos-de-boot)), e eles são o total menos o que a linha `boot time:` mostra.
+
+**O modo de teste do x86_64 em TCG ficou bimodal**: as mesmas medidas curtas levam de 0,3 a 3,4 s entre boots do mesmo binário, e uma mudança de uma linha no `kmain` (`BootParams::parse("")`) move o binário inteiro de 0,55 s para 1,3 s ou mais ([DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md)). A parte estável (`self-tests` 339 ms) é a mesma de antes; não é trabalho novo.
+
+### O que cada bloco custava no boot de antes
+
+Diferenças de tempo entre linhas consecutivas da serial, `release`, um boot (a mediana de 5 do total está acima):
+
+| Bloco | x86_64 (TCG) | aarch64 (HVF) | Hoje |
+| --- | --- | --- | --- |
+| `timer:` (5 tiques a 100 Hz) | 51,6 ms | 49 ms | só no modo de teste |
+| `idle:` (janela de 50 ms) | 52,5 ms | 51,4 ms | só no modo de teste |
+| `task self-test:` (preempção e SIMD) | 83,5 ms | 81 ms | só no modo de teste |
+| `smp self-test:` (migração) | 142,9 ms | 141,8 ms | só no modo de teste |
+| `switch:` + `scale:` + `alloc storm:` (esforço `BOOT`) | 483 ms | 106,8 ms | só no modo de teste |
+| `zero bench:` | 51,7 ms | 1,7 ms | só no modo de teste |
+| `random bench:` | 13,1 ms | 2,5 ms | só no modo de teste |
+| `heap self-test:` | 11,6 ms | 0,4 ms | só no modo de teste |
+| `key residue:` | 1,4 ms | 0,55 ms | só no modo de teste |
+| `frame self-test:` | 1,9 ms | 0,6 ms | sempre |
+| `w^x:` | 1,8 ms | 0,56 ms | sempre |
+| `exception self-test:` | 0,9 ms | 0,3 ms | sempre |
+| Calibração do PIT (x86_64) | 20 ms | não há | 5 ms |
+| Primeiro `render` da tela cheia (x86_64) | ~15 ms | não medido | 0 |
+| Uma linha na serial, com tela | 1,0 ms | 0,45 ms | menos linhas no modo normal |
+| Uma linha na serial, sem tela | 0,3 ms | 0,38 ms | |
+| `smp::start` + `wait_online` | 1 ms | < 0,1 ms | igual |
+| `reclaim_bootloader` | 0,3 ms | 2 µs | igual |
+| Zerar memória grande no boot | não há | não há | `Memory::init` leva 0,9 ms e o `Vm::build` 2,2 ms no x86_64; nenhum zera mais que a grade da tela |
+
+O que se mexeu, no x86_64 em TCG, com o kernel do modo normal medido depois de cada passo (um boot cada, host em silêncio; ms): autotestes e medidas atrás de `rustos.selftest=1`, 965 → 65; calibração do PIT em 5 ms e o primeiro `render` sem repintar a grade vazia, juntos, 65 → 38 (o PIT custa 15 por conta e o `render` inicial, ~15 observado na primeira linha impressa); menos linhas no boot normal e o `render` que junta células sem tinta, 38 → 26. O `wait_online` do SMP, o `reclaim` e a "memória grande" não estavam no caminho: 1 ms ou menos nas duas ISAs. A calibração do PIT e o redesenho só pesam em TCG; no aarch64 o boot normal já é 2 ms, e o que sobra é serial (cada byte escrito na PL011 é uma saída da VM) e `task::init`.
+
+### Comparação com o Linux (mesma QEMU)
+
+Três boots, mediana. O RustOS está no modo normal; "antes do kernel" é o de parede menos o kernel sozinho.
+
+| ISA (aceleração) | Sistema | Parede até o shell | Antes do kernel | Kernel sozinho |
+| --- | --- | --- | --- | --- |
+| x86_64 (TCG) | **RustOS**, pelo EDK2 e o Limine | **1,67 s** | 1,64 s (EDK2 1,34 s, Limine 0,25 s) | **24 ms** |
+| x86_64 (TCG) | Linux, pelo EDK2 (`-kernel`) | 3,71 s | 2,18 s (EDK2 e o *stub* EFI) | 1,54 s |
+| x86_64 (TCG) | Linux, sem firmware (`-kernel` direto) | 2,33 s | 0,94 s (QEMU, SeaBIOS e o `bzImage`) | 1,39 s |
+| aarch64 (HVF) | **RustOS**, pelo EDK2 e o Limine | **5,24 s** | 5,24 s (EDK2 5,11 s, Limine 0,04 s) | **2 ms** |
+| aarch64 (HVF) | Linux, pelo EDK2 (`-kernel`) | 0,38 s | 0,31 s (EDK2 e o *stub* EFI) | 69 ms |
+| aarch64 (HVF) | Linux, sem firmware (`-kernel` direto) | 0,18 s | 0,11 s | 66 ms |
+
+**O EDK2 não pesa igual nos dois no aarch64**, ao contrário do que o método supunha: ele leva 0,3 s a entregar o Linux pelo `-kernel` (com ou sem o disco anexado) e 5,1 s antes do Limine ao bootar o disco do RustOS, e nenhuma das variações testadas muda isso (`ramfb`, `bootindex`, `-boot menu=off`, tipo de FAT, disco só leitura; [DEBT-0069](../tech-debt/0069-firmware-do-aarch64-leva-5-s-ao-bootar-de-disco.md)). A comparação honesta é a das colunas "antes do kernel" e "kernel sozinho" lidas separadas: o tempo de parede do RustOS no aarch64 (5,24 s) é 98% firmware. No x86_64 o caminho de disco do EDK2 (1,34 s) é mais curto que o `-kernel` do Linux com o *stub* (2,18 s). O Linux não poderia ser entregue pelo Limine para igualar o caminho no aarch64: o `vmlinuz-virt` do Alpine é um PE EFI comprimido, não um `Image`.
+
+**Ressalvas, honestas:**
+
+- **O RustOS ainda não tem drivers nem espaço de usuário.** O Linux, até `Run /bin/sh`, inicializa o *subsistema de dispositivos* (virtio, PCI, serial, rede, o `rootfs`), descomprime o initramfs e executa o `/bin/sh`; o RustOS chega a um shell que roda dentro do kernel, sem disco, rede nem processo. A comparação mede "boot até um prompt", não "boot até a mesma capacidade".
+- **Número de TCG não é latência** (guidelines 05): no x86_64 os dois são TCG, então a razão (1,5 s contra 24 ms) vale mais que os valores, e mesmo ela mistura o custo do TCG por instrução (o Linux executa muito mais). O número de latência é o do aarch64 com HVF: 69 ms contra 2 ms no kernel sozinho.
+- **O `printk` do Linux não conta o que vem antes do `start_kernel`**; o do RustOS não conta o Limine. É o mesmo corte (o primeiro código do kernel), mas o Linux faz parte da inicialização da CPU e da memória antes dele (o *stub* EFI e a descompressão), que entram em "antes do kernel".
+- **O Linux é o de distro (`virt`, 13 MiB)**, não um kernel enxuto: o `tinyconfig` não foi medido (SDD 08).
+- Três boots por célula, host compartilhado: a dispersão do x86_64 em TCG é de ±3% entre boots em silêncio e maior sob carga.
+
 ## Método de comparação com Linux e Windows
 
 1. **Mesma máquina, mesmo firmware, versões anotadas.** Firmware e ACPI mudam o
@@ -558,7 +645,7 @@ base deixar de ser a de uma distro; se ele ficar bem abaixo, o alvo acima aperta
    ~8,25 s contra ~1,22 s com KVM
    ([Santilli](https://cirosantilli.com/linux-kernel-module-cheat/benchmark-linux-kernel-boot.html)):
    número de latência só vale com aceleração de hardware ou em metal.
-3. **Boot medido até a primeira instrução de usuário**, não até um shell.
+3. **Boot medido até a primeira instrução de usuário**, não até um shell. Enquanto não houver espaço de usuário no RustOS, a comparação é até o prompt dele contra `Run /bin/sh` no Linux, com a ressalva da seção [Tempo de boot](#tempo-de-boot).
 4. **Microbenchmarks com o mesmo binário de teste** nos três sistemas, quando houver
    ABI Linux (fase 5): syscall nula, troca de contexto, page fault, IPC. No Windows,
    o equivalente funcional mais próximo, com o método escrito ao lado do número.
