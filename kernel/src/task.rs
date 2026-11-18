@@ -161,6 +161,12 @@ struct Slot {
     switches: AtomicU64,
     /// Endereço da área de FPU/SIMD; zero se a tarefa não usa SIMD.
     fpu: AtomicUsize,
+    /// A raiz de página do processo de usuário que a tarefa roda; zero na tarefa só de kernel.
+    user_root: AtomicU64,
+    /// O topo da pilha do kernel da tarefa de usuário (a pilha de entrada de syscall e exceção).
+    user_top: AtomicU64,
+    /// O `Process` da tarefa (`Box::into_raw`), ou zero.
+    process: AtomicUsize,
     meta: IrqLock<Meta>,
 }
 
@@ -177,6 +183,9 @@ impl Slot {
             since_ns: AtomicU64::new(0),
             switches: AtomicU64::new(0),
             fpu: AtomicUsize::new(0),
+            user_root: AtomicU64::new(0),
+            user_top: AtomicU64::new(0),
+            process: AtomicUsize::new(0),
             meta: IrqLock::new(Meta {
                 name: "",
                 entry: None,
@@ -308,6 +317,8 @@ pub unsafe fn init(frames: Frames, direct_map_offset: u64) -> Result<FpuSummary,
     let summary = platform::fpu_init().map_err(TaskError::Fpu)?;
     // SAFETY: o contrato desta função.
     let tables = unsafe { platform::active_space(direct_map_offset) };
+    let mut user_frames = frames;
+    platform::user_init(&mut user_frames).map_err(TaskError::Stack)?;
     *SPACE.lock() = Some(Space { tables, frames });
     let cpu = percpu::current();
     let policy = Box::new(Policy::new());
@@ -353,6 +364,7 @@ pub unsafe fn init(frames: Frames, direct_map_offset: u64) -> Result<FpuSummary,
 
 /// Entra no escalonador numa CPU secundária: a execução atual vira a ociosa dela e não volta.
 pub fn run_secondary(stack: Stack) -> ! {
+    platform::user_cpu_init();
     let cpu = percpu::current();
     let index = cpu.index();
     let policy = Box::new(Policy::new());
@@ -474,6 +486,9 @@ fn start(id: usize, config: Spawn) -> Result<bool, TaskError> {
         target.fpu.store(area, Ordering::Relaxed);
     }
     target.permit.store(false, Ordering::Relaxed);
+    target.user_root.store(0, Ordering::Relaxed);
+    target.user_top.store(0, Ordering::Relaxed);
+    target.process.store(0, Ordering::Relaxed);
     target.cpu_ns.store(0, Ordering::Relaxed);
     target.switches.store(0, Ordering::Relaxed);
     target.wake_at_ns.store(u64::MAX, Ordering::Relaxed);
@@ -720,6 +735,10 @@ fn switch_from(cpu: &PerCpu, mut queue: IrqGuard<'static, Queue>, now_ns: u64) {
         // SAFETY: a área é da tarefa que entra, viva, e foi preparada ou salva antes.
         unsafe { platform::fpu_restore(area.as_ptr()) };
     }
+    platform::switch_space(
+        incoming.user_root.load(Ordering::Relaxed),
+        incoming.user_top.load(Ordering::Relaxed),
+    );
     // SAFETY: `to` foi preparada por `start` ou guardada por uma troca anterior; a IRQ está
     // mascarada, nenhum lock está preso e nenhuma outra CPU a usa (`on_cpu`).
     unsafe { platform::switch(CONTEXTS.0[from].get(), CONTEXTS.0[to].get()) };
@@ -729,6 +748,8 @@ fn switch_from(cpu: &PerCpu, mut queue: IrqGuard<'static, Queue>, now_ns: u64) {
 /// Depois de uma troca, já na pilha de quem entrou: libera a tarefa que saiu desta CPU para
 /// qualquer outra CPU escolhê-la. O `Release` publica o contexto que a troca acabou de salvar.
 fn finish_switch() {
+    #[cfg(feature = "selftest")]
+    crate::process::check_ac();
     let cpu = percpu::current();
     let prev = cpu.prev.load(Ordering::Relaxed);
     if prev != NO_TASK {
@@ -937,6 +958,51 @@ fn assert_task_context(here: &PerCpu) {
 /// A tarefa que roda agora nesta CPU.
 pub fn current() -> TaskId {
     TaskId::new(percpu::pinned(|cpu| cpu.current.load(Ordering::Relaxed)))
+}
+
+/// Liga a tarefa corrente ao processo de usuário `process` (o `Box::into_raw` de um `Process`) com
+/// a raiz `root`: o espaço e a pilha de entrada desta CPU passam a ser os dele e as próximas trocas
+/// os repõem. Deixa a IRQ mascarada, para a entrada no usuário. Devolve o topo da pilha do kernel.
+pub fn bind_user(root: u64, process: usize) -> u64 {
+    platform::cpu().save_and_disable_interrupts();
+    let here = percpu::current();
+    let current = slot(here.current.load(Ordering::Relaxed) as usize);
+    let top = current
+        .meta
+        .lock()
+        .stack
+        .map_or(0, |stack| stack.top().as_u64());
+    current.user_top.store(top, Ordering::Relaxed);
+    current.user_root.store(root, Ordering::Relaxed);
+    current.process.store(process, Ordering::Release);
+    platform::switch_space(root, top);
+    top
+}
+
+/// Desliga a tarefa corrente do processo: volta ao espaço do kernel nesta CPU e devolve o
+/// `Process` (ou `None` sem processo). Com a IRQ mascarada, antes de liberar qualquer tabela.
+pub fn unbind_user() -> Option<usize> {
+    let here = percpu::current();
+    let current = slot(here.current.load(Ordering::Relaxed) as usize);
+    platform::switch_space(0, 0);
+    current.user_root.store(0, Ordering::Relaxed);
+    current.user_top.store(0, Ordering::Relaxed);
+    let process = current.process.swap(0, Ordering::AcqRel);
+    (process != 0).then_some(process)
+}
+
+/// Guarda o pico da pilha da tarefa corrente, que a morte do processo ainda não repintou.
+pub fn note_stack_peak() -> usize {
+    let here = percpu::current();
+    let current = slot(here.current.load(Ordering::Relaxed) as usize);
+    let peak = current.meta.lock().stack.map_or(0, Stack::peak);
+    TASK_PEAK.fetch_max(peak, Ordering::Relaxed);
+    peak
+}
+
+/// O maior fundo da pilha de uma tarefa de usuário, medido na volta ao usuário.
+pub fn note_user_depth(bytes: usize) {
+    TASK_PEAK.fetch_max(bytes, Ordering::Relaxed);
 }
 
 pub fn set_current_name(name: &'static str) {

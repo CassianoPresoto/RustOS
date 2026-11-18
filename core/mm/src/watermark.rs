@@ -18,6 +18,40 @@ pub fn first_unpainted(words: usize, pattern: u64, read: impl Fn(usize) -> u64) 
     (base..words).find(dirty).unwrap_or(words)
 }
 
+/// Varre para baixo a partir da palavra `from` (exclusiva) e devolve o índice da palavra suja
+/// mais funda que ainda tem sujeira acima de um trecho de `run` palavras limpas seguidas;
+/// `from` se não há nenhuma. Quem chama repinta `[resultado, from)`: é a limpeza da pilha do
+/// kernel na volta ao usuário (SDD 17), que custa a profundidade que a chamada usou.
+pub fn lowest_dirty_below(
+    from: usize,
+    pattern: u64,
+    run: usize,
+    read: impl Fn(usize) -> u64,
+) -> usize {
+    let (mut index, mut lowest, mut clean) = (from, from, 0);
+    while index > 0 && clean < run {
+        let base = index.saturating_sub(GROUP);
+        let differs = (base..index).fold(0, |acc, at| acc | (read(at) ^ pattern));
+        if differs == 0 {
+            clean += index - base;
+        } else {
+            for at in (base..index).rev() {
+                if clean >= run {
+                    return lowest;
+                }
+                if read(at) == pattern {
+                    clean += 1;
+                } else {
+                    lowest = at;
+                    clean = 0;
+                }
+            }
+        }
+        index = base;
+    }
+    lowest
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +123,43 @@ mod tests {
                 assert_eq!(first(&memory), plain.unwrap_or(words));
             }
         }
+    }
+
+    fn lowest(memory: &[u64], from: usize, run: usize) -> usize {
+        lowest_dirty_below(from, PATTERN, run, |index| memory[index])
+    }
+
+    #[test]
+    fn a_clean_stack_has_nothing_to_scrub() {
+        let memory = painted(64, &[]);
+        assert_eq!(lowest(&memory, 64, 16), 64);
+        assert_eq!(lowest(&memory, 0, 16), 0);
+    }
+
+    #[test]
+    fn the_scan_stops_after_a_run_of_clean_words() {
+        let memory = painted(256, &[250, 240, 100]);
+        assert_eq!(lowest(&memory, 256, 16), 240);
+        assert_eq!(lowest(&memory, 256, 200), 100);
+    }
+
+    #[test]
+    fn a_dirty_word_inside_the_run_restarts_the_count() {
+        let memory = painted(256, &[254, 249, 244, 239]);
+        assert_eq!(lowest(&memory, 256, 6), 239);
+        assert_eq!(lowest(&memory, 256, 4), 254);
+    }
+
+    #[test]
+    fn a_fully_dirty_stack_is_scanned_to_the_bottom() {
+        let memory = vec![0; 128];
+        assert_eq!(lowest(&memory, 128, 16), 0);
+    }
+
+    #[test]
+    fn only_what_the_run_reaches_below_the_start_word_is_scrubbed() {
+        let memory = painted(64, &[40, 3]);
+        assert_eq!(lowest(&memory, 32, 8), 32);
+        assert_eq!(lowest(&memory, 32, 40), 3);
     }
 }

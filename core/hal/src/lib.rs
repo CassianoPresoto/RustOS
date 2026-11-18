@@ -5,6 +5,7 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod abi;
 pub mod addr;
 pub mod boot;
 pub mod clock;
@@ -31,7 +32,7 @@ pub use entropy::HardwareEntropy;
 pub use input::{ByteSource, KeyCode, KeyEvent};
 pub use interrupt::{Fault, FaultKind, Handlers, Irq};
 pub use io::RegisterBus;
-pub use memory::{MemoryRegion, RegionKind};
+pub use memory::{MemoryRegion, RegionKind, STACK_PAINT};
 pub use paging::{
     AddressSpace, CacheMode, FrameSource, LARGE_PAGE_SIZE, MapError, Mapping, MmuControl,
     PAGE_SIZE, PageFlags, PageFormat, PageMapper, TableMemory,

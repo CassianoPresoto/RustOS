@@ -4,6 +4,7 @@
 use core::fmt;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use rustos_hal::abi::{Status, SyscallArgs, SyscallReturn};
 use rustos_hal::{Console, Cpu, Fault, Handlers, Irq};
 
 use crate::console::Writer;
@@ -15,6 +16,8 @@ static HANDLERS: Handlers = Handlers {
     fault: on_fault,
     irq: ignore_irq,
     preempt: ignore_preempt,
+    syscall: ignore_syscall,
+    leave_user: ignore_leave,
 };
 
 /// Primeira coisa do `kmain`: dali em diante exceção e pânico já saem na serial.
@@ -59,6 +62,12 @@ fn on_fault(fault: &Fault) {
 fn ignore_irq(_irq: Irq) {}
 
 fn ignore_preempt() {}
+
+fn ignore_syscall(_: &SyscallArgs) -> SyscallReturn {
+    SyscallReturn::err(Status::NotSupported)
+}
+
+fn ignore_leave(_: usize) {}
 
 /// Perto do nulo e sem mapa em nenhuma fase do boot (o de 1:1 da serial cobre 2 MiB em `0x0900_0000`).
 #[cfg(feature = "panic-tests")]

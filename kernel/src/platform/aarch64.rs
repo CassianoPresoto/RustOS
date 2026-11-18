@@ -11,20 +11,22 @@ pub use rustos_arch_aarch64::fpu::{
 pub use rustos_arch_aarch64::fpu::{read_probe as fpu_read_probe, write_probe as fpu_write_probe};
 use rustos_arch_aarch64::intid::{QEMU_VIRT_PL011_INTID, VIRTUAL_TIMER_INTID};
 use rustos_arch_aarch64::sgi::{SGI_RESCHEDULE, SGI_STOP};
+#[cfg(feature = "selftest")]
+pub use rustos_arch_aarch64::user_blob;
 pub use rustos_arch_aarch64::zero::zero_aligned;
 use rustos_arch_aarch64::{
     Aarch64Cpu, Aarch64CpuLocal, Aarch64Entropy, Aarch64Ipi, Aarch64Mmu, DirectMapTables, MmioBus,
     QEMU_VIRT_GICD, QEMU_VIRT_GICR, QEMU_VIRT_PL011, active_root, early, exception, gic_cpu, intid,
     prepare_space, protection, timer,
 };
-pub use rustos_arch_aarch64::{Context, call_on_stack, switch};
+pub use rustos_arch_aarch64::{Context, CpuPrefix, call_on_stack, switch};
 use rustos_driver_gicv3::{GicError, GicV3, affinity_from_mpidr, find_redistributor, router_for};
 use rustos_driver_pl011::Pl011;
 use rustos_hal::{
     BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, MmuControl, PAGE_SIZE, PageMapper,
     PhysAddr, VirtAddr,
 };
-use rustos_mm::PageTables;
+use rustos_mm::{PageTables, UserRange};
 
 use super::{FpuSummary, PlatformError, Protection};
 use crate::interrupts::{FaultTest, IrqSource};
@@ -359,19 +361,31 @@ pub fn hardware_entropy() -> Option<PlatformEntropy> {
     Aarch64Entropy::detect()
 }
 
-/// As proteções de hardware desta ISA e se ficaram ligadas.
+/// As proteções de hardware desta ISA e se ficaram ligadas: `pan` e `wxn`.
 pub fn protections() -> &'static [Protection] {
-    const ON: [Protection; 1] = [Protection {
-        name: "pan",
-        enabled: true,
-    }];
-    const OFF: [Protection; 1] = [Protection {
-        name: "pan",
-        enabled: false,
-    }];
-    match PAN_STATE.load(Ordering::Relaxed) {
-        PAN_ON => &ON,
-        PAN_OFF => &OFF,
+    const fn pair(pan: bool, wxn: bool) -> [Protection; 2] {
+        [
+            Protection {
+                name: "pan",
+                enabled: pan,
+            },
+            Protection {
+                name: "wxn",
+                enabled: wxn,
+            },
+        ]
+    }
+    const OFF_OFF: [Protection; 2] = pair(false, false);
+    const OFF_ON: [Protection; 2] = pair(false, true);
+    const ON_OFF: [Protection; 2] = pair(true, false);
+    const ON_ON: [Protection; 2] = pair(true, true);
+    let wxn = rustos_arch_aarch64::wxn_active();
+    match (PAN_STATE.load(Ordering::Relaxed), wxn) {
+        (PAN_ON, true) => &ON_ON,
+        (PAN_ON, false) => &ON_OFF,
+        (PAN_OFF, true) => &OFF_ON,
+        (PAN_OFF, false) => &OFF_OFF,
+        (_, true) => &OFF_ON[1..],
         _ => &[],
     }
 }
@@ -472,4 +486,126 @@ pub fn secondary_init(resources: SecondaryResources) -> Result<(), PlatformError
     // SAFETY: EL1, depois de `timer::start` na CPU de boot.
     unsafe { timer::start_secondary() };
     fpu_init().map(|_| ())
+}
+
+/// O que o kernel escreveu em `[start, start + len)` vai ser executado: o aarch64 não mantém o
+/// cache de instrução coerente sozinho.
+pub fn sync_icache(start: usize, len: usize) {
+    // SAFETY: a faixa é um frame do alocador, mapeado e legível pelo mapa direto.
+    unsafe { rustos_arch_aarch64::cache::sync_icache(start, len) };
+}
+
+/// A raiz vazia do `TTBR0_EL1`: um frame zerado que a tarefa só de kernel usa. Guardada para o
+/// núcleo secundário, que a lê depois de `task::init`.
+static EMPTY_ROOT: AtomicU64 = AtomicU64::new(0);
+
+/// Aloca a raiz vazia da metade baixa e liga EL0 nesta CPU (a de boot). Uma vez, depois de
+/// `Vm::activate`.
+pub fn user_init(frames: &mut impl FrameSource) -> Result<(), MapError> {
+    let root = frames.allocate_frame().ok_or(MapError::OutOfFrames)?;
+    crate::memory::zero_frame(root);
+    EMPTY_ROOT.store(root.as_u64(), Ordering::Release);
+    user_cpu_init();
+    Ok(())
+}
+
+/// O que cada CPU faz antes de rodar tarefa de usuário: o `CNTKCTL_EL1`, a raiz vazia no
+/// `TTBR0_EL1` e a metade baixa traduzida.
+pub fn user_cpu_init() {
+    // SAFETY: EL1 com a MMU ligada e a IRQ mascarada, depois de `Vm::activate` nesta CPU; a raiz
+    // vazia é um frame zerado que vive para sempre.
+    unsafe { rustos_arch_aarch64::init_user(EMPTY_ROOT.load(Ordering::Acquire)) };
+}
+
+/// Troca o espaço de endereçamento desta CPU para o da tarefa que vai rodar; `root` zero é
+/// tarefa do kernel. Com a IRQ mascarada. A pilha de entrada é a própria `SP_EL1`.
+pub fn switch_space(root: u64, _kernel_stack_top: u64) {
+    // SAFETY: o chamador mascara a IRQ, depois de `user_cpu_init` nesta CPU; `root` é de um
+    // espaço de `new_user_space`.
+    unsafe { rustos_arch_aarch64::switch_space(root) };
+}
+
+/// Primeira volta a EL0. Nunca volta.
+///
+/// # Safety
+/// Contrato de `rustos_arch_aarch64::enter_user`.
+pub unsafe fn enter_user(entry: u64, sp: u64, arg0: u64, arg1: u64, kernel_top: u64) -> ! {
+    // SAFETY: o contrato desta função.
+    unsafe { rustos_arch_aarch64::enter_user(entry, sp, arg0, arg1, kernel_top) }
+}
+
+/// Espaço de usuário novo: uma raiz vazia para o `TTBR0_EL1` (a metade do kernel é o `TTBR1_EL1`).
+///
+/// # Safety
+/// Contrato de `new_space`.
+pub unsafe fn new_user_space(
+    frames: &mut impl FrameSource,
+    direct_map_offset: u64,
+) -> Result<PlatformSpace, MapError> {
+    // SAFETY: o contrato desta função.
+    unsafe { new_space(frames, direct_map_offset) }
+}
+
+/// No aarch64 a metade do kernel não está na raiz do usuário: não há o que dessincronizar.
+#[allow(
+    clippy::unnecessary_wraps,
+    clippy::needless_pass_by_ref_mut,
+    reason = "mesma assinatura em todas as ISAs"
+)]
+pub fn kernel_half_in_sync(_space: &PlatformSpace) -> bool {
+    true
+}
+
+/// Copia `dst.len()` bytes de `range` (usuário) para `dst`. `false` se uma página faltou.
+pub fn copy_from_user(range: UserRange, dst: &mut [u8]) -> bool {
+    assert_eq!(
+        range.len(),
+        dst.len() as u64,
+        "copy_from_user: tamanhos diferentes"
+    );
+    // SAFETY: `dst` é memória do kernel do tamanho da faixa e a faixa é de usuário (`UserRange`).
+    let missing = unsafe {
+        rustos_arch_aarch64::usercopy::copy_from_user(dst.as_mut_ptr(), range.addr(), dst.len())
+    };
+    missing == 0
+}
+
+/// Copia `src` para `range` (usuário). `false` se uma página faltou.
+pub fn copy_to_user(range: UserRange, src: &[u8]) -> bool {
+    assert_eq!(
+        range.len(),
+        src.len() as u64,
+        "copy_to_user: tamanhos diferentes"
+    );
+    // SAFETY: `src` é memória do kernel do tamanho da faixa e a faixa é de usuário (`UserRange`).
+    let missing = unsafe {
+        rustos_arch_aarch64::usercopy::copy_to_user(range.addr(), src.as_ptr(), src.len())
+    };
+    missing == 0
+}
+
+/// No aarch64 não há `AC`; o `SCTLR.SPAN` zerado religa o PAN a cada exceção.
+#[cfg(feature = "selftest")]
+pub fn ac_set() -> bool {
+    false
+}
+
+/// O aarch64 não tem `AC`: não há o que contar.
+#[cfg(feature = "selftest")]
+pub fn copy_fixup_stats() -> Option<(usize, usize)> {
+    None
+}
+
+/// O `eret` é a única saída para EL0: não há saída rápida a ligar.
+#[cfg(feature = "selftest")]
+pub const HAS_FAST_RETURN: bool = false;
+
+/// Sem efeito no aarch64.
+#[cfg(feature = "selftest")]
+pub fn set_fast_return(_on: bool) {}
+
+/// Liga ou desliga a limpeza da pilha do kernel na volta ao usuário (o `arch/` pula o gancho).
+#[cfg(feature = "selftest")]
+pub fn set_stack_clean(on: bool) {
+    rustos_arch_aarch64::exception::set_scrub(on);
 }

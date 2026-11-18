@@ -4,6 +4,7 @@ use rustos_hal::{Fault, FaultKind, VirtAddr};
 
 pub const DIVIDE_ERROR: u8 = 0;
 pub const NMI: u8 = 2;
+pub const DEBUG: u8 = 1;
 pub const BREAKPOINT: u8 = 3;
 pub const INVALID_OPCODE: u8 = 6;
 pub const DOUBLE_FAULT: u8 = 8;
@@ -65,7 +66,15 @@ pub const fn decode(vector: u8, error: u64, rip: u64, cr2: u64) -> Fault {
         kind,
         pc: VirtAddr::new(rip),
         code: raw_code(vector, error),
+        from_user: false,
+        user_sp: 0,
     }
+}
+
+/// A exceção que veio do anel 3 mata só o processo, salvo NMI, `#DF` e `#MC`: fatais com
+/// relatório mesmo vindas de usuário (SDD 17, "Exceções vindas do anel 3").
+pub const fn user_fault_kills_only_the_process(vector: u8) -> bool {
+    !matches!(vector, NMI | DOUBLE_FAULT | MACHINE_CHECK)
 }
 
 #[cfg(test)]
@@ -127,6 +136,23 @@ mod tests {
         assert_eq!(decode(18, 0, 0, 0).kind, FaultKind::MachineCheck);
         assert_eq!(decode(2, 0, 0, 0).kind, FaultKind::Other);
         assert_eq!(decode(21, 0, 0, 0).kind, FaultKind::Other);
+    }
+
+    #[test]
+    fn only_the_cpu_wide_faults_stay_fatal_when_they_come_from_user() {
+        for vector in [NMI, DOUBLE_FAULT, MACHINE_CHECK] {
+            assert!(!user_fault_kills_only_the_process(vector));
+        }
+        for vector in [0, DEBUG, 3, 6, 7, 13, 14, 17, 19] {
+            assert!(user_fault_kills_only_the_process(vector));
+        }
+    }
+
+    #[test]
+    fn decoded_faults_start_as_kernel_origin() {
+        let fault = decode(13, 0, 0x1000, 0);
+        assert!(!fault.from_user);
+        assert_eq!(fault.user_sp, 0);
     }
 
     #[test]

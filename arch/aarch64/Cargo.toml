@@ -10,6 +10,10 @@ publish.workspace = true
 [lib]
 bench = false
 
+[features]
+# O programa de usuário de teste (`user_blob`): só na imagem com o modo de teste.
+selftest = []
+
 [lints]
 workspace = true
 

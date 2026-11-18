@@ -10,8 +10,10 @@ pub mod ioapic;
 pub mod lapic;
 pub mod pic;
 pub mod pit;
+pub mod prefix;
 pub mod pte;
 pub mod segments;
+pub mod sysret;
 pub mod xstate;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -40,6 +42,12 @@ mod stack;
 mod sysreg;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod traps;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+mod user;
+#[cfg(all(target_arch = "x86_64", target_os = "none", feature = "selftest"))]
+pub mod user_blob;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub mod usercopy;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use apic::{
@@ -61,6 +69,7 @@ pub use mmu::{DirectMapTables, X86Mmu, active_root, require_features};
 pub use percpu::X86CpuLocal;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use port::PortBus;
+pub use prefix::CpuPrefix;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use protect::{Protections, enable as enable_protections};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -70,8 +79,10 @@ pub use sysreg::{features as cpu_features, rdtsc};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use traps::{
     CpuTables, IstStacks, breakpoint, install as install_traps,
-    install_early as install_early_traps, load_cpu as load_cpu_tables,
+    install_early as install_early_traps, load_cpu as load_cpu_tables, set_scrub, set_sysret,
 };
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub use user::{ac_flag_set, enter_user, set_kernel_root, switch_space};
 
 /// Base da COM1 no PC.
 pub const COM1: u16 = 0x3F8;

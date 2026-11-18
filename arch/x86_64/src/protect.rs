@@ -34,6 +34,7 @@ pub unsafe fn enable() -> Protections {
     if features.smap {
         cr4 |= CR4_SMAP;
     }
+    crate::usercopy::set_smap(features.smap);
     if features.umip {
         cr4 |= CR4_UMIP;
     }

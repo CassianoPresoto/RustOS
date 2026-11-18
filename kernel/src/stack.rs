@@ -6,8 +6,7 @@ use core::ptr;
 use rustos_hal::{PAGE_SIZE, VirtAddr};
 use rustos_mm::watermark::first_unpainted;
 
-/// Nenhum valor que uma pilha escreva de propósito; sem ele o pico sai menor que o real.
-const PATTERN: u64 = 0x5253_5441_434b_2121;
+const PATTERN: u64 = rustos_hal::STACK_PAINT;
 const WORD: usize = 8;
 
 /// Uma pilha mapeada: do topo (fim exclusivo) para baixo, sem a página de guarda.

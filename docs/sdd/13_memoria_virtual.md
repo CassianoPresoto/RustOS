@@ -14,7 +14,7 @@ a memória física e o heap, no [SDD 12](12_memoria_fisica_e_heap.md).
    mapa de memória, deslocamento do mapa direto, nome e versão do bootloader, marcos
    de tempo, framebuffer, endereço da imagem e módulos (faixa física e `string`). Depois disso nada lê a resposta do Limine.
 3. `platform::harden()` liga as proteções da CPU (x86_64: WP, NX, SMEP, SMAP, UMIP;
-   aarch64: PAN). No x86_64 o NX precisa estar no `EFER` antes de a tabela usar o bit.
+   aarch64: PAN; `SCTLR_EL1.WXN`, ligado depois de `Vm::activate` em cada CPU, vale também para EL0). No x86_64 o NX precisa estar no `EFER` antes de a tabela usar o bit.
 4. `Vm::build` monta tabelas novas, sem ativá-las. `Memory::place_windows` põe as janelas
    de dispositivos, de pilhas e de módulos. `Vm::map_initramfs` mapeia o initramfs
    ([abaixo](#o-módulo-initramfs)). `Vm::activate` troca `CR3` / `TTBR1_EL1`.
@@ -31,7 +31,7 @@ Pânico e exceção antes do console saem direto na serial ([SDD 04](04_boot.md#
 
 | Faixa | O quê | Permissão | Quem escolhe |
 | --- | --- | --- | --- |
-| Metade baixa | Nada | — | x86_64: raiz com as 256 entradas de baixo vazias. aarch64: `TCR_EL1.EPD0` desliga o `TTBR0_EL1` |
+| Metade baixa | A raiz do kernel nada tem; cada processo tem a sua | x86_64: a raiz do kernel tem as 256 entradas de baixo vazias, e a de um processo copia as 256 de cima por ponteiro (conferido em `Process::load`). aarch64: `TTBR0_EL1` aponta uma raiz vazia nas tarefas de kernel e a do processo nas de usuário, com `EPD0` limpo desde a 4a | Folha de usuário só em `[USER_MIN, USER_TOP)` e só com `PageFlags.user`; o mapeador recusa o resto ([SDD 17](17_processos_isolamento_e_syscalls.md#a-fatia-4a-como-entrou)) |
 | `[__image_start, __requests_end)` | `.requests`, `.dynamic`, `.got` | leitura, NX | Limine (KASLR), tamanho pelo linker script |
 | `[__text_start, __text_end)` | `.text` | leitura e execução | idem |
 | `[__rodata_start, __rodata_end)` | `.rodata`, `.dynsym`, `.rela.dyn`, `.data.rel.ro` | leitura, NX | idem |

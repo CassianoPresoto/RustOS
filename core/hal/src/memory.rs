@@ -2,6 +2,11 @@
 
 use crate::PhysAddr;
 
+/// O padrão com que o kernel pinta as pilhas das threads: o pico é até onde ele sumiu, e a
+/// limpeza da pilha na volta ao usuário (SDD 17) repinta com ele o que a chamada usou. Nenhum
+/// valor que uma pilha escreva de propósito.
+pub const STACK_PAINT: u64 = 0x5253_5441_434b_2121;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegionKind {
     Usable,

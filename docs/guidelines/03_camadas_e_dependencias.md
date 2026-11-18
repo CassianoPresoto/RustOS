@@ -38,10 +38,10 @@
 ## Como se verifica
 
 `make layers-check` (`cargo xtask check-layers`) lê o `Cargo.toml` de cada membro,
-classifica pela pasta e falha em dependência proibida ou crate externo. As regras 11 e 12
-valem a partir do PR da fase 4a, que traz o `check-layers` conhecendo `user/` e a regra 12, **com
-o teste vermelho antes do verde**: sem isso, `arch/x86_64-user` seria classificado como
-`Adapter` e o `Kernel` poderia depender dele. A regra 9:
+classifica pela pasta e falha em dependência proibida ou crate externo. O PR da fase 4a trouxe o
+`check-layers` conhecendo `user/` e `arch/<isa>-user` (regras 11 e 12), **com o teste vermelho
+antes do verde**: antes dele, `arch/x86_64-user` seria classificado como `Adapter` e o `Kernel`
+poderia depender dele. A regra 9:
 
 ```sh
 grep -rn 'path = ' --include=Cargo.toml core lib arch boot drivers kernel xtask

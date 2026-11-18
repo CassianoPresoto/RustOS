@@ -312,12 +312,11 @@ write, kernel, not mapped"), conferido com uma recursão numa tarefa, em vez de 
 cascata de faltas na própria entrada.
 `sp` de uma exceção que volta (`brk`) é o `SP_EL1` intocado: o `eret` restaura o `SPSel`.
 
-> **Desenho da fase 4 (ainda não implementado, [SDD 17](17_processos_isolamento_e_syscalls.md#aarch64-svc)):** com EL0, o `SP_EL0` passa a ser a pilha do usuário e o
-> `vector_fault` não pode mais empilhar nele, nem o `brk` e a falta do `usercopy`, que voltam. A ordem passa a ser a do
-> Linux: exceção síncrona e SError de EL1h entram na pilha da tarefa, com teste de estouro, e só o estouro troca para a
-> pilha de falhas **desta CPU**, achada pelo bloco `PerCpu` que o `TPIDR_EL1` já aponta (acima, "Estado por CPU"): o topo e a base
-> dela viram campos do prefixo do bloco, e `install` e `install_secondary` deixam de gravar o `SP_EL0`. Falta dentro da pilha de
-> falhas continua nela. O texto acima descreve o código de hoje.
+> **Desde a fatia 4a ([SDD 17](17_processos_isolamento_e_syscalls.md#a-fatia-4a-como-entrou)):** com EL0 o `SP_EL0` é a pilha do usuário, e o
+> `vector_fault` não empilha mais nele: lê o topo da pilha de falhas **desta CPU** no bloco `PerCpu` (`TPIDR_EL1`),
+> que `install` e `install_secondary` gravam, e só usa o `SP_EL0` no começo do boot, antes de haver topo. O quadro do vetor
+> ganhou `sp_el0` e `tpidr_el0` (288 bytes). A ordem do Linux (síncrona de EL1h na pilha da tarefa, com teste de estouro) é a
+> [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md). O quadro de 272 bytes acima é o de antes da 4a.
 
 ## Regra de lock
 

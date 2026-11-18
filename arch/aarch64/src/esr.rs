@@ -5,6 +5,9 @@ use rustos_hal::{FaultKind, VirtAddr};
 
 const EC_SHIFT: u32 = 26;
 const EC_UNKNOWN: u64 = 0x00;
+/// `SVC` de AArch64 e acesso de EL0 a registrador de sistema que trapeia (`esr.h` do Linux).
+pub const EC_SVC64: u64 = 0x15;
+const EC_SYS64: u64 = 0x18;
 const EC_IABT_LOW: u64 = 0x20;
 const EC_IABT_CUR: u64 = 0x21;
 const EC_PC_ALIGN: u64 = 0x22;
@@ -36,6 +39,11 @@ pub enum FaultStatus {
 
 pub const fn exception_class(esr: u64) -> u64 {
     esr >> EC_SHIFT & 0x3f
+}
+
+/// A exceção é um `SVC` de AArch64: a entrada de syscall de EL0.
+pub const fn is_svc64(esr: u64) -> bool {
+    exception_class(esr) == EC_SVC64
 }
 
 /// Decodifica o campo `FSC` (6 bits) do `ISS` de um aborto de dado ou de instrução.
@@ -80,7 +88,7 @@ pub const fn decode(esr: u64, far: u64) -> FaultKind {
             }
         }
         EC_BRK64 => FaultKind::Breakpoint,
-        EC_UNKNOWN => FaultKind::InvalidOpcode,
+        EC_UNKNOWN | EC_SYS64 => FaultKind::InvalidOpcode,
         EC_PC_ALIGN | EC_SP_ALIGN => FaultKind::Alignment,
         EC_SERROR => FaultKind::MachineCheck,
         _ => FaultKind::Other,
@@ -205,5 +213,25 @@ mod tests {
     fn wnr_is_ignored_outside_data_aborts() {
         assert!(!is_write(esr(EC_IABT_CUR, ISS_WNR)));
         assert!(is_write(esr(EC_DABT_LOW, ISS_WNR)));
+    }
+
+    #[test]
+    fn svc_is_class_0x15_and_a_trapped_system_register_is_an_illegal_instruction() {
+        assert!(is_svc64(esr(0x15, 0)));
+        assert!(is_svc64(esr(0x15, 0xFFFF)));
+        assert!(!is_svc64(esr(0x16, 0)));
+        assert!(!is_svc64(esr(0x24, 0)));
+        assert_eq!(decode(esr(0x18, 0), 0), FaultKind::InvalidOpcode);
+        assert_eq!(decode(esr(0x19, 0), 0), FaultKind::Other);
+        assert_eq!(decode(esr(0x1D, 0), 0), FaultKind::Other);
+    }
+
+    #[test]
+    fn a_user_data_or_instruction_abort_is_marked_user() {
+        let data = decode(esr(EC_DABT_LOW, 0b00_0111), 0x1000);
+        let fetch = decode(esr(EC_IABT_LOW, 0b00_0111), 0x2000);
+        assert_eq!(page_fault(data), (0x1000, false, false, true, false));
+        assert_eq!(page_fault(fetch), (0x2000, false, true, true, false));
+        assert_eq!(decode(esr(EC_BRK64, 0), 0), FaultKind::Breakpoint);
     }
 }

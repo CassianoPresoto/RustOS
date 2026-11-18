@@ -2,6 +2,7 @@
 //! físico em ponteiro, pelo mapa direto que o bootloader montou.
 
 use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::{ptr, slice};
 
 use rustos_hal::{
@@ -16,11 +17,15 @@ use rustos_mm::{
 use crate::boot::BootRecord;
 use crate::frames::{self, Frames};
 use crate::heap;
+use crate::platform;
 use crate::stack::Stack;
 use crate::sync::IrqLock;
 
 /// Janelas de dispositivos, de pilhas e de módulos: 1 GiB cada, vazias até `place_windows`.
 const WINDOW_LEN: u64 = 1 << 30;
+
+/// O deslocamento do mapa direto, guardado por `Memory::init` para quem converte frame em ponteiro.
+static DIRECT_MAP_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 static DEVICES: IrqLock<AddressWindow> = IrqLock::new(AddressWindow::new(VirtAddr::new(0), 0));
 static STACKS: IrqLock<AddressWindow> = IrqLock::new(AddressWindow::new(VirtAddr::new(0), 0));
@@ -67,6 +72,7 @@ impl Memory {
         }
         allocator.reserve_range(block, metadata_bytes);
         let frames = frames::install(allocator);
+        DIRECT_MAP_OFFSET.store(boot.direct_map_offset(), Ordering::Relaxed);
         // SAFETY: o contrato desta função põe todo frame utilizável no mapa direto.
         unsafe { heap::install(frames, boot.direct_map_offset()) };
         Ok(Self {
@@ -249,4 +255,39 @@ unsafe fn direct_map_slice(
     let start = ptr::with_exposed_provenance_mut::<u64>(virt);
     // SAFETY: região exclusiva e mapeada, pelo contrato da função.
     unsafe { slice::from_raw_parts_mut(start, words) }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "o kernel só existe em 64 bits"
+)]
+const FRAME_BYTES: usize = PAGE_SIZE as usize;
+
+/// O ponteiro de um frame pelo mapa direto.
+fn frame_ptr(phys: PhysAddr) -> *mut u8 {
+    let offset = DIRECT_MAP_OFFSET.load(Ordering::Relaxed);
+    ptr::with_exposed_provenance_mut(
+        usize::try_from(phys.as_u64() + offset).expect("endereço cabe em usize"),
+    )
+}
+
+/// Zera o frame inteiro, pelo mapa direto.
+pub fn zero_frame(phys: PhysAddr) {
+    // SAFETY: todo frame do alocador é acessível no mapa direto (contrato de `Memory::init`) e o
+    // chamador o tem só para si.
+    unsafe { frame_ptr(phys).write_bytes(0, FRAME_BYTES) };
+}
+
+/// O frame tem código que o usuário vai executar: torna a escrita visível ao cache de instrução.
+pub fn sync_code_frame(phys: PhysAddr) {
+    platform::sync_icache(frame_ptr(phys).addr(), FRAME_BYTES);
+}
+
+/// Copia `bytes` para o início do frame (que o chamador zerou), pelo mapa direto.
+///
+/// # Safety
+/// `bytes.len() <= PAGE_SIZE` e o frame é só do chamador.
+pub unsafe fn fill_frame(phys: PhysAddr, bytes: &[u8]) {
+    // SAFETY: o contrato desta função; os dois não se sobrepõem.
+    unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), frame_ptr(phys), bytes.len()) };
 }

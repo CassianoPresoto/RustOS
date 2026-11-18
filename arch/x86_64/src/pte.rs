@@ -4,6 +4,8 @@ use rustos_hal::{CacheMode, PageFlags, PageFormat, PhysAddr};
 
 pub const PRESENT: u64 = 1 << 0;
 pub const WRITABLE: u64 = 1 << 1;
+/// `U/S`: acessível ao anel 3; vale em todos os níveis da hierarquia.
+pub const USER: u64 = 1 << 2;
 const WRITE_THROUGH: u64 = 1 << 3;
 const CACHE_DISABLE: u64 = 1 << 4;
 const ACCESSED: u64 = 1 << 5;
@@ -30,6 +32,11 @@ pub const fn table_entry(next: PhysAddr) -> u64 {
     (next.as_u64() & OUTPUT_ADDRESS) | PRESENT | WRITABLE
 }
 
+/// Entrada de nível intermediário da hierarquia de uma folha de usuário: o `U/S` é o E dos níveis.
+pub const fn user_table_entry(next: PhysAddr) -> u64 {
+    table_entry(next) | USER
+}
+
 /// Bits comuns às folhas: permissão e acesso. `pat` é o bit PAT da folha (7 ou 12).
 const fn leaf_bits(flags: PageFlags, pat: u64) -> u64 {
     let mut bits = PRESENT | ACCESSED;
@@ -38,6 +45,9 @@ const fn leaf_bits(flags: PageFlags, pat: u64) -> u64 {
     }
     if !flags.executable {
         bits |= NO_EXECUTE;
+    }
+    if flags.user {
+        bits |= USER;
     }
     bits |= match flags.cache {
         CacheMode::WriteBack => 0,
@@ -76,6 +86,7 @@ pub const fn decode_leaf(entry: u64, large: bool) -> (PhysAddr, PageFlags) {
     let flags = PageFlags {
         writable: entry & WRITABLE != 0,
         executable: entry & NO_EXECUTE == 0,
+        user: entry & USER != 0,
         cache,
     };
     (PhysAddr::new(entry & mask), flags)
@@ -118,6 +129,10 @@ pub struct X86Format;
 impl PageFormat for X86Format {
     fn table_entry(next: PhysAddr) -> u64 {
         table_entry(next)
+    }
+
+    fn user_table_entry(next: PhysAddr) -> u64 {
+        user_table_entry(next)
     }
 
     fn page_entry(phys: PhysAddr, flags: PageFlags) -> u64 {
@@ -179,6 +194,7 @@ mod tests {
         let flags = PageFlags {
             writable: false,
             executable: true,
+            user: false,
             cache: CacheMode::WriteBack,
         };
         let entry = page_entry(PhysAddr::new(0x1000), flags);
@@ -267,6 +283,38 @@ mod tests {
         assert_eq!(canonical(255 << 39), 255 << 39);
         assert_eq!(canonical(256 << 39), 0xffff_8000_0000_0000);
         assert_eq!(canonical(511 << 39), 0xffff_ff80_0000_0000);
+    }
+
+    #[test]
+    fn user_pages_set_the_user_bit_and_keep_the_other_permissions() {
+        let encode = |flags| page_entry(PhysAddr::new(0x1000), flags);
+        let code = encode(PageFlags::USER_CODE);
+        assert_eq!((code & USER, code & (WRITABLE | NO_EXECUTE)), (USER, 0));
+        let data = encode(PageFlags::USER_DATA);
+        assert_eq!(
+            data & (USER | WRITABLE | NO_EXECUTE),
+            USER | WRITABLE | NO_EXECUTE
+        );
+        assert_eq!(
+            encode(PageFlags::DATA) & USER,
+            0,
+            "página do kernel nunca é de usuário"
+        );
+        assert!(decode_leaf(data, false).1.user);
+        assert!(!decode_leaf(encode(PageFlags::DATA), false).1.user);
+    }
+
+    #[test]
+    fn user_tables_carry_the_user_bit_and_kernel_tables_do_not() {
+        assert_eq!(
+            user_table_entry(PhysAddr::new(0x2000)),
+            0x2000 | PRESENT | WRITABLE | USER
+        );
+        assert_eq!(table_entry(PhysAddr::new(0x2000)) & USER, 0);
+        assert_eq!(
+            X86Format::user_table_entry(PhysAddr::new(0x2000)),
+            user_table_entry(PhysAddr::new(0x2000))
+        );
     }
 
     #[test]

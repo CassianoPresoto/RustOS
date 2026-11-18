@@ -10,23 +10,36 @@ mod x86_64;
 
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::{
-    ARCH, Context, EarlyScratch, FPU_AREA_ALIGN, PlatformConsole, PlatformSpace,
-    SecondaryResources, TIMER_HZ, active_space, arm_timer, call_on_stack, console, cpu, cpu_local,
-    cycles, cycles_to_ns, early_console, early_init, early_serial_map, early_serial_switch,
-    fpu_area_bytes, fpu_init, fpu_init_area, fpu_restore, fpu_save, harden, hardware_entropy,
-    has_keyboard, init_interrupts, ipi, ipi_target, irq_source, kernel_root, keyboard_event,
-    local_hw_id, new_space, now_ns, prepare_secondary, protections, sched_clock_ns,
-    secondary_early, secondary_init, serial_irq_done, switch, trigger,
+    ARCH, Context, CpuPrefix, EarlyScratch, FPU_AREA_ALIGN, PlatformConsole, PlatformSpace,
+    SecondaryResources, TIMER_HZ, active_space, arm_timer, call_on_stack, console, copy_from_user,
+    copy_to_user, cpu, cpu_local, cycles, cycles_to_ns, early_console, early_init,
+    early_serial_map, early_serial_switch, enter_user, fpu_area_bytes, fpu_init, fpu_init_area,
+    fpu_restore, fpu_save, harden, hardware_entropy, has_keyboard, init_interrupts, ipi,
+    ipi_target, irq_source, kernel_half_in_sync, kernel_root, keyboard_event, local_hw_id,
+    new_space, new_user_space, now_ns, prepare_secondary, protections, sched_clock_ns,
+    secondary_early, secondary_init, serial_irq_done, switch, switch_space, sync_icache, trigger,
+    user_cpu_init, user_init,
 };
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::{
-    ARCH, Context, EarlyScratch, FPU_AREA_ALIGN, PlatformConsole, PlatformSpace,
-    SecondaryResources, TIMER_HZ, active_space, arm_timer, call_on_stack, console, cpu, cpu_local,
-    cycles, cycles_to_ns, early_console, early_init, early_serial_map, early_serial_switch,
-    fpu_area_bytes, fpu_init, fpu_init_area, fpu_restore, fpu_save, harden, hardware_entropy,
-    has_keyboard, init_interrupts, ipi, ipi_target, irq_source, kernel_root, keyboard_event,
-    local_hw_id, new_space, now_ns, prepare_secondary, protections, sched_clock_ns,
-    secondary_early, secondary_init, serial_irq_done, switch, trigger,
+    ARCH, Context, CpuPrefix, EarlyScratch, FPU_AREA_ALIGN, PlatformConsole, PlatformSpace,
+    SecondaryResources, TIMER_HZ, active_space, arm_timer, call_on_stack, console, copy_from_user,
+    copy_to_user, cpu, cpu_local, cycles, cycles_to_ns, early_console, early_init,
+    early_serial_map, early_serial_switch, enter_user, fpu_area_bytes, fpu_init, fpu_init_area,
+    fpu_restore, fpu_save, harden, hardware_entropy, has_keyboard, init_interrupts, ipi,
+    ipi_target, irq_source, kernel_half_in_sync, kernel_root, keyboard_event, local_hw_id,
+    new_space, new_user_space, now_ns, prepare_secondary, protections, sched_clock_ns,
+    secondary_early, secondary_init, serial_irq_done, switch, switch_space, sync_icache, trigger,
+    user_cpu_init, user_init,
+};
+
+#[cfg(all(feature = "selftest", target_arch = "aarch64"))]
+pub use aarch64::{
+    HAS_FAST_RETURN, ac_set, copy_fixup_stats, set_fast_return, set_stack_clean, user_blob,
+};
+#[cfg(all(feature = "selftest", target_arch = "x86_64"))]
+pub use x86_64::{
+    HAS_FAST_RETURN, ac_set, copy_fixup_stats, set_fast_return, set_stack_clean, user_blob,
 };
 
 #[cfg(all(feature = "selftest", target_arch = "aarch64"))]

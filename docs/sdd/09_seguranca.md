@@ -233,7 +233,8 @@ precisa estar de pé para a linha `random bench:`).
    - **O que não vê:** o estado de trabalho no meio das rodadas, sem padrão reconhecível.
      No aarch64 o `permute` não o derrama (só salva registradores do chamador); no x86_64
      `release` guarda poucas palavras num quadro de 40 bytes, e `Rng::new` e
-     `gather_jitter` devolvem por valor ([DEBT-0059](../tech-debt/0059-estado-do-chacha20-derramado-na-pilha-no-x86.md)).
+     `gather_jitter` devolvem por valor. A limpeza da pilha do kernel na volta ao usuário (fatia 4a,
+     [SDD 17](17_processos_isolamento_e_syscalls.md)) cobre esse resíduo.
    - **O `v` do BLAKE2b** (`compress`) passou a ser zerado como o `m`: dava para reconstruir
      o `h` anterior a partir dele. Custo no host: 4 MiB de 1 595–1 606 para 1 554–1 578 MB/s
      (-2%), BLAKE2b-256 com chave de 191 para 200–202 ns (+5%), `reseed` de 164–167 para

@@ -3,6 +3,7 @@
 
 use core::marker::PhantomData;
 
+use rustos_hal::abi::{USER_MIN, USER_TOP};
 use rustos_hal::{
     AddressSpace, FrameSource, LARGE_PAGE_SIZE, MapError, Mapping, MmuControl, PAGE_SIZE,
     PageFlags, PageFormat, PageMapper, PhysAddr, TableMemory, VirtAddr,
@@ -60,13 +61,66 @@ impl<Fmt: PageFormat, Mem: TableMemory, Ctl: MmuControl> PageTables<Fmt, Mem, Ct
         Ok(Self::new(root, memory, control))
     }
 
-    /// Desce criando tabelas até `leaf_level` e grava `entry` lá.
+    /// A raiz desta hierarquia: o que o `CR3` ou o `TTBR0_EL1` recebe.
+    pub const fn root(&self) -> PhysAddr {
+        self.root
+    }
+
+    /// Copia as entradas `range` do nível mais alto de `from` para a raiz desta: o x86_64 dá
+    /// a cada processo a metade do kernel por ponteiro, as subárvores seguem compartilhadas.
+    pub fn adopt_top_entries(&mut self, from: PhysAddr, range: core::ops::Range<usize>) {
+        for index in range {
+            let entry = self.memory.read(from, index);
+            self.memory.write(self.root, index, entry);
+        }
+    }
+
+    /// As entradas `range` do nível mais alto desta raiz são iguais às de `other`.
+    pub fn top_entries_match(&self, other: PhysAddr, range: core::ops::Range<usize>) -> bool {
+        range
+            .into_iter()
+            .all(|index| self.memory.read(self.root, index) == self.memory.read(other, index))
+    }
+
+    /// Entrega a `free` cada frame de dado e cada tabela da metade de usuário (as primeiras
+    /// `top_entries` do nível mais alto), os de baixo primeiro, e por fim a raiz. Zera a raiz.
+    /// Depois disso o espaço não pode mais ser ativado.
+    pub fn release_user_half(&mut self, top_entries: usize, mut free: impl FnMut(PhysAddr)) {
+        for index in 0..top_entries {
+            let entry = self.memory.read(self.root, index);
+            if Fmt::is_valid(entry) {
+                self.release_table(Fmt::table_address(entry), 1, &mut free);
+                self.memory.write(self.root, index, 0);
+            }
+        }
+        free(self.root);
+    }
+
+    fn release_table(&mut self, table: PhysAddr, level: usize, free: &mut impl FnMut(PhysAddr)) {
+        for index in 0..ENTRIES {
+            let entry = self.memory.read(table, index);
+            if !Fmt::is_valid(entry) {
+                continue;
+            }
+            if level == LEVELS - 1 || !Fmt::is_table(entry, level) {
+                let (phys, _) = Fmt::decode_leaf(entry, level != LEVELS - 1);
+                free(phys);
+            } else {
+                self.release_table(Fmt::table_address(entry), level + 1, free);
+            }
+        }
+        free(table);
+    }
+
+    /// Desce criando tabelas até `leaf_level` e grava `entry` lá. `user` pede a hierarquia de
+    /// uma folha de usuário.
     fn map_leaf<F: FrameSource>(
         &mut self,
         virt: VirtAddr,
         frames: &mut F,
         leaf_level: usize,
         entry: u64,
+        user: bool,
     ) -> Result<(), MapError> {
         let mut table = self.root;
         for level in 0..leaf_level {
@@ -75,7 +129,12 @@ impl<Fmt: PageFormat, Mem: TableMemory, Ctl: MmuControl> PageTables<Fmt, Mem, Ct
             table = if !Fmt::is_valid(current) {
                 let next = frames.allocate_frame().ok_or(MapError::OutOfFrames)?;
                 self.memory.zero(next);
-                self.memory.write(table, index, Fmt::table_entry(next));
+                let descriptor = if user {
+                    Fmt::user_table_entry(next)
+                } else {
+                    Fmt::table_entry(next)
+                };
+                self.memory.write(table, index, descriptor);
                 next
             } else if Fmt::is_table(current, level) {
                 Fmt::table_address(current)
@@ -124,6 +183,18 @@ impl<Fmt: PageFormat, Mem: TableMemory, Ctl: MmuControl> PageTables<Fmt, Mem, Ct
     }
 }
 
+/// Folha de usuário só em `[USER_MIN, USER_TOP)`, e nada na metade baixa sem o bit de usuário:
+/// o espaço de usuário e o do kernel não se misturam.
+fn check_user_range(virt: VirtAddr, len: u64, flags: PageFlags) -> Result<(), MapError> {
+    let start = virt.as_u64();
+    let in_user_half = start < USER_TOP;
+    let fits = start >= USER_MIN && start.checked_add(len).is_some_and(|end| end <= USER_TOP);
+    if flags.user && !fits || !flags.user && in_user_half {
+        return Err(MapError::UserRange(virt));
+    }
+    Ok(())
+}
+
 impl<Fmt: PageFormat, Mem: TableMemory, Ctl: MmuControl> PageMapper for PageTables<Fmt, Mem, Ctl> {
     fn map_page<F: FrameSource>(
         &mut self,
@@ -138,7 +209,14 @@ impl<Fmt: PageFormat, Mem: TableMemory, Ctl: MmuControl> PageMapper for PageTabl
         if !virt.is_aligned(PAGE_SIZE) || !phys.is_aligned(PAGE_SIZE) {
             return Err(MapError::Misaligned);
         }
-        self.map_leaf(virt, frames, LEVELS - 1, Fmt::page_entry(phys, flags))
+        check_user_range(virt, PAGE_SIZE, flags)?;
+        self.map_leaf(
+            virt,
+            frames,
+            LEVELS - 1,
+            Fmt::page_entry(phys, flags),
+            flags.user,
+        )
     }
 
     fn map_large_page<F: FrameSource>(
@@ -154,7 +232,14 @@ impl<Fmt: PageFormat, Mem: TableMemory, Ctl: MmuControl> PageMapper for PageTabl
         if !virt.is_aligned(LARGE_PAGE_SIZE) || !phys.is_aligned(LARGE_PAGE_SIZE) {
             return Err(MapError::Misaligned);
         }
-        self.map_leaf(virt, frames, LARGE_LEVEL, Fmt::large_entry(phys, flags))
+        check_user_range(virt, LARGE_PAGE_SIZE, flags)?;
+        self.map_leaf(
+            virt,
+            frames,
+            LARGE_LEVEL,
+            Fmt::large_entry(phys, flags),
+            flags.user,
+        )
     }
 }
 
@@ -184,6 +269,7 @@ mod tests {
     const WRITE: u64 = 1 << 2;
     const NO_EXEC: u64 = 1 << 3;
     const LARGE: u64 = 1 << 7;
+    const USER: u64 = 1 << 4;
     const ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
     const LARGE_ADDRESS: u64 = 0x000F_FFFF_FFE0_0000;
 
@@ -192,12 +278,19 @@ mod tests {
     struct Toy;
 
     fn leaf_bits(flags: PageFlags) -> u64 {
-        VALID | if flags.writable { WRITE } else { 0 } | if flags.executable { 0 } else { NO_EXEC }
+        VALID
+            | if flags.writable { WRITE } else { 0 }
+            | if flags.executable { 0 } else { NO_EXEC }
+            | if flags.user { USER } else { 0 }
     }
 
     impl PageFormat for Toy {
         fn table_entry(next: PhysAddr) -> u64 {
             next.as_u64() | VALID | TABLE | WRITE
+        }
+
+        fn user_table_entry(next: PhysAddr) -> u64 {
+            Self::table_entry(next) | USER
         }
 
         fn page_entry(phys: PhysAddr, flags: PageFlags) -> u64 {
@@ -225,6 +318,7 @@ mod tests {
             let flags = PageFlags {
                 writable: entry & WRITE != 0,
                 executable: entry & NO_EXEC == 0,
+                user: entry & USER != 0,
                 cache: CacheMode::WriteBack,
             };
             (PhysAddr::new(entry & mask), flags)
@@ -457,6 +551,7 @@ mod tests {
         let both = PageFlags {
             writable: true,
             executable: true,
+            user: false,
             cache: CacheMode::WriteBack,
         };
         let phys = PhysAddr::new(0x4020_0000);
@@ -557,5 +652,129 @@ mod tests {
     fn walk_of_an_empty_root_finds_nothing() {
         let cpu = Cpu::default();
         assert_eq!(collect(&space(&cpu)).len(), 0);
+    }
+
+    const USER_VIRT: VirtAddr = VirtAddr::new(0x40_0000);
+
+    #[test]
+    fn a_user_leaf_asks_for_user_tables_at_every_level() {
+        let (cpu, mut frames) = (Cpu::default(), Frames(vec![0x5000, 0x4000, 0x3000, 0x2000]));
+        let mut space = space(&cpu);
+        space
+            .map_page(USER_VIRT, DEVICE, PageFlags::USER_DATA, &mut frames)
+            .unwrap();
+        let top = space.memory.read(ROOT, table_index(USER_VIRT, 0));
+        assert_ne!(top & USER, 0);
+        let leaf = space
+            .memory
+            .read(PhysAddr::new(0x4000), table_index(USER_VIRT, 3));
+        assert_eq!(leaf, Toy::page_entry(DEVICE, PageFlags::USER_DATA));
+        let middle = space
+            .memory
+            .read(PhysAddr::new(0x2000), table_index(USER_VIRT, 1));
+        assert_ne!(middle & USER, 0, "a hierarquia inteira nasce de usuário");
+    }
+
+    #[test]
+    fn the_user_and_kernel_halves_do_not_mix() {
+        let (cpu, mut frames) = (Cpu::default(), Frames(vec![0x5000, 0x4000, 0x3000, 0x2000]));
+        let mut space = space(&cpu);
+        let user = PageFlags::USER_DATA;
+        for virt in [
+            VirtAddr::new(0),
+            VirtAddr::new(USER_MIN - PAGE_SIZE),
+            VirtAddr::new(USER_TOP),
+            VirtAddr::new(0xffff_8000_0000_0000),
+            VIRT,
+        ] {
+            assert_eq!(
+                space.map_page(virt, DEVICE, user, &mut frames),
+                Err(MapError::UserRange(virt)),
+                "{virt:?}"
+            );
+        }
+        for virt in [USER_VIRT, VirtAddr::new(USER_TOP - PAGE_SIZE)] {
+            assert_eq!(
+                space.map_page(virt, DEVICE, PageFlags::DATA, &mut frames),
+                Err(MapError::UserRange(virt)),
+                "{virt:?}"
+            );
+        }
+        assert_eq!(space.memory.0.len(), 0);
+    }
+
+    #[test]
+    fn user_write_and_execute_is_refused() {
+        let (cpu, mut frames) = (Cpu::default(), Frames(vec![0x5000, 0x4000, 0x3000, 0x2000]));
+        let mut space = space(&cpu);
+        let both = PageFlags {
+            writable: true,
+            executable: true,
+            ..PageFlags::USER_DATA
+        };
+        assert_eq!(
+            space.map_page(USER_VIRT, DEVICE, both, &mut frames),
+            Err(MapError::WriteExecute(USER_VIRT))
+        );
+    }
+
+    #[test]
+    fn adopt_copies_the_upper_entries_and_the_check_sees_a_stale_root() {
+        let cpu = Cpu::default();
+        let mut kernel = space(&cpu);
+        let mut frames = Frames(vec![0x5000, 0x4000, 0x3000, 0x2000]);
+        map(&mut kernel, VIRT, &mut frames).unwrap();
+        let mut memory = FakeTables::default();
+        memory.0.insert(0x1000, kernel.memory.0[&0x1000]);
+        let mut user: Space<'_> =
+            PageTables::new_empty(&mut Frames(vec![0x9000]), memory, &cpu).unwrap();
+        assert!(!user.top_entries_match(ROOT, 256..512));
+        user.adopt_top_entries(ROOT, 256..512);
+        assert!(user.top_entries_match(ROOT, 256..512));
+        assert_eq!(
+            user.memory.read(PhysAddr::new(0x9000), 510),
+            user.memory.read(ROOT, 510)
+        );
+        assert_ne!(user.memory.read(ROOT, 510), 0);
+    }
+
+    #[test]
+    fn release_returns_every_data_frame_table_and_the_root_once() {
+        let (cpu, mut frames) = (
+            Cpu::default(),
+            Frames(vec![0x7000, 0x6000, 0x5000, 0x4000, 0x3000, 0x2000]),
+        );
+        let mut space = space(&cpu);
+        let second = VirtAddr::new(USER_VIRT.as_u64() + PAGE_SIZE);
+        let code = PhysAddr::new(0xA000);
+        space
+            .map_page(USER_VIRT, code, PageFlags::USER_CODE, &mut frames)
+            .unwrap();
+        space
+            .map_page(
+                second,
+                PhysAddr::new(0xB000),
+                PageFlags::USER_DATA,
+                &mut frames,
+            )
+            .unwrap();
+        let mut freed = Vec::new();
+        space.release_user_half(256, |frame| freed.push(frame.as_u64()));
+        freed.sort_unstable();
+        assert_eq!(freed, [0x1000, 0x2000, 0x3000, 0x4000, 0xA000, 0xB000]);
+        assert_eq!(space.memory.read(ROOT, 0), 0);
+    }
+
+    #[test]
+    fn release_keeps_the_upper_half_alone() {
+        let (cpu, mut frames) = (Cpu::default(), Frames(vec![0x5000, 0x4000, 0x3000, 0x2000]));
+        let mut space = space(&cpu);
+        map(&mut space, VIRT, &mut frames).unwrap();
+        let upper = space.memory.read(ROOT, 510);
+        assert_ne!(upper, 0);
+        let mut freed = Vec::new();
+        space.release_user_half(256, |frame| freed.push(frame.as_u64()));
+        assert_eq!(freed, [0x1000]);
+        assert_eq!(space.memory.read(ROOT, 510), upper);
     }
 }

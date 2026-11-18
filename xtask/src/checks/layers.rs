@@ -10,13 +10,20 @@ use crate::{manifest, workspace};
 /// Crates de fora do workspace aprovados (guidelines 03, regra 7). Vazio de propósito.
 const ALLOWED_EXTERNAL: &[&str] = &[];
 
+/// Os crates de `core/` que o `user/` pode ligar, além do `core/hal` (guidelines 03, regra 11).
+const USER_MAY_USE_CORE: &[&str] = &["core/elf", "core/cpio"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Layer {
     Ports,
     Core,
     Lib,
     Adapter,
+    /// `arch/<isa>-user`: adaptador do lado do usuário, que o `kernel/` nunca liga (regra 12).
+    UserAdapter,
     Kernel,
+    /// `user/`: runtime e programas de usuário (regra 11).
+    User,
     Tool,
 }
 
@@ -27,21 +34,30 @@ impl Layer {
             (_, "core/hal") => Some(Self::Ports),
             ("core", _) => Some(Self::Core),
             ("lib", _) => Some(Self::Lib),
+            ("arch", _) if member.ends_with("-user") => Some(Self::UserAdapter),
             ("arch" | "boot" | "drivers", _) => Some(Self::Adapter),
             ("kernel", _) => Some(Self::Kernel),
+            ("user", _) => Some(Self::User),
             ("xtask", _) => Some(Self::Tool),
             _ => None,
         }
     }
 
-    fn may_depend_on(self, other: Self) -> bool {
-        use Layer::{Adapter, Core, Lib, Ports};
+    /// `other_path` é a pasta do alvo: o `user/` só depende dos crates de `core/` que a regra 11
+    /// lista.
+    fn may_depend_on(self, other: Self, other_path: &str) -> bool {
+        use Layer::{Adapter, Core, Lib, Ports, User, UserAdapter};
         match self {
             Self::Ports | Self::Tool => false,
             Self::Core => other == Ports,
             Self::Lib => other == Lib,
-            Self::Adapter => matches!(other, Ports | Lib),
+            Self::Adapter | Self::UserAdapter => matches!(other, Ports | Lib),
             Self::Kernel => matches!(other, Ports | Core | Lib | Adapter),
+            Self::User => match other {
+                Ports | UserAdapter | User => true,
+                Core => USER_MAY_USE_CORE.contains(&other_path),
+                _ => false,
+            },
         }
     }
 }
@@ -60,7 +76,7 @@ pub fn layers(root: &Path) -> Result<(), String> {
     for path in manifest::workspace_members(&root_manifest) {
         let Some(layer) = Layer::of(&path) else {
             violations.push(format!(
-                "{path}: pasta fora das camadas (core, lib, arch, boot, drivers, kernel, xtask)"
+                "{path}: pasta fora das camadas (core, lib, arch, boot, drivers, kernel, user, xtask)"
             ));
             continue;
         };
@@ -81,7 +97,7 @@ pub fn layers(root: &Path) -> Result<(), String> {
     for member in &members {
         for dependency in manifest::dependencies(&member.manifest) {
             match by_name.get(dependency.as_str()) {
-                Some(target) if !member.layer.may_depend_on(target.layer) => {
+                Some(target) if !member.layer.may_depend_on(target.layer, &target.path) => {
                     violations.push(format!(
                         "{}: {:?} não pode depender de {:?} ({})",
                         member.path, member.layer, target.layer, target.path
@@ -127,6 +143,15 @@ fn check_sources(root: &Path, member: &Member, violations: &mut Vec<String>) {
         violations.push(format!("{}: crate do kernel sem `no_std`", member.path));
     }
     let asm_allowed = member.path.starts_with("arch/") || member.layer == Layer::Tool;
+    if member.layer == Layer::User
+        && !member.path.ends_with("/rt")
+        && !crate_text.contains("#![forbid(unsafe_code)]")
+    {
+        violations.push(format!(
+            "{}: programa de usuário sem `#![forbid(unsafe_code)]` (só o `user/rt` tem `unsafe`, guidelines 03, regra 11)",
+            member.path
+        ));
+    }
     for file in workspace::files_with_extension(&dir.join("src"), "rs") {
         let text = fs::read_to_string(&file).unwrap_or_default();
         if !asm_allowed && (text.contains("asm!(") || text.contains("naked_asm!(")) {
@@ -155,13 +180,55 @@ mod tests {
     }
 
     #[test]
+    fn the_kernel_never_links_an_arch_user_adapter() {
+        let user_adapter = Layer::of("arch/x86_64-user").unwrap();
+        assert!(!Layer::Kernel.may_depend_on(user_adapter, "arch/x86_64-user"));
+        assert_ne!(user_adapter, Layer::of("arch/x86_64").unwrap());
+        assert_eq!(Layer::of("arch/aarch64-user"), Some(Layer::UserAdapter));
+        let arch = Layer::of("arch/aarch64").unwrap();
+        assert!(!arch.may_depend_on(user_adapter, "arch/x86_64-user"));
+        assert!(user_adapter.may_depend_on(Layer::Ports, "core/hal"));
+        assert!(!user_adapter.may_depend_on(Layer::Core, "core/mm"));
+        assert!(!user_adapter.may_depend_on(Layer::Adapter, "arch/x86_64"));
+    }
+
+    #[test]
+    fn user_depends_on_the_abi_the_loaders_and_its_own_adapters_only() {
+        let user = Layer::of("user/rt").unwrap();
+        assert_eq!(user, Layer::User);
+        assert!(user.may_depend_on(Layer::Ports, "core/hal"));
+        assert!(user.may_depend_on(Layer::Core, "core/elf"));
+        assert!(user.may_depend_on(Layer::Core, "core/cpio"));
+        assert!(user.may_depend_on(Layer::UserAdapter, "arch/x86_64-user"));
+        assert!(user.may_depend_on(Layer::User, "user/rt"));
+        assert!(!user.may_depend_on(Layer::Core, "core/mm"));
+        assert!(!user.may_depend_on(Layer::Kernel, "kernel"));
+        assert!(!user.may_depend_on(Layer::Adapter, "arch/x86_64"));
+        assert!(!user.may_depend_on(Layer::Lib, "lib/sync"));
+    }
+
+    #[test]
+    fn nothing_depends_on_user() {
+        for layer in [
+            Layer::Ports,
+            Layer::Core,
+            Layer::Lib,
+            Layer::Adapter,
+            Layer::UserAdapter,
+            Layer::Kernel,
+        ] {
+            assert!(!layer.may_depend_on(Layer::User, "user/rt"), "{layer:?}");
+        }
+    }
+
+    #[test]
     fn dependencies_point_inward() {
-        assert!(Layer::Adapter.may_depend_on(Layer::Ports));
-        assert!(Layer::Kernel.may_depend_on(Layer::Adapter));
-        assert!(!Layer::Core.may_depend_on(Layer::Adapter));
-        assert!(!Layer::Adapter.may_depend_on(Layer::Adapter));
-        assert!(!Layer::Adapter.may_depend_on(Layer::Core));
-        assert!(!Layer::Ports.may_depend_on(Layer::Lib));
-        assert!(!Layer::Lib.may_depend_on(Layer::Ports));
+        assert!(Layer::Adapter.may_depend_on(Layer::Ports, "core/hal"));
+        assert!(Layer::Kernel.may_depend_on(Layer::Adapter, "arch/x86_64"));
+        assert!(!Layer::Core.may_depend_on(Layer::Adapter, "arch/x86_64"));
+        assert!(!Layer::Adapter.may_depend_on(Layer::Adapter, "arch/aarch64"));
+        assert!(!Layer::Adapter.may_depend_on(Layer::Core, "core/mm"));
+        assert!(!Layer::Ports.may_depend_on(Layer::Lib, "lib/sync"));
+        assert!(!Layer::Lib.may_depend_on(Layer::Ports, "core/hal"));
     }
 }

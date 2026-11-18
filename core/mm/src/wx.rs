@@ -257,6 +257,7 @@ mod tests {
         let both = PageFlags {
             writable: true,
             executable: true,
+            user: false,
             cache: CacheMode::WriteBack,
         };
         maps.push(page(HHDM + 0x2000_0000, 0x2000_0000, both));

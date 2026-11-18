@@ -7,11 +7,12 @@ use alloc::string::String;
 use rustos_hal::{BootInfo, Cpu, PAGE_SIZE};
 use rustos_shell::DisplayInfo;
 
+use crate::frames::Frames;
 use crate::memory::Memory;
 use crate::platform::FpuSummary;
 use crate::{
-    KERNEL_STACK_PAGES, bench, boot_time, console, fmt, heap, interrupts, platform, random, task,
-    vm,
+    KERNEL_STACK_PAGES, bench, boot_time, console, fmt, heap, interrupts, platform, process,
+    random, task, vm,
 };
 
 /// O boot de teste foi pedido e esta imagem o tem.
@@ -127,7 +128,7 @@ pub fn before_tasks() -> bool {
 
 /// Com as tarefas ligadas: a preempção e o estado de SIMD de cada uma, a migração entre núcleos,
 /// a troca de contexto, o jitter de acordar e as pilhas. Devolve `false` se algum falhou.
-pub fn after_tasks(summary: FpuSummary) -> bool {
+pub fn after_tasks(summary: FpuSummary, frames: Frames, map_offset: u64) -> bool {
     boot_time::enter(boot_time::Phase::SelfTests);
     kprintln!(
         "[rustos] fpu: {}, {} bytes per task, {}",
@@ -180,8 +181,9 @@ pub fn after_tasks(summary: FpuSummary) -> bool {
         }
         None => kprintln!("[rustos] switch: not measured"),
     }
+    let user_ok = process::self_test(frames, map_offset);
     let stacks_ok = task::log_stacks();
-    preempted.is_some() && smp_ok && stacks_ok
+    preempted.is_some() && smp_ok && user_ok && stacks_ok
 }
 
 /// O que a linha `boot time:` não mostra: o tempo das fases e o erro da calibração do TSC.

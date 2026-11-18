@@ -42,6 +42,8 @@ static HANDLERS: Handlers = Handlers {
     fault: on_fault,
     irq: on_irq,
     preempt: task::preempt,
+    syscall: crate::syscall::dispatch,
+    leave_user: crate::scrub::leave_user,
 };
 /// Período do tique de boot, antes de o escalonador ligar; depois dele não há tique periódico.
 const TICK_NS: u64 = 1_000_000_000 / platform::TIMER_HZ as u64;
@@ -152,6 +154,11 @@ fn push_input(byte: u8) {
 }
 
 fn on_fault(fault: &Fault) {
+    #[cfg(feature = "selftest")]
+    crate::process::check_ac();
+    if fault.from_user {
+        crate::process::user_fault(fault);
+    }
     if fault.kind.is_recoverable() {
         BREAKPOINTS.fetch_add(1, Ordering::Relaxed);
         return;
@@ -177,6 +184,8 @@ impl core::fmt::Display for FaultLine<'_> {
 }
 
 fn on_irq(irq: Irq) {
+    #[cfg(feature = "selftest")]
+    crate::process::check_ac();
     let cpu = percpu::current();
     cpu.set_in_irq(true);
     bump(&cpu.stats.irqs, 1);

@@ -4,6 +4,7 @@
 use rustos_hal::BootInfo;
 use rustos_shell::DisplayInfo;
 
+use crate::frames::Frames;
 use crate::memory::Memory;
 use crate::platform::FpuSummary;
 use crate::{random, vm};
@@ -33,7 +34,7 @@ pub fn before_tasks() -> bool {
     true
 }
 
-pub fn after_tasks(_: FpuSummary) -> bool {
+pub fn after_tasks(_: FpuSummary, _: Frames, _: u64) -> bool {
     true
 }
 
