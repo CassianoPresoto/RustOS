@@ -23,13 +23,19 @@ pub struct Rng {
 }
 
 impl Rng {
+    /// Chave de zeros, previsível: só serve para ser semeada no lugar, com `reseed`, de modo
+    /// que a chave nunca passe por uma cópia na pilha (`random::init` do kernel).
+    pub const fn unseeded() -> Self {
+        Self {
+            key: [0; chacha20::KEY_LEN],
+            bytes_since_seed: 0,
+        }
+    }
+
     /// Cria o gerador a partir de `seed`, de qualquer tamanho. Com menos de 256
     /// bits de entropia na semente, o gerador é tão fraco quanto a semente.
     pub fn new(seed: &[u8]) -> Self {
-        let mut rng = Self {
-            key: [0; chacha20::KEY_LEN],
-            bytes_since_seed: 0,
-        };
+        let mut rng = Self::unseeded();
         rng.reseed(seed);
         rng
     }
@@ -37,8 +43,10 @@ impl Rng {
     /// Mistura `entropy` na chave: `chave = BLAKE2b-256(chave antiga, entropy)`.
     /// A entrada não apaga o que o gerador já sabia, e zera o contador de bytes.
     pub fn reseed(&mut self, entropy: &[u8]) {
-        let next = blake2b::keyed_256(&self.key, entropy);
-        self.key = next;
+        let mut next = [0_u8; chacha20::KEY_LEN];
+        blake2b::keyed_256(&self.key, entropy, &mut next);
+        self.key.copy_from_slice(&next);
+        wipe(&mut next);
         self.bytes_since_seed = 0;
     }
 
@@ -66,7 +74,8 @@ impl Rng {
     /// O bloco 0 dá a chave nova (primeira metade) e os primeiros 32 bytes de
     /// saída; os blocos seguintes, com a chave velha, dão o resto.
     fn request(&mut self, out: &mut [u8]) {
-        let mut first = chacha20::block(&self.key, 0, &NONCE);
+        let mut first = [0_u8; chacha20::BLOCK_LEN];
+        chacha20::block_into(&self.key, 0, &NONCE, &mut first);
         let head = out.len().min(HALF);
         out[..head].copy_from_slice(&first[HALF..HALF + head]);
         if out.len() > HALF {
@@ -301,6 +310,16 @@ mod tests {
         let before = rng.key;
         rng.reseed(&[]);
         assert_ne!(rng.key, before);
+    }
+
+    #[test]
+    fn unseeded_has_a_zero_key_and_new_is_unseeded_plus_reseed() {
+        let fresh = Rng::unseeded();
+        assert_eq!(fresh.key, [0; 32]);
+        assert_eq!(fresh.bytes_since_seed(), 0);
+        let mut in_place = Rng::unseeded();
+        in_place.reseed(b"seed");
+        assert_eq!(in_place.key, Rng::new(b"seed").key);
     }
 
     #[test]

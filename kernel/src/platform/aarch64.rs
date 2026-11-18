@@ -9,6 +9,7 @@ pub use rustos_arch_aarch64::fpu::{
     save as fpu_save, write_probe as fpu_write_probe,
 };
 use rustos_arch_aarch64::intid::{QEMU_VIRT_PL011_INTID, VIRTUAL_TIMER_INTID};
+pub use rustos_arch_aarch64::zero::zero_aligned;
 use rustos_arch_aarch64::{
     Aarch64Cpu, Aarch64Entropy, Aarch64Mmu, DirectMapTables, MmioBus, QEMU_VIRT_GICD,
     QEMU_VIRT_GICR, QEMU_VIRT_PL011, active_root, exception, gic_cpu, intid, prepare_space,
@@ -83,6 +84,7 @@ const PAN_OFF: u8 = 2;
 
 /// Liga as proteções de hardware da CPU, antes das tabelas novas.
 pub fn harden() {
+    rustos_arch_aarch64::zero::init();
     if protection::pan_available() {
         // SAFETY: EL1, e a CPU anuncia `PAN`.
         let on = unsafe { protection::enable_pan() };

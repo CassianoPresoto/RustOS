@@ -1,8 +1,11 @@
 //! Gerador aleatório do kernel: semente do hardware, ou jitter do contador quando a
 //! CPU não tem gerador, e o estado global com reposição por volume entregue.
 
+use alloc::boxed::Box;
+use core::ptr;
+
 use rustos_crypto::seed::{HARDWARE_SAMPLE_LEN, gather_jitter, hardware_output_plausible};
-use rustos_crypto::{Rng, wipe};
+use rustos_crypto::{Rng, blake2b, wipe};
 use rustos_hal::HardwareEntropy;
 
 use crate::platform;
@@ -18,6 +21,11 @@ const JITTER_ROUNDS: usize = 512;
 const MARKS_MAX: usize = 16;
 const BENCH_BLOCK: usize = 4096;
 const BENCH_BLOCKS: usize = 32;
+const BENCH_REQUESTS: u64 = 20_000;
+/// Bytes da pilha, abaixo do chamador, que o autoteste de resíduo varre.
+const SCAN_BYTES: usize = 2048;
+/// As quatro primeiras palavras do estado do ChaCha20, que vêm antes da chave.
+const CHACHA_CONSTANTS: [u8; 16] = *b"expand 32-byte k";
 
 /// De onde veio a semente.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,10 +38,16 @@ pub enum Source {
 /// Semeia o gerador global. `marks` são os marcos impredizíveis do boot (contadores,
 /// tempos do bootloader): entram por `reseed` junto com o jitter, qualquer que seja a fonte.
 pub fn init(marks: &[u64]) -> Source {
-    let mut rng = Rng::new(&[]);
-    let source = replenish(&mut rng, marks);
-    *RNG.lock() = Some(rng);
-    source
+    let mut slot = RNG.lock();
+    replenish(start(&mut slot), marks)
+}
+
+/// Põe no `slot` o gerador com a chave de `Rng::new(&[])`, semeada no lugar: a chave não
+/// passa por cópia na pilha.
+fn start(slot: &mut Option<Rng>) -> &mut Rng {
+    let rng = slot.insert(Rng::unseeded());
+    rng.reseed(&[]);
+    rng
 }
 
 /// Um número de 64 bits; `None` antes de `init`. Repõe a semente a cada `RESEED_BYTES`.
@@ -78,6 +92,8 @@ fn replenish(rng: &mut Rng, marks: &[u64]) -> Source {
 pub struct Benchmark {
     pub mb_per_s: u64,
     pub reseed_ns: u64,
+    /// Décimos de ns por `Rng::next_u64`.
+    pub u64_tenths_ns: u64,
 }
 
 /// `None` sem relógio. Usa um gerador à parte, não o global.
@@ -94,8 +110,66 @@ pub fn benchmark() -> Option<Benchmark> {
     replenish(&mut rng, &[platform::cycles()]);
     let reseed_ns = platform::now_ns()?.saturating_sub(start);
     wipe(&mut block);
+    let start = platform::now_ns()?;
+    for _ in 0..BENCH_REQUESTS {
+        core::hint::black_box(rng.next_u64());
+    }
+    let u64_ns = platform::now_ns()?.saturating_sub(start);
     Some(Benchmark {
         mb_per_s: bytes * 1000 / fill_ns,
         reseed_ns,
+        u64_tenths_ns: u64_ns * 10 / BENCH_REQUESTS,
     })
+}
+
+/// Cópias de material de chave achadas na pilha depois de semear e de um pedido.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Residue {
+    /// Estados do ChaCha20 (constantes seguidas da chave).
+    pub states: usize,
+    /// Cópias dos 16 primeiros bytes da chave que o gerador tinha antes do pedido.
+    pub keys: usize,
+}
+
+/// Enche a pilha abaixo do chamador com um padrão para o resíduo se distinguir.
+#[inline(never)]
+fn poison_stack() {
+    let mut pad = [0x5A_u8; SCAN_BYTES + 512];
+    core::hint::black_box(&mut pad);
+}
+
+fn count_windows(window: &[u8; 16], low: usize, high: usize) -> usize {
+    let mut found = 0;
+    for start in low..high.saturating_sub(window.len() - 1) {
+        let matches = window.iter().enumerate().all(|(i, &byte)| {
+            // SAFETY: `[low, high)` está na pilha própria do kernel, mapeada e abaixo do `sp`.
+            byte == unsafe { ptr::with_exposed_provenance::<u8>(start + i).read_volatile() }
+        });
+        found += usize::from(matches);
+    }
+    found
+}
+
+/// Semeia um gerador com a chave conhecida de `Rng::new(&[])`, atende um pedido e varre a
+/// pilha abaixo daqui atrás de cópias do estado do ChaCha20 e da chave antiga (SDD 09).
+/// Nada do gerador fica na pilha deste quadro: ele mora no heap.
+#[inline(never)]
+pub fn stack_residue() -> Residue {
+    let mut known = Box::new([0_u8; 32]);
+    let zero_key = [0_u8; 32];
+    if blake2b::hash(&mut *known, &zero_key, &[]).is_err() {
+        return Residue::default();
+    }
+    let needle: Box<[u8; 16]> = Box::new(known[..16].try_into().unwrap_or([0; 16]));
+    let mut slot: Box<Option<Rng>> = Box::new(None);
+    poison_stack();
+    let mut out = Box::new([0_u8; 64]);
+    start(&mut slot).fill_bytes(&mut *out);
+    let probe = 0_u8;
+    let top = ptr::from_ref(&probe).expose_provenance();
+    let (low, high) = (top - SCAN_BYTES, top);
+    Residue {
+        states: count_windows(&CHACHA_CONSTANTS, low, high),
+        keys: count_windows(&needle, low, high),
+    }
 }

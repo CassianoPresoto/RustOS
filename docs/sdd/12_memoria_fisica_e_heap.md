@@ -138,8 +138,9 @@ ponteiro, e o subtrai em `dealloc`. `deallocate` recebe o mesmo `Layout` de
   pegado. Antes de zerar, `FrameAllocator::verify_used` confere que o bloco está
   ocupado no buddy, para a dupla liberação de bloco livre não gravar zero em lugar
   nenhum (se outro dono já pegou o bloco, o buddy não tem como saber). A política é do heap; frame que sai do buddy para
-  processo é zerado por quem o usa (`FrameMemory::zero`). Custo no
-  [SDD 07](07_desempenho_e_recursos.md).
+  processo é zerado por quem o usa (`FrameMemory::zero`). No kernel, `DirectMap::zero` manda
+  faixas de 512 bytes ou mais, múltiplas de 64, ao `arch/` (`DC ZVA` no aarch64; no x86_64
+  ainda o `memset`), e o resto ao `write_bytes`. Custo no [SDD 07](07_desempenho_e_recursos.md).
 
 | Classe | Objetos por slab | Aproveitamento da página |
 | --- | --- | --- |
@@ -183,7 +184,9 @@ ordem fica escrita para a fase 3, quando houver disputa.
   `u64`, `[u32; 300]` e dois tipos alinhados a 64 e a 4096, um `Vec<u32>` que cresce até
   10 000, e a contabilidade de volta ao ponto de partida. Depois aloca um bloco de duas
   páginas, o solta, lê as palavras dele pelo mapa direto (voltam zeradas) e confere
-  que os frames voltaram ao buddy.
+  que os frames voltaram ao buddy. Depois zera faixas de começo e tamanho variados (512 B até
+  3 páginas, sem alinhar ao bloco do `DC ZVA`) numa área de 3 páginas cheia de `0xAA` e
+  confere que os vizinhos de cada faixa seguem intactos.
 - **Zerar ao liberar está ligado** (`ZERO_ON_FREE`). O custo no alvo está no
   [SDD 07](07_desempenho_e_recursos.md).
 - **Só o kernel usa `alloc`**: `extern crate alloc` está em `kernel/src/main.rs`, e

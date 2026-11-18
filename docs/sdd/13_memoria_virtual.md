@@ -88,6 +88,36 @@ Em todas as folhas do aarch64 o UXN fica ligado (página do kernel nunca executa
   permissão **efetiva** (E da escrita, OU do NX entre os níveis), então uma tabela
   restritiva no meio também apareceria.
 
+## Zerar
+
+`DirectMap::zero` manda ao `arch/` as faixas de 512 bytes ou mais, com início e tamanho
+múltiplos de 64 (`platform::zero_aligned`); o resto vai ao `write_bytes`. Números no
+[SDD 07](07_desempenho_e_recursos.md).
+
+- **aarch64** (`arch/aarch64/src/zero.rs`, divisão pura em `zero_plan.rs`). `DC ZVA` zera um
+  bloco alinhado de `4 << DCZID_EL0.BS` bytes, e `DZP` (bit 4) ligado o proíbe. O
+  `harden` lê o `DCZID_EL0` uma vez e guarda o bloco; com `DZP` ligado, ou bloco menor que 64,
+  o laço é de `STP` de pares (64 bytes por volta). O começo antes do primeiro bloco alinhado e
+  a sobra depois do último vão por `STP`, o miolo por `DC ZVA`. No HVF o bloco é de 64 bytes e
+  `DZP` está limpo.
+- **Só vale em memória Normal.** O mapa direto é `DATA` com `AttrIndx` 0, e o `MAIR_EL1` lido
+  em boot é `0xffff` (Attr0 = `0xff`, Normal write-back; o kernel só escreve o índice 7, de
+  dispositivo). `DC ZVA` nunca vai para o framebuffer (índice 1) nem para a janela de
+  dispositivos: `DirectMap` só toca frames do alocador.
+- **x86_64.** `zero_aligned` é o `write_bytes`; ver o SDD 07 e a
+  [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md).
+- **Fontes.** Linux `arch/arm64/lib/clear_page.S` (v6.6 e v6.12, lido): `mrs dczid_el0`,
+  `tbnz #4` para o recuo, `4 << (x & 0xf)`, e o recuo com `stnp`. Linux
+  `arch/x86/lib/clear_page_64.S` e `page_64.h` (v6.12, lidos): `clear_page_orig`, `_rep`
+  (`stosq`) e `_erms` (`stosb`). **Não verificado no Arm ARM** (a página da Arm não é
+  legível por busca automática): que `DC ZVA` em memória Device ou não cacheável dá falta de
+  alinhamento, e os campos `DZP` e `BS` além do que o código do Linux usa.
+- **Teste.** Host: `zero_plan` (bloco por `DCZID`, `DZP`, divisão em cabeça, corpo e cauda para
+  vários blocos e alinhamentos). No alvo: o autoteste do heap confere que os vizinhos de
+  cada faixa ficam intactos (`heap::self_test`). O laço de `STP` foi rodado à mão no HVF
+  forçando `DZP`, com o mesmo autoteste verde; o `make smoke` não o cobre (o HVF não liga
+  `DZP`).
+
 ## Página grande
 
 O mapa direto usa **2 MiB onde o endereço virtual e o físico alinham, e 4 KiB nas pontas**

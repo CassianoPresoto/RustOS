@@ -135,6 +135,7 @@ fn boot_kernel(handoff: Handoff) -> ! {
     report(&boot, &memory, display, reclaimed);
     report_vm(&vm, boot.direct_map_offset());
     report_random(source);
+    let residue_ok = report_key_residue();
     // SAFETY: o mapa direto cobre todo frame utilizável, de onde vem o frame do teste.
     let frames_ok = unsafe { memory.self_test(boot.direct_map_offset()) };
     kprintln!(
@@ -146,10 +147,11 @@ fn boot_kernel(handoff: Handoff) -> ! {
         "[rustos] heap self-test: {}",
         if heap_ok { "ok" } else { "FAILED" }
     );
+    report_zero_bench();
     let wx_ok = report_wx(&vm);
     let irq_ok = interrupts_on && system::interrupt_self_test();
     let tasks_ok = irq_ok && report_tasks(&boot, &memory);
-    if !frames_ok || !heap_ok || !wx_ok || !irq_ok || !tasks_ok {
+    if !frames_ok || !heap_ok || !residue_ok || !wx_ok || !irq_ok || !tasks_ok {
         rustos_hal::Cpu::halt_forever(&platform::cpu());
     }
     kprintln!("{BOOT_OK_MARKER}");
@@ -251,9 +253,43 @@ fn report_random(source: random::Source) {
     }
     if let Some(bench) = random::benchmark() {
         kprintln!(
-            "[rustos] random bench: chacha20 {} MB/s, reseed {} us",
+            "[rustos] random bench: chacha20 {} MB/s, reseed {} us, next_u64 {}.{} ns",
             bench.mb_per_s,
-            bench.reseed_ns / 1000
+            bench.reseed_ns / 1000,
+            bench.u64_tenths_ns / 10,
+            bench.u64_tenths_ns % 10
+        );
+    }
+}
+
+/// Procura cópias da chave na pilha depois de semear e de um pedido (SDD 09).
+fn report_key_residue() -> bool {
+    let residue = random::stack_residue();
+    let clean = residue == random::Residue::default();
+    kprintln!(
+        "[rustos] key residue: {} chacha states, {} key copies on the stack: {}",
+        residue.states,
+        residue.keys,
+        if clean { "ok" } else { "FAILED" }
+    );
+    clean
+}
+
+fn report_zero_bench() {
+    if let Some(bench) = heap::zero_benchmark() {
+        let tenths = |value: u64| (value / 10, value % 10);
+        let (kib, page) = (tenths(bench.kib), tenths(bench.page));
+        let (cold, pair) = (tenths(bench.cold_page), tenths(bench.pair));
+        kprintln!(
+            "[rustos] zero bench: 1 KiB {}.{} ns, 4 KiB {}.{} ns, 4 KiB over 1 MiB {}.{} ns, 4 KiB alloc+free {}.{} ns",
+            kib.0,
+            kib.1,
+            page.0,
+            page.1,
+            cold.0,
+            cold.1,
+            pair.0,
+            pair.1
         );
     }
 }
