@@ -32,6 +32,8 @@ struct Scenario {
     forbid: &'static [&'static str],
     /// Espera o prompt voltar depois do último comando (comando que não derruba o kernel).
     prompt_after: bool,
+    /// Pico de pilha do shell, em KiB, que o `ps` do cenário não pode passar; zero não confere.
+    max_shell_stack_kib: u32,
 }
 
 const NONE: Scenario = Scenario {
@@ -42,9 +44,10 @@ const NONE: Scenario = Scenario {
     once: None,
     forbid: &[],
     prompt_after: false,
+    max_shell_stack_kib: 0,
 };
 
-const SCENARIOS: [Scenario; 8] = [
+const SCENARIOS: [Scenario; 9] = [
     Scenario {
         name: "panic at entry, before memory",
         cmdline: Some("rustos.panic_early=1"),
@@ -96,6 +99,15 @@ const SCENARIOS: [Scenario; 8] = [
         ..NONE
     },
     Scenario {
+        name: "yield with an IrqLock held, a panic and not a deadlock",
+        commands: &["fault held"],
+        expect: &[
+            "yielding the CPU with a lock held",
+            "context switch with 2 IrqLock held, expected 1",
+        ],
+        ..NONE
+    },
+    Scenario {
         name: "write to .text shows the offset, not the address",
         commands: &["fault text"],
         expect: &[
@@ -109,6 +121,7 @@ const SCENARIOS: [Scenario; 8] = [
         commands: &["mem", "ps", "fetch"],
         expect: &["idle", "RustOS"],
         prompt_after: true,
+        max_shell_stack_kib: 48,
         ..NONE
     },
 ];
@@ -206,11 +219,34 @@ fn verdict(log: &str, scenario: &Scenario) -> Option<String> {
             return Some(format!("`{text}` apareceu {count} vezes, não uma"));
         }
     }
+    if scenario.max_shell_stack_kib > 0 {
+        let Some(peak) = shell_stack_peak_kib(log) else {
+            return Some("o `ps` não mostrou a pilha do shell".to_owned());
+        };
+        if peak > f64::from(scenario.max_shell_stack_kib) {
+            return Some(format!(
+                "o shell usou {peak} KiB de pilha, mais que {}",
+                scenario.max_shell_stack_kib
+            ));
+        }
+    }
     scenario
         .forbid
         .iter()
         .find(|text| log.contains(**text))
         .map(|text| format!("apareceu `{text}` na serial"))
+}
+
+/// O pico de pilha da linha `shell` do `ps` (coluna `3.4/64K`), em KiB.
+fn shell_stack_peak_kib(log: &str) -> Option<f64> {
+    let row = log.lines().find(|line| {
+        let mut words = line.split_whitespace();
+        words.nth(1) == Some("shell")
+    })?;
+    let (peak, _) = row
+        .split_whitespace()
+        .find_map(|word| word.strip_suffix('K')?.split_once('/'))?;
+    peak.parse().ok()
 }
 
 /// Lê a serial até o cenário se completar (e mais um instante), ou o tempo acabar. Digita
@@ -279,6 +315,31 @@ mod tests {
         assert!(verdict(twice, &scenario).unwrap().contains("2 vezes"));
         let again = "[rustos] panic: x failed again";
         assert!(verdict(again, &scenario).unwrap().contains("failed again"));
+    }
+
+    #[test]
+    fn the_shell_stack_peak_comes_from_the_ps_row() {
+        let ps = "  0  idle       0 run   1.7  479   1.1/16K  -\n  8  shell      3 run   0.1  124  17.0/64K  -\n";
+        assert_eq!(shell_stack_peak_kib(ps), Some(17.0));
+        assert_eq!(shell_stack_peak_kib("sem ps"), None);
+        let scenario = Scenario {
+            expect: &["shell"],
+            max_shell_stack_kib: 16,
+            ..NONE
+        };
+        assert!(verdict(ps, &scenario).unwrap().contains("17"));
+        let without_row = verdict("shell sem a coluna", &scenario).unwrap();
+        assert!(without_row.contains("não mostrou"));
+        assert_eq!(
+            verdict(
+                ps,
+                &Scenario {
+                    max_shell_stack_kib: 48,
+                    ..scenario
+                }
+            ),
+            None
+        );
     }
 
     #[test]

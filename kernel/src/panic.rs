@@ -147,3 +147,12 @@ pub fn simultaneous_test() -> bool {
     together(0);
     false
 }
+
+/// Teste do escalonador: cede a CPU com um `IrqLock` preso, e ele tem de entrar em pânico.
+#[cfg(feature = "panic-tests")]
+pub fn held_lock_test() -> bool {
+    static HELD: crate::sync::IrqLock<()> = crate::sync::IrqLock::new(());
+    let _held = HELD.lock();
+    crate::task::yield_now();
+    false
+}

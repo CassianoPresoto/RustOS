@@ -23,6 +23,7 @@
 │       ├── console.rs          # console global e kprintln!: serial e tela
 │       ├── screen.rs           # tela: framebuffer + grade do term + desenho do gfx, tema e barra
 │       ├── interrupts.rs       # IRQ do timer (o que o escalonador pede: acordar, fim de fatia, próximo disparo), fila de entrada e o relatório de falha
+│       ├── stack.rs            # marca d'água das pilhas: pinta com um padrão e lê o pico varrendo do fundo (SDD 15)
 │       ├── sync.rs             # IrqLock: spinlock que mascara IRQ, conta os presos por CPU e as disputas; `bump` para contador de uma CPU só
 │       ├── percpu.rs           # PerCpu: o bloco de cada núcleo (GS/TPIDR_EL1): índice, hw_id, in_irq, locks_held, prazo armado, carga, fila, cache de frames e contadores
 │       ├── smp.rs              # núcleos secundários: solta pelo pedido MP, entrada na pilha do Limine, init por CPU, espera do escalonador
@@ -34,7 +35,7 @@
 │       └── platform/           # um módulo por ISA: ARCH, PlatformConsole, cpu(), console()
 ├── core/                       # o centro do hexágono: no_std, forbid(unsafe_code), testado no host
 │   ├── hal/                    # rustos-hal: as portas (traits), os tipos de fronteira e `redact` (endereço no log), `clock` (`TickScale`, ticks para ns) e `cmdline` (a linha de comando do kernel), puros
-│   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow, WxChecker, PageTables (a caminhada de 4 níveis das duas ISAs), `runs`/`coalesce` (2 MiB ou 4 KiB no mapa direto); porta FrameMemory e trait FrameAllocator (SDD 12, SDD 13)
+│   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow, WxChecker, PageTables (a caminhada de 4 níveis das duas ISAs), first_unpainted (a marca d'água da pilha), `runs`/`coalesce` (2 MiB ou 4 KiB no mapa direto); porta FrameMemory e trait FrameAllocator (SDD 12, SDD 13)
 │   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) Rng (fast key erasure) e a semente de reserva por jitter
 │   ├── sched/                  # rustos-sched: trait Scheduler, TaskId, RunQueue; RoundRobin, Eevdf (treap de prazos), Fifo e Composite (teto de 95% para o tempo real); sim, property e bench só em teste (SDD 14; o kernel usa o `Composite`)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16

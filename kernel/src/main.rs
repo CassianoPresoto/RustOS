@@ -27,6 +27,7 @@ mod platform;
 mod random;
 mod screen;
 mod smp;
+mod stack;
 mod sync;
 mod system;
 mod task;
@@ -108,10 +109,11 @@ extern "C" fn kmain() -> ! {
     platform::early_serial_switch(&mut early_scratch);
     #[cfg(feature = "panic-tests")]
     early::test_point(params, rustos_hal::EarlyPanic::Activated);
-    let top = match memory.map_stack(vm.space_mut(), KERNEL_STACK_PAGES) {
-        Ok(top) => top,
+    let stack = match memory.map_stack_painted(vm.space_mut(), KERNEL_STACK_PAGES) {
+        Ok(stack) => stack,
         Err(error) => panic!("kernel stack: {error:?}"),
     };
+    task::adopt_boot_stack(stack);
     let handoff = Box::into_raw(Box::new(Handoff {
         boot,
         memory,
@@ -121,7 +123,7 @@ extern "C" fn kmain() -> ! {
     }));
     // SAFETY: `top` é o fim de uma pilha recém-mapeada e só nossa; a continuação não
     // volta, e `handoff` vem de `Box::into_raw`.
-    unsafe { platform::call_on_stack(top, run_on_kernel_stack, handoff.cast()) }
+    unsafe { platform::call_on_stack(stack.top(), run_on_kernel_stack, handoff.cast()) }
 }
 
 /// # Safety
@@ -337,7 +339,8 @@ fn report_tasks(boot: &impl BootInfo, memory: &memory::Memory, selftest: bool) -
         }
         None => kprintln!("[rustos] switch: not measured"),
     }
-    preempted.is_some() && smp_ok
+    let stacks_ok = task::log_stacks();
+    preempted.is_some() && smp_ok && stacks_ok
 }
 
 /// O tempo total das tarefas de CPU em 1, 2 e 4 núcleos, em microssegundos.

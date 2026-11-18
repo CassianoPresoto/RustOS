@@ -12,13 +12,14 @@ use core::sync::atomic::{
     AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
 };
 
-use rustos_hal::{Cpu, Ipi, IpiKind, MAX_CPUS, MapError, VirtAddr};
+use rustos_hal::{Cpu, Ipi, IpiKind, MAX_CPUS, MapError};
 use rustos_sched::{Composite, SchedError, SchedParams, Scheduler, TaskId};
 
 use crate::frames::Frames;
-use crate::memory::map_stack;
+use crate::memory::map_stack_painted;
 use crate::percpu::{self, NO_TASK, PerCpu};
 use crate::platform::{self, FpuSummary, PlatformSpace};
+use crate::stack::Stack;
 use crate::sync::{IrqGuard, IrqLock, bump, locks_held};
 use crate::{bench, interrupts};
 
@@ -32,9 +33,8 @@ type Policy = Composite<RT_SLOTS, MAX_TASKS>;
 const SHELL_SLICE_NS: u64 = 200_000;
 /// A tarefa do boot vira o shell: classe justa, nice 0 e a fatia curta.
 pub const SHELL_PARAMS: SchedParams = SchedParams::fair_with_slice(0, SHELL_SLICE_NS);
-/// Páginas da pilha de uma tarefa, fora a de guarda: 32 KiB.
-const STACK_PAGES: u64 = 8;
-const IDLE_STACK_PAGES: u64 = 4;
+/// Páginas da pilha de toda thread do kernel, fora a do boot e a de guarda: 16 KiB (SDD 15).
+pub const STACK_PAGES: u64 = 4;
 /// Intervalo mínimo entre dois pulls periódicos de uma CPU.
 const BALANCE_NS: u64 = 2_000_000;
 
@@ -134,7 +134,7 @@ struct Meta {
     entry: Option<fn(usize)>,
     arg: usize,
     /// A pilha mapeada fica com o slot: a tarefa nova que o reusa não mapeia outra.
-    stack_top: Option<VirtAddr>,
+    stack: Option<Stack>,
     fpu: Option<FpuArea>,
 }
 
@@ -179,7 +179,7 @@ impl Slot {
                 name: "",
                 entry: None,
                 arg: 0,
-                stack_top: None,
+                stack: None,
                 fpu: None,
             }),
         }
@@ -288,6 +288,15 @@ static SPACE: IrqLock<Option<Space>> = IrqLock::new(None);
 static ACTIVE: AtomicU32 = AtomicU32::new(0);
 /// Quem espera a entrada do teclado ou da serial: slot + 1, ou 0.
 static INPUT_WAITER: AtomicUsize = AtomicUsize::new(0);
+/// O maior pico das tarefas cujo slot já foi reusado: o pico some ao repintar a pilha.
+static TASK_PEAK: AtomicUsize = AtomicUsize::new(0);
+/// A pilha do boot, que a tarefa `init` adota.
+static BOOT_STACK: IrqLock<Option<Stack>> = IrqLock::new(None);
+
+/// Guarda a pilha do boot para `init` adotá-la como a do shell.
+pub fn adopt_boot_stack(stack: Stack) {
+    *BOOT_STACK.lock() = Some(stack);
+}
 
 /// Adota a execução atual como a primeira tarefa da CPU de boot, cria a ociosa dela e liga
 /// FPU/SIMD.
@@ -307,7 +316,11 @@ pub unsafe fn init(frames: Frames, direct_map_offset: u64) -> Result<FpuSummary,
         queue.idle = 0;
         let now = now();
         let task = slot(boot);
-        task.meta.lock().name = "init";
+        {
+            let mut meta = task.meta.lock();
+            meta.name = "init";
+            meta.stack = *BOOT_STACK.lock();
+        }
         task.cpu.store(0, Ordering::Release);
         task.affinity.store(0, Ordering::Relaxed);
         task.set_state(State::Running);
@@ -331,14 +344,13 @@ pub unsafe fn init(frames: Frames, direct_map_offset: u64) -> Result<FpuSummary,
             params: SHELL_PARAMS,
             affinity: 1,
         },
-        IDLE_STACK_PAGES,
     )?;
     ACTIVE.fetch_or(1, Ordering::Release);
     Ok(summary)
 }
 
 /// Entra no escalonador numa CPU secundária: a execução atual vira a ociosa dela e não volta.
-pub fn run_secondary() -> ! {
+pub fn run_secondary(stack: Stack) -> ! {
     let cpu = percpu::current();
     let index = cpu.index();
     let policy = Box::new(Policy::new());
@@ -347,7 +359,11 @@ pub fn run_secondary() -> ! {
         queue.policy = Some(policy);
         queue.idle = index;
         let idle = slot(index);
-        idle.meta.lock().name = "idle";
+        {
+            let mut meta = idle.meta.lock();
+            meta.name = "idle";
+            meta.stack = Some(stack);
+        }
         idle.cpu.store(slot_u32(index), Ordering::Release);
         idle.affinity.store(1 << index, Ordering::Relaxed);
         idle.set_state(State::Running);
@@ -370,7 +386,7 @@ fn publish(cpu: &PerCpu, queue: &Queue) {
 /// Se a nova deve rodar antes da corrente, a troca vem no fim da chamada (`preempt_now`).
 pub fn spawn(config: Spawn) -> Result<TaskId, TaskError> {
     let id = claim_slot().ok_or(TaskError::NoSlot)?;
-    match start(id, config, STACK_PAGES) {
+    match start(id, config) {
         Ok(preempts) => {
             if preempts {
                 let cpu = platform::cpu();
@@ -408,19 +424,26 @@ fn claim_slot() -> Option<usize> {
 }
 
 /// Dá pilha, área de FPU e contexto ao slot reservado e o põe numa fila, pronto.
-fn start(id: usize, config: Spawn, stack_pages: u64) -> Result<bool, TaskError> {
+fn start(id: usize, config: Spawn) -> Result<bool, TaskError> {
     let target = slot(id);
     let (known_stack, has_fpu) = {
         let meta = target.meta.lock();
-        (meta.stack_top, meta.fpu.is_some())
+        (meta.stack, meta.fpu.is_some())
     };
-    let top = if let Some(top) = known_stack {
-        top
+    let stack = if let Some(stack) = known_stack {
+        // SAFETY: o slot é `New` com `on_cpu` baixo: nenhuma CPU roda nesta pilha.
+        let used = unsafe { stack.repaint() };
+        if id >= FIRST_TASK {
+            TASK_PEAK.fetch_max(used, Ordering::Relaxed);
+        }
+        stack
     } else {
         let mut space = SPACE.lock();
         let space = space.as_mut().ok_or(TaskError::NoMemory)?;
-        map_stack(&mut space.frames, &mut space.tables, stack_pages).map_err(TaskError::Stack)?
+        map_stack_painted(&mut space.frames, &mut space.tables, STACK_PAGES)
+            .map_err(TaskError::Stack)?
     };
+    let top = stack.top();
     let area = if config.simd && !has_fpu {
         Some(FpuArea::new().ok_or(TaskError::NoMemory)?)
     } else {
@@ -435,7 +458,7 @@ fn start(id: usize, config: Spawn, stack_pages: u64) -> Result<bool, TaskError> 
         meta.name = config.name;
         meta.entry = Some(config.entry);
         meta.arg = config.arg;
-        meta.stack_top = Some(top);
+        meta.stack = Some(stack);
         if area.is_some() {
             meta.fpu = area;
         } else if let Some(existing) = meta.fpu.as_mut() {
@@ -626,6 +649,21 @@ fn pull(thief: usize, gap: u32) -> bool {
     true
 }
 
+/// Lock preso na troca é deadlock mudo: a conferência vale também em `release` (SDD 15).
+#[inline]
+fn check_locks_held(expected: u32) {
+    let held = locks_held();
+    if held != expected {
+        locks_held_on_switch(held, expected);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn locks_held_on_switch(held: u32, expected: u32) -> ! {
+    panic!("context switch with {held} IrqLock held, expected {expected}");
+}
+
 /// Escolhe a próxima tarefa e troca para ela. Chamar com a interrupção mascarada
 /// e sem `IrqLock` preso: o lock da fila é solto antes da troca.
 fn schedule() {
@@ -635,14 +673,14 @@ fn schedule() {
 /// `schedule` com o relógio que o chamador já leu.
 fn schedule_at(now_ns: u64) {
     let cpu = percpu::current();
-    debug_assert_eq!(locks_held(), 0, "troca de contexto com IrqLock preso");
+    check_locks_held(0);
     switch_from(cpu, cpu.queue.lock(), now_ns);
 }
 
 /// `schedule_at` para quem já tem o lock da fila preso e mais nenhum: o lock vale da decisão
 /// de bloquear até a escolha, sem soltar e pegar de novo, e é solto antes da troca.
 fn switch_from(cpu: &PerCpu, mut queue: IrqGuard<'static, Queue>, now_ns: u64) {
-    debug_assert_eq!(locks_held(), 1, "troca de contexto com IrqLock preso");
+    check_locks_held(1);
     let from = cpu.current.load(Ordering::Relaxed) as usize;
     let outgoing = slot(from);
     let since = outgoing.since_ns.load(Ordering::Relaxed);
@@ -708,11 +746,11 @@ fn fpu_pointer(task: &Slot) -> Option<NonNull<u8>> {
 
 /// Cede a CPU a outra tarefa pronta, se houver.
 pub fn yield_now() {
-    assert_task_context();
     let cpu = platform::cpu();
     let were_enabled = cpu.save_and_disable_interrupts();
     let now = now();
     let here = percpu::current();
+    assert_task_context(here);
     let mut queue = here.queue.lock();
     if here.current.load(Ordering::Relaxed) as usize != queue.idle {
         queue.policy().yield_current(now);
@@ -723,12 +761,12 @@ pub fn yield_now() {
 
 /// Dorme até o relógio (`now_ns`) chegar a `deadline_ns`.
 pub fn sleep_until(deadline_ns: u64) {
-    assert_task_context();
     let cpu = platform::cpu();
     let were_enabled = cpu.save_and_disable_interrupts();
     let now = now();
+    let here = percpu::current();
+    assert_task_context(here);
     if now < deadline_ns {
-        let here = percpu::current();
         let mut queue = here.queue.lock();
         let current = here.current.load(Ordering::Relaxed) as usize;
         let task = slot(current);
@@ -743,7 +781,6 @@ pub fn sleep_until(deadline_ns: u64) {
 
 /// Espera um `unpark`; volta já se ele chegou antes.
 pub fn park() {
-    assert_task_context();
     let cpu = platform::cpu();
     let were_enabled = cpu.save_and_disable_interrupts();
     park_masked();
@@ -754,6 +791,7 @@ pub fn park() {
 pub fn park_masked() {
     let now = now();
     let here = percpu::current();
+    assert_task_context(here);
     let mut queue = here.queue.lock();
     let current = here.current.load(Ordering::Relaxed) as usize;
     let task = slot(current);
@@ -875,9 +913,9 @@ fn preempt_now(were_enabled: bool, now_ns: u64) {
 
 /// Encerra a tarefa atual; o slot e a pilha ficam para a próxima.
 pub fn exit() -> ! {
-    assert_task_context();
     platform::cpu().save_and_disable_interrupts();
     let here = percpu::current();
+    assert_task_context(here);
     let mut queue = here.queue.lock();
     let current = here.current.load(Ordering::Relaxed) as usize;
     slot(current).set_state(State::Exited);
@@ -886,12 +924,10 @@ pub fn exit() -> ! {
     unreachable!("tarefa encerrada voltou a rodar");
 }
 
-fn assert_task_context() {
-    debug_assert!(
-        !interrupts::in_irq(),
-        "yield, sleep ou park dentro de uma interrupção"
-    );
-    debug_assert!(is_ready(), "escalonador sem `init`");
+/// Ceder a CPU de dentro de IRQ trocaria a pilha da interrupção: recusa também em `release`.
+fn assert_task_context(here: &PerCpu) {
+    assert!(!here.in_irq(), "yield, sleep or park inside an interrupt");
+    debug_assert!(is_active(here), "escalonador sem `init`");
 }
 
 /// A tarefa que roda agora nesta CPU.
@@ -1019,11 +1055,14 @@ pub struct Snapshot {
     pub cpu_ns: u64,
     pub switches: u64,
     pub simd: bool,
+    /// Pico de uso da pilha e o tamanho dela, em bytes; zero sem pilha medida.
+    pub stack_peak: usize,
+    pub stack_bytes: usize,
 }
 
-/// Retrato das tarefas vivas, tirado slot a slot e entregue fora de qualquer lock.
-pub fn snapshot() -> [Option<Snapshot>; MAX_TASKS] {
-    let mut out = [None; MAX_TASKS];
+/// Entrega cada tarefa viva a `visit`, slot a slot e fora de qualquer lock; sem array, que
+/// em `release` ocupava muita pilha do shell.
+pub fn for_each_snapshot(visit: &mut dyn FnMut(Snapshot)) {
     let now = now();
     let active = ACTIVE.load(Ordering::Acquire);
     for (id, task) in TASKS.iter().enumerate() {
@@ -1037,17 +1076,120 @@ pub fn snapshot() -> [Option<Snapshot>; MAX_TASKS] {
         } else {
             0
         };
-        out[id] = Some(Snapshot {
+        let (name, stack) = {
+            let meta = task.meta.lock();
+            (meta.name, meta.stack)
+        };
+        visit(Snapshot {
             id: slot_u32(id),
-            name: task.meta.lock().name,
+            name,
             state,
             cpu: task.cpu.load(Ordering::Relaxed) as usize,
             cpu_ns: task.cpu_ns.load(Ordering::Relaxed) + running,
             switches: task.switches.load(Ordering::Relaxed),
             simd: task.fpu.load(Ordering::Relaxed) != 0,
+            stack_peak: stack.map_or(0, Stack::peak),
+            stack_bytes: stack.map_or(0, Stack::bytes),
         });
     }
-    out
+}
+
+/// Bytes que a tarefa de prova escreve na pilha; o pico medido tem de cobri-los.
+const PROBE_BYTES: usize = 3000;
+
+fn probe_main(_: usize) {
+    let mut buffer = [1u8; PROBE_BYTES];
+    core::hint::black_box(&mut buffer);
+}
+
+/// Autoteste da marca d'água: a tarefa escreve `PROBE_BYTES` e o pico lido depois do `exit`
+/// tem de ser pelo menos isso. Devolve o pico, se passou.
+fn stack_probe() -> Option<usize> {
+    let id = spawn(Spawn {
+        name: "probe",
+        entry: probe_main,
+        arg: 0,
+        simd: false,
+        params: SchedParams::fair(0),
+        affinity: 0,
+    })
+    .ok()?;
+    while !has_exited(id) {
+        yield_now();
+    }
+    let peak = slot(id.as_u32() as usize)
+        .meta
+        .lock()
+        .stack
+        .map_or(0, Stack::peak);
+    (peak >= PROBE_BYTES).then_some(peak)
+}
+
+/// A linha `stacks:` do boot, que o SDD 15 pede para remedir quando o uso de pilha mudar. Reprova
+/// (`FAILED`, que o smoke recusa) se a prova falha ou se algum pico passa de 75% da pilha.
+pub fn log_stacks() -> bool {
+    let report = stack_report();
+    let probe = stack_probe();
+    let over = |peak: usize, bytes: usize| peak * 4 > bytes * 3;
+    let ok = probe.is_some()
+        && !over(report.idle_peak, report.idle_bytes)
+        && !over(report.task_peak, report.task_bytes)
+        && !over(report.shell_peak, report.shell_bytes);
+    let kib = |bytes: usize| (bytes / 1024, bytes % 1024 * 10 / 1024);
+    let (idle, task, shell) = (
+        kib(report.idle_peak),
+        kib(report.task_peak),
+        kib(report.shell_peak),
+    );
+    kprintln!(
+        "[rustos] stacks: idle peak {}.{} KiB of {}, task peak {}.{} KiB of {}, shell peak {}.{} KiB of {}, probe {} of {PROBE_BYTES} B {}",
+        idle.0,
+        idle.1,
+        report.idle_bytes / 1024,
+        task.0,
+        task.1,
+        report.task_bytes / 1024,
+        shell.0,
+        shell.1,
+        report.shell_bytes / 1024,
+        probe.unwrap_or(0),
+        if ok { "ok" } else { "FAILED" }
+    );
+    ok
+}
+
+/// Pico e tamanho das pilhas por tipo de tarefa, em bytes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StackReport {
+    pub idle_peak: usize,
+    pub idle_bytes: usize,
+    pub task_peak: usize,
+    pub task_bytes: usize,
+    pub shell_peak: usize,
+    pub shell_bytes: usize,
+}
+
+/// O maior pico de cada tipo desde o boot: as ociosas, o shell (a pilha do boot) e as tarefas,
+/// as já encerradas incluídas (o slot guarda a marca até ser reusado).
+pub fn stack_report() -> StackReport {
+    let mut report = StackReport {
+        task_peak: TASK_PEAK.load(Ordering::Relaxed),
+        ..StackReport::default()
+    };
+    for (id, task) in TASKS.iter().enumerate() {
+        let Some(stack) = task.meta.lock().stack else {
+            continue;
+        };
+        let peak = stack.peak();
+        let (max, bytes) = match id {
+            _ if id < FIRST_TASK => (&mut report.idle_peak, &mut report.idle_bytes),
+            FIRST_TASK => (&mut report.shell_peak, &mut report.shell_bytes),
+            _ => (&mut report.task_peak, &mut report.task_bytes),
+        };
+        *max = (*max).max(peak);
+        *bytes = (*bytes).max(stack.bytes());
+    }
+    report
 }
 
 /// O que `ps` e `bench` mostram de uma CPU.

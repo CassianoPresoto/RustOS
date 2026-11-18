@@ -93,7 +93,7 @@ os definitivos entram em `interrupts::init` ([SDD 10](10_interrupcoes.md)).
    cria a ociosa e liga FPU/SIMD; `smp::release` solta os núcleos), imprimem `boot time:` e `[rustos] boot ok`. **O modo de teste** acrescenta `bootloader:`, `memory:`, `frames:`, `screen:`, `vm:`, `random:`,
    `fpu:`, `sched:`, o autoteste de resíduo de chave (`key residue:`), o do heap, o do timer (`timer:`, cinco tiques
    contra o relógio), `random bench:`, `zero bench:`, a janela `idle:`, o autoteste de preempção e de estado de SIMD
-   (`task self-test:`), o de migração (`smp self-test:`) e as medidas curtas (`switch:`, `scale:`, `alloc storm:`).
+   (`task self-test:`), o de migração (`smp self-test:`) as medidas curtas (`switch:`, `scale:`, `alloc storm:`) e a prova e o pico de pilha (`stacks:`, [SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)).
 10. `system::run_shell`: a tarefa `init` vira a tarefa `shell`. Ela lê a fila que a IRQ
    da serial (e, no x86_64, a do teclado) enche e bloqueia (`park`) quando ela está
    vazia; a ociosa dorme em `hlt`/`wfi` quando ninguém está pronto.
@@ -108,7 +108,7 @@ O kernel tem dois modos, escolhidos pela linha de comando do Limine (`BootParams
 | --- | --- | --- |
 | Quem sobe | `make run`, `make screenshot`, o usuário, `make smoke-fast`, `make smoke-panic` | `make smoke` (e o `a64fx` do `make pr`) |
 | Autotestes | frame, `w^x:` e exceção: os três juntos custam 3 ms no x86_64 em TCG (com as linhas) e 1 ms no aarch64 com HVF, e nada além deles exercita o que provam (o mapa direto, as tabelas ativas, a IDT/`VBAR` e o retorno da exceção) | os três, mais heap, resíduo de chave, timer, preempção com estado de SIMD e migração entre núcleos |
-| Medidas | nenhuma | `zero bench:`, `random bench:`, `idle:`, `switch:`, `scale:`, `alloc storm:` |
+| Medidas | nenhuma | `zero bench:`, `random bench:`, `idle:`, `switch:`, `scale:`, `alloc storm:`, `stacks:` |
 | Linhas na serial | as que um gate confere (`kaslr:`, `reclaimed:`, `protections:`, `cpus:`, `w^x:`) ou que avisam (`random: jitter (weak)`) | todas |
 | Tempo no kernel (`release`) | 25 a 31 ms (x86_64, TCG) · 2 ms (aarch64, HVF) | 1,0 a 3,8 s conforme o binário (x86_64 em TCG, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md)) · 0,45 s (aarch64) |
 
@@ -166,7 +166,7 @@ não programa a UART e, no aarch64, é a da QEMU `virt` ([DEBT-0064](../tech-deb
 O pedido MP faz o Limine acordar cada núcleo e estacioná-lo. O kernel o solta depois de `interrupts::init` e **antes** de `reclaim_bootloader`:
 o núcleo ainda anda na pilha e nas tabelas do Limine até trocar as dele.
 
-1. **Antes de soltar** (`smp::start`, na CPU de boot): para cada núcleo que não é o de boot, até `MAX_CPUS` (8; o resto fica parado, com aviso), mapeia a pilha de 32 KiB
+1. **Antes de soltar** (`smp::start`, na CPU de boot): para cada núcleo que não é o de boot, até `MAX_CPUS` (8; o resto fica parado, com aviso), mapeia a pilha de 16 KiB, que pinta para medir o pico
    (`Memory::map_stack`) e o que a ISA pede (`platform::prepare_secondary`: 3 pilhas IST e a GDT/TSS no x86_64; a pilha de falhas no aarch64), grava o índice e o `hw_id`, e
    escreve `extra_argument` (o índice) e depois `goto_address`, com release (`boot_limine::start_cpu`).
 2. **A entrada** (`ap_entry`, `RDI`/`X0` = `MpInfo`), ainda na pilha do Limine: instala o `PerCpu` (`GS` ou `TPIDR_EL1`), liga as proteções de hardware e **só então** troca para as tabelas do kernel

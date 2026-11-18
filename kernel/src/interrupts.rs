@@ -8,7 +8,6 @@ use rustos_sync::ByteRing;
 
 use crate::addr::Addr;
 use crate::memory::Memory;
-use crate::percpu::PerCpu;
 use crate::sync::bump;
 use crate::{console, panic, percpu, platform, task};
 
@@ -87,11 +86,6 @@ pub fn arm_no_later_than(deadline_ns: u64) {
     if deadline_ns < percpu::current().armed_ns() {
         arm(deadline_ns);
     }
-}
-
-/// Se esta CPU está dentro de um handler de IRQ.
-pub fn in_irq() -> bool {
-    percpu::pinned(PerCpu::in_irq)
 }
 
 /// IRQ do timer. Antes do escalonador, o tique periódico do autoteste. Depois, só o

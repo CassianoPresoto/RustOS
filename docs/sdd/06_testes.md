@@ -62,9 +62,9 @@ passarem; o `smoke` exige a linha `task self-test: ok`, a `smp self-test: ok` (m
 W^X percorre as tabelas novas ([SDD 13](13_memoria_virtual.md)); `fault text` no shell
 confere que a CPU recusa a escrita em `.text`.
 
-Como o modo de teste imprime o que o normal não imprime, o `smoke` exige também a linha de cada autoteste e medida (`frame`, `heap` e `exception self-test: ok`, `timer:`, `idle:`, `key residue:`, `zero bench:`, `random bench:`, `switch:`, `scale:`, `alloc storm:`) e a `boot time:`: se a linha de comando se perder, o boot normal não passa por boot de teste.
+Como o modo de teste imprime o que o normal não imprime, o `smoke` exige também a linha de cada autoteste e medida (`frame`, `heap` e `exception self-test: ok`, `timer:`, `idle:`, `key residue:`, `zero bench:`, `random bench:`, `switch:`, `scale:`, `alloc storm:`, `stacks:`) e a `boot time:`: se a linha de comando se perder, o boot normal não passa por boot de teste.
 
-Duas linhas do boot são medida e heurística, não gate: `key residue:` (varredura da pilha
+A linha `stacks:` (pico de pilha por tipo de thread e uma prova da marca d'água) é gate: vira `FAILED` se um pico passa de 75% da pilha ou se a prova falha ([SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)). Duas linhas são medida e heurística, não gate: `key residue:` (varredura da pilha
 atrás de cópias da chave, com uma sonda que planta 4 estados e exige achá-los; [SDD 09](09_seguranca.md))
 e `zero bench:` ([SDD 07](07_desempenho_e_recursos.md)). O kernel as imprime e segue;
 o `smoke` reprova o `FAILED` de qualquer linha. O autoteste do heap confere que o zerar
@@ -78,7 +78,7 @@ O que o modo normal deixa de provar (heap, timer, preempção, SIMD por tarefa, 
 
 ## Andar 3a — pânico (`make smoke-panic`)
 
-`cargo xtask smoke-panic` derruba o kernel de propósito em sete pontos, mais um boot que roda `mem`, `ps` e `fetch`, e confere que a mensagem
+`cargo xtask smoke-panic` derruba o kernel de propósito em oito pontos, mais um boot que roda `mem`, `ps` e `fetch`, e confere que a mensagem
 aparece na serial e que nenhum endereço do kernel vem junto (o log inteiro depois do primeiro `[rustos]`, com o corpo do pânico e a saída do shell). Constrói com a feature `panic-tests`
 (além das de `RUSTOS_FEATURES`) e sobe um boot por cenário:
 
@@ -90,11 +90,14 @@ aparece na serial e que nenhum endereço do kernel vem junto (o log inteiro depo
 | Falha com a serial e a tela presas | `fault lock` no shell | `[rustos] fault: page fault at …` |
 | Pânico dentro da mensagem do pânico | `fault nested` | a mensagem do segundo pânico |
 | Pânico em todas as CPUs ao mesmo tempo | `fault all` (uma tarefa por CPU ativa, com barreira) | um único `[rustos] panic:`, sem `failed again` nem texto misturado |
+| Ceder a CPU com um `IrqLock` preso | `fault held` (o shell segura um lock e chama `yield_now`; vale em `release` também, [SDD 15](15_tarefas_e_preempcao.md#regra-de-lock)) | `context switch with 2 IrqLock held, expected 1` |
 | Escrita em `.text` | `fault text` | `page fault at kernel+0x…` (deslocamento, não endereço) |
 
+O boot que roda `mem`, `ps` e `fetch` reprova também se o `ps` mostra o pico de pilha do shell acima de 48 KiB (75% de 64), na coluna `stack` ([SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)); vale o perfil do `make smoke-panic PROFILE=…`.
+
 A linha de comando vem do `cmdline:` da entrada do `limine.conf` (`xtask/src/image.rs`); `core/hal`
-`BootParams::parse` a traduz e tem teste de entrada inválida. Os cenários de shell (`fault lock`, `fault all`…) sobem no modo normal. Custa oito boots por ISA (cerca de
-25 s no x86_64 e 49 s no aarch64 neste host); `fault lock`, `fault nested` e `fault all` só existem no build com `panic-tests`, por isso é alvo à parte; entra no `make pr` e no CI,
+`BootParams::parse` a traduz e tem teste de entrada inválida. Os cenários de shell (`fault lock`, `fault all`…) sobem no modo normal. Custa nove boots por ISA (cerca de
+27 s no x86_64 e 54 s no aarch64 neste host); `fault lock`, `fault nested`, `fault all` e `fault held` só existem no build com `panic-tests`, por isso é alvo à parte; entra no `make pr` e no CI,
 não no `make smoke`. Com `debug-addrs` ele recusa rodar: os cenários conferem o endereço relativo.
 
 ## Andar 3b — tela
