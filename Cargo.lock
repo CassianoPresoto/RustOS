@@ -10,7 +10,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-arch-aarch64-user"
+version = "0.1.0"
+dependencies = [
+ "rustos-hal",
+]
+
+[[package]]
 name = "rustos-arch-x86_64"
+version = "0.1.0"
+dependencies = [
+ "rustos-hal",
+]
+
+[[package]]
+name = "rustos-arch-x86_64-user"
 version = "0.1.0"
 dependencies = [
  "rustos-hal",
@@ -84,6 +98,7 @@ dependencies = [
  "rustos-driver-i8042",
  "rustos-driver-pl011",
  "rustos-driver-uart16550",
+ "rustos-elf",
  "rustos-gfx",
  "rustos-hal",
  "rustos-mm",
@@ -120,6 +135,29 @@ name = "rustos-term"
 version = "0.1.0"
 dependencies = [
  "rustos-hal",
+]
+
+[[package]]
+name = "rustos-user-init"
+version = "0.1.0"
+dependencies = [
+ "rustos-user-rt",
+]
+
+[[package]]
+name = "rustos-user-rt"
+version = "0.1.0"
+dependencies = [
+ "rustos-arch-aarch64-user",
+ "rustos-arch-x86_64-user",
+ "rustos-hal",
+]
+
+[[package]]
+name = "rustos-user-test-big"
+version = "0.1.0"
+dependencies = [
+ "rustos-user-rt",
 ]
 
 [[package]]
