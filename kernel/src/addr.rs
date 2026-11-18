@@ -20,6 +20,7 @@ pub fn set_direct(range: (u64, u64)) {
 }
 
 /// Guarda as janelas de dispositivos e de pilhas: `len` bytes cada, uma depois da outra.
+/// A de módulos vem depois delas e não tem região no log.
 pub fn set_windows(base: u64, len: u64) {
     WINDOWS[0].store(base, Ordering::Relaxed);
     WINDOWS[1].store(len, Ordering::Relaxed);

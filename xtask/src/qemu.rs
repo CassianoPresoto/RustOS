@@ -117,6 +117,10 @@ const BOOT_TIME: &str = "[rustos] boot time: kernel ";
 /// Autotestes de tarefa que o `REQUIRED` pode ter e que só o modo de teste roda.
 const TASK_SELFTESTS: [&str; 2] = ["[rustos] smp self-test:", "[rustos] wake self-test:"];
 
+/// Qualquer linha do initramfs: no boot normal nem a de sucesso (que é do modo de teste) nem o
+/// aviso `not mapped` pode aparecer.
+const INITRAMFS_ANY: &str = "[rustos] initramfs:";
+
 /// O que o boot normal não pode imprimir: tudo o que é do modo de teste e não do normal, mais
 /// os autotestes de tarefa. Uma linha destas é trabalho de teste que voltou ao caminho do prompt.
 fn normal_forbidden() -> Vec<&'static str> {
@@ -125,7 +129,7 @@ fn normal_forbidden() -> Vec<&'static str> {
         .iter()
         .map(|(line, _)| *line)
         .filter(|line| !own(line))
-        .chain(["[rustos] task self-test:"])
+        .chain(["[rustos] task self-test:", INITRAMFS_ANY])
         .chain(TASK_SELFTESTS)
         .collect()
 }
@@ -666,6 +670,7 @@ mod tests {
             "[rustos] wake self-test:",
             "[rustos] task self-test:",
             "[rustos] switch: ",
+            "[rustos] initramfs:",
         ] {
             assert!(forbidden.contains(&line), "{line}");
         }
@@ -680,7 +685,12 @@ mod tests {
             )
             .is_ok()
         );
-        for line in ["[rustos] heap self-test: ok", "[rustos] timer: 100 Hz"] {
+        for line in [
+            "[rustos] heap self-test: ok",
+            "[rustos] timer: 100 Hz",
+            "[rustos] initramfs: not mapped, the boot goes on without it",
+            "[rustos] initramfs: 1 files, 272 bytes",
+        ] {
             let log = normal_log(5, line);
             let outcome = Outcome::Booted(Duration::ZERO);
             let result = report(Arch::X86_64, BootMode::Normal, outcome, &log);

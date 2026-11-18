@@ -211,15 +211,22 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
 /// Dá lugar ao `init` na fase 4b.
 const PROBE: File<'static> = ("hello.txt", b"hello from the initramfs\n", DEFAULT_MODE);
 
-/// Grava em `default_path` o initramfs provisório, só com o arquivo de teste, e devolve o caminho.
+/// Grava o initramfs provisório, só com o arquivo de teste, em `<isa>.provisional.cpio` (o
+/// `<isa>.cpio` é do comando `initramfs`, que o `image` não pode sobrescrever) e devolve o caminho.
 pub fn write_provisional(root: &Path, arch: Arch) -> Result<PathBuf, String> {
     let archive = build(&[PROBE]).map_err(|error| error.to_string())?;
-    let path = default_path(root, arch);
+    let path = provisional_path(root, arch);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|error| format!("criar {}: {error}", dir.display()))?;
     }
     fs::write(&path, archive).map_err(|error| format!("gravar {}: {error}", path.display()))?;
     Ok(path)
+}
+
+pub fn provisional_path(root: &Path, arch: Arch) -> PathBuf {
+    root.join("target")
+        .join("initramfs")
+        .join(format!("{}.provisional.cpio", arch.name()))
 }
 
 pub fn default_path(root: &Path, arch: Arch) -> PathBuf {
@@ -477,6 +484,17 @@ mod tests {
         assert_eq!(parsed[0].0, "bin/sh");
         assert_eq!(parsed[0].1, b"elf");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_provisional_archive_never_shares_the_path_of_the_initramfs_command() {
+        let root = Path::new("/r");
+        let (provisional, command) = (
+            provisional_path(root, Arch::X86_64),
+            default_path(root, Arch::X86_64),
+        );
+        assert_ne!(provisional, command);
+        assert!(provisional.ends_with("target/initramfs/x86_64.provisional.cpio"));
     }
 
     #[test]

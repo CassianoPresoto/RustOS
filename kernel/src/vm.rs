@@ -7,7 +7,7 @@ use rustos_hal::{
     AddressSpace, BootInfo, FrameSource, MapError, PAGE_SIZE, PageFlags, PageMapper, PhysAddr,
     RegionKind, VirtAddr,
 };
-use rustos_mm::ranges::{coalesce, runs};
+use rustos_mm::ranges::{coalesce, overlaps, runs};
 use rustos_mm::{Section, Violation, WxChecker};
 
 use crate::frames::Frames;
@@ -103,6 +103,8 @@ pub struct Vm {
     stats: VmStats,
     initramfs: Option<Initramfs>,
     initramfs_failed: bool,
+    /// `activate` já trocou para as tabelas; antes disso a janela do initramfs não é lida.
+    activated: bool,
 }
 
 fn symbol(address: *const u8) -> u64 {
@@ -217,12 +219,13 @@ impl Vm {
             stats,
             initramfs: None,
             initramfs_failed: false,
+            activated: false,
         })
     }
 
     /// Mapeia o initramfs, o módulo de `module_string` `initramfs`, só leitura e sem execução, na
-    /// janela de módulos. Sem módulo o boot segue; com mapeamento que falha, `initramfs_failed`.
-    /// Depois de `Memory::place_windows`; a leitura só vale depois de `activate`.
+    /// janela de módulos. Sem módulo o boot segue; módulo sobre a imagem ou mapeamento que falha
+    /// dão `initramfs_failed`. Depois de `Memory::place_windows`.
     pub fn map_initramfs(&mut self, boot: &impl BootInfo, frames: &mut Frames) {
         let Some(module) = boot
             .modules()
@@ -230,6 +233,11 @@ impl Vm {
         else {
             return;
         };
+        let pages_end = module.start.as_u64() + module.len.next_multiple_of(PAGE_SIZE);
+        if overlaps((module.start.as_u64(), pages_end), self.image_phys) {
+            self.initramfs_failed = true;
+            return;
+        }
         let mut frames = Counting { frames, taken: 0 };
         let mapped = memory::map_module(&mut self.space, &mut frames, module.start, module.len);
         self.stats.table_frames += frames.taken;
@@ -249,7 +257,8 @@ impl Vm {
         self.initramfs_failed
     }
 
-    /// Os bytes do initramfs, ou `None` sem módulo. Só depois de `activate`.
+    /// Os bytes do initramfs, ou `None` sem módulo ou antes de `activate` (a janela só existe nas
+    /// tabelas novas).
     #[cfg_attr(
         not(feature = "selftest"),
         allow(
@@ -258,7 +267,7 @@ impl Vm {
         )
     )]
     pub fn initramfs(&self) -> Option<&'static [u8]> {
-        let module = self.initramfs?;
+        let module = self.initramfs.filter(|_| self.activated)?;
         let start = ptr::with_exposed_provenance::<u8>(usize::try_from(module.virt).ok()?);
         // SAFETY: `map_initramfs` mapeou `len` bytes só de leitura, para sempre, e a memória
         // do módulo não volta ao alocador; ninguém a escreve.
@@ -283,8 +292,9 @@ impl Vm {
     }
 
     /// Passa a traduzir pelas tabelas novas.
-    pub fn activate(&self) {
+    pub fn activate(&mut self) {
         self.space.activate();
+        self.activated = true;
     }
 
     pub fn space_mut(&mut self) -> &mut PlatformSpace {

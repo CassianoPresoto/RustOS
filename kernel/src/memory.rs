@@ -77,7 +77,7 @@ impl Memory {
         })
     }
 
-    /// Põe as janelas de dispositivos e de pilhas, uma depois da outra, na entrada do
+    /// Põe as janelas de dispositivos, de pilhas e de módulos, uma depois da outra, na entrada do
     /// nível mais alto que `occupied` (mapa direto e imagem, sorteados) não toca.
     pub fn place_windows(occupied: &[(u64, u64)]) -> Result<(), MemoryError> {
         let base = free_top_level_slot(occupied).ok_or(MemoryError::NoAddressSpace)?;
@@ -220,26 +220,21 @@ pub fn map_device(
     Ok(VirtAddr::new(virt.as_u64() + offset))
 }
 
-/// Mapeia `[phys, phys + len)`, de um módulo do bootloader, só leitura e sem execução, na janela
-/// de módulos. `phys` é alinhado a uma página. Devolve o endereço virtual do primeiro byte.
+/// Mapeia um módulo do bootloader na janela de módulos, só leitura e sem execução
+/// (`rustos_mm::map_module`). `phys` é alinhado a uma página.
 pub fn map_module(
     mapper: &mut impl PageMapper,
     frames: &mut impl FrameSource,
     phys: PhysAddr,
     len: u64,
 ) -> Result<VirtAddr, MapError> {
-    let pages = len.div_ceil(PAGE_SIZE);
-    let virt = MODULES
-        .lock()
-        .take(pages * PAGE_SIZE)
-        .ok_or(MapError::OutOfAddressSpace)?;
-    for page in 0..pages {
-        let delta = page * PAGE_SIZE;
-        let page_virt = VirtAddr::new(virt.as_u64() + delta);
-        let page_phys = PhysAddr::new(phys.as_u64() + delta);
-        mapper.map_page(page_virt, page_phys, PageFlags::RODATA, frames)?;
-    }
-    Ok(virt)
+    rustos_mm::map_module(
+        |bytes| MODULES.lock().take(bytes),
+        mapper,
+        frames,
+        phys,
+        len,
+    )
 }
 
 /// # Safety

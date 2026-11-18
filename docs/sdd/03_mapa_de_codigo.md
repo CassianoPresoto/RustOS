@@ -14,7 +14,7 @@
 │       ├── main.rs             # kmain: boot → memória → serial → tela → relatório → tarefas → boot ok → shell; modo normal ou de teste (`rustos.selftest=1`, só na imagem com a feature `selftest`); `boot_time.rs`: o relógio por fase do boot
 │       ├── boot.rs             # BootRecord: o que o Limine entregou (inclusive os módulos), copiado para o heap (BootInfo)
 │       ├── vm.rs               # Vm: tabelas próprias, W^X por seção, mapa direto, conferência e fault text
-│       ├── memory.rs           # Memory::init: buddy e heap; janelas de dispositivos e de pilhas; map_stack; devolução da memória do bootloader
+│       ├── memory.rs           # Memory::init: buddy e heap; janelas de dispositivos, de pilhas e de módulos; map_stack; map_module; devolução da memória do bootloader
 │       ├── frames.rs           # alocador de frames global (IrqLock), o cache de frames por CPU na frente do buddy e o handle Frames
 │       ├── heap.rs             # GlobalAlloc sobre KernelHeap e DirectMap (FrameMemory); `heap/selftest.rs`: o autoteste e a medida de zerar (feature `selftest`)
 │       ├── random.rs           # gerador global: semente de hardware ou jitter, reposição; `random/selftest.rs`: a medida e o resíduo de chave (feature `selftest`)

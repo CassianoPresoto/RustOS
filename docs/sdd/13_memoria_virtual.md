@@ -55,15 +55,22 @@ O módulo que o Limine carrega cai em `KernelAndModules` e, por isso, **fora do 
 **janela de módulos**, a terceira de 1 GiB da mesma entrada do nível mais alto (a que o
 mapa direto e a imagem não tocam): `memory::map_module` toma as páginas da janela e mapeia
 uma a uma com `PageFlags::RODATA` (leitura, NX), em páginas de 4 KiB. A faixa física vem do
-adaptador do Limine, já conferida (alinhada, sem transbordo, fora de RAM do alocador); o
+adaptador do Limine, já conferida ([SDD 04](04_boot.md#o-que-o-kernel-pede): alinhada, dentro do mapa de memória, fora de RAM do alocador, do framebuffer e de outro módulo), e o `Vm` recusa a que toca a imagem. O mapeamento é `rustos_mm::map_module` (`core/mm/src/window.rs`, testado no host: arredondamento a páginas, janela esgotada, estouro); o
 `WxChecker` a vê como qualquer folha: se ela fosse gravável e executável, ou se tocasse a
 memória física da imagem (`ImageAlias`), o `w^x:` reprovaria. No modo de teste,
 `Vm::initramfs_is_read_only` confere que nenhuma folha do módulo é gravável ou executável e
 que o número de páginas bate com o tamanho. A janela não tem região própria no `Addr`
 (SDD 09): o endereço dela sairia como `<kernel>`, e o kernel não o imprime.
-Custo para o cpio de 272 bytes (uma página): alguns frames de tabela e, estimado, 80 µs no x86_64
-em TCG e 7 µs no aarch64 com HVF (86 000 ciclos de TSC e 157 do `CNTVCT_EL0` em volta de `map_initramfs`; o TSC ainda não está calibrado ali, então o x86_64 vem da razão com os 4,3 milhões de ciclos do `kmain` até esse ponto, cerca de 4 ms). Os frames do módulo **seguem
-reservados**: nunca vão ao buddy ([DEBT-0080](../tech-debt/0080-initramfs-residente-sem-devolver-os-frames.md)).
+Custo para o cpio de 272 bytes (uma página), com `now_ns` depois da calibração e um laço de
+64 mapeamentos da mesma página em endereços novos da janela (instrumentação temporária, não
+mantida): no x86_64 em TCG a primeira chamada leva 132 a 141 µs (3 boots; domina a primeira
+execução do código no TCG, não a tabela) e 0,36 a 0,42 µs por página depois; no aarch64 com HVF, 0,17 µs
+a primeira e 33 ns por página. A chamada real do `kmain`, que ainda cria os frames de tabela, mediu 86 000 ciclos
+de TSC no x86_64 (o TSC não está calibrado ali; **estimado** em 80 µs pela razão com os 4,3 milhões de
+ciclos do `kmain` até esse ponto, cerca de 4 ms) e 157 ticks do `CNTVCT_EL0` (cerca de 7 µs) no aarch64.
+Ordem de grandeza: de 0,08 a 0,15 ms em TCG, que some no ruído do `boot time:` (24 a 32 ms).
+
+Os frames do módulo **seguem reservados**: nunca vão ao buddy ([DEBT-0080](../tech-debt/0080-initramfs-residente-sem-devolver-os-frames.md)).
 
 ## Flags e codificação
 
@@ -254,7 +261,7 @@ mapa direto também (`0xffff831f80000000`, `0xffff9c6cc0000000`...). A fonte da 
 não se aplica). O boot não imprime a base: só `kaslr: on` ([SDD 09](09_seguranca.md#endereços-do-kernel-no-log));
 `RUSTOS_FEATURES=debug-addrs` a mostra.
 
-**Por causa do sorteio do mapa direto, as janelas de dispositivos e de pilhas não têm
+**Por causa do sorteio do mapa direto, as janelas de dispositivos, de pilhas e de módulos não têm
 endereço fixo.** Com o endereço fixo da fase 1 (entradas 510 e 509), o mapa direto sorteado
 poderia cair sobre elas (inferência: 1 TiB de 128 TiB, cerca de 1 boot em 100; não medido). `free_top_level_slot` escolhe a entrada
 depois de conhecer o mapa direto e a imagem.
