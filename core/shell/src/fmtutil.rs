@@ -126,7 +126,7 @@ impl fmt::Display for Seconds {
     }
 }
 
-/// Uso de uma pilha: o pico em KiB com uma casa truncada, e o tamanho: `3.4/32K`. Zero é `-`.
+/// Uso de uma pilha: o pico em KiB com uma casa truncada, e o tamanho: `3.4/16K`. Zero é `-`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct StackUse {
     pub peak: u32,
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn stack_use_shows_the_peak_and_the_size_in_kib() {
         let use_of = |peak, bytes| StackUse { peak, bytes }.to_string();
-        assert_eq!(use_of(3_500, 32_768), "3.4/32K");
+        assert_eq!(use_of(3_500, 16_384), "3.4/16K");
         assert_eq!(use_of(0, 16_384), "0.0/16K");
         assert_eq!(use_of(0, 0), "-");
         assert_eq!(

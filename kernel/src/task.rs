@@ -12,11 +12,11 @@ use core::sync::atomic::{
     AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
 };
 
-use rustos_hal::{Cpu, Ipi, IpiKind, MAX_CPUS, MapError, VirtAddr};
+use rustos_hal::{Cpu, Ipi, IpiKind, MAX_CPUS, MapError};
 use rustos_sched::{Composite, SchedError, SchedParams, Scheduler, TaskId};
 
 use crate::frames::Frames;
-use crate::memory::map_stack;
+use crate::memory::map_stack_painted;
 use crate::percpu::{self, NO_TASK, PerCpu};
 use crate::platform::{self, FpuSummary, PlatformSpace};
 use crate::stack::Stack;
@@ -293,10 +293,8 @@ static TASK_PEAK: AtomicUsize = AtomicUsize::new(0);
 /// A pilha do boot, que a tarefa `init` adota.
 static BOOT_STACK: IrqLock<Option<Stack>> = IrqLock::new(None);
 
-/// Pinta a pilha do kernel, a do boot, e a guarda para `init` adotar como a do shell.
-pub fn adopt_boot_stack(top: VirtAddr, pages: u64) {
-    let stack = Stack::new(top, pages);
-    stack.paint();
+/// Guarda a pilha do boot para `init` adotá-la como a do shell.
+pub fn adopt_boot_stack(stack: Stack) {
     *BOOT_STACK.lock() = Some(stack);
 }
 
@@ -433,7 +431,8 @@ fn start(id: usize, config: Spawn) -> Result<bool, TaskError> {
         (meta.stack, meta.fpu.is_some())
     };
     let stack = if let Some(stack) = known_stack {
-        let used = stack.repaint();
+        // SAFETY: o slot é `New` com `on_cpu` baixo: nenhuma CPU roda nesta pilha.
+        let used = unsafe { stack.repaint() };
         if id >= FIRST_TASK {
             TASK_PEAK.fetch_max(used, Ordering::Relaxed);
         }
@@ -441,11 +440,8 @@ fn start(id: usize, config: Spawn) -> Result<bool, TaskError> {
     } else {
         let mut space = SPACE.lock();
         let space = space.as_mut().ok_or(TaskError::NoMemory)?;
-        let top = map_stack(&mut space.frames, &mut space.tables, STACK_PAGES)
-            .map_err(TaskError::Stack)?;
-        let stack = Stack::new(top, STACK_PAGES);
-        stack.paint();
-        stack
+        map_stack_painted(&mut space.frames, &mut space.tables, STACK_PAGES)
+            .map_err(TaskError::Stack)?
     };
     let top = stack.top();
     let area = if config.simd && !has_fpu {
@@ -750,11 +746,11 @@ fn fpu_pointer(task: &Slot) -> Option<NonNull<u8>> {
 
 /// Cede a CPU a outra tarefa pronta, se houver.
 pub fn yield_now() {
-    assert_task_context();
     let cpu = platform::cpu();
     let were_enabled = cpu.save_and_disable_interrupts();
     let now = now();
     let here = percpu::current();
+    assert_task_context(here);
     let mut queue = here.queue.lock();
     if here.current.load(Ordering::Relaxed) as usize != queue.idle {
         queue.policy().yield_current(now);
@@ -765,12 +761,12 @@ pub fn yield_now() {
 
 /// Dorme até o relógio (`now_ns`) chegar a `deadline_ns`.
 pub fn sleep_until(deadline_ns: u64) {
-    assert_task_context();
     let cpu = platform::cpu();
     let were_enabled = cpu.save_and_disable_interrupts();
     let now = now();
+    let here = percpu::current();
+    assert_task_context(here);
     if now < deadline_ns {
-        let here = percpu::current();
         let mut queue = here.queue.lock();
         let current = here.current.load(Ordering::Relaxed) as usize;
         let task = slot(current);
@@ -785,7 +781,6 @@ pub fn sleep_until(deadline_ns: u64) {
 
 /// Espera um `unpark`; volta já se ele chegou antes.
 pub fn park() {
-    assert_task_context();
     let cpu = platform::cpu();
     let were_enabled = cpu.save_and_disable_interrupts();
     park_masked();
@@ -796,6 +791,7 @@ pub fn park() {
 pub fn park_masked() {
     let now = now();
     let here = percpu::current();
+    assert_task_context(here);
     let mut queue = here.queue.lock();
     let current = here.current.load(Ordering::Relaxed) as usize;
     let task = slot(current);
@@ -917,9 +913,9 @@ fn preempt_now(were_enabled: bool, now_ns: u64) {
 
 /// Encerra a tarefa atual; o slot e a pilha ficam para a próxima.
 pub fn exit() -> ! {
-    assert_task_context();
     platform::cpu().save_and_disable_interrupts();
     let here = percpu::current();
+    assert_task_context(here);
     let mut queue = here.queue.lock();
     let current = here.current.load(Ordering::Relaxed) as usize;
     slot(current).set_state(State::Exited);
@@ -928,12 +924,10 @@ pub fn exit() -> ! {
     unreachable!("tarefa encerrada voltou a rodar");
 }
 
-fn assert_task_context() {
-    debug_assert!(
-        !interrupts::in_irq(),
-        "yield, sleep ou park dentro de uma interrupção"
-    );
-    debug_assert!(is_ready(), "escalonador sem `init`");
+/// Ceder a CPU de dentro de IRQ trocaria a pilha da interrupção: recusa também em `release`.
+fn assert_task_context(here: &PerCpu) {
+    assert!(!here.in_irq(), "yield, sleep or park inside an interrupt");
+    debug_assert!(is_active(here), "escalonador sem `init`");
 }
 
 /// A tarefa que roda agora nesta CPU.
@@ -1066,9 +1060,9 @@ pub struct Snapshot {
     pub stack_bytes: usize,
 }
 
-/// Retrato das tarefas vivas, tirado slot a slot e entregue fora de qualquer lock.
-pub fn snapshot() -> [Option<Snapshot>; MAX_TASKS] {
-    let mut out = [None; MAX_TASKS];
+/// Entrega cada tarefa viva a `visit`, slot a slot e fora de qualquer lock; sem array, que
+/// em `release` ocupava muita pilha do shell.
+pub fn for_each_snapshot(visit: &mut dyn FnMut(Snapshot)) {
     let now = now();
     let active = ACTIVE.load(Ordering::Acquire);
     for (id, task) in TASKS.iter().enumerate() {
@@ -1086,7 +1080,7 @@ pub fn snapshot() -> [Option<Snapshot>; MAX_TASKS] {
             let meta = task.meta.lock();
             (meta.name, meta.stack)
         };
-        out[id] = Some(Snapshot {
+        visit(Snapshot {
             id: slot_u32(id),
             name,
             state,
@@ -1098,12 +1092,49 @@ pub fn snapshot() -> [Option<Snapshot>; MAX_TASKS] {
             stack_bytes: stack.map_or(0, Stack::bytes),
         });
     }
-    out
 }
 
-/// A linha `stacks:` do boot, que o SDD 15 pede para remedir quando o uso de pilha mudar.
-pub fn log_stacks() {
+/// Bytes que a tarefa de prova escreve na pilha; o pico medido tem de cobri-los.
+const PROBE_BYTES: usize = 3000;
+
+fn probe_main(_: usize) {
+    let mut buffer = [1u8; PROBE_BYTES];
+    core::hint::black_box(&mut buffer);
+}
+
+/// Autoteste da marca d'água: a tarefa escreve `PROBE_BYTES` e o pico lido depois do `exit`
+/// tem de ser pelo menos isso. Devolve o pico, se passou.
+fn stack_probe() -> Option<usize> {
+    let id = spawn(Spawn {
+        name: "probe",
+        entry: probe_main,
+        arg: 0,
+        simd: false,
+        params: SchedParams::fair(0),
+        affinity: 0,
+    })
+    .ok()?;
+    while !has_exited(id) {
+        yield_now();
+    }
+    let peak = slot(id.as_u32() as usize)
+        .meta
+        .lock()
+        .stack
+        .map_or(0, Stack::peak);
+    (peak >= PROBE_BYTES).then_some(peak)
+}
+
+/// A linha `stacks:` do boot, que o SDD 15 pede para remedir quando o uso de pilha mudar. Reprova
+/// (`FAILED`, que o smoke recusa) se a prova falha ou se algum pico passa de 75% da pilha.
+pub fn log_stacks() -> bool {
     let report = stack_report();
+    let probe = stack_probe();
+    let over = |peak: usize, bytes: usize| peak * 4 > bytes * 3;
+    let ok = probe.is_some()
+        && !over(report.idle_peak, report.idle_bytes)
+        && !over(report.task_peak, report.task_bytes)
+        && !over(report.shell_peak, report.shell_bytes);
     let kib = |bytes: usize| (bytes / 1024, bytes % 1024 * 10 / 1024);
     let (idle, task, shell) = (
         kib(report.idle_peak),
@@ -1111,7 +1142,7 @@ pub fn log_stacks() {
         kib(report.shell_peak),
     );
     kprintln!(
-        "[rustos] stacks: idle peak {}.{} KiB of {}, task peak {}.{} KiB of {}, shell peak {}.{} KiB of {}",
+        "[rustos] stacks: idle peak {}.{} KiB of {}, task peak {}.{} KiB of {}, shell peak {}.{} KiB of {}, probe {} of {PROBE_BYTES} B {}",
         idle.0,
         idle.1,
         report.idle_bytes / 1024,
@@ -1120,8 +1151,11 @@ pub fn log_stacks() {
         report.task_bytes / 1024,
         shell.0,
         shell.1,
-        report.shell_bytes / 1024
+        report.shell_bytes / 1024,
+        probe.unwrap_or(0),
+        if ok { "ok" } else { "FAILED" }
     );
+    ok
 }
 
 /// Pico e tamanho das pilhas por tipo de tarefa, em bytes.

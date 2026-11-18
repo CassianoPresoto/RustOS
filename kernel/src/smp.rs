@@ -19,6 +19,7 @@ const START_TIMEOUT_NS: u64 = 3_000_000_000;
 /// O que o BSP prepara para um núcleo antes de soltá-lo.
 struct Plan {
     resources: platform::SecondaryResources,
+    stack: Stack,
 }
 
 static PLANS: [SpinLock<Option<Plan>>; MAX_CPUS] = [const { SpinLock::new(None) }; MAX_CPUS];
@@ -61,12 +62,12 @@ pub fn start(boot: &impl BootInfo, memory: &mut Memory) -> Started {
         let index = next;
         next += 1;
         let prepared = memory
-            .map_stack(&mut mapper, task::STACK_PAGES)
+            .map_stack_painted(&mut mapper, task::STACK_PAGES)
             .map_err(platform::PlatformError::Map)
-            .and_then(|top| {
-                platform::prepare_secondary(memory, &mut mapper).map(|resources| (top, resources))
+            .and_then(|stack| {
+                platform::prepare_secondary(memory, &mut mapper).map(|resources| (stack, resources))
             });
-        let (top, resources) = match prepared {
+        let (stack, resources) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 kprintln!("[rustos] cpu {index}: not prepared: {error:?}");
@@ -74,9 +75,8 @@ pub fn start(boot: &impl BootInfo, memory: &mut Memory) -> Started {
                 continue;
             }
         };
-        Stack::new(top, task::STACK_PAGES).paint();
-        *PLANS[index].lock() = Some(Plan { resources });
-        STACK_TOPS[index].store(top.as_u64(), Ordering::Release);
+        *PLANS[index].lock() = Some(Plan { resources, stack });
+        STACK_TOPS[index].store(stack.top().as_u64(), Ordering::Release);
         percpu::set_hw_id(index, platform::ipi_target(cpu.hw_id));
         // SAFETY: o núcleo não é o de boot, é solto uma vez, e a memória do bootloader segue intacta.
         unsafe { rustos_boot_limine::start_cpu(cpu.token, index as u64, ap_entry) };
@@ -158,16 +158,16 @@ unsafe extern "C" fn ap_entry(info: *const MpInfo) -> ! {
 unsafe extern "C" fn ap_main(arg: *mut ()) -> ! {
     let index = arg.addr();
     let plan = PLANS[index].lock().take();
+    let stack = plan.as_ref().map(|plan| plan.stack);
     let ready = plan.is_some_and(|plan| platform::secondary_init(plan.resources).is_ok());
-    if !ready {
+    let Some(stack) = stack.filter(|_| ready) else {
         FAILED.fetch_or(1 << index, Ordering::Relaxed);
         platform::cpu().halt_forever();
-    }
+    };
     percpu::mark_online(index);
     while !GO.load(Ordering::Acquire) {
         panic::stop_if_requested();
         core::hint::spin_loop();
     }
-    let top = VirtAddr::new(STACK_TOPS[index].load(Ordering::Acquire));
-    task::run_secondary(Stack::new(top, task::STACK_PAGES))
+    task::run_secondary(stack)
 }

@@ -2,14 +2,13 @@
 //! padrão sumiu, varrendo do fundo (SDD 15, "Pico de pilha").
 
 use core::ptr;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use rustos_hal::{PAGE_SIZE, VirtAddr};
+use rustos_mm::watermark::first_unpainted;
 
 /// Nenhum valor que uma pilha escreva de propósito; sem ele o pico sai menor que o real.
 const PATTERN: u64 = 0x5253_5441_434b_2121;
 const WORD: usize = 8;
-const LINE_WORDS: usize = 64 / WORD;
 
 /// Uma pilha mapeada: do topo (fim exclusivo) para baixo, sem a página de guarda.
 #[derive(Clone, Copy, Debug)]
@@ -19,11 +18,13 @@ pub struct Stack {
 }
 
 impl Stack {
-    /// `top` é o que `map_stack` devolveu e `pages` o que ela recebeu.
-    pub fn new(top: VirtAddr, pages: u64) -> Self {
+    /// # Safety
+    /// As `pages` páginas abaixo de `top` ficam mapeadas para sempre como leitura e escrita,
+    /// alinhadas a 8, e `pages` não é zero.
+    pub unsafe fn new(top: VirtAddr, pages: u64) -> Self {
         Self {
-            top: usize::try_from(top.as_u64()).unwrap_or(0),
-            bytes: usize::try_from(pages * PAGE_SIZE).unwrap_or(0),
+            top: usize::try_from(top.as_u64()).expect("endereço cabe em usize"),
+            bytes: usize::try_from(pages * PAGE_SIZE).expect("tamanho cabe em usize"),
         }
     }
 
@@ -39,41 +40,50 @@ impl Stack {
         self.bytes / WORD
     }
 
-    fn word(self, index: usize) -> &'static AtomicU64 {
-        let at = self.top - self.bytes + index * WORD;
-        // SAFETY: a pilha fica mapeada para sempre, alinhada a 8, e só se acessa com atômico.
-        unsafe { AtomicU64::from_ptr(ptr::with_exposed_provenance_mut(at)) }
+    fn at(self, index: usize) -> *mut u64 {
+        ptr::with_exposed_provenance_mut(self.top - self.bytes + index * WORD)
     }
 
-    /// Cobre a pilha inteira com o padrão. Só de pilha que nenhuma tarefa usa agora.
-    pub fn paint(self) {
+    fn read(self, index: usize) -> u64 {
+        // SAFETY: mapeada para sempre (contrato de `new`). A leitura pode correr com a escrita
+        // da thread dona: o valor só alimenta estatística, e uma palavra alinhada não rasga.
+        unsafe { ptr::read_volatile(self.at(index)) }
+    }
+
+    fn write(self, index: usize) {
+        // SAFETY: mapeada para sempre (contrato de `new`) e, pelo contrato de `paint` e
+        // `repaint`, sem thread que a use.
+        unsafe { ptr::write_volatile(self.at(index), PATTERN) };
+    }
+
+    /// Cobre a pilha inteira com o padrão.
+    ///
+    /// # Safety
+    /// Nenhuma thread usa a pilha.
+    pub unsafe fn paint(self) {
         for index in 0..self.words() {
-            self.word(index).store(PATTERN, Ordering::Relaxed);
+            self.write(index);
         }
     }
 
-    /// O índice da primeira palavra que o padrão não cobre, do fundo para cima. Olha uma palavra
-    /// por linha de cache e refina na última linha limpa: o pico tem resolução de 8 bytes.
     fn first_used(self) -> usize {
-        let mut line = 0;
-        while line < self.words() && self.word(line).load(Ordering::Relaxed) == PATTERN {
-            line += LINE_WORDS;
-        }
-        (line.saturating_sub(LINE_WORDS - 1)..self.words())
-            .find(|&index| self.word(index).load(Ordering::Relaxed) != PATTERN)
-            .unwrap_or(self.words())
+        first_unpainted(self.words(), PATTERN, |index| self.read(index))
     }
 
     /// Bytes que a pilha já usou: do topo até a palavra mais funda que o padrão não cobre.
+    /// Não vê o que a thread reservou e não escreveu abaixo da palavra mais funda que escreveu.
     pub fn peak(self) -> usize {
         self.bytes - self.first_used() * WORD
     }
 
     /// Devolve o pico e repinta só o que foi usado: a pilha de uma tarefa nova que reusa o slot.
-    pub fn repaint(self) -> usize {
+    ///
+    /// # Safety
+    /// Nenhuma thread usa a pilha.
+    pub unsafe fn repaint(self) -> usize {
         let first = self.first_used();
         for index in first..self.words() {
-            self.word(index).store(PATTERN, Ordering::Relaxed);
+            self.write(index);
         }
         self.bytes - first * WORD
     }

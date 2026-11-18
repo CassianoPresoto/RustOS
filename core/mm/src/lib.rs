@@ -19,6 +19,7 @@ pub mod ranges;
 pub mod tables;
 #[cfg(test)]
 mod testing;
+pub mod watermark;
 pub mod window;
 pub mod wx;
 

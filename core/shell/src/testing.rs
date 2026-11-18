@@ -146,7 +146,7 @@ impl Host for FakeHost {
             switches: 7,
             simd,
             stack_peak: 3_500,
-            stack_bytes: 32_768,
+            stack_bytes: 16_384,
         };
         visit(&task(0, "idle", TaskState::Ready, 250_000_000, false));
         visit(&task(1, "shell", TaskState::Running, 12_345_678_901, false));

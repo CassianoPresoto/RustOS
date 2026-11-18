@@ -860,7 +860,7 @@ mod tests {
         assert!(
             rows[0].contains("name") && rows[0].contains("switches") && rows[0].contains("cpu")
         );
-        assert!(rows[0].contains("stack") && rows[1].contains("3.4/32K"));
+        assert!(rows[0].contains("stack") && rows[1].contains("3.4/16K"));
         assert!(rows[1].contains("idle") && rows[1].contains("ready") && rows[1].contains("0.250"));
         assert!(rows[2].contains("shell") && rows[2].contains("run") && rows[2].contains("12.345"));
         assert!(

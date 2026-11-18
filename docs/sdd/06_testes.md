@@ -61,7 +61,7 @@ passarem; o `smoke` exige a linha `task self-test: ok`, a `smp self-test: ok` (m
 W^X percorre as tabelas novas ([SDD 13](13_memoria_virtual.md)); `fault text` no shell
 confere que a CPU recusa a escrita em `.text`.
 
-Três linhas do boot são medida e heurística, não gate: `stacks:` (pico de pilha por tipo de thread, [SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)), `key residue:` (varredura da pilha
+Três linhas do boot são medida e heurística, não gate: `stacks:` (pico de pilha por tipo de thread e uma prova da marca d'água; vira `FAILED` se um pico passa de 75% da pilha, [SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)), `key residue:` (varredura da pilha
 atrás de cópias da chave, com uma sonda que planta 4 estados e exige achá-los; [SDD 09](09_seguranca.md))
 e `zero bench:` ([SDD 07](07_desempenho_e_recursos.md)). O kernel as imprime e segue;
 o `smoke` reprova o `FAILED` de qualquer linha. O autoteste do heap confere que o zerar
@@ -83,6 +83,8 @@ aparece na serial e que nenhum endereço do kernel vem junto (o log inteiro depo
 | Pânico em todas as CPUs ao mesmo tempo | `fault all` (uma tarefa por CPU ativa, com barreira) | um único `[rustos] panic:`, sem `failed again` nem texto misturado |
 | Ceder a CPU com um `IrqLock` preso | `fault held` (o shell segura um lock e chama `yield_now`; vale em `release` também, [SDD 15](15_tarefas_e_preempcao.md#regra-de-lock)) | `context switch with 2 IrqLock held, expected 1` |
 | Escrita em `.text` | `fault text` | `page fault at kernel+0x…` (deslocamento, não endereço) |
+
+O boot que roda `mem`, `ps` e `fetch` reprova também se o `ps` mostra o pico de pilha do shell acima de 48 KiB (75% de 64), na coluna `stack` ([SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)); vale o perfil do `make smoke-panic PROFILE=…`.
 
 A linha de comando vem do `cmdline:` da entrada do `limine.conf` (`xtask/src/image.rs`); `core/hal`
 `BootParams::parse` a traduz e tem teste de entrada inválida. Custa nove boots por ISA (cerca de
