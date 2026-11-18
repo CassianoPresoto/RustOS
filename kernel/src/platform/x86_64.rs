@@ -506,6 +506,18 @@ pub fn hardware_entropy() -> Option<PlatformEntropy> {
     X86Entropy::detect(cpu_features())
 }
 
+/// O clamp do Spectre v1: a máscara aritmética basta no x86_64 (o Linux usa `cmp` e `sbb`).
+#[inline]
+pub fn array_index_nospec(index: usize, size: usize) -> usize {
+    rustos_hal::nospec::array_index_nospec(index, size)
+}
+
+/// O que o CPUID e o `IA32_ARCH_CAPABILITIES` dizem das mitigações.
+pub fn mitigation_features() -> rustos_arch_x86_64::mitigation::MitigationFeatures {
+    // SAFETY: ring 0; o `rdmsr` só roda se o CPUID anuncia o MSR.
+    unsafe { rustos_arch_x86_64::mitigation_features() }
+}
+
 /// As proteções de hardware desta ISA e se ficaram ligadas.
 pub fn protections() -> &'static [Protection] {
     // SAFETY: a escrita foi no boot; depois disso o relatório só é lido.

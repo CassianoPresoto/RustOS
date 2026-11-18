@@ -22,10 +22,52 @@ const DEBUG_BYTES: usize = DEBUG_WRITE_MAX as usize;
 )]
 const RANDOM_BYTES: usize = RANDOM_GET_MAX as usize;
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "o kernel só existe em 64 bits"
+)]
+const fn slot(number: u64) -> usize {
+    number as usize
+}
+
+/// Entradas da tabela de despacho: o maior número da ABI mais um.
+const TABLE_LEN: usize = {
+    let mut max = 0;
+    let mut index = 0;
+    while index < Syscall::ALL.len() {
+        let number = slot(Syscall::ALL[index].raw());
+        if number > max {
+            max = number;
+        }
+        index += 1;
+    }
+    max + 1
+};
+
+/// O número da chamada indexa a tabela direto; o vazio é número que a ABI não define.
+static TABLE: [Option<Syscall>; TABLE_LEN] = {
+    let mut table = [None; TABLE_LEN];
+    let mut index = 0;
+    while index < Syscall::ALL.len() {
+        table[slot(Syscall::ALL[index].raw())] = Some(Syscall::ALL[index]);
+        index += 1;
+    }
+    table
+};
+
+/// A chamada do número, ou `None`; o índice passa pelo clamp do Spectre v1 antes da tabela.
+#[inline]
+fn lookup(number: u64) -> Option<Syscall> {
+    if number >= TABLE_LEN as u64 {
+        return None;
+    }
+    TABLE[platform::array_index_nospec(slot(number), TABLE_LEN)]
+}
+
 /// `Handlers::syscall`: o número e os seis argumentos vindos do usuário.
 pub fn dispatch(args: &SyscallArgs) -> SyscallReturn {
     process::note_first_syscall();
-    let Some(call) = Syscall::from_raw(args.number) else {
+    let Some(call) = lookup(args.number) else {
         return SyscallReturn::err(Status::NotSupported);
     };
     let [a0, a1, ..] = args.args;

@@ -50,6 +50,7 @@ pub fn details(
     if let random::Source::Hardware(name) = source {
         kprintln!("[rustos] random: {name}");
     }
+    crate::mitigation::details();
 }
 
 /// O texto do arquivo de teste que o `xtask image` põe no initramfs provisório.

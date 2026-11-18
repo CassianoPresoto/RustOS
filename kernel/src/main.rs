@@ -22,6 +22,7 @@ mod frames;
 mod heap;
 mod interrupts;
 mod memory;
+mod mitigation;
 mod panic;
 mod percpu;
 mod platform;
@@ -67,6 +68,8 @@ struct Handoff {
     entry_cycles: u64,
     /// `rustos.selftest=1`: autotestes e benchmarks completos no boot (SDD 04); a imagem enxuta o recusa.
     selftest: bool,
+    /// `kpti=on|off|auto`: o que o relatório `mitigations:` diz que o KPTI faria.
+    kpti: rustos_hal::mitigation::KptiPolicy,
 }
 
 #[unsafe(no_mangle)]
@@ -129,6 +132,7 @@ extern "C" fn kmain() -> ! {
         vm,
         entry_cycles,
         selftest: params.selftest,
+        kpti: params.kpti,
     }));
     // SAFETY: `top` é o fim de uma pilha recém-mapeada e só nossa; a continuação não
     // volta, e `handoff` vem de `Box::into_raw`.
@@ -150,6 +154,7 @@ fn boot_kernel(handoff: Handoff) -> ! {
         vm,
         entry_cycles,
         selftest,
+        kpti,
     } = handoff;
     boot_time::enter(boot_time::Phase::Console);
     match platform::console(&boot, &mut memory.frames) {
@@ -190,7 +195,7 @@ fn boot_kernel(handoff: Handoff) -> ! {
     };
     boot_time::enter(boot_time::Phase::Setup);
     let source = random::init(&boot_marks(&boot, &memory, entry_cycles));
-    report(&boot, reclaimed);
+    report(&boot, reclaimed, kpti);
     if vm.initramfs_failed() {
         kprintln!("[rustos] initramfs: not mapped, the boot goes on without it");
     }
@@ -336,7 +341,7 @@ fn display_info(screen: &screen::Screen) -> DisplayInfo {
 
 /// O que o boot conta. O modo normal só diz o que um gate confere ou o que avisa; o resto é do
 /// modo de teste (`selftest::details`) e do shell: cada linha custa tempo na serial (SDD 04).
-fn report(boot: &impl BootInfo, reclaimed: u64) {
+fn report(boot: &impl BootInfo, reclaimed: u64, kpti: rustos_hal::mitigation::KptiPolicy) {
     kprintln!(
         "[rustos] RustOS {} ({})",
         env!("CARGO_PKG_VERSION"),
@@ -370,4 +375,5 @@ fn report(boot: &impl BootInfo, reclaimed: u64) {
     if !line.as_str().is_empty() {
         kprintln!("[rustos] protections:{}", line.as_str());
     }
+    mitigation::report(kpti);
 }
