@@ -19,12 +19,16 @@ const DEFAULT_MODE: u32 = 0o755;
 pub enum Error {
     /// Nome vazio, com NUL, ou com componente vazio, `.` ou `..` (cobre `/` inicial e final).
     BadName(String),
+    /// O nome é `TRAILER!!!`, que o leitor trata como o fim do arquivo.
+    ReservedName(String),
     /// Nome acima de `MAX_NAME_SIZE - 1` bytes do `core/cpio`.
     NameTooLong(String),
     /// Dois arquivos com o mesmo nome.
     Duplicate(String),
     /// Conteúdo que não cabe em `c_filesize` (8 dígitos hexadecimais).
     TooBig(String),
+    /// Mais arquivos do que cabem em `c_ino` (8 dígitos hexadecimais).
+    TooMany,
     /// Modo com bit fora das permissões (`0o7777`): o tipo regular é do escritor.
     BadMode(String, u32),
 }
@@ -35,6 +39,8 @@ impl fmt::Display for Error {
             Self::BadName(name) => write!(f, "nome inválido no initramfs: {name:?}"),
             Self::NameTooLong(name) => write!(f, "nome longo demais no initramfs: {name:?}"),
             Self::Duplicate(name) => write!(f, "nome repetido no initramfs: {name:?}"),
+            Self::ReservedName(name) => write!(f, "nome reservado no initramfs: {name:?}"),
+            Self::TooMany => write!(f, "arquivos demais para o newc"),
             Self::TooBig(name) => write!(f, "arquivo grande demais para o newc: {name:?}"),
             Self::BadMode(name, mode) => write!(f, "modo {mode:#o} inválido em {name:?}"),
         }
@@ -57,7 +63,7 @@ pub fn build(files: &[File<'_>]) -> Result<Vec<u8>, Error> {
             return Err(Error::BadMode(name.to_owned(), mode));
         }
         let size = u32::try_from(data.len()).map_err(|_| Error::TooBig(name.to_owned()))?;
-        let ino = u32::try_from(index + 1).map_err(|_| Error::TooBig(name.to_owned()))?;
+        let ino = u32::try_from(index + 1).map_err(|_| Error::TooMany)?;
         entry(
             &mut out,
             (name, namesize),
@@ -73,6 +79,9 @@ pub fn build(files: &[File<'_>]) -> Result<Vec<u8>, Error> {
 fn check_name(name: &str) -> Result<u32, Error> {
     if name.contains('\0') || name.split('/').any(|part| matches!(part, "" | "." | "..")) {
         return Err(Error::BadName(name.to_owned()));
+    }
+    if name == TRAILER {
+        return Err(Error::ReservedName(name.to_owned()));
     }
     u32::try_from(name.len() + 1)
         .ok()
@@ -111,7 +120,8 @@ struct Options {
     inputs: Vec<String>,
 }
 
-const USAGE: &str = "uso: initramfs [--arch A] [--out caminho] [nome=]arquivo...";
+const USAGE: &str = "uso: initramfs [--arch A] [--out caminho] [nome=]arquivo...\n\
+  `nome=` só vale se o trecho antes do primeiro `=` não tiver `/`; caminho com `=` sem `/` antes pede `nome=` explícito";
 
 fn parse(args: &[String]) -> Result<Options, String> {
     let mut options = Options {
@@ -147,9 +157,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
     Ok(options)
 }
 
-/// `nome=caminho` grava `nome`; sem o `=`, o nome é o último componente do caminho.
+/// `nome=caminho` grava `nome` se o `nome` não tem `/`; senão o nome é o último
+/// componente do caminho inteiro.
 fn split_input(input: &str) -> Result<(String, &str), String> {
-    if let Some((name, path)) = input.split_once('=') {
+    if let Some((name, path)) = input
+        .split_once('=')
+        .filter(|(name, _)| !name.contains('/'))
+    {
         return Ok((name.to_owned(), path));
     }
     Path::new(input)
@@ -331,6 +345,11 @@ mod tests {
         let cases = [
             "", "/init", "./init", "../init", "a/../b", "a/./b", "a//b", "dir/", ".", "..", "a\0b",
         ];
+        assert_eq!(
+            build(&[("TRAILER!!!", b"", 0o755)]),
+            Err(Error::ReservedName("TRAILER!!!".to_owned()))
+        );
+        assert!(build(&[("a/TRAILER!!!", b"", 0o755)]).is_ok());
         for name in cases {
             assert_eq!(
                 build(&[(name, b"x", 0o755)]),
@@ -383,6 +402,15 @@ mod tests {
         assert_eq!(
             split_input("/tmp/dir/prog").unwrap(),
             ("prog".to_owned(), "/tmp/dir/prog")
+        );
+        assert_eq!(
+            split_input("/tmp/a=b/prog").unwrap(),
+            ("prog".to_owned(), "/tmp/a=b/prog")
+        );
+        assert_eq!(split_input("v=1/prog").unwrap(), ("v".to_owned(), "1/prog"));
+        assert_eq!(
+            split_input("x=/tmp/a=b").unwrap(),
+            ("x".to_owned(), "/tmp/a=b")
         );
         assert!(parse(&args(&["--arch", "all", "--out", "x", "f"])).is_err());
         assert!(parse(&args(&["--arch", "x86_64"])).is_err());
