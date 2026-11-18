@@ -122,6 +122,17 @@ fn normal_ceiling_ms(forced: Option<&str>) -> u64 {
     }
 }
 
+/// Teto do `firmware` do `boot timeline:` no aarch64, em ms, com qualquer aceleração (HVF 0,1 s,
+/// TCG 0,5 s). A espera de 5 s do EDK2 (SDD 05) estoura.
+const FIRMWARE_CEILING_MS: u64 = 4000;
+
+/// Os microssegundos de `boot timeline: firmware N us`.
+fn firmware_boot_us(log: &str) -> Option<u64> {
+    const MARK: &str = "[rustos] boot timeline: firmware ";
+    let rest = &log[log.find(MARK)? + MARK.len()..];
+    rest.split_ascii_whitespace().next()?.parse().ok()
+}
+
 /// A linha em que o kernel diz quantos núcleos subiram; o limite do kernel (8) corta o pedido.
 fn cpus_line(requested: usize) -> String {
     format!("[rustos] cpus: {} online", requested.min(MAX_KERNEL_CPUS))
@@ -395,6 +406,19 @@ fn report(arch: Arch, mode: BootMode, outcome: Outcome, log: &str) -> Result<(),
                     return Err(failure(arch, &reason, log));
                 }
             }
+            if mode == BootMode::Normal && arch == Arch::Aarch64 {
+                let Some(us) = firmware_boot_us(log) else {
+                    return Err(failure(arch, "boot sem a linha `boot timeline:`", log));
+                };
+                if us > FIRMWARE_CEILING_MS * 1000 {
+                    let reason = format!(
+                        "o firmware levou {} ms até o Limine, teto de {FIRMWARE_CEILING_MS} ms: \
+                         a espera do EDK2 voltou? (SDD 05)",
+                        us / 1000
+                    );
+                    return Err(failure(arch, &reason, log));
+                }
+            }
             let online = cpus_line(Arch::cpus());
             if !log.contains(&online) {
                 let reason = format!("boot sem `{online}`: nem todos os núcleos subiram");
@@ -495,6 +519,10 @@ mod tests {
 
     /// Um log de boot normal que passa em tudo, com o tempo e as linhas extras que o teste pedir.
     fn normal_log(ms: u64, extra: &str) -> String {
+        normal_log_with(ms, 100_000, extra)
+    }
+
+    fn normal_log_with(ms: u64, firmware_us: u64, extra: &str) -> String {
         use std::fmt::Write as _;
         let mut log = String::new();
         for (line, _) in mode_lines(BootMode::Normal) {
@@ -505,6 +533,11 @@ mod tests {
             log.push('\n');
         }
         writeln!(log, "{BOOT_TIME}{ms} ms to prompt").unwrap();
+        writeln!(
+            log,
+            "[rustos] boot timeline: firmware {firmware_us} us, bootloader 1 us"
+        )
+        .unwrap();
         log.push_str(&cpus_line(Arch::cpus()));
         writeln!(log, "\n{KASLR_ON}\n{extra}").unwrap();
         log
@@ -559,6 +592,21 @@ mod tests {
             result.is_err(),
             "o modo de teste segue exigindo as linhas dele"
         );
+    }
+
+    #[test]
+    fn the_aarch64_normal_boot_refuses_a_slow_firmware() {
+        let outcome = Outcome::Booted(Duration::ZERO);
+        let slow = normal_log_with(2, 5_100_000, "");
+        let result = report(Arch::Aarch64, BootMode::Normal, outcome, &slow);
+        assert!(result.unwrap_err().contains("espera do EDK2"));
+        let fast = normal_log_with(2, 3_999_000, "");
+        assert!(report(Arch::Aarch64, BootMode::Normal, outcome, &fast).is_ok());
+        let missing = normal_log(2, "").replace("boot timeline", "boot tl");
+        let result = report(Arch::Aarch64, BootMode::Normal, outcome, &missing);
+        assert!(result.unwrap_err().contains("boot timeline"));
+        assert_eq!(firmware_boot_us(&slow), Some(5_100_000));
+        assert!(report(Arch::X86_64, BootMode::Normal, outcome, &slow).is_ok());
     }
 
     #[test]
