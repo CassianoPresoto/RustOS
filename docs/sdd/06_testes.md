@@ -9,8 +9,8 @@
 | --- | --- | --- | --- |
 | 1. Unidade da política | Algoritmo de `core/` certo, inclusive bordas (frame parcial, bitmap no limite, fila cheia) | host | `make test` |
 | 2. Adaptador com porta falsa | Driver e caminhada de tabela fazem a sequência certa de acessos, sem hardware | host | `make test` |
-| 3. Fumaça na QEMU, modo de teste | O kernel sobe de verdade, roda todos os autotestes e medidas e chega ao `boot ok` nas duas ISAs | QEMU | `make smoke ARCH=all` |
-| 3c. Fumaça na QEMU, modo normal | O boot que o usuário vê chega ao `boot ok` e imprime o tempo; barato (1,7 s no x86_64, 0,2 s no aarch64 em HVF com o firmware) | QEMU | `make smoke-fast ARCH=all` |
+| 3. Fumaça na QEMU, modo de teste | O kernel sobe de verdade, roda todos os autotestes e medidas e chega ao `boot ok` nas duas ISAs; só na imagem com a feature `selftest` | QEMU | `make smoke ARCH=all` |
+| 3c. Fumaça na QEMU, modo normal | O boot que o usuário vê chega ao `boot ok` e imprime o tempo; barato (1,7 s no x86_64, 0,2 s no aarch64 em HVF com o firmware). Na imagem enxuta (`release-small`, sem a feature `selftest`) confere também a recusa do modo de teste e do `bench` | QEMU | `make smoke-fast ARCH=all [PROFILE=release-small]` |
 | 3b. Tela na QEMU | O que o kernel desenha: fonte, terminal, shell e barra, depois de digitar comandos | QEMU | `make screenshot ARCH=all CMDS="fetch"` |
 | 4. Gates de arquitetura | Camadas, `unsafe`, `asm!`, comentários, docs | host | `make check` |
 
@@ -76,11 +76,13 @@ rápido mexe só na faixa pedida ([SDD 13](13_memoria_virtual.md), "Zerar").
 
 O que o modo normal deixa de provar (heap, timer, preempção, SIMD por tarefa, migração) só o `make smoke` prova.
 
+**A imagem enxuta (`PROFILE=release-small`, sem a feature `selftest`, [SDD 05](05_build_e_execucao.md#perfis)).** O `make smoke` não a cobre: ela não tem o modo de teste. O `smoke-fast` dela faz dois boots. O primeiro é o normal acima, com os mesmos tetos. O segundo passa `rustos.selftest=1` (o `limine.conf` é o mesmo do `make smoke`) e exige `[rustos] selftest: not in this build`, as linhas do modo normal, nenhuma do modo de teste e, depois do `boot ok`, que o `bench` digitado no shell responda `bench: not in this build`. Sem isso a imagem de produção, que o CI não roda no modo de teste, apodreceria sem ninguém ver: um `cfg` errado que tire o `w^x:` ou o `reclaimed:` só apareceria nela. Entra no `make pr` e no CI nas duas ISAs. O `core/shell` tem o mesmo par: `cargo test` com o `bench` e `cargo test --no-default-features` sem ele (`make test`).
+
 ## Andar 3a — pânico (`make smoke-panic`)
 
 `cargo xtask smoke-panic` derruba o kernel de propósito em oito pontos, mais um boot que roda `mem`, `ps` e `fetch`, e confere que a mensagem
 aparece na serial e que nenhum endereço do kernel vem junto (o log inteiro depois do primeiro `[rustos]`, com o corpo do pânico e a saída do shell). Constrói com a feature `panic-tests`
-(além das de `RUSTOS_FEATURES`) e sobe um boot por cenário:
+(além das de `RUSTOS_FEATURES` e da `selftest` do perfil) e sobe um boot por cenário:
 
 | Cenário | Como provoca | Mensagem esperada |
 | --- | --- | --- |

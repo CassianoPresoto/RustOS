@@ -97,9 +97,9 @@ inteira em [guidelines 08](docs/guidelines/08_commits_branches_e_pr.md).
 | Compila o kernel | `make build ARCH=x86_64\|aarch64 PROFILE=dev\|release\|release-small` |
 | Sobe na QEMU com a serial no terminal | `make run ARCH=…` |
 | Sobe, espera `[rustos] boot ok` e sai | `make smoke ARCH=…\|all` |
-| O mesmo no boot normal, com o tempo do kernel até o prompt | `make smoke-fast ARCH=…\|all` |
+| O mesmo no boot normal, com o tempo do kernel até o prompt (em `PROFILE=release-small`, a imagem enxuta, sem o modo de teste) | `make smoke-fast ARCH=…\|all` |
 | Tamanho das seções do kernel | `make size ARCH=… PROFILE=…` |
-| Checklist antes do PR | `make pr` (`check` + `test` + smoke e smoke-fast nas duas ISAs) |
+| Checklist antes do PR | `make pr` (`check` + `test` + smoke e smoke-fast nas duas ISAs, e o smoke-fast da `release-small`) |
 
 **`make check` verde não é kernel verificado.** Ele não sobe a QEMU. Mexeu em
 `kernel/`, `arch/`, `boot/` ou `drivers/`: rode `make smoke ARCH=all` e diga no PR
