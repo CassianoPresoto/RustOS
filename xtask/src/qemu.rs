@@ -47,6 +47,80 @@ const REQUIRED: [(&str, &str); 6] = [
 ];
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Como o `smoke` sobe o kernel: com os autotestes e os benchmarks, ou só o essencial (SDD 06).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootMode {
+    /// `rustos.selftest=1` na linha de comando: o que o `make smoke` confere.
+    SelfTest,
+    /// Sem linha de comando: o boot que o usuário vê, o do `make smoke-fast`.
+    Normal,
+}
+
+impl BootMode {
+    const fn cmdline(self) -> Option<&'static str> {
+        match self {
+            Self::SelfTest => Some("rustos.selftest=1"),
+            Self::Normal => None,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::SelfTest => "smoke",
+            Self::Normal => "smoke-fast",
+        }
+    }
+}
+
+/// O que só o modo de teste imprime: se uma destas faltar, a linha de comando se perdeu e o
+/// boot que passou foi o normal.
+const SELFTEST_LINES: [(&str, &str); 11] = [
+    ("[rustos] frame self-test: ok", "o autoteste de frame"),
+    ("[rustos] heap self-test: ok", "o autoteste do heap"),
+    ("[rustos] exception self-test: ok", "o autoteste de exceção"),
+    ("[rustos] timer: ", "o autoteste do timer"),
+    ("[rustos] idle: ", "a medida da ociosa"),
+    ("[rustos] key residue: ", "o autoteste de resíduo de chave"),
+    ("[rustos] zero bench: ", "a medida de zerar"),
+    ("[rustos] random bench: ", "a medida do gerador"),
+    ("[rustos] switch: ", "a medida de troca de contexto"),
+    ("[rustos] scale: ", "a medida de escala"),
+    ("[rustos] alloc storm: ", "a medida de contenção da memória"),
+];
+/// O que o boot normal confere, além do que o `REQUIRED` tem de comum aos dois modos.
+const NORMAL_LINES: [(&str, &str); 2] = [
+    ("[rustos] frame self-test: ok", "o autoteste de frame"),
+    ("[rustos] exception self-test: ok", "o autoteste de exceção"),
+];
+/// A linha de tempo do boot, nos dois modos (SDD 04).
+const BOOT_TIME: &str = "[rustos] boot time: kernel ";
+/// Autotestes de tarefa que o `REQUIRED` pode ter e que só o modo de teste roda.
+const TASK_SELFTESTS: [&str; 2] = ["[rustos] smp self-test:", "[rustos] wake self-test:"];
+
+/// O que o boot normal não pode imprimir: tudo o que é do modo de teste e não do normal, mais
+/// os autotestes de tarefa. Uma linha destas é trabalho de teste que voltou ao caminho do prompt.
+fn normal_forbidden() -> Vec<&'static str> {
+    let own = |line: &str| NORMAL_LINES.iter().any(|(kept, _)| *kept == line);
+    SELFTEST_LINES
+        .iter()
+        .map(|(line, _)| *line)
+        .filter(|line| !own(line))
+        .chain(["[rustos] task self-test:"])
+        .chain(TASK_SELFTESTS)
+        .collect()
+}
+
+/// Teto do `boot time:` no modo normal, em ms. Só uma aceleração **forçada** (`RUSTOS_ACCEL`) conta
+/// como confirmada: a lista padrão tem `kvm`/`hvf` mas a QEMU cai no TCG sem avisar (o runner do CI
+/// tem `/dev/kvm` sem permissão). Sem confirmação o teto é folgado e as linhas proibidas pegam a
+/// regressão de verdade.
+fn normal_ceiling_ms(forced: Option<&str>) -> u64 {
+    match forced {
+        Some("hvf" | "kvm") => 50,
+        _ => 500,
+    }
+}
+
 /// A linha em que o kernel diz quantos núcleos subiram; o limite do kernel (8) corta o pedido.
 fn cpus_line(requested: usize) -> String {
     format!("[rustos] cpus: {} online", requested.min(MAX_KERNEL_CPUS))
@@ -83,8 +157,8 @@ pub fn run(root: &Path, arch: Arch, profile: Profile) -> Result<(), String> {
     workspace::run(qemu.args(["-serial", "mon:stdio"]))
 }
 
-pub fn smoke(root: &Path, arch: Arch, profile: Profile) -> Result<(), String> {
-    let mut qemu = command(root, arch, profile)?;
+pub fn smoke(root: &Path, arch: Arch, profile: Profile, mode: BootMode) -> Result<(), String> {
+    let mut qemu = command_with(root, arch, profile, &cargo::features(), mode.cmdline())?;
     qemu.args(["-display", "none", "-serial", "stdio", "-monitor", "none"])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -98,7 +172,7 @@ pub fn smoke(root: &Path, arch: Arch, profile: Profile) -> Result<(), String> {
     child.wait().ok();
 
     print_kernel_lines(&log);
-    report(arch, outcome, &log)
+    report(arch, mode, outcome, &log)
 }
 
 /// Sobe sem janela, espera o boot, digita cada comando na serial e grava a tela
@@ -130,7 +204,9 @@ pub fn screenshot(
     let (outcome, log) = wait_for_boot(&receiver, started);
     let result = match outcome {
         Outcome::Booted(_) => capture(&mut child, &receiver, &socket, &ppm, commands),
-        other => report(arch, other, &log).and(Err("sem boot, sem captura".to_owned())),
+        other => {
+            report(arch, BootMode::Normal, other, &log).and(Err("sem boot, sem captura".to_owned()))
+        }
     };
     child.kill().ok();
     child.wait().ok();
@@ -248,18 +324,75 @@ fn wait_for_boot(receiver: &mpsc::Receiver<String>, started: Instant) -> (Outcom
             break Outcome::Booted(started.elapsed());
         }
         if log.contains(PANIC) || FATAL.iter().any(|mark| log.contains(mark)) {
+            drain(receiver, &mut log, FATAL_DRAIN);
             break Outcome::Panicked;
         }
     };
     (outcome, log)
 }
 
-fn report(arch: Arch, outcome: Outcome, log: &str) -> Result<(), String> {
+/// Quanto o xtask ainda lê depois de casar uma linha fatal: o resto dela (a mensagem inteira) chega
+/// depois do prefixo que casou.
+const FATAL_DRAIN: Duration = Duration::from_millis(200);
+
+fn drain(receiver: &mpsc::Receiver<String>, log: &mut String, window: Duration) {
+    let deadline = Instant::now() + window;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match receiver.recv_timeout(left) {
+            Ok(chunk) => log.push_str(&chunk),
+            Err(_) => return,
+        }
+    }
+}
+
+/// As linhas que o modo exige, na ordem: as comuns do `REQUIRED` (sem os autotestes de tarefa,
+/// que só o modo de teste roda), as do modo e a de tempo.
+fn mode_lines(mode: BootMode) -> Vec<(&'static str, &'static str)> {
+    let common = REQUIRED
+        .iter()
+        .filter(|(line, _)| mode == BootMode::SelfTest || !line.contains("self-test:"));
+    let own: &[(&str, &str)] = match mode {
+        BootMode::SelfTest => &SELFTEST_LINES,
+        BootMode::Normal => &NORMAL_LINES,
+    };
+    common
+        .chain(own)
+        .copied()
+        .chain([(BOOT_TIME, "a linha de tempo do boot")])
+        .collect()
+}
+
+/// Os milissegundos de `boot time: kernel N ms to prompt`.
+fn kernel_boot_ms(log: &str) -> Option<u64> {
+    let rest = &log[log.find(BOOT_TIME)? + BOOT_TIME.len()..];
+    rest.split_ascii_whitespace().next()?.parse().ok()
+}
+
+fn report(arch: Arch, mode: BootMode, outcome: Outcome, log: &str) -> Result<(), String> {
     match outcome {
         Outcome::Booted(elapsed) => {
-            if let Some((_, what)) = REQUIRED.iter().find(|(line, _)| !log.contains(line)) {
+            if let Some((_, what)) = mode_lines(mode)
+                .iter()
+                .find(|(line, _)| !log.contains(line))
+            {
                 let reason = format!("boot sem {what} (guidelines 09)");
                 return Err(failure(arch, &reason, log));
+            }
+            if mode == BootMode::Normal {
+                if let Some(line) = normal_forbidden().iter().find(|line| log.contains(*line)) {
+                    let reason = format!("o boot normal rodou `{line}`, que é do modo de teste");
+                    return Err(failure(arch, &reason, log));
+                }
+                let forced = std::env::var("RUSTOS_ACCEL").ok();
+                let accel = forced.as_deref().unwrap_or("não confirmada");
+                let ceiling = normal_ceiling_ms(forced.as_deref());
+                if let Some(ms) = kernel_boot_ms(log).filter(|&ms| ms > ceiling) {
+                    let reason = format!(
+                        "boot normal levou {ms} ms no kernel, teto de {ceiling} ms com `{accel}`: \
+                         autoteste ou medida voltou ao caminho do prompt?"
+                    );
+                    return Err(failure(arch, &reason, log));
+                }
             }
             let online = cpus_line(Arch::cpus());
             if !log.contains(&online) {
@@ -275,8 +408,11 @@ fn report(arch: Arch, outcome: Outcome, log: &str) -> Result<(), String> {
                 let reason = format!("endereço do kernel no log: `{address}` (SDD 09)");
                 return Err(failure(arch, &reason, log));
             }
+            let kernel = kernel_boot_ms(log)
+                .map_or_else(String::new, |ms| format!(", kernel {ms} ms até o prompt"));
             println!(
-                "xtask: smoke {} ok em {} ms (relógio de parede, firmware incluso)",
+                "xtask: {} {} ok em {} ms (relógio de parede, firmware incluso){kernel}",
+                mode.name(),
                 arch.name(),
                 elapsed.as_millis()
             );
@@ -341,6 +477,112 @@ mod tests {
         let prompt = "\x1b[1;38;5;208mrustos\x1b[0m \x1b[34m~\x1b[0m % ";
         assert!(ends_with_prompt(&format!("ps\r\n  0 idle\r\n{prompt}")));
         assert!(!ends_with_prompt("busy 23% \r\n"));
+    }
+
+    #[test]
+    fn only_the_self_test_mode_asks_for_the_task_self_tests() {
+        let wants = |mode, text: &str| mode_lines(mode).iter().any(|(line, _)| line.contains(text));
+        assert!(wants(BootMode::SelfTest, "task self-test"));
+        assert!(wants(BootMode::SelfTest, "alloc storm"));
+        assert!(!wants(BootMode::Normal, "task self-test"));
+        assert!(!wants(BootMode::Normal, "smp self-test"));
+        for mode in [BootMode::SelfTest, BootMode::Normal] {
+            assert!(wants(mode, "w^x: ok"));
+            assert!(wants(mode, "boot time:"));
+        }
+    }
+
+    /// Um log de boot normal que passa em tudo, com o tempo e as linhas extras que o teste pedir.
+    fn normal_log(ms: u64, extra: &str) -> String {
+        use std::fmt::Write as _;
+        let mut log = String::new();
+        for (line, _) in mode_lines(BootMode::Normal) {
+            if line == BOOT_TIME {
+                continue;
+            }
+            log.push_str(line);
+            log.push('\n');
+        }
+        writeln!(log, "{BOOT_TIME}{ms} ms to prompt").unwrap();
+        log.push_str(&cpus_line(Arch::cpus()));
+        writeln!(log, "\n{KASLR_ON}\n{extra}").unwrap();
+        log
+    }
+
+    #[test]
+    fn the_normal_boot_refuses_every_line_of_the_self_test_mode() {
+        let forbidden = normal_forbidden();
+        for line in [
+            "[rustos] heap self-test: ok",
+            "[rustos] timer: ",
+            "[rustos] random bench: ",
+            "[rustos] zero bench: ",
+            "[rustos] smp self-test:",
+            "[rustos] wake self-test:",
+            "[rustos] task self-test:",
+            "[rustos] switch: ",
+        ] {
+            assert!(forbidden.contains(&line), "{line}");
+        }
+        assert!(!forbidden.contains(&"[rustos] frame self-test: ok"));
+        assert!(!forbidden.contains(&"[rustos] exception self-test: ok"));
+        assert!(
+            report(
+                Arch::X86_64,
+                BootMode::Normal,
+                Outcome::Booted(Duration::ZERO),
+                &normal_log(5, "")
+            )
+            .is_ok()
+        );
+        for line in ["[rustos] heap self-test: ok", "[rustos] timer: 100 Hz"] {
+            let log = normal_log(5, line);
+            let outcome = Outcome::Booted(Duration::ZERO);
+            let result = report(Arch::X86_64, BootMode::Normal, outcome, &log);
+            assert!(result.unwrap_err().contains("do modo de teste"), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_normal_boot_has_a_time_ceiling() {
+        assert_eq!(normal_ceiling_ms(None), 500);
+        assert_eq!(normal_ceiling_ms(Some("tcg")), 500);
+        assert_eq!(normal_ceiling_ms(Some("hvf")), 50);
+        assert_eq!(normal_ceiling_ms(Some("kvm")), 50);
+        let slow = normal_log(99_999, "");
+        let outcome = Outcome::Booted(Duration::ZERO);
+        let result = report(Arch::Aarch64, BootMode::Normal, outcome, &slow);
+        assert!(result.unwrap_err().contains("teto de"));
+        let result = report(Arch::Aarch64, BootMode::SelfTest, outcome, &slow);
+        assert!(
+            result.is_err(),
+            "o modo de teste segue exigindo as linhas dele"
+        );
+    }
+
+    #[test]
+    fn a_fatal_line_is_read_to_its_end_before_the_report() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send("[rustos] interrupts: Missing".to_owned())
+            .unwrap();
+        let late = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            sender.send("Feature(\"pit\")\n".to_owned()).unwrap();
+            sender
+        });
+        let (outcome, log) = wait_for_boot(&receiver, Instant::now());
+        assert!(matches!(outcome, Outcome::Panicked));
+        assert!(log.ends_with("Feature(\"pit\")\n"), "{log}");
+        drop(late.join());
+    }
+
+    #[test]
+    fn the_kernel_boot_time_is_read_from_its_line() {
+        let log = "x [rustos] boot time: kernel 41 ms to prompt (memory 3, smp 0)\n";
+        assert_eq!(kernel_boot_ms(log), Some(41));
+        assert_eq!(kernel_boot_ms("[rustos] boot time: kernel soon"), None);
+        assert_eq!(kernel_boot_ms("nada"), None);
     }
 
     #[test]

@@ -45,6 +45,26 @@ pub trait Host {
     fn bench(&self) -> Option<BenchReport> {
         None
     }
+    /// As medidas curtas de zerar memória e do gerador aleatório, as que o boot só faz no
+    /// modo de teste; `None` quando o sistema não as tem.
+    fn micro_bench(&self) -> Option<MicroBench> {
+        None
+    }
+}
+
+/// Zerar memória e gerar números aleatórios: o que o `bench` mostra além das tarefas.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MicroBench {
+    /// Zerar 1 KiB, 4 KiB, 4 KiB numa faixa de 1 MiB e um par alocar-liberar de 4 KiB do heap,
+    /// em décimos de ns.
+    pub zero_kib_tenths_ns: u64,
+    pub zero_page_tenths_ns: u64,
+    pub zero_cold_tenths_ns: u64,
+    pub zero_pair_tenths_ns: u64,
+    /// Vazão do ChaCha20 em MB/s, custo de uma reposição e de um `next_u64` (décimos de ns).
+    pub random_mb_per_s: u64,
+    pub random_reseed_ns: u64,
+    pub random_u64_tenths_ns: u64,
 }
 
 /// Em que ponto do ciclo de vida uma tarefa está.

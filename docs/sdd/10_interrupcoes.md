@@ -20,7 +20,7 @@ entre elas está numa seção por ISA, abaixo.
 | 5 | 8259 mascarado (0xFF em 0x21 e 0xA1) | `pic.rs` |
 | 6 | Local APIC: x2APIC por MSR se `CPUID.1:ECX[21]`, senão xAPIC por MMIO na janela de dispositivos | `apic.rs`, `lapic.rs` |
 | 7 | I/O APIC em `0xFEC0_0000` (DEBT-0009): pino 4 (COM1) → vetor `0x24`; pino 1 (teclado) → `0x21`, mascarado | `ioapic.rs` |
-| 8 | Calibração: um intervalo de 20 ms do PIT (canal 2) mede o TSC e o contador do timer do APIC; o timer fica em modo de um tiro (TSC-deadline se o CPUID anuncia), desarmado: `interrupts::init` arma o primeiro tique | `pit.rs`, `clock.rs`, `lapic.rs` |
+| 8 | Calibração: uma janela do PIT (canal 2) de 5 a 20 ms, lida pelo contador, fecha quando a incerteza cai a 400 ppm ou não vai cair ([abaixo](#calibração-pelo-pit-uma-janela-que-cresce-até-fechar)); mede o TSC e o contador do timer do APIC; o timer fica em modo de um tiro (TSC-deadline se o CPUID anuncia), desarmado: `interrupts::init` arma o primeiro tique | `pit.rs`, `clock.rs`, `lapic.rs` |
 | 9 | `Uart16550::enable_receive_interrupt` (`IER` bit 0 e `OUT2` do `MCR`), por último | `drivers/uart16550` |
 
 O chamador (`interrupts::init`) liga o `IF` depois. Os núcleos secundários repetem só o que é
@@ -95,6 +95,32 @@ inutiliza o CPUID 0x15 do Linux: por isso a referência é o PIT.
 | Contador do timer do APIC, divisor 16 | ~62,5 MHz |
 | `timer: 100 Hz, 5 ticks in …` | 40 a 45 ms (a fase do primeiro tique é aleatória) |
 | `sched: … timer one-shot` | o contador do APIC (62,5 MHz); o TSC-deadline nunca rodou ([DEBT-0034](../tech-debt/0034-tsc-deadline-sem-teste-no-x86.md)) |
+
+### Calibração pelo PIT: uma janela que cresce até fechar
+
+A calibração era de 20 ms de PIT, a maior fatia do `interrupts::init` (em TCG o PIT corre em tempo real). O TSC da QEMU em TCG é de 1 GHz exatos (o TCG conta nanossegundos), o que dá o erro de cada medida. Janela fixa lida pela saída do canal 2, quatro boots por janela:
+
+| Janela | Erro máximo visto |
+| --- | --- |
+| 20 ms | 0,07% |
+| 5 ms | 0,28%, sempre para mais |
+| 2,5 ms | 0,84% |
+
+O erro vem da latência da leitura de porta que fecha a janela (cerca de 7 a 14 µs no TCG), não da quantização. A versão atual (`arch/x86_64/src/pit.rs`) segue o `quick_pit_calibrate` do Linux (`arch/x86/kernel/tsc.c`, v6.18, linhas 568–641, lido no GitHub): o PIT conta em modo 0 a partir de 0xFFFF, e o TSC é amostrado junto do contador (e do contador do APIC), numa **única** janela; fecha quando a incerteza, `d_origem + d_agora` sobre o intervalo, cai abaixo do alvo, com o teto de duração (`MAX_QUICK_PIT_MS`, 50 ms lá) e a saída antecipada quando a extrapolação mostra que o alvo não chega (`i == 1 && d1 + d2 >= (delta * MAX_QUICK_PIT_ITERATIONS) >> 11`, lá).
+
+| | Linux (`quick_pit_calibrate`) | RustOS (`pit::calibrate`) |
+| --- | --- | --- |
+| Sinal do PIT | o byte alto do contador muda a cada 256 ticks (`pit_expect_msb`, lendo `0x42` duas vezes, sem latch) e o TSC se toma na última leitura com o mesmo valor | o comando de latch (`0x80`) trava a contagem de 16 bits e o instante é o do comando, entre duas leituras do TSC: não precisa alinhar a transições |
+| Incerteza | `d1 + d2` (período de leitura das duas pontas) contra `delta >> 11` (~488 ppm) | a largura das duas amostras das pontas, `(d_origem + d_agora)/2`, sobre o intervalo, mais 1 tick do PIT (`1e6 / ticks` ppm: a diferença entre dois latches erra até 838 ns) |
+| Alvo | 500 ppm | 400 ppm (margem) |
+| Teto | 50 ms | 20 ms |
+| Se o alvo não chega | falha e o Linux cai para outro método (`pit_hpet_ptimer_calibrate_cpu`, `CAL_MS` 10, `CAL2_MS` 50) | aceita o que a janela mínima de 5 ms deu, se a incerteza for de até 1% (10 000 ppm); acima disso recusa (`MissingFeature("pit: …")`) |
+| PIT parado | sai por contagem de leituras (`count < 50000`) | sai por ciclos de TSC (300 M, ~100 a 300 ms) |
+| Primeira leitura | descartada (`pit_verify_msb(0)`) | descartada; a origem tem de estar a até 4 096 ticks de 0xFFFF, senão a contagem é velha e a medida é recusada |
+
+No TCG a leitura de porta é lenta (cerca de 7 µs por operação): a incerteza a 5 ms é de uns 1 700 a 2 700 ppm e a 20 ms seria de uns 500, então a saída antecipada fecha aos 5 ms, sempre, sem medir duas vezes. Uma primeira versão deste PR media 5 ms, e se a incerteza passasse de 500 ppm media de novo com uma janela maior: o boot normal do x86_64 oscilava entre 24 e 40 ms. Com uma janela só, 12 boots (TSC medido contra 1 GHz): **erro máximo 0,094%, mediana 0,037%** (a incerteza devolvida, 1 650 a 2 660 ppm, é um limite, não o erro); kernel do boot normal **26 a 31 ms, mediana 26**, sem as duas modas. O limite é de 3 a 5 vezes o erro visto, e o boot só imprime `tsc: calibrated to within N ppm` acima de 5 000 ppm (0,5%); o modo de teste mostra o limite sempre, na linha `boot phases:` (`tsc error at most N ppm`). Em hardware de leitura rápida (1 µs) a medida fecha em 400 ppm antes dos 5 ms (teste de host com 0,5 µs por leitura). O aarch64 não calibra (o `CNTFRQ_EL0` dá a frequência). Em metal ou KVM ninguém mediu ([DEBT-0066](../tech-debt/0066-calibracao-do-pit-com-janela-curta-sem-medida-em-kvm.md)).
+
+Com `-machine q35,pit=off` o contador não anda: `interrupts: MissingFeature("pit: the counter does not move")` depois de ~0,3 s, e o boot para (antes, com 50 M consultas, a calibração lixo era aceita: TSC 480× errado, `kernel 11624 ms`).
 
 ### Custo
 

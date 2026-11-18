@@ -7,7 +7,7 @@ XTASK := cargo xtask
 
 .DEFAULT_GOAL := help
 .PHONY: help fmt fmt-check clippy layers-check comments-check docs-check check test \
-        build image run smoke smoke-panic screenshot font-preview size pr clean
+        build image run smoke smoke-fast smoke-panic screenshot font-preview size pr clean
 
 help: ## lista os alvos
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -49,8 +49,11 @@ image: ## monta a partição EFI em target/esp/<arch>
 run: ## sobe na QEMU com a serial no terminal (Ctrl-A X sai)
 	$(XTASK) run --arch $(ARCH) --profile $(PROFILE)
 
-smoke: ## sobe na QEMU, espera "[rustos] boot ok" e sai
+smoke: ## sobe na QEMU no modo de teste (autotestes e benchmarks), espera "[rustos] boot ok" e sai
 	$(XTASK) smoke --arch $(ARCH) --profile $(PROFILE)
+
+smoke-fast: ## o mesmo no modo normal (o boot do usuário), com o tempo de boot do kernel
+	$(XTASK) smoke-fast --arch $(ARCH) --profile $(PROFILE)
 
 smoke-panic: ## derruba o kernel de propósito e confere que o pânico aparece (cedo, console preso, aninhado)
 	$(XTASK) smoke-panic --arch $(ARCH) --profile $(PROFILE)
@@ -64,8 +67,9 @@ font-preview: ## desenha todos os glifos da fonte própria em target/font-previe
 size: ## tamanho das seções do kernel
 	$(XTASK) size --arch $(ARCH) --profile $(PROFILE)
 
-pr: check test ## checklist antes do PR: gates, testes, smoke e smoke-panic nas duas ISAs
+pr: check test ## checklist antes do PR: gates, testes, smoke, smoke-fast e smoke-panic nas duas ISAs
 	$(XTASK) smoke --arch all --profile $(PROFILE)
+	$(XTASK) smoke-fast --arch all --profile $(PROFILE)
 	$(XTASK) smoke-panic --arch all --profile $(PROFILE)
 	RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx $(XTASK) smoke --arch aarch64 --profile $(PROFILE)
 

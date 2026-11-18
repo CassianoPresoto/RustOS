@@ -86,10 +86,17 @@ pub const TIMER_HZ: u32 = 100;
 
 /// Páginas de cada pilha de exceção (#DF, NMI, #MC); a de guarda fica abaixo.
 const IST_STACK_PAGES: u64 = 4;
-/// Janela de calibração: 20 ms de PIT (1 193 182 Hz × 0,02 s).
-const PIT_WINDOW_TICKS: u16 = 23_864;
-/// Consultas à porta B antes de desistir do PIT.
-const PIT_MAX_POLLS: u32 = 50_000_000;
+/// Calibração pelo PIT (SDD 10, DEBT-0066): fecha em 400 ppm, aceita o que houver aos 5 ms se
+/// mais tempo não chega lá, para em 20 ms, recusa acima de 1% e desiste do PIT parado em 300 M ciclos.
+const PIT_POLICY: pit::Policy = pit::Policy {
+    min_ticks: 5_966,
+    max_ticks: 23_864,
+    target_ppm: 400,
+    refuse_ppm: 10_000,
+    max_cycles: 300_000_000,
+};
+/// Incerteza acima da qual o boot avisa: 0,5%. O limite é de 3 a 5 vezes o erro visto em TCG.
+const PIT_WARN_PPM: u64 = 5_000;
 /// Pinos do I/O APIC da QEMU `q35`: as ISA 1 (teclado) e 4 (COM1) vão direto,
 /// sem redirecionamento do MADT (DEBT-0009).
 const IOAPIC_PIN_KEYBOARD: u8 = 1;
@@ -106,6 +113,8 @@ static READY: AtomicBool = AtomicBool::new(false);
 /// Primeira página, sem mapeamento, da pilha de #DF: lê-la provoca um #PF.
 static GUARD_PAGE: AtomicU64 = AtomicU64::new(0);
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+/// Limite do erro da calibração do TSC, em ppm; 0 antes dela.
+static CLOCK_ERROR_PPM: AtomicU64 = AtomicU64::new(0);
 static TSC_ORIGIN: AtomicU64 = AtomicU64::new(0);
 /// `TickScale` do TSC, em dois atômicos: `now_ns` não divide.
 static TSC_MULT: AtomicU64 = AtomicU64::new(0);
@@ -342,11 +351,23 @@ fn start_clocks(apic: &ApicAccess) -> Result<(), PlatformError> {
     // SAFETY: as portas do PIT são só desta função, no boot.
     let pit = Pit::new(unsafe { PortBus::new(PIT_PORTS) });
     local.start_countdown();
-    let measured = pit::measure(&pit, PIT_WINDOW_TICKS, PIT_MAX_POLLS, || Reading {
+    let measured = pit::calibrate(&pit, PIT_POLICY, || Reading {
         tsc: rdtsc(),
         apic_ticks: local.elapsed_ticks(),
     })
-    .ok_or(PlatformError::MissingFeature("pit"))?;
+    .map_err(|failure| match failure {
+        pit::Failure::Stuck => PlatformError::MissingFeature("pit: the counter does not move"),
+        pit::Failure::TooUncertain(_) => {
+            PlatformError::MissingFeature("pit: calibration error above 1%")
+        }
+    })?;
+    CLOCK_ERROR_PPM.store(measured.error_ppm, Ordering::Relaxed);
+    if measured.error_ppm > PIT_WARN_PPM {
+        kprintln!(
+            "[rustos] tsc: calibrated to within {} ppm (target {PIT_WARN_PPM})",
+            measured.error_ppm
+        );
+    }
     TSC_HZ.store(measured.tsc_hz, Ordering::Relaxed);
     let (mult, shift) = TickScale::new(measured.tsc_hz).map_or((0, 0), TickScale::parts);
     TSC_ORIGIN.store(rdtsc(), Ordering::Relaxed);
@@ -362,6 +383,15 @@ fn start_clocks(apic: &ApicAccess) -> Result<(), PlatformError> {
         TimerMode::OneShot
     });
     Ok(())
+}
+
+/// Limite do erro da calibração do relógio contra o PIT, em ppm.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "mesma assinatura em todas as ISAs"
+)]
+pub fn clock_error_ppm() -> Option<u64> {
+    Some(CLOCK_ERROR_PPM.load(Ordering::Relaxed))
 }
 
 /// Como o timer dispara: `tsc-deadline` ou `one-shot` (contador do APIC).
