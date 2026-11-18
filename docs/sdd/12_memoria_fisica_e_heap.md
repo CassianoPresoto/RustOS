@@ -5,7 +5,7 @@
 
 Estado: o núcleo puro está em `core/mm`, testado no host, e o kernel o liga: o buddy
 entrega os frames e o heap é o `GlobalAlloc` (fase 2 do [roadmap](08_roadmap.md)). O
-cache por CPU ainda não está ligado (DEBT-0018). Os números medidos estão no
+cache por CPU está ligado desde o SMP (fase 3). Os números medidos estão no
 [SDD 07](07_desempenho_e_recursos.md).
 
 ## As camadas
@@ -168,8 +168,9 @@ recuperáveis entram depois, em `Memory::reclaim_bootloader` ([SDD 13](13_memori
 
 **Ordem de lock: `HEAP`, depois `FRAMES`.** Só o heap trava os dois, nessa ordem,
 e quem segura `FRAMES` (só dentro de um método de `Frames`) nunca chama o heap. Os
-dois são `IrqLock`: com a CPU única de hoje, a máscara de interrupção basta, e a
-ordem fica escrita para a fase 3, quando houver disputa.
+dois são `IrqLock`, spinlocks de verdade (a máscara de interrupção só protege contra o handler da mesma
+CPU; contra outra CPU vale o `compare_exchange` do `SpinLock`), e a disputa entre CPUs é medida
+([SDD 07](07_desempenho_e_recursos.md)). A ordem entre os locks do kernel todo está no [SDD 15](15_tarefas_e_preempcao.md).
 
 - **`alloc`** chama `KernelHeap::allocate` e soma o deslocamento do mapa direto ao
   `PhysAddr`; devolve nulo se o heap não foi instalado ou não há frames.
@@ -192,17 +193,15 @@ ordem fica escrita para a fase 3, quando houver disputa.
 - **Só o kernel usa `alloc`**: `extern crate alloc` está em `kernel/src/main.rs`, e
   `core/` continua sem chamar o alocador global (guidelines 05).
 
-### O cache por CPU não está ligado
+### O cache por CPU está ligado
 
-Decisão desta etapa: o `FrameCache` fica de fora até a fase 3 (DEBT-0018).
+Decisão da segunda onda da fase 3, com número ([SDD 07](07_desempenho_e_recursos.md)): com todas as CPUs alocando e devolvendo frames, o lock do buddy é disputado e o cache por CPU
+tira a disputa do caminho. `Frames::allocate`, `deallocate` e as corridas de **um** frame (`allocate_contiguous(1)`, o que o heap pede para o slab)
+passam pelo `FrameCache<32>` do `PerCpu` da CPU que roda, atrás do `IrqLock` próprio dele (sem disputa: só a CPU dona o pega). Corrida de mais de um frame vai direto ao buddy.
 
-- **Não há disputa:** uma CPU só, então o lock do buddy nunca espera ninguém.
-- **Custo de ligar agora:** o cache esconde frames do `free_frames` (o `mem` e a linha
-  `frames:` do boot passariam a mentir), e pede uma identidade de CPU que o kernel
-  ainda não tem.
-- **Pouco ganho agora:** o slab do heap já guarda uma página livre por classe (a
-  histerese), e frame solto fora do boot só aparece com o page fault de usuário, na
-  fase 4. O 1,7 ns do cache de 64 contra 21 ns do buddy (SDD 07) paga só num caminho
-  que ainda não existe.
+- **Ordem de lock:** heap, cache da CPU, frames. O buddy por trás do cache (`Backing`) trava `FRAMES` por chamada; quem segura `FRAMES` não chama o heap nem o cache.
+- **`free_frames`** soma o buddy e os caches de todas as CPUs: `mem` e `frames:` do boot seguem verdadeiros. Os frames de um cache não estão no buddy: de lá só voltam quando o cache enche (metade vai) ou esvazia (metade vem).
+- **O que se perde:** `verify_used` de um frame só devolve `Ok` sem conferir com o cache ligado ([DEBT-0017](../tech-debt/0017-dupla-liberacao-escondida-no-cache-de-frames.md)).
+- **Custo:** 256 bytes por CPU (`CACHE_CAP` = 32 × 8). Memória parada em cache: até 31 frames (124 KiB) por CPU.
 
-O heap também fica com um lock global; um heap por CPU espera a medição da fase 3.
+O heap segue com um lock global: com 4 CPUs alocando sem parar ele disputa ([DEBT-0054](../tech-debt/0054-heap-com-lock-global.md)).

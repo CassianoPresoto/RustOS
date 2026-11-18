@@ -4,12 +4,14 @@ use core::cell::UnsafeCell;
 use core::fmt;
 use core::hint::spin_loop;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Não mascara interrupções: lock que um handler também pega tem de ser o
 /// `IrqLock` do kernel, ou a CPU trava girando no próprio lock.
 pub struct SpinLock<T> {
     locked: AtomicBool,
+    /// Tentativas que acharam o lock preso: a medida de disputa entre CPUs.
+    contended: AtomicU32,
     value: UnsafeCell<T>,
 }
 
@@ -21,6 +23,7 @@ impl<T> SpinLock<T> {
     pub const fn new(value: T) -> Self {
         Self {
             locked: AtomicBool::new(false),
+            contended: AtomicU32::new(0),
             value: UnsafeCell::new(value),
         }
     }
@@ -45,8 +48,27 @@ impl<T> SpinLock<T> {
         if acquired {
             Some(SpinLockGuard { lock: self })
         } else {
+            self.contended.fetch_add(1, Ordering::Relaxed);
             None
         }
+    }
+
+    /// Alguém segura o lock agora; só serve para girar esperando, nunca para decidir.
+    pub fn is_locked(&self) -> bool {
+        self.locked.load(Ordering::Relaxed)
+    }
+
+    /// Quantas tentativas de pegar o lock o acharam preso, desde o início.
+    pub fn contentions(&self) -> u32 {
+        self.contended.load(Ordering::Relaxed)
+    }
+
+    /// Solta o lock sem o guard, para o pânico tomar o que um núcleo parado segurava.
+    ///
+    /// # Safety
+    /// O dono não roda mais e nenhum guard dele será usado de novo.
+    pub unsafe fn force_unlock(&self) {
+        self.locked.store(false, Ordering::Release);
     }
 
     pub fn into_inner(self) -> T {
@@ -107,6 +129,28 @@ mod tests {
         let guard = lock.lock();
         assert!(lock.try_lock().is_none());
         drop(guard);
+        assert!(lock.try_lock().is_some());
+    }
+
+    #[test]
+    fn counts_the_attempts_that_found_the_lock_held() {
+        let lock = SpinLock::new(0);
+        let guard = lock.lock();
+        assert!(lock.try_lock().is_none());
+        assert!(lock.try_lock().is_none());
+        drop(guard);
+        assert_eq!(lock.contentions(), 2);
+        assert!(lock.try_lock().is_some());
+        assert_eq!(lock.contentions(), 2);
+    }
+
+    #[test]
+    fn force_unlock_lets_the_next_taker_in() {
+        let lock = SpinLock::new(0);
+        core::mem::forget(lock.lock());
+        assert!(lock.is_locked());
+        // SAFETY: o guard esquecido nunca é usado de novo.
+        unsafe { lock.force_unlock() };
         assert!(lock.try_lock().is_some());
     }
 

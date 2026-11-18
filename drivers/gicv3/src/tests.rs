@@ -245,3 +245,60 @@ fn router_puts_aff3_in_bits_39_to_32_and_leaves_irm_clear() {
     assert_eq!(router_for(0x0104_0302), 0x01_0004_0302);
     assert_eq!(router_for(0) & (1 << 31), 0);
 }
+
+/// Uma região com um redistribuidor por afinidade em `frames`, cada um com `stride` bytes.
+fn region(frames: &[(u32, u64)], stride: usize) -> FakeBus {
+    let bus = FakeBus::default();
+    for (index, &(affinity, flags)) in frames.iter().enumerate() {
+        let at = index * stride + gicr::TYPER;
+        let low = u32::try_from(flags).unwrap();
+        bus.registers.borrow_mut().insert(at, low);
+        bus.registers.borrow_mut().insert(at + 4, affinity);
+    }
+    bus
+}
+
+#[test]
+fn finds_the_redistributor_of_a_cpu_by_walking_the_frames() {
+    let bus = region(
+        &[(0, 0), (1, 0), (2, 0), (3, gicr::TYPER_LAST)],
+        gicr::FRAME_SIZE,
+    );
+    assert_eq!(find_redistributor(&bus, 0), Ok(0));
+    assert_eq!(find_redistributor(&bus, 2), Ok(2 * gicr::FRAME_SIZE));
+    assert_eq!(find_redistributor(&bus, 3), Ok(3 * gicr::FRAME_SIZE));
+}
+
+#[test]
+fn stops_at_the_last_frame_when_the_affinity_is_not_there() {
+    let bus = region(&[(0, 0), (1, gicr::TYPER_LAST)], gicr::FRAME_SIZE);
+    assert_eq!(
+        find_redistributor(&bus, 7),
+        Err(GicError::WrongRedistributor)
+    );
+}
+
+#[test]
+fn gicv4_frames_are_twice_as_long() {
+    let stride = 2 * gicr::FRAME_SIZE;
+    let bus = region(
+        &[
+            (0, gicr::TYPER_VLPIS),
+            (1, gicr::TYPER_VLPIS | gicr::TYPER_LAST),
+        ],
+        stride,
+    );
+    assert_eq!(find_redistributor(&bus, 1), Ok(stride));
+}
+
+#[test]
+fn sgi_is_configured_before_it_is_enabled_and_only_sgis_are_accepted() {
+    let mut gic = GicV3::new(distributor(0), redistributor(0));
+    gic.enable_sgi(1, 0x20).unwrap();
+    let sgi = gicr::SGI_BASE;
+    let bus = &gic.redistributor;
+    assert_eq!(bus.value(sgi + gicd::ISENABLER), 1 << 1);
+    assert_eq!(bus.read8(sgi + gicd::IPRIORITYR + 1), 0x20);
+    assert!(bus.position(sgi + gicd::IPRIORITYR + 1) < bus.position(sgi + gicd::ISENABLER));
+    assert_eq!(gic.enable_sgi(16, 0), Err(GicError::InvalidIntid));
+}

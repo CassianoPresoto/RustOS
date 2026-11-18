@@ -5,7 +5,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_hal::{
-    BootInfo, BootTimeline, BootloaderId, FramebufferInfo, KernelImage, MemoryRegion, RegionKind,
+    BootInfo, BootTimeline, BootloaderId, CpuDescriptor, FramebufferInfo, KernelImage,
+    MemoryRegion, RegionKind,
 };
 
 #[derive(Clone, Debug)]
@@ -16,6 +17,7 @@ pub struct BootRecord {
     timeline: Option<BootTimeline>,
     framebuffer: Option<FramebufferInfo>,
     kernel_image: Option<KernelImage>,
+    cpus: Vec<CpuDescriptor>,
 }
 
 impl BootRecord {
@@ -30,6 +32,7 @@ impl BootRecord {
             timeline: source.timeline(),
             framebuffer: source.framebuffer(),
             kernel_image: source.kernel_image(),
+            cpus: source.cpus().collect(),
         }
     }
 
@@ -72,5 +75,9 @@ impl BootInfo for BootRecord {
 
     fn kernel_image(&self) -> Option<KernelImage> {
         self.kernel_image
+    }
+
+    fn cpus(&self) -> impl Iterator<Item = CpuDescriptor> + '_ {
+        self.cpus.iter().copied()
     }
 }

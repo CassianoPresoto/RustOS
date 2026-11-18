@@ -19,9 +19,11 @@ mod heap;
 mod interrupts;
 mod memory;
 mod panic;
+mod percpu;
 mod platform;
 mod random;
 mod screen;
+mod smp;
 mod sync;
 mod system;
 mod task;
@@ -53,6 +55,8 @@ struct Handoff {
 #[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
     let entry_cycles = platform::cycles();
+    percpu::install(0);
+    percpu::mark_boot_online();
     // Até o console existir, pânico não aparece em lugar nenhum (DEBT-0005).
     // SAFETY: primeira coisa na entrada; nada reaproveitou a memória do bootloader.
     let limine = match unsafe { LimineBoot::from_bootloader() } {
@@ -130,10 +134,19 @@ fn boot_kernel(handoff: Handoff) -> ! {
     if platform::has_keyboard() {
         console::enable_history(&mut memory);
     }
-    let reclaimed = memory.reclaim_bootloader(&mut boot);
+    let cpus = interrupts_on.then(|| smp::start(&boot, &mut memory));
+    // Um núcleo que não respondeu pode estar rodando na pilha ou nas tabelas do bootloader: a
+    // memória dele fica onde está.
+    let reclaimed = if cpus.is_some_and(|started| started.silent != 0) {
+        kprintln!("[rustos] reclaim: skipped, a core never answered");
+        0
+    } else {
+        memory.reclaim_bootloader(&mut boot)
+    };
     let source = random::init(&boot_marks(&boot, &memory, entry_cycles));
     report(&boot, &memory, display, reclaimed);
     report_vm(&vm, boot.direct_map_offset());
+    let cpus_ok = cpus.is_none_or(report_cpus);
     report_random(source);
     report_key_residue();
     // SAFETY: o mapa direto cobre todo frame utilizável, de onde vem o frame do teste.
@@ -151,12 +164,32 @@ fn boot_kernel(handoff: Handoff) -> ! {
     let wx_ok = report_wx(&vm);
     let irq_ok = interrupts_on && system::interrupt_self_test();
     let tasks_ok = irq_ok && report_tasks(&boot, &memory);
-    if !frames_ok || !heap_ok || !wx_ok || !irq_ok || !tasks_ok {
+    if !frames_ok || !heap_ok || !wx_ok || !irq_ok || !tasks_ok || !cpus_ok {
         rustos_hal::Cpu::halt_forever(&platform::cpu());
     }
     kprintln!("{BOOT_OK_MARKER}");
     let mut system = system::System::new(&boot, &memory, display);
     system::run_shell(&mut system)
+}
+
+/// O relatório dos núcleos: a linha que o `make smoke` confere.
+fn report_cpus(started: smp::Started) -> bool {
+    kprintln!(
+        "[rustos] cpus: {} online (found {}, limit {})",
+        started.online,
+        started.found,
+        rustos_hal::MAX_CPUS
+    );
+    if started.skipped > 0 {
+        kprintln!(
+            "[rustos] cpus: {} left parked over the limit",
+            started.skipped
+        );
+    }
+    if started.failed != 0 {
+        kprintln!("[rustos] cpus: FAILED mask {:#x}", started.failed);
+    }
+    started.failed == 0
 }
 
 /// Liga as tarefas, confere a preempção e o estado de SIMD de cada uma, e mede a
@@ -176,10 +209,12 @@ fn report_tasks(boot: &impl BootInfo, memory: &memory::Memory) -> bool {
         summary.bytes,
         summary.components
     );
+    smp::release();
     kprintln!(
-        "[rustos] sched: fifo+eevdf, {} us base slice, {} tasks max, timer {}",
+        "[rustos] sched: fifo+eevdf per cpu, {} us base slice, {} tasks max, {} cpus, timer {}",
         rustos_sched::eevdf::BASE_SLICE_NS / 1000,
-        task::MAX_TASKS,
+        task::MAX_TASKS - rustos_hal::MAX_CPUS,
+        task::active_cpus().count_ones(),
         platform::timer_mode()
     );
     let (irqs, window_ms) = bench::idle_timer_irqs();
@@ -191,20 +226,69 @@ fn report_tasks(boot: &impl BootInfo, memory: &memory::Memory) -> bool {
         }
         None => kprintln!("[rustos] task self-test: FAILED"),
     }
+    let smp_ok = if let Some((migrations, turns)) = bench::smp_self_test() {
+        kprintln!("[rustos] smp self-test: ok ({turns} turns, {migrations} migrations)");
+        true
+    } else {
+        kprintln!("[rustos] smp self-test: FAILED");
+        false
+    };
     match bench::run(bench::BOOT) {
-        Some(report) => kprintln!(
-            "[rustos] switch: {} ns ({} with simd), pick_next {} ns, tick {} ns, wake: mean {} ns, max {} ns, {} samples",
-            report.switch_ns,
-            report.switch_simd_ns,
-            report.pick_next_ns,
-            report.tick_ns,
-            report.wake_mean_ns,
-            report.wake_max_ns,
-            report.wake_samples
-        ),
+        Some(report) => {
+            kprintln!(
+                "[rustos] switch: {} ns ({} with simd, {} cross-core), ipi round trip {} ns, pick_next {} ns, tick {} ns, wake: mean {} ns, max {} ns, {} samples",
+                report.switch_ns,
+                report.switch_simd_ns,
+                report.switch_cross_ns,
+                report.ipi_rtt_ns,
+                report.pick_next_ns,
+                report.tick_ns,
+                report.wake_mean_ns,
+                report.wake_max_ns,
+                report.wake_samples
+            );
+            report_scale(&report);
+            report_storm(&report.storm);
+        }
         None => kprintln!("[rustos] switch: not measured"),
     }
-    preempted.is_some()
+    preempted.is_some() && smp_ok
+}
+
+/// O tempo total das tarefas de CPU em 1, 2 e 4 núcleos, em microssegundos.
+fn report_scale(report: &rustos_shell::BenchReport) {
+    let mut line = fmt::Buffer::<128>::new();
+    for sample in report.scale.iter().filter(|sample| sample.total_ns > 0) {
+        core::fmt::Write::write_fmt(
+            &mut line,
+            format_args!(" {} cpu: {} us,", sample.cpus, sample.total_ns / 1000),
+        )
+        .ok();
+    }
+    if !line.as_str().is_empty() {
+        let tasks = report.scale[0].tasks;
+        kprintln!(
+            "[rustos] scale: {tasks} tasks,{}",
+            line.as_str().trim_end_matches(',')
+        );
+    }
+}
+
+/// A contenção da memória: frames pelo lock do buddy, com o cache por CPU, e o heap.
+fn report_storm(storm: &rustos_shell::StormSample) {
+    if storm.locked_ns > 0 {
+        kprintln!(
+            "[rustos] alloc storm: {} cpus x {}, frames locked {} us ({} contended), cached {} us ({}), heap {} us ({})",
+            storm.cpus,
+            storm.iterations,
+            storm.locked_ns / 1000,
+            storm.locked_contention,
+            storm.cached_ns / 1000,
+            storm.cached_contention,
+            storm.heap_ns / 1000,
+            storm.heap_contention
+        );
+    }
 }
 
 /// O que o boot tem de impredizível: contadores de ciclo e os tempos do bootloader.

@@ -6,6 +6,7 @@ use core::fmt::{self, Write};
 use rustos_hal::{ByteSource, Console, KeyEvent};
 
 use crate::memory::Memory;
+use crate::panic;
 use crate::platform::PlatformConsole;
 use crate::screen::Screen;
 use crate::sync::IrqLock;
@@ -22,14 +23,31 @@ pub fn install_screen(screen: Screen) {
     *SCREEN.lock() = Some(screen);
 }
 
+/// A mensagem inteira sai sob os dois locks, serial e depois tela: com vários núcleos
+/// escrevendo, as linhas não se misturam. Depois do pânico de outro núcleo, silêncio.
 pub fn print(args: fmt::Arguments<'_>) {
-    Sink.write_fmt(args).ok();
+    if panic::elsewhere() {
+        return;
+    }
+    {
+        let mut serial = SERIAL.lock();
+        let mut screen = SCREEN.lock();
+        Both {
+            serial: serial.as_mut(),
+            screen: screen.as_mut(),
+        }
+        .write_fmt(args)
+        .ok();
+    }
     flush();
 }
 
 /// Desenha na tela o que o `Sink` escreveu: uma vez por mensagem ou tecla, não
 /// por pedaço de texto, porque cada desenho repinta linhas inteiras.
 pub fn flush() {
+    if panic::elsewhere() {
+        return;
+    }
     if let Some(screen) = SCREEN.lock().as_mut() {
         screen.render();
     }
@@ -42,6 +60,9 @@ pub fn read_byte() -> Option<u8> {
 
 /// Tecla física vira bytes de terminal, pelo layout e pelo modo de cursor da tela.
 pub fn key_event(event: KeyEvent, mut push: impl FnMut(u8)) {
+    if panic::elsewhere() {
+        return;
+    }
     if let Some(screen) = SCREEN.lock().as_mut() {
         screen.key_event(event, &mut push);
     }
@@ -74,6 +95,22 @@ pub fn screen_modes() -> Option<(bool, usize)> {
     SCREEN.lock().as_ref().map(Screen::screens)
 }
 
+/// Disputas pelos locks da serial e da tela desde o boot.
+pub fn contentions() -> u32 {
+    SERIAL.contentions() + SCREEN.contentions()
+}
+
+/// Toma o serial e a tela de quem os segurava no núcleo que parou.
+///
+/// # Safety
+/// Os outros núcleos pararam ou ficam sem escrever (`panic::elsewhere`).
+pub unsafe fn break_locks() {
+    // SAFETY: o contrato desta função.
+    unsafe { SERIAL.break_lock() };
+    // SAFETY: idem.
+    unsafe { SCREEN.break_lock() };
+}
+
 /// Caminho do pânico: não espera nenhum lock, que pode estar com quem entrou em pânico.
 pub fn print_panic(args: fmt::Arguments<'_>) {
     if let Some(mut guard) = SERIAL.try_lock()
@@ -96,10 +133,31 @@ pub struct Sink;
 
 impl Write for Sink {
     fn write_str(&mut self, text: &str) -> fmt::Result {
+        if panic::elsewhere() {
+            return Ok(());
+        }
         if let Some(serial) = SERIAL.lock().as_mut() {
             serial.write_bytes(text.as_bytes());
         }
         if let Some(screen) = SCREEN.lock().as_mut() {
+            screen.write(text.as_bytes());
+        }
+        Ok(())
+    }
+}
+
+/// Serial e tela já travadas pelo chamador.
+struct Both<'a> {
+    serial: Option<&'a mut PlatformConsole>,
+    screen: Option<&'a mut Screen>,
+}
+
+impl Write for Both<'_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        if let Some(serial) = self.serial.as_mut() {
+            serial.write_bytes(text.as_bytes());
+        }
+        if let Some(screen) = self.screen.as_mut() {
             screen.write(text.as_bytes());
         }
         Ok(())

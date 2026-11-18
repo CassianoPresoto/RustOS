@@ -7,7 +7,7 @@ use crate::fmtutil::{Bytes, Micros, Millis, Percent, Seconds, Uptime};
 use crate::history::Entries;
 use rustos_hal::PAGE_SIZE;
 
-use crate::host::{FaultTest, Host, SystemInfo, TaskState};
+use crate::host::{BenchReport, FaultTest, Host, SystemInfo, TaskState};
 
 /// O que um comando recebe: seus argumentos (sem o nome) e as portas.
 pub(crate) struct Ctx<'a> {
@@ -33,7 +33,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
     Command {
         name: "bench",
-        summary: "measure the context switch and the wake-up jitter",
+        summary: "measure context switches, IPIs, multi-core scaling and wake-up jitter",
         run: bench,
     },
     Command {
@@ -183,11 +183,15 @@ fn fault(ctx: &mut Ctx<'_>) -> fmt::Result {
         Some("break") => FaultTest::Breakpoint,
         Some("page") => FaultTest::PageFault,
         Some("text") => FaultTest::WriteText,
-        _ => return ctx.out.write_str("usage: fault break|page|text\r\n"),
+        Some("cpu") => FaultTest::CpuPanic,
+        _ => return ctx.out.write_str("usage: fault break|page|text|cpu\r\n"),
     };
     match kind {
         FaultTest::PageFault => ctx.out.write_str("reading an unmapped page...\r\n")?,
         FaultTest::WriteText => ctx.out.write_str("writing to the kernel text...\r\n")?,
+        FaultTest::CpuPanic => ctx
+            .out
+            .write_str("panicking a task on another core...\r\n")?,
         FaultTest::Breakpoint => {}
     }
     if !ctx.host.fault_test(kind) {
@@ -200,6 +204,7 @@ fn fault(ctx: &mut Ctx<'_>) -> fmt::Result {
         FaultTest::PageFault | FaultTest::WriteText => ctx
             .out
             .write_str("no fault was raised: the protection is missing\r\n"),
+        FaultTest::CpuPanic => ctx.out.write_str("the panic did not stop the system\r\n"),
     }
 }
 
@@ -303,8 +308,8 @@ fn mem(ctx: &mut Ctx<'_>) -> fmt::Result {
 fn ps(ctx: &mut Ctx<'_>) -> fmt::Result {
     write!(
         ctx.out,
-        "{DIM}{:>3}  {:<8} {:<7} {:>10} {:>9}  simd{RESET}\r\n",
-        "id", "name", "state", "cpu (s)", "switches"
+        "{DIM}{:>3}  {:<8} {:>3} {:<7} {:>10} {:>9}  simd{RESET}\r\n",
+        "id", "name", "cpu", "state", "cpu (s)", "switches"
     )?;
     let mut result = Ok(());
     ctx.host.tasks(&mut |task| {
@@ -318,14 +323,46 @@ fn ps(ctx: &mut Ctx<'_>) -> fmt::Result {
         if result.is_ok() {
             result = write!(
                 ctx.out,
-                "{:>3}  {:<8} {:<7} {:>10} {:>9}  {simd}\r\n",
+                "{:>3}  {:<8} {:>3} {:<7} {:>10} {:>9}  {simd}\r\n",
                 task.id,
                 task.name,
+                task.cpu,
                 state,
                 Seconds(task.cpu_ns),
                 task.switches
             );
         }
+    });
+    result?;
+    cpu_table(ctx)
+}
+
+/// Uma linha por CPU: fila, tempo ocupado, trocas, IPIs e tarefas puxadas.
+fn cpu_table(ctx: &mut Ctx<'_>) -> fmt::Result {
+    let uptime = ctx.host.uptime_ns().unwrap_or(0).max(1);
+    let mut header = false;
+    let mut result = Ok(());
+    ctx.host.cpus(&mut |cpu| {
+        if result.is_err() {
+            return;
+        }
+        if !header {
+            header = true;
+            result = write!(
+                ctx.out,
+                "{DIM}{:>3}  {:>4} {:>5} {:>9} {:>11} {:>6}{RESET}\r\n",
+                "cpu", "load", "busy", "switches", "ipi out/in", "pulled"
+            );
+        }
+        let busy = 100 - (cpu.idle_ns.min(uptime) * 100 / uptime);
+        let ipis = [cpu.ipis_sent, cpu.ipis_received];
+        result = result.and_then(|()| {
+            write!(
+                ctx.out,
+                "{:>3}  {:>4} {:>4}% {:>9} {:>5}/{:<5} {:>6}\r\n",
+                cpu.index, cpu.load, busy, cpu.switches, ipis[0], ipis[1], cpu.pulled
+            )
+        });
     });
     result
 }
@@ -345,6 +382,20 @@ fn bench(ctx: &mut Ctx<'_>) -> fmt::Result {
         "  {:<14}{:>7} ns\r\n",
         "with SIMD", report.switch_simd_ns
     )?;
+    if report.switch_cross_ns > 0 {
+        write!(
+            out,
+            "  {:<14}{:>7} ns\r\n",
+            "cross-core", report.switch_cross_ns
+        )?;
+        write!(
+            out,
+            "{DIM}IPI round trip between two cores{RESET}\r\n  {:<14}{:>7} ns\r\n",
+            "ping-pong", report.ipi_rtt_ns
+        )?;
+    }
+    scale_rows(out, &report)?;
+    storm_rows(out, &report.storm)?;
     write!(
         out,
         "{DIM}Wake-up jitter (sleep_until, {} samples){RESET}\r\n",
@@ -374,7 +425,87 @@ fn bench(ctx: &mut Ctx<'_>) -> fmt::Result {
         "  {:<14}{:>7} ns\r\n",
         "pick_next", report.pick_next_ns
     )?;
-    write!(out, "  {:<14}{:>7} ns\r\n", "tick", report.tick_ns)
+    write!(out, "  {:<14}{:>7} ns\r\n", "tick", report.tick_ns)?;
+    cpu_table(ctx)?;
+    lock_table(ctx)
+}
+
+/// Quantas vezes cada lock global foi achado preso por outra CPU, desde o boot.
+fn lock_table(ctx: &mut Ctx<'_>) -> fmt::Result {
+    let mut header = false;
+    let mut result = Ok(());
+    ctx.host.lock_contention(&mut |name, count| {
+        if result.is_err() {
+            return;
+        }
+        if !header {
+            header = true;
+            result = write!(
+                ctx.out,
+                "{DIM}Lock contention (attempts that found it held){RESET}\r\n"
+            );
+        }
+        result = result.and_then(|()| write!(ctx.out, "  {name:<14}{count:>7}\r\n"));
+    });
+    result
+}
+
+/// A alocação com todas as CPUs ao mesmo tempo: frames sem e com o cache por CPU, e o heap.
+fn storm_rows(out: &mut dyn fmt::Write, storm: &crate::StormSample) -> fmt::Result {
+    if storm.locked_ns == 0 {
+        return Ok(());
+    }
+    write!(
+        out,
+        "{DIM}Allocation storm ({} CPUs x {} rounds, total time / lock contention){RESET}\r\n",
+        storm.cpus, storm.iterations
+    )?;
+    let row = |out: &mut dyn fmt::Write, label: &str, ns: u64, contention: u32| {
+        write!(
+            out,
+            "  {label:<14}{:>9} ms {contention:>8}\r\n",
+            Millis(ns / 1000)
+        )
+    };
+    row(
+        out,
+        "frames locked",
+        storm.locked_ns,
+        storm.locked_contention,
+    )?;
+    row(
+        out,
+        "frames cached",
+        storm.cached_ns,
+        storm.cached_contention,
+    )?;
+    row(out, "heap", storm.heap_ns, storm.heap_contention)
+}
+
+/// O tempo total de N tarefas de CPU em 1, 2 e 4 núcleos, e quantas vezes mais rápido que 1.
+fn scale_rows(out: &mut dyn fmt::Write, report: &BenchReport) -> fmt::Result {
+    let first = report.scale[0];
+    if first.total_ns == 0 {
+        return Ok(());
+    }
+    write!(
+        out,
+        "{DIM}Scale ({} CPU-bound tasks, total time){RESET}\r\n",
+        first.tasks
+    )?;
+    for sample in report.scale.iter().filter(|sample| sample.total_ns > 0) {
+        let tenths = first.total_ns * 10 / sample.total_ns;
+        let plural = if sample.cpus == 1 { "cpu" } else { "cpus" };
+        write!(
+            out,
+            "  {} {plural:<12}{:>9} ms  {}.{}x\r\n",
+            sample.cpus,
+            Millis(sample.total_ns / 1000),
+            tenths / 10,
+            tenths % 10
+        )?;
+    }
+    Ok(())
 }
 
 fn random(ctx: &mut Ctx<'_>) -> fmt::Result {
@@ -683,16 +814,30 @@ mod tests {
     }
 
     #[test]
-    fn ps_lists_one_row_per_task_with_state_and_cpu_time() {
+    fn ps_lists_one_row_per_task_with_state_cpu_and_cpu_time() {
         let out = run("ps", &[], &FakeHost::new());
         let rows: Vec<&str> = out.split("\r\n").collect();
-        assert!(rows[0].contains("name") && rows[0].contains("switches"));
+        assert!(
+            rows[0].contains("name") && rows[0].contains("switches") && rows[0].contains("cpu")
+        );
         assert!(rows[1].contains("idle") && rows[1].contains("ready") && rows[1].contains("0.250"));
         assert!(rows[2].contains("shell") && rows[2].contains("run") && rows[2].contains("12.345"));
         assert!(
             rows[3].contains("worker") && rows[3].contains("sleep") && rows[3].ends_with("yes")
         );
-        assert_eq!(rows.len(), 5);
+        // A coluna `cpu` mostra a fila dona: o `FakeHost` põe o id.
+        assert!(rows[3].contains("worker") && rows[3].contains("  2 sleep"));
+    }
+
+    #[test]
+    fn ps_ends_with_one_row_per_cpu() {
+        let out = run("ps", &[], &FakeHost::new());
+        let rows: Vec<&str> = out.split("\r\n").collect();
+        assert!(rows[4].contains("load") && rows[4].contains("ipi out/in"));
+        assert!(rows[5].starts_with("  0     2  100%      1000     7/9"));
+        assert!(rows[5].ends_with('3'));
+        assert!(rows[6].starts_with("  1     1   50%      1001"));
+        assert_eq!(rows.len(), 8);
     }
 
     #[test]
@@ -705,6 +850,33 @@ mod tests {
         assert!(out.contains("one busy task"));
         assert!(out.contains("pick_next") && out.contains("88 ns"));
         assert!(out.contains("tick") && out.contains("31 ns"));
+    }
+
+    #[test]
+    fn bench_prints_the_cross_core_switch_ipi_and_scale_rows() {
+        let out = run("bench", &[], &FakeHost::new());
+        assert!(out.contains("cross-core") && out.contains("3210 ns"));
+        assert!(out.contains("IPI round trip") && out.contains("4560 ns"));
+        assert!(out.contains("8 CPU-bound tasks"));
+        assert!(out.contains("1 cpu ") && out.contains("80.0 ms") && out.contains("1.0x"));
+        assert!(out.contains("2 cpus ") && out.contains("40.0 ms") && out.contains("2.0x"));
+        assert!(out.contains("4 cpus") && out.contains("20.5 ms") && out.contains("3.9x"));
+        assert!(out.contains("ipi out/in"));
+        assert!(out.contains("frames locked") && out.contains("90.0 ms") && out.contains("5000"));
+        assert!(out.contains("frames cached") && out.contains("9.0 ms"));
+        assert!(out.contains("Lock contention") && out.contains("heap") && out.contains("     12"));
+    }
+
+    #[test]
+    fn bench_on_one_cpu_leaves_out_the_cross_core_rows() {
+        let mut host = FakeHost::new();
+        let mut report = host.bench.unwrap();
+        report.switch_cross_ns = 0;
+        report.scale = [crate::ScaleSample::default(); 3];
+        host.bench = Some(report);
+        let out = run("bench", &[], &host);
+        assert!(!out.contains("cross-core") && !out.contains("Scale"));
+        assert!(out.contains("plain"));
     }
 
     #[test]
@@ -732,6 +904,15 @@ mod tests {
         let output = run("fault", &["text"], &host);
         assert!(output.contains("writing to the kernel text"));
         assert!(output.contains("no fault was raised"));
+    }
+
+    #[test]
+    fn fault_cpu_says_it_panics_another_core() {
+        let mut host = FakeHost::new();
+        host.faults = true;
+        let output = run("fault", &["cpu"], &host);
+        assert!(output.contains("another core"));
+        assert!(output.contains("did not stop"));
     }
 
     #[test]

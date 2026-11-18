@@ -3,7 +3,8 @@
 
 use rustos_hal::{BootInfo, Cpu, PAGE_SIZE, RegionKind};
 use rustos_shell::{
-    BenchReport, DisplayInfo, FaultTest, Host, MemoryInfo, Shell, SystemInfo, TaskInfo, TaskState,
+    BenchReport, CpuInfo, DisplayInfo, FaultTest, Host, MemoryInfo, Shell, SystemInfo, TaskInfo,
+    TaskState,
 };
 use rustos_term::Layout;
 
@@ -129,6 +130,7 @@ impl<B: BootInfo> Host for System<'_, B> {
             FaultTest::Breakpoint => interrupts::FaultTest::Breakpoint,
             FaultTest::PageFault => interrupts::FaultTest::PageFault,
             FaultTest::WriteText => interrupts::FaultTest::WriteText,
+            FaultTest::CpuPanic => return bench::panic_on_other_cpu(),
         };
         platform::trigger(kind)
     }
@@ -154,11 +156,33 @@ impl<B: BootInfo> Host for System<'_, B> {
                 id: snapshot.id,
                 name: snapshot.name,
                 state,
+                cpu: u8::try_from(snapshot.cpu).unwrap_or(u8::MAX),
                 cpu_ns: snapshot.cpu_ns,
                 switches: snapshot.switches,
                 simd: snapshot.simd,
             });
         }
+    }
+
+    fn cpus(&self, visit: &mut dyn FnMut(&CpuInfo)) {
+        for snapshot in task::cpu_snapshots().into_iter().flatten() {
+            visit(&CpuInfo {
+                index: u8::try_from(snapshot.index).unwrap_or(u8::MAX),
+                load: snapshot.load,
+                idle_ns: snapshot.idle_ns,
+                switches: snapshot.switches,
+                ipis_sent: snapshot.ipis_sent,
+                ipis_received: snapshot.ipis_received,
+                pulled: snapshot.pulled,
+            });
+        }
+    }
+
+    fn lock_contention(&self, visit: &mut dyn FnMut(&str, u64)) {
+        visit("heap", u64::from(heap::contentions()));
+        visit("frames", u64::from(crate::frames::contentions()));
+        visit("console", u64::from(console::contentions()));
+        visit("run queues", u64::from(task::queue_contentions()));
     }
 
     fn bench(&self) -> Option<BenchReport> {

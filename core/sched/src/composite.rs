@@ -4,7 +4,7 @@
 use crate::TaskId;
 use crate::eevdf::{Eevdf, EevdfConfig};
 use crate::fifo::Fifo;
-use crate::scheduler::{SchedError, SchedParams, Scheduler};
+use crate::scheduler::{Detached, SchedError, SchedParams, Scheduler};
 
 /// Quanto do tempo o tempo real pode usar por janela, quando a justa tem trabalho.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +76,46 @@ impl<const RT: usize, const FAIR: usize> Composite<RT, FAIR> {
 
     pub const fn fifo(&self) -> &Fifo<RT> {
         &self.fifo
+    }
+
+    /// Tarefas prontas ou correndo nas duas classes: a carga da fila.
+    pub fn runnable(&self) -> usize {
+        self.fifo.runnable() + self.fair.runnable()
+    }
+
+    /// Tira a tarefa (pronta ou dormindo, nunca a corrente) desta fila, com o lag que ela
+    /// leva para `add_with_lag` em outra.
+    pub fn detach(&mut self, task: TaskId) -> Option<Detached> {
+        self.fifo.detach(task).or_else(|| self.fair.detach(task))
+    }
+
+    /// `add` de quem vem de outra fila: a justa entra com o lag que levava.
+    ///
+    /// # Errors
+    /// Os de `add`.
+    pub fn add_with_lag(
+        &mut self,
+        task: TaskId,
+        moved: Detached,
+        now_ns: u64,
+    ) -> Result<(), SchedError> {
+        if self.fifo.contains(task) || self.fair.contains(task) {
+            return Err(SchedError::Duplicate);
+        }
+        self.account(now_ns);
+        match moved.params {
+            SchedParams::Fifo { .. } => self.fifo.add(task, moved.params, now_ns),
+            SchedParams::Fair { .. } => {
+                self.fair
+                    .add_with_lag(task, moved.params, moved.lag_ns, now_ns)
+            }
+        }
+    }
+
+    /// Uma tarefa justa pronta que `accept` aceita, a que menos espera perder ao mudar de
+    /// fila. O tempo real não migra por aqui.
+    pub fn pull_candidate(&self, accept: impl FnMut(TaskId) -> bool) -> Option<TaskId> {
+        self.fair.pull_candidate(accept)
     }
 
     /// O tempo real está bloqueado pelo teto e a justa tem trabalho.
@@ -226,5 +266,13 @@ impl<const RT: usize, const FAIR: usize> Scheduler for Composite<RT, FAIR> {
 
     fn current(&self) -> Option<TaskId> {
         self.fifo.current().or_else(|| self.fair.current())
+    }
+}
+
+#[cfg(test)]
+impl<const RT: usize, const FAIR: usize> Composite<RT, FAIR> {
+    /// A tarefa está em alguma das duas classes, em qualquer estado.
+    pub(crate) fn contains_for_test(&self, task: TaskId) -> bool {
+        self.fifo.contains(task) || self.fair.contains(task)
     }
 }

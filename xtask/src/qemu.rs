@@ -24,7 +24,7 @@ const LINK_BASE: &str = "kernel base: 0xffffffff80000000 ";
 /// Linhas que todo boot precisa ter (guidelines 09): as proteções de hardware, o
 /// W^X conferido nas tabelas de página, a memória que o bootloader devolveu e a
 /// preempção com o estado de SIMD por tarefa.
-const REQUIRED: [(&str, &str); 4] = [
+const REQUIRED: [(&str, &str); 5] = [
     ("[rustos] protections:", "a linha de proteções de hardware"),
     (
         "[rustos] w^x: ok",
@@ -35,8 +35,20 @@ const REQUIRED: [(&str, &str); 4] = [
         "[rustos] task self-test: ok",
         "o autoteste de preempção e de estado de SIMD por tarefa",
     ),
+    (
+        "[rustos] smp self-test: ok",
+        "o autoteste de migração entre núcleos",
+    ),
 ];
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A linha em que o kernel diz quantos núcleos subiram; o limite do kernel (8) corta o pedido.
+fn cpus_line(requested: usize) -> String {
+    format!("[rustos] cpus: {} online", requested.min(MAX_KERNEL_CPUS))
+}
+
+/// Igual a `MAX_CPUS` de `core/hal`; o xtask não depende de crate do workspace.
+const MAX_KERNEL_CPUS: usize = 8;
 
 fn command(root: &Path, arch: Arch, profile: Profile) -> Result<Command, String> {
     let esp = image::assemble(root, arch, profile)?;
@@ -102,7 +114,7 @@ pub fn screenshot(
     let receiver = stream_stdout(&mut child)?;
     let (outcome, log) = wait_for_boot(&receiver, started);
     let result = match outcome {
-        Outcome::Booted(_) => capture(&mut child, &socket, &ppm, commands),
+        Outcome::Booted(_) => capture(&mut child, &receiver, &socket, &ppm, commands),
         other => report(arch, other, &log).and(Err("sem boot, sem captura".to_owned())),
     };
     child.kill().ok();
@@ -121,8 +133,34 @@ pub fn screenshot(
 /// Tempo para o kernel desenhar depois de cada entrada; TCG é lento.
 const SETTLE: Duration = Duration::from_millis(1500);
 
+/// O fim do prompt do shell (`rustos ~ % `): quando ele volta, o comando terminou.
+const PROMPT_TAIL: &str = "\x1b[34m~\x1b[0m % ";
+/// Tempo máximo que um comando do shell leva para devolver o prompt.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Espera o prompt voltar depois de um comando digitado; o `bench` leva mais que `SETTLE`.
+/// Quem chama descarta antes o que já chegou: o prompt anterior não conta.
+fn wait_for_prompt(receiver: &mpsc::Receiver<String>) {
+    let deadline = Instant::now() + COMMAND_TIMEOUT;
+    let mut seen = String::new();
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match receiver.recv_timeout(left) {
+            Ok(chunk) => seen.push_str(&chunk),
+            Err(_) => return,
+        }
+        if ends_with_prompt(&seen) {
+            return;
+        }
+    }
+}
+
+fn ends_with_prompt(log: &str) -> bool {
+    log.contains(PROMPT_TAIL)
+}
+
 fn capture(
     child: &mut std::process::Child,
+    receiver: &mpsc::Receiver<String>,
     socket: &Path,
     ppm: &Path,
     commands: &[String],
@@ -140,10 +178,12 @@ fn capture(
         if let Some(keys) = command.strip_prefix(KEYS_PREFIX) {
             press_keys(&mut monitor, keys)?;
         } else {
+            while receiver.try_recv().is_ok() {}
             stdin
                 .write_all(format!("{command}\r").as_bytes())
                 .and_then(|()| stdin.flush())
                 .map_err(|error| format!("digitar na serial: {error}"))?;
+            wait_for_prompt(receiver);
         }
         thread::sleep(SETTLE);
     }
@@ -204,6 +244,11 @@ fn report(arch: Arch, outcome: Outcome, log: &str) -> Result<(), String> {
         Outcome::Booted(elapsed) => {
             if let Some((_, what)) = REQUIRED.iter().find(|(line, _)| !log.contains(line)) {
                 let reason = format!("boot sem {what} (guidelines 09)");
+                return Err(failure(arch, &reason, log));
+            }
+            let online = cpus_line(Arch::cpus());
+            if !log.contains(&online) {
+                let reason = format!("boot sem `{online}`: nem todos os núcleos subiram");
                 return Err(failure(arch, &reason, log));
             }
             if log.contains(LINK_BASE) {
@@ -268,4 +313,22 @@ fn failure(arch: Arch, reason: &str, log: &str) -> String {
         arch.name(),
         tail.join("\n")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_prompt_tail_marks_the_end_of_a_command() {
+        let prompt = "\x1b[1;38;5;208mrustos\x1b[0m \x1b[34m~\x1b[0m % ";
+        assert!(ends_with_prompt(&format!("ps\r\n  0 idle\r\n{prompt}")));
+        assert!(!ends_with_prompt("busy 23% \r\n"));
+    }
+
+    #[test]
+    fn the_smoke_line_follows_the_requested_core_count() {
+        assert_eq!(cpus_line(4), "[rustos] cpus: 4 online");
+        assert_eq!(cpus_line(12), "[rustos] cpus: 8 online");
+    }
 }

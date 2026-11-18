@@ -46,6 +46,24 @@ pub const fn router_for(affinity: u32) -> u64 {
     ((affinity as u64 & 0xff00_0000) << 8) | (affinity as u64 & 0x00ff_ffff)
 }
 
+/// Onde está o redistribuidor da CPU de afinidade `affinity` dentro de `region`, que cobre os
+/// frames contíguos da região: percorre de um em um até achar a afinidade ou ler `Last`.
+/// Devolve o deslocamento do `RD_base` dele, de onde sai o barramento de `GicV3`.
+pub fn find_redistributor(region: &impl RegisterBus, affinity: u32) -> Result<usize, GicError> {
+    let mut offset = 0;
+    loop {
+        let typer = region.read64(offset + gicr::TYPER);
+        if typer >> gicr::TYPER_AFFINITY_SHIFT == u64::from(affinity) {
+            return Ok(offset);
+        }
+        if typer & gicr::TYPER_LAST != 0 {
+            return Err(GicError::WrongRedistributor);
+        }
+        let skip = if typer & gicr::TYPER_VLPIS != 0 { 2 } else { 1 };
+        offset += gicr::FRAME_SIZE * skip;
+    }
+}
+
 /// `distributor` cobre a página de 64 KiB do GICD; `redistributor`, os dois
 /// quadros de 64 KiB (`RD_base` e `SGI_base`) do redistribuidor de uma CPU.
 #[derive(Debug)]
@@ -111,6 +129,21 @@ impl<D: RegisterBus, R: RegisterBus> GicV3<D, R> {
         update(bus, base + gicd::IGROUPR, |word| word | bit);
         bus.write8(base + gicd::IPRIORITYR + intid as usize, priority);
         set_level_sensitive(bus, base + gicd::ICFGR, intid);
+        bus.write32(base + gicd::ICPENDR, bit);
+        bus.write32(base + gicd::ISENABLER, bit);
+        Ok(())
+    }
+
+    /// Habilita uma SGI (0–15) no redistribuidor desta CPU, no grupo 1.
+    pub fn enable_sgi(&mut self, intid: u32, priority: u8) -> Result<(), GicError> {
+        if intid >= FIRST_PPI {
+            return Err(GicError::InvalidIntid);
+        }
+        let bus = &self.redistributor;
+        let base = gicr::SGI_BASE;
+        let bit = 1 << intid;
+        update(bus, base + gicd::IGROUPR, |word| word | bit);
+        bus.write8(base + gicd::IPRIORITYR + intid as usize, priority);
         bus.write32(base + gicd::ICPENDR, bit);
         bus.write32(base + gicd::ISENABLER, bit);
         Ok(())

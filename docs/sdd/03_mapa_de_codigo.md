@@ -15,18 +15,20 @@
 │       ├── boot.rs             # BootRecord: o que o Limine entregou, copiado para o heap (BootInfo)
 │       ├── vm.rs               # Vm: tabelas próprias, W^X por seção, mapa direto, conferência e fault text
 │       ├── memory.rs           # Memory::init: buddy e heap; janelas de dispositivos e de pilhas; map_stack; devolução da memória do bootloader
-│       ├── frames.rs           # alocador de frames global (IrqLock) e o handle Frames
+│       ├── frames.rs           # alocador de frames global (IrqLock), o cache de frames por CPU na frente do buddy e o handle Frames
 │       ├── heap.rs             # GlobalAlloc sobre KernelHeap, DirectMap (FrameMemory) e o autoteste
 │       ├── random.rs           # gerador global: semente de hardware ou jitter, reposição
 │       ├── console.rs          # console global e kprintln!: serial e tela
 │       ├── screen.rs           # tela: framebuffer + grade do term + desenho do gfx, tema e barra
 │       ├── interrupts.rs       # IRQ do timer (o que o escalonador pede: acordar, fim de fatia, próximo disparo), fila de entrada e o relatório de falha
-│       ├── sync.rs             # IrqLock: lock que mascara IRQ e conta quantos estão presos
+│       ├── sync.rs             # IrqLock: spinlock que mascara IRQ, conta os presos por CPU e as disputas; `bump` para contador de uma CPU só
+│       ├── percpu.rs           # PerCpu: o bloco de cada núcleo (GS/TPIDR_EL1): índice, hw_id, in_irq, locks_held, prazo armado, carga, fila, cache de frames e contadores
+│       ├── smp.rs              # núcleos secundários: solta pelo pedido MP, entrada na pilha do Limine, init por CPU, espera do escalonador
 │       ├── system.rs           # porta Host do shell (inclui `tasks` e `bench`) e o laço de entrada
-│       ├── task.rs             # tarefas do kernel: tabela, escalonador global sobre o `Composite` de `core/sched`, spawn/yield/sleep/park/exit e a preempção (SDD 15)
-│       ├── bench.rs            # autoteste de SIMD, latência de troca de contexto e jitter de acordar
+│       ├── task.rs             # tarefas do kernel: tabela, uma fila por CPU sobre o `Composite` de `core/sched`, spawn/yield/sleep/park/exit, migração, IPI de reescalonar e a preempção (SDD 15)
+│       ├── bench.rs            # autotestes de SIMD e de SMP; troca de contexto (mesma CPU e entre CPUs), IPI de ida e volta, escala, contenção da memória e jitter de acordar
 │       ├── fmt.rs              # texto formatado em buffer fixo
-│       ├── panic.rs            # pânico: escreve o que puder e para a CPU
+│       ├── panic.rs            # pânico: o primeiro núcleo para os outros por IPI, toma o console e escreve
 │       └── platform/           # um módulo por ISA: ARCH, PlatformConsole, cpu(), console()
 ├── core/                       # o centro do hexágono: no_std, forbid(unsafe_code), testado no host
 │   ├── hal/                    # rustos-hal: as portas (traits) e os tipos de fronteira
@@ -37,18 +39,18 @@
 │   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células, tela alternativa, histórico, DEC Special Graphics, tabulação; SDD 16), Cell, Key, Keyboard (layouts)
 │   └── shell/                  # rustos-shell: Shell (edição de linha, histórico, comandos) e a porta Host
 ├── lib/
-│   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set)
+│   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set, conta disputas, `force_unlock` para o pânico)
 ├── arch/                       # adaptadores de ISA: o único lugar com asm!
-│   ├── x86_64/                 # X86Cpu, PortBus, X86Mmu e DirectMapTables (`invlpg`, `CR3`, memória das tabelas), X86Entropy, GDT/TSS/IDT, APIC (periódico → um tiro/TSC-deadline), PIT, troca de pilha, `Context`/`switch`, `fpu`; módulos puros (pte com `X86Format`, segments, fault, lapic, ioapic, pit, clock, xstate) testados no host
-│   └── aarch64/                # Aarch64Cpu, MmioBus, Aarch64Mmu e DirectMapTables (TTBR1), Aarch64Entropy; vetores (EL1h), ICC_*, CNTV de um tiro, PAN, `Context`/`switch` e `fpu`;
-│                               # puros: descriptor (com `Aarch64Format`), esr, time, intid, features
+│   ├── x86_64/                 # X86Cpu, X86CpuLocal (GS), X86Ipi (ICR), PortBus, X86Mmu e DirectMapTables (`invlpg`, `CR3`, memória das tabelas), X86Entropy, GDT/TSS por CPU e IDT única, APIC (periódico → um tiro/TSC-deadline), PIT, troca de pilha, `Context`/`switch`, `fpu`; módulos puros (pte com `X86Format`, segments, fault, lapic, ioapic, pit, clock, xstate) testados no host
+│   └── aarch64/                # Aarch64Cpu, Aarch64CpuLocal (TPIDR_EL1), Aarch64Ipi (SGI), MmioBus, Aarch64Mmu e DirectMapTables (TTBR1), Aarch64Entropy; vetores (EL1h), ICC_*, CNTV de um tiro, PAN, `Context`/`switch` e `fpu`;
+│                               # puros: descriptor (com `Aarch64Format`), esr, time, intid, sgi, features
 ├── boot/
-│   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 escrito aqui → hal::BootInfo
+│   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 (inclusive MP) escrito aqui → hal::BootInfo
 ├── drivers/                    # adaptadores de dispositivo: genéricos sobre hal::RegisterBus, sem unsafe
 │   ├── uart16550/              # COM1 do PC (porta) ou 16550 em MMIO; recepção por consulta ou interrupção
 │   ├── pl011/                  # serial da QEMU virt e de placas ARM (com a IRQ de recepção)
 │   ├── i8042/                  # teclado PS/2 do PC: controlador e decodificador do conjunto 1
-│   └── gicv3/                  # GICv3 da ARM: distribuidor e redistribuidor, sobre hal::RegisterBus
+│   └── gicv3/                  # GICv3 da ARM: distribuidor, redistribuidor (achado por afinidade) e SGI, sobre hal::RegisterBus
 ├── xtask/                      # ferramenta de host (só std): build, image, run, smoke, screenshot, size, font-preview, check-*
 ├── docs/                       # sdd/, guidelines/, tech-debt/
 ├── .github/workflows/ci.yml    # gates, testes e smoke nas duas ISAs
@@ -85,7 +87,9 @@ EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_es
 | Código novo | Lugar |
 | --- | --- |
 | Algoritmo ou política (alocador, escalonador, cache, fila) | crate de `core/` do assunto |
-| Estado de uma tarefa, pilha, troca de contexto, preempção | `kernel/src/task.rs`; salvar e restaurar registrador, em `arch/<isa>/src/context.rs` e `fpu.rs` |
+| Estado por CPU (fila, carga, contadores) | `kernel/src/percpu.rs`; o registrador que o acha (`GS`, `TPIDR_EL1`) é da porta `hal::CpuLocal`, em `arch/` |
+| Subir um núcleo, o IPI | `kernel/src/smp.rs`, `task.rs`; o ICR e a SGI em `arch/` (porta `hal::Ipi`) |
+| Estado de uma tarefa, pilha, troca de contexto, preempção, migração | `kernel/src/task.rs`; salvar e restaurar registrador, em `arch/<isa>/src/context.rs` e `fpu.rs` |
 | Cifra, hash ou gerador de números aleatórios | `core/crypto/`; a semente do hardware vem por porta do `hal` |
 | Desenho de pixel, glifo da fonte | `core/gfx/` |
 | Sequência de terminal, codificação de tecla, layout de teclado | `core/term/` |

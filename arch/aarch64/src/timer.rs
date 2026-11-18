@@ -43,6 +43,18 @@ pub unsafe fn start() -> Result<u64, TimerError> {
     Ok(frequency)
 }
 
+/// Liga o timer desta CPU, desarmado, com o relógio e a frequência de `start` na CPU de boot.
+/// # Safety
+/// Em EL1 ou acima, depois de `start` na CPU de boot.
+pub unsafe fn start_secondary() {
+    let now = counter();
+    write_deadline(now.wrapping_add(FREQUENCY_HZ.load(Ordering::Relaxed).saturating_mul(3600)));
+    // SAFETY: EL1+; o `isb` garante que o disparo vale antes de a IRQ ser destravada.
+    unsafe {
+        asm!("msr cntv_ctl_el0, {}", "isb", in(reg) CTL_ENABLE, options(nostack, preserves_flags));
+    };
+}
+
 /// Dispara quando o relógio (`now_ns`) chegar a `deadline_ns`; no passado, dispara já.
 /// Um disparo só: escrever o `CNTV_CVAL_EL0` absoluto também baixa a IRQ em serviço.
 pub fn arm_ns(deadline_ns: u64) {

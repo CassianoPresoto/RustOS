@@ -9,17 +9,19 @@ pub use rustos_arch_aarch64::fpu::{
     save as fpu_save, write_probe as fpu_write_probe,
 };
 use rustos_arch_aarch64::intid::{QEMU_VIRT_PL011_INTID, VIRTUAL_TIMER_INTID};
+use rustos_arch_aarch64::sgi::{SGI_RESCHEDULE, SGI_STOP};
 pub use rustos_arch_aarch64::zero::zero_aligned;
 use rustos_arch_aarch64::{
-    Aarch64Cpu, Aarch64Entropy, Aarch64Mmu, DirectMapTables, MmioBus, QEMU_VIRT_GICD,
-    QEMU_VIRT_GICR, QEMU_VIRT_PL011, active_root, exception, gic_cpu, intid, prepare_space,
-    protection, timer,
+    Aarch64Cpu, Aarch64CpuLocal, Aarch64Entropy, Aarch64Ipi, Aarch64Mmu, DirectMapTables, MmioBus,
+    QEMU_VIRT_GICD, QEMU_VIRT_GICR, QEMU_VIRT_PL011, active_root, exception, gic_cpu, intid,
+    prepare_space, protection, timer,
 };
 pub use rustos_arch_aarch64::{Context, call_on_stack, switch};
-use rustos_driver_gicv3::{GicError, GicV3, affinity_from_mpidr, router_for};
+use rustos_driver_gicv3::{GicError, GicV3, affinity_from_mpidr, find_redistributor, router_for};
 use rustos_driver_pl011::Pl011;
 use rustos_hal::{
-    BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, PAGE_SIZE, PhysAddr, VirtAddr,
+    BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, MmuControl, PAGE_SIZE, PhysAddr,
+    VirtAddr,
 };
 use rustos_mm::PageTables;
 
@@ -68,14 +70,17 @@ pub const TIMER_HZ: u32 = 100;
 
 /// Pilha das exceções: 4 páginas e a de guarda embaixo.
 const EXCEPTION_STACK_PAGES: u64 = 4;
-/// Registradores do distribuidor (64 KiB) e do redistribuidor da CPU 0 (`RD_base` + `SGI_base`).
+/// Registradores do distribuidor (64 KiB) e de cada redistribuidor (`RD_base` + `SGI_base`).
 const GICD_LEN: u64 = 0x1_0000;
-const GICR_LEN: u64 = 0x2_0000;
+const GICR_FRAME_LEN: u64 = 0x2_0000;
 /// Prioridade do GIC: quanto menor o número, mais urgente.
 const TIMER_PRIORITY: u8 = 0x40;
 const SERIAL_PRIORITY: u8 = 0x80;
 
 static UART_BASE: AtomicU64 = AtomicU64::new(0);
+/// A janela do distribuidor e a da região dos redistribuidores, para cada CPU achar o seu.
+static GICD_VIRT: AtomicU64 = AtomicU64::new(0);
+static GICR_VIRT: AtomicU64 = AtomicU64::new(0);
 static STACK_GUARD: AtomicU64 = AtomicU64::new(0);
 static PAN_STATE: AtomicU8 = AtomicU8::new(PAN_UNSUPPORTED);
 const PAN_UNSUPPORTED: u8 = 0;
@@ -130,20 +135,19 @@ pub fn init_interrupts(
     unsafe { exception::install(handlers, stack_top) }
         .map_err(|_| PlatformError::MissingFeature("EL1h (kernel is not on SP_EL1)"))?;
 
+    let frames = u64::try_from(boot.cpus().count().max(1)).unwrap_or(1);
     let distributor = map_gic(&mut mapper, memory, QEMU_VIRT_GICD, GICD_LEN)?;
-    let redistributor = map_gic(&mut mapper, memory, QEMU_VIRT_GICR, GICR_LEN)?;
-    // SAFETY: as duas faixas acabaram de ser mapeadas como dispositivo e cobrem os blocos.
-    let mut gic = GicV3::new(unsafe { MmioBus::new(distributor) }, unsafe {
-        MmioBus::new(redistributor)
-    });
+    let redistributors = map_gic(&mut mapper, memory, QEMU_VIRT_GICR, frames * GICR_FRAME_LEN)?;
+    GICD_VIRT.store(distributor.as_u64(), Ordering::Relaxed);
+    GICR_VIRT.store(redistributors.as_u64(), Ordering::Relaxed);
+    let mut gic = secondary_gic()?;
     let affinity = affinity_from_mpidr(gic_cpu::mpidr());
     gic.init_distributor().map_err(gic_error)?;
     gic.init_redistributor(affinity).map_err(gic_error)?;
     // SAFETY: EL1 e o redistribuidor desta CPU acabou de acordar.
     unsafe { gic_cpu::enable() }
         .map_err(|_| PlatformError::MissingFeature("GICv3 system registers (ICC_SRE_EL1)"))?;
-    gic.enable_ppi(VIRTUAL_TIMER_INTID, TIMER_PRIORITY)
-        .map_err(gic_error)?;
+    enable_local_interrupts(&mut gic)?;
     gic.enable_spi(QEMU_VIRT_PL011_INTID, SERIAL_PRIORITY, router_for(affinity))
         .map_err(gic_error)?;
     serial().enable_rx_interrupt();
@@ -153,6 +157,31 @@ pub fn init_interrupts(
         timer::TimerError::NoFrequency => PlatformError::MissingFeature("CNTFRQ_EL0"),
     })?;
     Ok(())
+}
+
+/// O distribuidor e o redistribuidor desta CPU, achado percorrendo os frames da região até a
+/// afinidade dela ou o `Last` (DEBT-0002 para os endereços).
+fn secondary_gic() -> Result<GicV3<MmioBus, MmioBus>, PlatformError> {
+    let distributor = VirtAddr::new(GICD_VIRT.load(Ordering::Relaxed));
+    let region = VirtAddr::new(GICR_VIRT.load(Ordering::Relaxed));
+    // SAFETY: `init_interrupts` mapeou a região inteira dos redistribuidores como dispositivo.
+    let whole = unsafe { MmioBus::new(region) };
+    let affinity = affinity_from_mpidr(gic_cpu::mpidr());
+    let offset = find_redistributor(&whole, affinity).map_err(gic_error)?;
+    // SAFETY: o frame achado está dentro da região mapeada e cobre `RD_base` e `SGI_base`.
+    let frame = unsafe { MmioBus::new(VirtAddr::new(region.as_u64() + offset as u64)) };
+    // SAFETY: `init_interrupts` mapeou o distribuidor como dispositivo.
+    let distributor = unsafe { MmioBus::new(distributor) };
+    Ok(GicV3::new(distributor, frame))
+}
+
+/// O timer e os IPIs desta CPU, no redistribuidor dela.
+fn enable_local_interrupts(gic: &mut GicV3<MmioBus, MmioBus>) -> Result<(), PlatformError> {
+    gic.enable_ppi(VIRTUAL_TIMER_INTID, TIMER_PRIORITY)
+        .map_err(gic_error)?;
+    gic.enable_sgi(SGI_RESCHEDULE, TIMER_PRIORITY)
+        .map_err(gic_error)?;
+    gic.enable_sgi(SGI_STOP, TIMER_PRIORITY).map_err(gic_error)
 }
 
 /// Como o timer dispara: o comparador absoluto do `CNTV`, de um tiro.
@@ -229,6 +258,8 @@ fn serial() -> Pl011<MmioBus> {
 pub fn irq_source(irq: Irq) -> IrqSource {
     match irq.0 {
         VIRTUAL_TIMER_INTID => IrqSource::Timer,
+        SGI_RESCHEDULE => IrqSource::Reschedule,
+        SGI_STOP => IrqSource::Stop,
         QEMU_VIRT_PL011_INTID => IrqSource::Serial,
         intid if !intid::needs_end_of_interrupt(intid) => IrqSource::Spurious,
         _ => IrqSource::Unknown,
@@ -302,4 +333,81 @@ pub fn trigger(test: FaultTest) -> bool {
             false
         }
     }
+}
+
+pub fn cpu_local() -> Aarch64CpuLocal {
+    // SAFETY: o kernel roda em EL1.
+    unsafe { Aarch64CpuLocal::new() }
+}
+
+/// O IPI desta CPU.
+///
+/// # Safety
+/// A interface do GIC desta CPU já está ligada: só há outra CPU para receber depois disso.
+pub unsafe fn ipi() -> Aarch64Ipi {
+    // SAFETY: o contrato desta função.
+    unsafe { Aarch64Ipi::new() }
+}
+
+/// O identificador que o IPI usa para esta CPU: a afinidade no formato do `GICR_TYPER`.
+pub fn local_hw_id() -> u64 {
+    u64::from(affinity_from_mpidr(gic_cpu::mpidr()))
+}
+
+/// O identificador de uma CPU como o bootloader o dá (o `MPIDR`), no formato do IPI.
+pub fn ipi_target(boot_hw_id: u64) -> u64 {
+    u64::from(affinity_from_mpidr(boot_hw_id))
+}
+
+/// A raiz das tabelas que esta CPU usa agora: a das tabelas do kernel, depois de `Vm::activate`.
+pub fn kernel_root() -> PhysAddr {
+    // SAFETY: EL1 com MMU ligada.
+    unsafe { active_root() }
+}
+
+/// O que uma CPU secundária precisa antes de rodar: a pilha das falhas dela.
+#[derive(Debug)]
+pub struct SecondaryResources {
+    fault_stack_top: VirtAddr,
+}
+
+/// Aloca o que a CPU secundária usa; roda na CPU de boot, antes de soltá-la.
+pub fn prepare_secondary(
+    memory: &mut Memory,
+    mapper: &mut PlatformSpace,
+) -> Result<SecondaryResources, PlatformError> {
+    let fault_stack_top = memory
+        .map_stack(mapper, EXCEPTION_STACK_PAGES)
+        .map_err(map_error)?;
+    Ok(SecondaryResources { fault_stack_top })
+}
+
+/// A primeira coisa de uma CPU secundária, ainda na pilha do Limine: as proteções de
+/// hardware, o atributo de dispositivo do `MAIR` e as tabelas do kernel.
+pub fn secondary_early(root: PhysAddr) {
+    harden();
+    // SAFETY: o índice 7 do MAIR não é usado por mapeamento algum ainda nesta CPU.
+    unsafe { prepare_space() };
+    Aarch64Mmu.activate(root);
+}
+
+/// Vetores, redistribuidor, interface do GIC, timer e FP/SIMD desta CPU secundária; já em EL1h.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "o recurso é entregue a esta CPU e não volta"
+)]
+pub fn secondary_init(resources: SecondaryResources) -> Result<(), PlatformError> {
+    // SAFETY: EL1h com IRQ mascarada, depois de `install` na CPU de boot; a pilha é só desta CPU.
+    unsafe { exception::install_secondary(resources.fault_stack_top) }
+        .map_err(|_| PlatformError::MissingFeature("EL1h (kernel is not on SP_EL1)"))?;
+    let mut gic = secondary_gic()?;
+    gic.init_redistributor(affinity_from_mpidr(gic_cpu::mpidr()))
+        .map_err(gic_error)?;
+    // SAFETY: EL1 e o redistribuidor desta CPU acabou de acordar.
+    unsafe { gic_cpu::enable() }
+        .map_err(|_| PlatformError::MissingFeature("GICv3 system registers (ICC_SRE_EL1)"))?;
+    enable_local_interrupts(&mut gic)?;
+    // SAFETY: EL1, depois de `timer::start` na CPU de boot.
+    unsafe { timer::start_secondary() };
+    fpu_init().map(|_| ())
 }

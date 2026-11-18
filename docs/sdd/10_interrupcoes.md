@@ -23,7 +23,8 @@ entre elas está numa seção por ISA, abaixo.
 | 8 | Calibração: um intervalo de 20 ms do PIT (canal 2) mede o TSC e o contador do timer do APIC; o timer fica em modo de um tiro (TSC-deadline se o CPUID anuncia), desarmado: `interrupts::init` arma o primeiro tique | `pit.rs`, `clock.rs`, `lapic.rs` |
 | 9 | `Uart16550::enable_receive_interrupt` (`IER` bit 0 e `OUT2` do `MCR`), por último | `drivers/uart16550` |
 
-O chamador (`interrupts::init`) liga o `IF` depois. A parte pura de cada passo
+O chamador (`interrupts::init`) liga o `IF` depois. Os núcleos secundários repetem só o que é
+por CPU ([abaixo](#núcleos-secundários-x86_64)). A parte pura de cada passo
 roda no `cargo test` do host, com `RegisterBus` e memória de tabelas falsos.
 
 ### Vetores
@@ -35,6 +36,8 @@ roda no `cargo test` do host, com `RegisterBus` e memória de tabelas falsos.
 | `0x20` | Timer do Local APIC | atual (a da tarefa interrompida) |
 | `0x21` | Teclado PS/2 (pino 1, mascarado) | atual |
 | `0x24` | COM1 (pino 4) | atual |
+| `0xFD` | IPI de reescalonar (`IrqSource::Reschedule`) | atual |
+| `0xFE` | IPI de parada, pânico em outro núcleo (`IrqSource::Stop`) | atual |
 | `0xFF` | Espúrio: chega ao `Handlers.irq` e não recebe EOI | atual |
 
 Os 256 gates apontam para stubs de 16 bytes (`rustos_isr_stubs + 16 * vetor`) que
@@ -44,6 +47,26 @@ entrada comum salva os 15 registradores (ordem de `TrapFrame`), faz `cld` e cham
 erro e pelo `CR2`) ou entrega `hal::Irq` ao núcleo, dá o EOI depois do handler e chama
 `Handlers.preempt`, onde o núcleo pode trocar de tarefa ([SDD 15](15_tarefas_e_preempcao.md)).
 O breakpoint volta; qualquer outra exceção pára a CPU.
+
+### Núcleos secundários (x86_64)
+
+O Limine entrega cada núcleo com o estado do BSP (GDT, tabelas e registradores de controle do
+Limine) e o `goto_address` ([SDD 04](04_boot.md)). O que o kernel refaz **em cada um**, na ordem:
+
+| Passo | O quê | Onde |
+| --- | --- | --- |
+| 1 | `IA32_GS_BASE` aponta o bloco `PerCpu` (`KERNEL_GS_BASE` fica em zero para o `swapgs` da fase 4); `gs:[0]` devolve o endereço dele | `percpu.rs` |
+| 2 | WP, SMEP, SMAP, UMIP e NXE, e só então o `CR3` do kernel (o NXE tem de valer antes das tabelas com NX) | `protect.rs`, `mmu.rs` |
+| 3 | Troca para a pilha própria (`call_on_stack`) | `stack.rs` |
+| 4 | **GDT e TSS próprias** (`CpuTables`) com as 3 pilhas IST próprias, e `lidt` da **IDT compartilhada** (montada uma vez pela CPU de boot). O `ltr` marca a TSS como ocupada na GDT, por isso uma GDT por CPU. Carregar o seletor nulo no `GS` pode zerar a base: `load_cpu` lê a `GS_BASE` antes e a escreve depois | `traps.rs` |
+| 5 | Local APIC no modo que a CPU de boot escolheu (x2APIC por MSR, ou xAPIC na mesma página MMIO, que cada núcleo vê como a sua), vetor espúrio, timer mascarado e depois no mesmo modo de um tiro | `apic.rs` |
+| 6 | `CR0`, `CR4` e `XCR0` de FPU/SIMD | `fpu.rs` |
+
+O contador do timer e o TSC são calibrados uma vez, no BSP, e valem para todos: **supõe TSC
+sincronizado e a mesma frequência do contador em cada núcleo** (não verificado em metal,
+[DEBT-0057](../tech-debt/0057-tsc-entre-nucleos-sem-verificacao.md)).
+
+**IPI** (`lapic.rs`, `apic.rs`): entrega fixa, destino físico, nível *assert*, borda. No x2APIC o ICR é o MSR `0x830`, de 64 bits, com o LAPIC ID em 63:32; no xAPIC são dois registradores, `ICR2` (`0x310`, destino em 31:24) escrito antes do `ICR` (`0x300`), depois de esperar o bit de envio pendente (bit 12). Antes do ICR vai um `mfence` (`weak_wrmsr_fence` do Linux, `x2apic_phys.c`): o `wrmsr` do x2APIC não ordena as escritas anteriores, e o IPI de reescalonar precisa que `kick_pending` e a fila estejam visíveis ao destino. "Todos menos eu" é o atalho `0b11` nos bits 19:18, sem destino.
 
 ### Seletores
 
@@ -100,6 +123,12 @@ calibração e o teclado.
 | I/O APIC em `0xFEC0_0000` | `IO_APIC_DEFAULT_ADDRESS` em `include/hw/intc/ioapic.h` da QEMU |
 | PAT do Limine (PAT3 = UC) | `PROTOCOL.md` do Limine, seção *Caching* |
 | IST no gate é índice mais um | comentário em `arch/x86/kernel/idt.c` do Linux |
+| `IA32_GS_BASE` = `0xC000_0101`, `IA32_KERNEL_GS_BASE` = `0xC000_0102` | `msr-index.h` do Linux (master, lido em 2026-11-17) |
+| ICR em `0x300`/`0x310`, `APIC_DEST_ALLBUT` = `0xC0000`, `APIC_INT_ASSERT` = `0x04000`, `APIC_ICR_BUSY` = `0x01000`, `APIC_DM_FIXED` = 0 | `apicdef.h` do Linux (lido em 2026-11-17) |
+| Escrita do ICR no x2APIC: um `wrmsr` de `id << 32 \| low` no MSR `0x800 + (0x300 >> 4)` | `native_x2apic_icr_write` em `arch/x86/include/asm/apic.h` do Linux |
+| Que o Limine entrega o AP com o estado do BSP, e o `goto_address` com store de release | `PROTOCOL.md`, seção *MP*, do Limine |
+| Ordem de init de um AP (`cpu_init`, `ap_starting`, `set_cpu_online`) | `arch/x86/kernel/smpboot.c` do Linux, `start_secondary` (lido para a ordem; o Linux sobe o AP por INIT/SIPI, o que aqui é do Limine) |
+| Bits do ICR (modo, nível, atalho) na SDM vol. 3A, seção 11.6.1 | **não lida direto**: conferido só pelo `apicdef.h` do Linux acima |
 
 ## aarch64
 
@@ -114,8 +143,11 @@ foi conferida nelas.
 | Pilha | IRQ empilha na pilha da própria tarefa (`SP_EL1`). Síncrona e SError (4 e 7) fazem `msr spsel, #0` e empilham em `SP_EL0`, a pilha de falhas de 4 páginas com guarda (`map_stack`) que `install` grava, com `SPSel` em 0 (só assim do EL1 se escreve `SP_EL0`) ([SDD 15](15_tarefas_e_preempcao.md)) |
 | Quadro | x0–x30, `ELR_EL1`, `SPSR_EL1`: 272 bytes. `brk` volta para a instrução seguinte (o `ELR` aponta para o próprio `brk`: soma 4); falha não recuperável para a CPU em `wfe` |
 | `ESR_EL1` | `esr.rs` (puro): classe → `hal::FaultKind`; em aborto, `DFSC`/`IFSC` (tradução por nível, acesso, permissão, alinhamento) e `WnR`. `Fault.code` é o `ESR` cru |
-| GICv3 | `drivers/gicv3` (MMIO) mais `gic_cpu.rs` (`ICC_*_EL1`). Distribuidor em `0x0800_0000`, redistribuidor da CPU 0 em `0x080A_0000`, ambos pela janela de dispositivos (DEBT-0002). Sequência: distribuidor desligado → `ARE` + grupo 1 → acorda o redistribuidor (`GICR_WAKER`) → `ICC_SRE_EL1`, `PMR`, `IGRPEN1` |
-| Fontes | PPI 27 (`CNTV`, nível) no redistribuidor e SPI 33 (UART0, nível) no distribuidor, grupo 1, roteada para a afinidade do `MPIDR_EL1` desta CPU |
+| GICv3 | `drivers/gicv3` (MMIO) mais `gic_cpu.rs` (`ICC_*_EL1`). Distribuidor em `0x0800_0000` e a região dos redistribuidores em `0x080A_0000` (`0x20000` por CPU), pela janela de dispositivos (DEBT-0002). Sequência: distribuidor desligado → `ARE` + grupo 1 → **acha o redistribuidor desta CPU** → acorda-o (`GICR_WAKER`) → `ICC_SRE_EL1`, `PMR`, `IGRPEN1` |
+| Redistribuidor por CPU | `find_redistributor` percorre os frames da região a partir do primeiro, lê `GICR_TYPER` e compara a afinidade (`[63:32]`) com a do `MPIDR_EL1` da CPU; para em `Last` (bit 4) sem achar. Cada frame tem 128 KiB (`RD_base` e `SGI_base`), ou 256 KiB com `VLPIS` (bit 1; GICv4: mais `VLPI_base` e uma página reservada). Cada CPU só mexe no frame dela |
+| IPI | `dsb ishst` e depois `ICC_SGI1R_EL1` (a barreira de `gic_ipi_send_mask` do Linux: as escritas em memória normal ficam visíveis às outras CPUs antes da SGI), SGI do grupo 1: INTID 0 reescalonar, 1 parar; `Aff3.Aff2.Aff1` no registrador, `TargetList` = `1 << (Aff0 % 16)` e `RS` = `Aff0 / 16`; "todos menos eu" é `IRM = 1`. As duas SGIs são habilitadas, prioridade `0x40`, em **cada** redistribuidor (`ISENABLER0`) |
+| Fontes | PPI 27 (`CNTV`, nível) no redistribuidor **de cada CPU** e SPI 33 (UART0, nível) no distribuidor, grupo 1, roteada para a afinidade da CPU de boot ([DEBT-0056](../tech-debt/0056-irqs-de-dispositivo-so-na-cpu-de-boot.md)) |
+| Núcleo secundário | Em EL1t pelo Limine; `call_on_stack` passa a EL1h; depois, em ordem: `MAIR` (índice 7) e `PAN` na entrada, `TTBR1_EL1` do kernel (`Aarch64Mmu::activate`); no `ap_main`, `VBAR_EL1` e `SP_EL0` (pilha de falhas própria: `install_secondary`), o redistribuidor, `ICC_*`, o PPI do timer e as SGIs, `CNTV` ligado e desarmado, `CPACR_EL1.FPEN`. `MAIR_EL1`, `SCTLR_EL1`, `TCR_EL1` e `CPACR_EL1` são por CPU |
 | EOI | `EOImode` 0: um `ICC_EOIR1_EL1` baixa a prioridade e desativa, antes de `Handlers.preempt`. INTID ≥ 1020 (espúrio) não leva EOI |
 | Timer | `CNTV` (o Linux usa o virtual em EL1 sem EL2 e o HVF só entrega o virtual). `CNTFRQ_EL0` lido em tempo de execução. O disparo usa `CNTV_CVAL_EL0` absoluto (`TVAL` acumulava ~2 ms de atraso por tique sob QEMU: 50 tiques em 600 ms), de um tiro: o núcleo o rearma a cada disparo para o próximo tique ou acordar |
 | Relógio | `now_ns` = `(CNTVCT − início) × 10⁹ / CNTFRQ` em `u128`; zero em `init_interrupts` |
@@ -124,3 +156,14 @@ foi conferida nelas.
 
 A mesma configuração roda no HVF (vGIC da Apple, `virt-11.1`+, macOS 15+) e no TCG:
 a `virt` fixa o GICv3 por `gic-version=3` e as duas aceleram os mesmos registradores.
+
+### Fontes (aarch64, núcleos)
+
+| Afirmação | Fonte |
+| --- | --- |
+| Campos de `ICC_SGI1R_EL1` | `ICC_SGI1R_*` em `include/linux/irqchip/arm-gic-v3.h` do Linux (lido em 2026-11-17) |
+| `GICR_TYPER.VLPIS` (bit 1) e `Last` (bit 4); `Affinity_Value` em `[63:32]` | `GICR_TYPER_*` no mesmo arquivo |
+| Percorrer os redistribuidores: 128 KiB por frame, mais 128 KiB com `VLPIS`, até `Last` | `gic_iterate_rdists` em `drivers/irqchip/irq-gic-v3.c` do Linux (lido em 2026-11-17); o Linux também aceita `redistributor-stride` do DT, que aqui não há (DEBT-0002) |
+| O Limine entrega `X0` = `MpInfo` com `mpidr` mascarado e `extra_argument` livre | `PROTOCOL.md`, *MP*, do Limine |
+| Ler o `GICR_TYPER` de cada frame com acesso de 64 bits | `read64` do `RegisterBus` (dois de 32 bits na ordem baixo, alto): a QEMU aceita; **o Arm IHI 0069 não foi lido** neste ponto |
+| O PSCI (`CPU_ON`) não é usado: quem acorda os núcleos é o Limine | `PROTOCOL.md`; a especificação (DEN0022) **não foi lida** |

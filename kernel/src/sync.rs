@@ -1,24 +1,30 @@
-//! Lock que mascara interrupção na CPU local enquanto está preso: um handler que
-//! pegue o mesmo lock nunca acha o dono interrompido no meio.
-//! Ninguém cede a CPU (`yield_now`, `sleep_until`, `park`) com um preso; o
-//! `locks_held` serve ao `debug_assert` do escalonador (SDD 15).
+//! Spinlock que mascara interrupção na CPU local enquanto está preso: um handler que
+//! pegue o mesmo lock nunca acha o dono interrompido no meio, e outra CPU gira até ele
+//! soltar. Ninguém cede a CPU (`yield_now`, `sleep_until`, `park`) com um preso; o
+//! `locks_held` por CPU serve ao `debug_assert` do escalonador (SDD 15).
 
 use core::fmt;
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use rustos_hal::Cpu;
 use rustos_sync::{SpinLock, SpinLockGuard};
 
-use crate::platform;
+use crate::{panic, percpu, platform};
 
-/// `IrqLock`s presos agora. Uma CPU só até o SMP: vira estado por CPU então.
-static HELD: AtomicU32 = AtomicU32::new(0);
+/// Soma sem a instrução atômica: só para contador que uma CPU escreve de cada vez e as outras
+/// só leem. O `lock xadd` custa de 20 ciclos em metal a centenas de ns no TCG.
+pub fn bump(counter: &AtomicU64, by: u64) {
+    counter.store(
+        counter.load(Ordering::Relaxed).wrapping_add(by),
+        Ordering::Relaxed,
+    );
+}
 
 /// Quantos `IrqLock`s estão presos nesta CPU.
 pub fn locks_held() -> u32 {
-    HELD.load(Ordering::Relaxed)
+    percpu::current().locks_held()
 }
 
 pub struct IrqLock<T> {
@@ -32,12 +38,22 @@ impl<T> IrqLock<T> {
         }
     }
 
+    /// Com a interrupção mascarada a CPU não ouve o IPI de parada: o giro confere o sinal
+    /// de pânico de outro núcleo e para ali mesmo.
     pub fn lock(&self) -> IrqGuard<'_, T> {
         let were_enabled = platform::cpu().save_and_disable_interrupts();
-        let guard = ManuallyDrop::new(self.inner.lock());
-        HELD.fetch_add(1, Ordering::Relaxed);
+        let guard = loop {
+            if let Some(guard) = self.inner.try_lock() {
+                break guard;
+            }
+            while self.inner.is_locked() {
+                panic::stop_if_requested();
+                core::hint::spin_loop();
+            }
+        };
+        percpu::current().lock_taken();
         IrqGuard {
-            guard,
+            guard: ManuallyDrop::new(guard),
             were_enabled,
         }
     }
@@ -46,7 +62,7 @@ impl<T> IrqLock<T> {
         let cpu = platform::cpu();
         let were_enabled = cpu.save_and_disable_interrupts();
         if let Some(guard) = self.inner.try_lock() {
-            HELD.fetch_add(1, Ordering::Relaxed);
+            percpu::current().lock_taken();
             Some(IrqGuard {
                 guard: ManuallyDrop::new(guard),
                 were_enabled,
@@ -55,6 +71,22 @@ impl<T> IrqLock<T> {
             cpu.restore_interrupts(were_enabled);
             None
         }
+    }
+}
+
+impl<T> IrqLock<T> {
+    /// Tentativas que acharam o lock preso, desde o início.
+    pub fn contentions(&self) -> u32 {
+        self.inner.contentions()
+    }
+
+    /// Solta o lock de um dono que não roda mais (pânico em outro núcleo).
+    ///
+    /// # Safety
+    /// O dono está parado para sempre e nenhum guard dele será usado de novo.
+    pub unsafe fn break_lock(&self) {
+        // SAFETY: o contrato desta função.
+        unsafe { self.inner.force_unlock() };
     }
 }
 
@@ -89,7 +121,7 @@ impl<T> Drop for IrqGuard<'_, T> {
     fn drop(&mut self) {
         // SAFETY: o guard interno é solto só aqui, uma vez, e não é usado depois.
         unsafe { ManuallyDrop::drop(&mut self.guard) };
-        HELD.fetch_sub(1, Ordering::Relaxed);
+        percpu::current().lock_released();
         platform::cpu().restore_interrupts(self.were_enabled);
     }
 }
