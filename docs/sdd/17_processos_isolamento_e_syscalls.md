@@ -831,26 +831,26 @@ nativo até a fase 5, e o pai só mata o filho pelo canal ou esperando.
 | Item | Valor | Fonte |
 | --- | --- | --- |
 | `e_machine` | `62` (x86_64), `183` (aarch64) | **Verificado**: `include/uapi/linux/elf-em.h` |
-| Classe e ordem | 64 bits, little-endian: `EI_CLASS` (índice 4) = `ELFCLASS64` (2); `EI_DATA` (índice 5) = `ELFDATA2LSB` (1); `EI_VERSION` (6) = `EV_CURRENT` (1); `EI_OSABI` (7) = `ELFOSABI_NONE` (0); `EI_NIDENT` = 16 | **Verificado**: [gABI](https://www.sco.com/developers/gabi/latest/ch4.eheader.html) |
-| Tipo | `ET_EXEC`. `ET_DYN` só com a [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois) | — |
+| Classe e ordem | 64 bits, little-endian: `EI_CLASS` (índice 4) = `ELFCLASS64` (2); `EI_DATA` (índice 5) = `ELFDATA2LSB` (1); `EI_VERSION` (6) = `EV_CURRENT` (1); `EI_OSABI` (7) = `ELFOSABI_NONE` (0); `EI_NIDENT` = 16 | **Verificado**: [gABI](https://www.sco.com/developers/gabi/latest/ch4.eheader.html). **Testado:** o `rust-lld` grava `EI_OSABI = 3` num programa com `#[used]` ([DEBT-0074](../tech-debt/0074-elf-recusa-osabi-gnu-do-used.md)) |
+| Tipo | `ET_EXEC`; `ET_DYN` é recusado na fase 4 (decisão 5) | — |
 | Seções | O kernel **nunca** lê section headers | **Proposta** |
 
 ### Validação, regra por regra
 
 O molde é `fs/binfmt_elf.c` do Linux (**verificado**, [fonte](https://github.com/torvalds/linux/blob/master/fs/binfmt_elf.c)).
-A validação mora em `core/elf` (`forbid(unsafe_code)`, `&[u8]` para uma `Image`; depende só do `hal`, de onde vêm `USER_MIN`, `USER_TOP` e `PAGE_SIZE`),
-testada no host com ELF sintético e com os casos inválidos (guidelines 09).
+A validação mora em `core/elf` (`forbid(unsafe_code)`, `&[u8]` para uma `Image`; sem dependência: o chamador passa `Limits { machine, user_min, user_top, page_size, max_loads_bytes }`, e o `kernel/` os tira de `hal::abi`),
+testada no host com ELF sintético, dois ELF reais e os casos inválidos (guidelines 09). As decisões de implementação estão no [SDD 03](03_mapa_de_codigo.md#formatos-de-entrada-corecpio-e-coreelf).
 
 | Regra | De onde |
 | --- | --- |
 | `e_ident` começa com `ELFMAG` | Linux (verificado) |
-| `e_type` é `ET_EXEC` (ou `ET_DYN`, se a [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois) permitir) | Linux (verificado) |
+| `e_type` é `ET_EXEC`; `ET_DYN` recusado na fase 4 ([decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois)) | Linux (verificado) |
 | Máquina e classe batem com a ISA do kernel (`elf_check_arch`) | Linux (verificado; `EI_CLASS`/`EI_DATA` estão dentro dela, não visíveis no trecho lido) |
 | `e_phentsize == size_of::<Phdr>()` | Linux (verificado) |
 | `e_phoff + e_phnum * e_phentsize` sem estouro e **dentro do arquivo** (a tabela de program headers inteira) | **Proposta** (própria) |
 | Tamanho total dos program headers entre 1 e 65 536 bytes | Linux (verificado) |
 | `p_filesz <= p_memsz` | Linux (verificado) |
-| `p_align` é potência de dois | Linux (verificado) |
+| `p_align` é 0, 1 (sem alinhamento, gABI) ou potência de dois | Linux (verificado) e gABI |
 | `PT_INTERP` **recusado** (o Linux o aceita, limitado e terminado em NUL; a fase 4 não tem interpretador) | Linux (verificado) e decisão do RustOS |
 | `p_offset + p_filesz` sem estouro e dentro do arquivo | Proposta |
 | `PT_LOAD` com `p_memsz == 0` **recusado** (não mapeia nada; é erro do linker) | Proposta |
@@ -858,7 +858,7 @@ testada no host com ELF sintético e com os casos inválidos (guidelines 09).
 | `p_vaddr ≡ p_offset` **módulo o tamanho da página** (não módulo `p_align`) | **Verificado**: [gABI, ch. 5](https://www.sco.com/developers/gabi/latest/ch5.pheader.html): "loadable process segments must have congruent values for p_vaddr and p_offset, modulo the page size". Sobre `p_align` a gABI diz só que 0 e 1 significam "sem alinhamento" |
 | **Nenhum `PT_LOAD` com W e X** (W^X por segmento) | Proposta; é o que o mapeador já exige |
 | `PT_LOAD` ordenados por `p_vaddr`, sem sobreposição (em granularidade de página) | Proposta |
-| `e_entry` dentro de um `PT_LOAD` executável | Proposta |
+| `e_entry` dentro do conteúdo de arquivo (`p_filesz`) de um `PT_LOAD` executável; a cauda zerada não vale | Proposta |
 | Todo `PT_LOAD` com `R` | Proposta |
 | No máximo 16 `PT_LOAD` e `p_memsz` total até um teto (ex.: 64 MiB) | Proposta |
 | `PT_TLS`, `PT_DYNAMIC` recusados na fase 4 (sem TLS, sem ligação dinâmica) | Proposta |
@@ -965,11 +965,13 @@ O `init` é o primeiro processo e o único que o kernel lança sozinho.
 | Hard link | Entrada com `c_nlink > 1`: o Linux a liga ao `(c_maj, c_min, c_ino)` já visto e aceita os dados em qualquer ocorrência |
 | Fim | `TRAILER!!!`, com `c_filesize` zero. No Linux ele é opcional, "mas não é ignorado"; o `core/cpio` o **exige** (regra própria, mais estrita) |
 
-O leitor (`core/cpio`) é um iterador sem alocação: confere o magic, cada dígito
-hexadecimal, `c_namesize` e `c_filesize` contra o fim do buffer (sem estouro), o NUL do
-nome e a presença do `TRAILER!!!`, e usa o alinhamento da gramática acima. Aceita só
-arquivo regular (`c_mode & S_IFMT == S_IFREG`) com `c_nlink == 1`; rejeita diretório que
-tenha dado, link simbólico, dispositivo e hard link. O `init` é o arquivo de nome `init`.
+O leitor (`core/cpio`) é um iterador sem alocação: confere o magic (`070702` é recusado),
+cada dígito hexadecimal, `c_namesize` (de 1 a 4096) e `c_filesize` contra o fim do buffer
+(sem estouro), o NUL do nome e a presença do `TRAILER!!!`, e usa o alinhamento da gramática
+acima. Devolve só arquivo regular (`c_mode & S_IFMT == S_IFREG`) com `c_nlink == 1`; **pula**
+diretório sem dado e rejeita diretório com dado, link simbólico, dispositivo, FIFO, socket e
+hard link. `find` percorre o arquivo inteiro e, com nome repetido, vale a última ocorrência.
+O `init` é o arquivo de nome `init`, sem `./`. Decisões e testes: [SDD 03](03_mapa_de_codigo.md#formatos-de-entrada-corecpio-e-coreelf).
 
 **Limine.** O protocolo **saiu do repositório do bootloader**: em `v12.10.0` do
 [Limine](https://github.com/Limine-Bootloader/Limine) só há `CONFIG.md`; o `PROTOCOL.md` está em
@@ -1080,7 +1082,7 @@ O adaptador Linux da fase 5 traduz o `Fault` em sinal.
 
 | Crate | Pasta | O que faz | `unsafe` | Depende de |
 | --- | --- | --- | --- | --- |
-| `rustos-elf` **(novo)** | `core/elf` | Validação e leitura de ELF64: `&[u8]` para `Image { entry, loads, phdr }` | proibido | `rustos-hal` (`abi`: `USER_MIN`, `USER_TOP`, `PAGE_SIZE`) |
+| `rustos-elf` **(novo)** | `core/elf` | Validação e leitura de ELF64: `&[u8]` para `Image { entry, loads, phdr }`; o chamador passa `Limits` (ISA e faixa do usuário) | proibido | nada |
 | `rustos-cpio` **(novo)** | `core/cpio` | Leitor `newc`, iterador sem alocação | proibido | nada |
 | `rustos-object` **(novo)** | `core/object` | `Rights`, `HandleTable<T>`, regras de duplicar, substituir e transferir, contagem de handles, fila do canal, sinais | proibido | `rustos-hal` |
 | ABI (números, `Status`, direitos, constantes de layout, `ProcessEvent`, mensagem de boot) | `core/hal/src/abi.rs` (**módulo, não crate**) | O contrato com o programa de usuário, a "primeira porta de entrada" do [SDD 02](02_arquitetura.md) | proibido | nada |

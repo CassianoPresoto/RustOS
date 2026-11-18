@@ -164,7 +164,7 @@ capítulo 18 mudar. As regras são a tabela "Validação, regra por regra" do ca
 `EI_OSABI` tem de ser `ELFOSABI_NONE` (0). **Achado nos testes:** o `rust-lld` grava
 `ELFOSABI_GNU` (3) quando o programa tem um `#[used]` (seção com `SHF_GNU_RETAIN`); o mesmo
 programa sem ele sai com 0. O `user/rt` e os programas não podem usar `#[used]`, ou a regra
-muda (contrato de formato: caso 6 do [`AGENTS.md`](../../AGENTS.md)).
+muda (contrato de formato: caso 6 do [`AGENTS.md`](../../AGENTS.md); [DEBT-0074](../tech-debt/0074-elf-recusa-osabi-gnu-do-used.md)).
 
 O ELF real dos testes é um `#![no_std] #![no_main]` mínimo ligado com
 `rustc 1.100.0 --target {x86_64-unknown-none,aarch64-unknown-none-softfloat} -C opt-level=s
