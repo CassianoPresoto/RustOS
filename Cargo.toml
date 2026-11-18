@@ -15,15 +15,21 @@ members = [
     "lib/sync",
     "arch/x86_64",
     "arch/aarch64",
+    "arch/x86_64-user",
+    "arch/aarch64-user",
     "boot/limine",
     "drivers/uart16550",
     "drivers/pl011",
     "drivers/i8042",
     "drivers/gicv3",
+    "user/rt",
+    "user/init",
+    "user/tests/big",
     "xtask",
 ]
 # `cargo build`/`test` sem `-p` rodam no host; o kernel só compila para os alvos
-# bare-metal, pelo `cargo xtask build`.
+# bare-metal, pelo `cargo xtask build`. `user/` e `arch/*-user` também ficam de fora: só compilam
+# para os alvos bare-metal, pelo `cargo xtask user`.
 default-members = [
     "core/hal",
     "core/mm",
@@ -63,10 +69,14 @@ rustos-sched = { path = "core/sched" }
 rustos-gfx = { path = "core/gfx" }
 rustos-term = { path = "core/term" }
 rustos-cpio = { path = "core/cpio" }
+rustos-elf = { path = "core/elf" }
 rustos-shell = { path = "core/shell", default-features = false }
 rustos-sync = { path = "lib/sync" }
 rustos-arch-x86_64 = { path = "arch/x86_64" }
 rustos-arch-aarch64 = { path = "arch/aarch64" }
+rustos-arch-x86_64-user = { path = "arch/x86_64-user" }
+rustos-arch-aarch64-user = { path = "arch/aarch64-user" }
+rustos-user-rt = { path = "user/rt" }
 rustos-boot-limine = { path = "boot/limine" }
 rustos-driver-uart16550 = { path = "drivers/uart16550" }
 rustos-driver-pl011 = { path = "drivers/pl011" }

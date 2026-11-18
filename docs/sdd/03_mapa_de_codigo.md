@@ -23,8 +23,10 @@
 │       ├── console.rs          # console global e kprintln!: serial e tela
 │       ├── screen.rs           # tela: framebuffer + grade do term + desenho do gfx, tema e barra
 │       ├── interrupts.rs       # IRQ do timer (o que o escalonador pede: acordar, fim de fatia, próximo disparo), fila de entrada e o relatório de falha
-│       ├── process.rs          # processo de usuário da fatia 4a (um espaço, uma thread, sem handles): `spawn`, `process_main`, `exit`, `user_fault` (mata o processo e o kernel segue); `process/selftest.rs`: o autoteste dos casos de usuário (feature `selftest`)
-│       ├── uspace.rs           # UserSpace: tabelas da metade baixa, mapeamento de frames zerados e a devolução zerada na morte
+│       ├── process.rs          # processo de usuário (um espaço, uma thread, uma árvore de regiões, sem handles): `spawn` de um ELF ou, no modo de teste, de um programa plano, `process_main`, `exit`, `user_fault` (mata o processo e o kernel segue); `process/selftest.rs`: o autoteste dos casos de usuário (feature `selftest`)
+│       ├── loader.rs           # o carregador de ELF do initramfs (4b): `core/cpio` + `core/elf`, `PT_LOAD` em frames novos, `Vmar` do processo e a pilha inicial com guarda e topo sorteado
+│       ├── init.rs             # (feature `selftest`) lança o `init` do initramfs, espera e confere o código de saída; mede o custo do menor processo
+│       ├── uspace.rs           # UserSpace: tabelas da metade baixa, mapeamento de frames zerados (`map_at`) e a devolução zerada na morte
 │       ├── syscall.rs          # o despacho da ABI nativa: `nop`, `clock_get_monotonic`, `random_get`, `process_exit` e a `debug_write` provisória; o resto devolve `NotSupported`
 │       ├── scrub.rs            # a limpeza da pilha do kernel na volta ao usuário (`Handlers::leave_user`)
 │       ├── stack.rs            # marca d'água das pilhas: pinta com um padrão e lê o pico varrendo do fundo (SDD 15)
@@ -53,8 +55,15 @@
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set, conta disputas, `force_unlock` para o pânico)
 ├── arch/                       # adaptadores de ISA: o único lugar com asm!
 │   ├── x86_64/                 # X86Cpu, X86CpuLocal (GS), X86Ipi (ICR), PortBus, X86Mmu e DirectMapTables (`invlpg`, `CR3`, memória das tabelas), X86Entropy, GDT/TSS por CPU (4 pilhas IST, a IST4 do `#DB`) e IDT única, `SYSCALL`/`SYSRET` (`user`), `usercopy`, `CpuPrefix`, APIC (periódico → um tiro/TSC-deadline), PIT, troca de pilha, `Context`/`switch`, `fpu`; módulos puros (pte com `X86Format`, segments, fault, sysret, prefix, lapic, ioapic, pit, clock, xstate) testados no host
+│   ├── x86_64-user/            # rustos-arch-x86_64-user: `_start` e o stub de `syscall` do `user/rt` (regra 12; o `kernel/` nunca o liga)
+│   ├── aarch64-user/           # rustos-arch-aarch64-user: `_start` e o stub de `svc`
 │   └── aarch64/                # Aarch64Cpu, Aarch64CpuLocal (TPIDR_EL1), Aarch64Ipi (SGI), MmioBus, Aarch64Mmu e DirectMapTables (TTBR1), `early` (a PL011 por TTBR0 antes das tabelas próprias), Aarch64Entropy; vetores (EL1h e EL0, `SVC`), `usercopy` (`ldtr`/`sttr`), `user` (`eret`, `TTBR0_EL1`, `CNTKCTL_EL1`), ICC_*, CNTV de um tiro, PAN, `Context`/`switch` e `fpu`;
 │                               # puros: descriptor (com `Aarch64Format`), esr, prefix, time, intid, sgi, features
+├── user/                       # o segundo anel de composição: só alvos bare-metal, fora do `default-members` (guidelines 03, regra 11)
+│   ├── rt/                     # rustos-user-rt: ponto de entrada em Rust, leitor do auxv (`Env`), `println!`, wrappers seguros das syscalls, pânico e alocador de avanço; o único `unsafe` de usuário
+│   ├── init/                   # rustos-user-init: o `init`, `forbid(unsafe_code)`
+│   ├── tests/big/              # rustos-user-test-big: programa de teste de 1,3 MiB (carregador e `code-model=small`); só entra na imagem com `selftest`
+│   └── link/                   # x86_64.ld, aarch64.ld: `ET_EXEC` em `0x40_0000`, uma página por permissão
 ├── boot/
 │   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 (inclusive MP e módulos) escrito aqui → hal::BootInfo
 ├── drivers/                    # adaptadores de dispositivo: genéricos sobre hal::RegisterBus, sem unsafe
@@ -62,7 +71,7 @@
 │   ├── pl011/                  # serial da QEMU virt e de placas ARM (com a IRQ de recepção)
 │   ├── i8042/                  # teclado PS/2 do PC: controlador e decodificador do conjunto 1
 │   └── gicv3/                  # GICv3 da ARM: distribuidor, redistribuidor (achado por afinidade) e SGI, sobre hal::RegisterBus
-├── xtask/                      # ferramenta de host (só std): build, image, run, smoke, screenshot, size, font-preview, initramfs, check-*
+├── xtask/                      # ferramenta de host (só std): build, user, image, run, smoke, screenshot, size, font-preview, initramfs, check-*
 ├── docs/                       # sdd/, guidelines/, tech-debt/
 ├── .github/workflows/ci.yml    # gates, testes e smoke nas duas ISAs
 ├── Makefile                    # atalhos para cargo e xtask
@@ -89,12 +98,18 @@
 | `rustos-arch-aarch64` | `rustos-hal` |
 | `rustos-boot-limine` | `rustos-hal` |
 | `rustos-driver-uart16550`, `rustos-driver-pl011`, `rustos-driver-i8042`, `rustos-driver-gicv3` | `rustos-hal` |
-| `rustos-kernel` | `hal`, `mm`, `crypto`, `sched`, `gfx`, `term`, `shell`, `sync`, `boot-limine`; por ISA, `arch-*` e os drivers (x86_64: `uart16550`, `i8042`; aarch64: `pl011`, `gicv3`) |
+| `rustos-arch-x86_64-user`, `rustos-arch-aarch64-user` | `rustos-hal` (só no alvo bare-metal da ISA) |
+| `rustos-user-rt` | `rustos-hal`; por ISA, `arch-<isa>-user` (só bare-metal) |
+| `rustos-user-init`, `rustos-user-test-big` | `rustos-user-rt` |
+| `rustos-kernel` | `hal`, `mm`, `crypto`, `sched`, `gfx`, `term`, `shell`, `cpio`, `elf`, `sync`, `boot-limine`; por ISA, `arch-*` e os drivers (x86_64: `uart16550`, `i8042`; aarch64: `pl011`, `gicv3`) |
 | `xtask` | nada (só `std`) |
 
-`user/` e `arch/<isa>-user` ainda não existem (a 4b traz o `user/`); o `check-layers` já os conhece
-(guidelines 03, regras 11 e 12). O programa de teste da 4a mora em `arch/<isa>/src/user_blob.rs`, atrás da
-feature `selftest`, porque o `kernel/` nunca liga `arch/<isa>-user`.
+`user/` e `arch/<isa>-user` existem desde a 4b, e o `check-layers` os confere (guidelines 03, regras 11 e 12): o
+`kernel/` nunca liga um `arch/<isa>-user`, nada liga `user/`, o `user/` só liga `hal`, `elf`, `cpio` e os `arch-<isa>-user`, e
+só o `user/rt` pode ter `unsafe`. `user/` e `arch/*-user` ficam fora do `default-members` e só compilam para os alvos
+bare-metal (`cargo xtask user`); o `make clippy` os confere nos dois alvos e o `make test` roda os testes do `user/rt` no host. O
+programa de teste da 4a mora em `arch/<isa>/src/user_blob.rs`, atrás da feature `selftest`
+([DEBT-0086](../tech-debt/0086-casos-de-falha-de-usuario-no-blob-do-kernel.md)).
 
 O `rustos-sched` é usado pelo `kernel/src/task.rs` desde a fase 3: o `Composite` (FIFO e
 EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_escalonador.md),
@@ -107,7 +122,7 @@ EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_es
 | Algoritmo ou política (alocador, escalonador, cache, fila) | crate de `core/` do assunto |
 | Estado por CPU (fila, carga, contadores) | `kernel/src/percpu.rs`; o registrador que o acha (`GS`, `TPIDR_EL1`) é da porta `hal::CpuLocal`, em `arch/` |
 | Subir um núcleo, o IPI | `kernel/src/smp.rs`, `task.rs`; o ICR e a SGI em `arch/` (porta `hal::Ipi`) |
-| Processo de usuário, espaço de endereçamento, syscall | `kernel/src/{process,uspace,syscall}.rs`; a entrada e a saída (`SYSCALL`, `SVC`, `swapgs`, `eret`) e a cópia usuário↔kernel em `arch/<isa>/src/{traps,exception,user,usercopy}.rs`; o contrato em `core/hal/src/abi.rs` |
+| Processo de usuário, espaço de endereçamento, carregador, syscall | `kernel/src/{process,uspace,loader,syscall}.rs`; a entrada e a saída (`SYSCALL`, `SVC`, `swapgs`, `eret`) e a cópia usuário↔kernel em `arch/<isa>/src/{traps,exception,user,usercopy}.rs`; o contrato em `core/hal/src/abi.rs` |
 | Estado de uma tarefa, pilha, troca de contexto, preempção, migração | `kernel/src/task.rs`; salvar e restaurar registrador, em `arch/<isa>/src/context.rs` e `fpu.rs` |
 | Cifra, hash ou gerador de números aleatórios | `core/crypto/`; a semente do hardware vem por porta do `hal` |
 | Desenho de pixel, glifo da fonte | `core/gfx/` |
@@ -115,6 +130,7 @@ EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_es
 | Ler o initramfs (cpio `newc`) | `core/cpio/` |
 | Tabela de handles, direitos, contagem de handles, fila e sinais do canal, transferência de handles | `core/object/`; os objetos reais (Process, Thread, VMO, VMAR, ponta de canal), o lock e a memória dos slots vêm do `kernel/` ([SDD 17](17_processos_isolamento_e_syscalls.md#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) |
 | Validar um executável ELF e dizer o que mapear | `core/elf/`; os limites da ISA e da faixa do usuário vêm do chamador (`elf::Limits`) |
+| Programa de usuário, o runtime dele, o `_start` e o stub de syscall | `user/` (programa e `rt`); `arch/<isa>-user` (o `asm!`) |
 | Comando do shell embutido | `core/shell/`; o dado do sistema chega pela porta `Host` |
 | Tema, barra do topo, como a grade vira pixel | `kernel/src/screen.rs` |
 | Vulnerabilidade de CPU, mitigação e a linha `mitigations:` | a decodificação do CPUID e dos registradores e a regra do Linux em `arch/<isa>/src/mitigation.rs` (puro); o tipo `Vulns`, a política `kpti=` e o texto da linha em `core/hal/src/mitigation.rs`; o clamp de índice em `core/hal/src/nospec.rs` (a `CSDB` do aarch64 em `arch/aarch64/src/nospec.rs`); a linha em `kernel/src/mitigation.rs` |
@@ -134,7 +150,7 @@ entrada hostil vira `Error` (enum, uma variante por regra), nunca pânico. Todo 
 de tamanho e de offset é `checked_*`. Os testes de host ([SDD 06](06_testes.md)) têm um
 caso por regra de recusa, as truncações em todos os comprimentos e os campos nos extremos.
 
-Nenhum dos dois (nem o `core/object`) está em `[workspace.dependencies]` ainda: o primeiro consumidor (o carregador da 4b, no `kernel/`) acrescenta a entrada junto com a dependência.
+`core/cpio` e `core/elf` estão em `[workspace.dependencies]` desde a 4b, com o primeiro consumidor, o carregador do `kernel/` (`kernel/src/loader.rs`); o `core/object` entra com o dele (4c).
 
 **`core/cpio`** (`Reader`, `Entry`, `find`). Regras do `newc` como no
 [early-userspace buffer format](https://docs.kernel.org/driver-api/early-userspace/buffer-format.html):

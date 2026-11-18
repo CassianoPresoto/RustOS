@@ -72,6 +72,8 @@ Ordem de grandeza: de 0,08 a 0,15 ms em TCG, que some no ruído do `boot time:` 
 
 Os frames do módulo **seguem reservados**: nunca vão ao buddy ([DEBT-0080](../tech-debt/0080-initramfs-residente-sem-devolver-os-frames.md)).
 
+**Quem lê o módulo (4b).** O carregador do `init` lê o arquivo desta janela (`Vm::initramfs`, só leitura) com o `core/cpio` e **copia** cada `PT_LOAD` para frames novos do usuário: não mapeia em lugar, porque o `newc` só alinha os dados a 4 bytes. A imagem de teste leva também o `big` e o módulo tem 1,3 MiB (329 páginas, residentes); a imagem de produção leva só o `init` (cerca de 17 KiB).
+
 ## Flags e codificação
 
 `hal::PageFlags` tem `CODE`, `RODATA`, `DATA`, `DEVICE` e `FRAMEBUFFER`

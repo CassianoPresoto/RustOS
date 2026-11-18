@@ -11,6 +11,7 @@
 | **Centro** | `core/mm`, `core/crypto`, `core/sched`, `core/gfx`, `core/term`, `core/shell`, `core/cpio`, `core/elf` | Política pura: alocadores de frames (buddy, cache por CPU) e do heap, leitura do mapa de memória, janela de endereços, fila de execução, rodízio (o estado das tarefas e a troca moram no `kernel/` e no `arch/`); ChaCha20, BLAKE2b e o gerador de números aleatórios; desenho de pixels e a fonte própria; emulador de terminal VT/xterm; shell embutido; leitor de cpio `newc` e validador de ELF64 ([SDD 03](03_mapa_de_codigo.md#formatos-de-entrada-corecpio-e-coreelf)) | proibido |
 | **Suporte** | `lib/sync` | Primitivas sem domínio (`SpinLock`) que precisam de `unsafe` para existir | permitido |
 | **Adaptadores** | `arch/*`, `boot/*`, `drivers/*` | Implementam as portas para uma ISA, um bootloader ou um dispositivo | permitido em `arch/` e `boot/`; proibido em `drivers/` |
+| **Usuário** | `user/`, `arch/<isa>-user` | O segundo anel de composição: o runtime e os programas (só `unsafe` no `user/rt`), e o adaptador de usuário com o `_start` e o stub de syscall; só bare-metal, fora do `default-members` ([guidelines 03](../guidelines/03_camadas_e_dependencias.md), regras 11 e 12) | permitido só no `user/rt` e em `arch/<isa>-user` |
 | **Raiz de composição** | `kernel/` | Entrada, pânico, console global, e a escolha de qual adaptador atende cada porta | permitido |
 | **Ferramenta** | `xtask/` | Host: build, imagem, QEMU, medição e os gates | — |
 

@@ -39,7 +39,7 @@ impl Profile {
     }
 
     /// O cargo grava o perfil `dev` em `debug/`; os outros, no próprio nome.
-    const fn output_dir(self) -> &'static str {
+    pub const fn output_dir(self) -> &'static str {
         match self {
             Self::Dev => "debug",
             other => other.name(),

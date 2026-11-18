@@ -1,53 +1,71 @@
-//! Processos de usuário (fatia 4a do SDD 17): um espaço de endereçamento e uma thread, sem objetos
-//! nem handles. Entra em anel 3 ou EL0, morre por `process_exit` ou por falha da CPU, e o kernel
-//! segue. O programa de teste embutido só existe no modo de teste; na 4b ele dá lugar ao `init`.
+//! Processos de usuário (fatias 4a e 4b do SDD 17): um espaço de endereçamento e uma thread, sem
+//! objetos nem handles. Nasce de um ELF do initramfs (o `init`), entra em anel 3 ou EL0, morre por
+//! `process_exit` ou por falha da CPU, e o kernel segue. O programa plano de teste só existe no
+//! modo de teste.
 #![cfg_attr(
     not(feature = "selftest"),
     allow(
         dead_code,
-        reason = "o init da 4b cria o processo; até lá só o modo de teste"
+        reason = "só o modo de teste lança processo até a 4c dar trabalho ao init"
     )
 )]
 
 use alloc::boxed::Box;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+#[cfg(feature = "selftest")]
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use rustos_hal::abi::{
-    ProcessEvent, USER_IMAGE_BASE, USER_TOP, event_kind, fault_access, fault_kind,
-};
-use rustos_hal::{Cpu, Fault, FaultKind, PAGE_SIZE, PageFlags};
+use rustos_hal::abi::{ProcessEvent, USER_TOP, event_kind, fault_access, fault_kind};
+use rustos_hal::{Cpu, Fault, FaultKind};
 use rustos_sched::SchedParams;
 
 use crate::frames::Frames;
+use crate::loader::{self, LoadError, Loaded, RegionTree};
 use crate::platform;
 use crate::sync::IrqLock;
 use crate::task::{self, Spawn, TaskError};
-use crate::uspace::UserSpace;
-
-/// A pilha inicial do usuário: 16 páginas (64 KiB) terminando aqui, com as páginas de cima e de
-/// baixo sem mapeamento (guardas). Sem ASLR na 4a.
-const STACK_TOP: u64 = 0x7000_0000_0000;
-const STACK_PAGES: u64 = 16;
+use crate::uspace::{SpaceStats, UserSpace};
 
 #[derive(Debug)]
 pub enum ProcessError {
-    Map(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] rustos_hal::MapError),
+    Load(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] LoadError),
     Task(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] TaskError),
 }
 
-/// Um processo: o espaço, e onde a primeira thread começa.
+impl<E: Into<LoadError>> From<E> for ProcessError {
+    fn from(error: E) -> Self {
+        Self::Load(error.into())
+    }
+}
+
+/// Um processo: o espaço, a árvore de regiões e onde a primeira thread começa.
 #[derive(Debug)]
 pub struct Process {
     pid: u32,
     space: UserSpace,
+    #[allow(
+        dead_code,
+        reason = "lido pelo `vmar_map` e pela falta de página da 4c"
+    )]
+    regions: RegionTree,
     entry: u64,
     sp: u64,
+    /// O handle de boot de `rdi`/`x0`: `0` até a 4c.
     arg0: u64,
+}
+
+/// De onde vem o código do processo: um ELF do initramfs ou, no modo de teste, um programa plano.
+#[derive(Clone, Copy, Debug)]
+pub enum Source<'a> {
+    Elf(&'a [u8]),
+    #[cfg(feature = "selftest")]
+    Flat(Program<'a>),
 }
 
 /// O que um programa plano precisa para virar processo: os bytes de código (mapeados em
 /// `USER_IMAGE_BASE`), o deslocamento da entrada e o primeiro argumento.
+#[cfg(feature = "selftest")]
 #[derive(Clone, Copy, Debug)]
 pub struct Program<'a> {
     pub code: &'a [u8],
@@ -55,7 +73,21 @@ pub struct Program<'a> {
     pub arg0: u64,
 }
 
+/// O que `spawn` entrega: a tarefa, o número do processo e o que a carga custou.
+#[derive(Clone, Copy, Debug)]
+pub struct Spawned {
+    pub task: rustos_sched::TaskId,
+    pub pid: u32,
+    pub segments: usize,
+    #[cfg_attr(
+        not(feature = "selftest"),
+        allow(dead_code, reason = "lido só pelo modo de teste")
+    )]
+    pub stats: SpaceStats,
+}
+
 /// O maior fundo da pilha do kernel que uma falha de usuário alcançou, em bytes.
+#[cfg(feature = "selftest")]
 static FAULT_PEAK: AtomicUsize = AtomicUsize::new(0);
 
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
@@ -63,58 +95,99 @@ static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 static LAST_EVENT: IrqLock<Option<(u32, ProcessEvent)>> = IrqLock::new(None);
 /// A primeira syscall do boot já foi vista: o usuário entrou e voltou.
 static FIRST_SYSCALL: AtomicBool = AtomicBool::new(false);
+/// O contador de ciclos na primeira syscall do boot e na última entrada em usuário.
+static FIRST_SYSCALL_CYCLES: AtomicU64 = AtomicU64::new(0);
+static ENTRY_CYCLES: AtomicU64 = AtomicU64::new(0);
 
 impl Process {
-    /// Mapeia o código (só leitura e execução) e a pilha (leitura e escrita), sem execução.
+    /// Monta o espaço: a imagem (de `source`), a pilha inicial e a árvore de regiões.
     fn load(
         frames: Frames,
         direct_map_offset: u64,
-        program: Program<'_>,
-    ) -> Result<Self, ProcessError> {
+        source: Source<'_>,
+    ) -> Result<(Self, Loaded), ProcessError> {
         // SAFETY: o mapa direto cobre todo frame do alocador, e o kernel já roda nas próprias tabelas.
-        let mut space =
-            unsafe { UserSpace::new(frames, direct_map_offset) }.map_err(ProcessError::Map)?;
-        let code_pages = (program.code.len() as u64).div_ceil(PAGE_SIZE).max(1);
-        let mapped = space
-            .map(
-                USER_IMAGE_BASE,
-                program.code,
-                code_pages,
-                PageFlags::USER_CODE,
-            )
-            .and_then(|()| {
-                let base = STACK_TOP - STACK_PAGES * PAGE_SIZE;
-                space.map(base, &[], STACK_PAGES, PageFlags::USER_DATA)
-            });
-        if let Err(error) = mapped {
-            space.destroy();
-            return Err(ProcessError::Map(error));
-        }
+        let mut space = unsafe { UserSpace::new(frames, direct_map_offset) }?;
+        let built = Self::populate(&mut space, source);
+        let (regions, loaded, sp, arg0) = match built {
+            Ok(parts) => parts,
+            Err(error) => {
+                space.destroy();
+                return Err(error);
+            }
+        };
         if !space.kernel_half_in_sync() {
             space.destroy();
-            return Err(ProcessError::Map(rustos_hal::MapError::Unsupported(
-                "kernel half out of sync",
-            )));
+            return Err(rustos_hal::MapError::Unsupported("kernel half out of sync").into());
         }
-        Ok(Self {
+        let process = Self {
             pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
             space,
-            entry: USER_IMAGE_BASE + program.entry_offset as u64,
-            sp: STACK_TOP,
-            arg0: program.arg0,
-        })
+            regions,
+            entry: loaded.entry,
+            sp,
+            arg0,
+        };
+        Ok((process, loaded))
     }
+
+    fn populate(
+        space: &mut UserSpace,
+        source: Source<'_>,
+    ) -> Result<(RegionTree, Loaded, u64, u64), ProcessError> {
+        let mut regions = loader::new_tree()?;
+        let (loaded, arg0) = match source {
+            Source::Elf(file) => (loader::load_image(space, &mut regions, file)?, 0),
+            #[cfg(feature = "selftest")]
+            Source::Flat(program) => (load_flat(space, &mut regions, program)?, program.arg0),
+        };
+        let sp = loader::map_stack(space, &mut regions, &loaded)?;
+        Ok((regions, loaded, sp, arg0))
+    }
+}
+
+/// O programa plano: o código em `USER_IMAGE_BASE`, só leitura e execução.
+#[cfg(feature = "selftest")]
+fn load_flat(
+    space: &mut UserSpace,
+    regions: &mut RegionTree,
+    program: Program<'_>,
+) -> Result<Loaded, LoadError> {
+    use rustos_hal::abi::USER_IMAGE_BASE;
+    use rustos_hal::{PAGE_SIZE, PageFlags};
+    use rustos_mm::vmar::{Attrs, Kind, Perms};
+
+    let pages = (program.code.len() as u64).div_ceil(PAGE_SIZE).max(1);
+    let perms = Perms::READ.union(Perms::EXECUTE);
+    regions.reserve(
+        USER_IMAGE_BASE,
+        pages * PAGE_SIZE,
+        Attrs::new(Kind::Image, perms),
+    )?;
+    space.map_at(
+        USER_IMAGE_BASE,
+        0,
+        program.code,
+        pages,
+        PageFlags::USER_CODE,
+    )?;
+    Ok(Loaded {
+        entry: USER_IMAGE_BASE + program.entry_offset as u64,
+        segments: 1,
+        phdr: None,
+        phnum: 0,
+    })
 }
 
 /// Cria o processo e a tarefa que o roda. Devolve a tarefa e o número do processo.
 pub fn spawn(
     frames: Frames,
     direct_map_offset: u64,
-    program: Program<'_>,
+    source: Source<'_>,
     affinity: u32,
-) -> Result<(rustos_sched::TaskId, u32), ProcessError> {
-    let process = Process::load(frames, direct_map_offset, program)?;
-    let pid = process.pid;
+) -> Result<Spawned, ProcessError> {
+    let (process, loaded) = Process::load(frames, direct_map_offset, source)?;
+    let (pid, stats) = (process.pid, process.space.stats());
     let raw = Box::into_raw(Box::new(process));
     let started = task::spawn(Spawn {
         name: "user",
@@ -125,7 +198,12 @@ pub fn spawn(
         affinity,
     });
     match started {
-        Ok(id) => Ok((id, pid)),
+        Ok(task) => Ok(Spawned {
+            task,
+            pid,
+            segments: loaded.segments,
+            stats,
+        }),
         Err(error) => {
             // SAFETY: `raw` veio de `Box::into_raw` acima e a tarefa não chegou a existir.
             let process = unsafe { Box::from_raw(raw) };
@@ -144,6 +222,7 @@ fn process_main(arg: usize) {
         (p.space.root().as_u64(), p.entry, p.sp, p.arg0)
     };
     let top = task::bind_user(root, arg);
+    ENTRY_CYCLES.store(platform::cycles(), Ordering::Relaxed);
     // SAFETY: `bind_user` mascarou a IRQ e já pôs o espaço e a pilha de entrada desta CPU; `entry` e
     // `sp` vêm de `load`, dentro de `[USER_MIN, USER_TOP)`, `sp` alinhado a 16.
     unsafe { platform::enter_user(entry, sp, arg0, 0, top) }
@@ -152,6 +231,7 @@ fn process_main(arg: usize) {
 /// Ocorreu a primeira chamada de usuário do boot: diz, uma vez, que o anel 3 ou EL0 ficou de pé.
 pub fn note_first_syscall() {
     if !FIRST_SYSCALL.swap(true, Ordering::Relaxed) {
+        FIRST_SYSCALL_CYCLES.store(platform::cycles(), Ordering::Relaxed);
         kprintln!("[rustos] user: entered ring3/el0");
     }
 }
@@ -222,7 +302,9 @@ fn terminate(event: ProcessEvent) -> ! {
     let process = unsafe { Box::from_raw(ptr::with_exposed_provenance_mut::<Process>(raw)) };
     let pid = process.pid;
     let cpu = crate::percpu::pinned(crate::percpu::PerCpu::index);
-    process.space.destroy();
+    let Process { space, regions, .. } = *process;
+    space.destroy();
+    drop(regions);
     if event.kind == event_kind::EXIT {
         kprintln!(
             "[rustos] user: pid {pid} exited (code {}, cpu {cpu})",
@@ -235,9 +317,12 @@ fn terminate(event: ProcessEvent) -> ! {
     *LAST_EVENT.lock() = Some((pid, event));
     if crate::scrub::measuring() {
         let peak = task::note_stack_peak();
+        #[cfg(feature = "selftest")]
         if event.kind == event_kind::FAULT {
             FAULT_PEAK.fetch_max(peak, Ordering::Relaxed);
         }
+        #[cfg(not(feature = "selftest"))]
+        let _ = peak;
     }
     task::exit()
 }
@@ -261,7 +346,20 @@ fn log_fault(pid: u32, event: &ProcessEvent) {
     }
 }
 
+/// Os contadores de ciclo da última entrada em usuário e da primeira syscall do boot.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "lido só pelo modo de teste")
+)]
+pub fn entry_and_first_syscall_cycles() -> (u64, u64) {
+    (
+        ENTRY_CYCLES.load(Ordering::Relaxed),
+        FIRST_SYSCALL_CYCLES.load(Ordering::Relaxed),
+    )
+}
+
 /// O maior fundo da pilha do kernel numa falha de usuário.
+#[cfg(feature = "selftest")]
 pub fn fault_peak() -> usize {
     FAULT_PEAK.load(Ordering::Relaxed)
 }

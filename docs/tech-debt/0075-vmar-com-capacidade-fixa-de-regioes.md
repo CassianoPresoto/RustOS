@@ -15,7 +15,7 @@ paid_date:
 
 ## Por que foi aceito
 
-O `init` e os filhos da fase 4 têm dezenas de regiões (inferência, não medida em processo real). O vetor ordenado acha em O(log N), custa 32 bytes por região e não aloca sozinho; uma árvore balanceada pesaria em código e memória por nó sem caso que a peça.
+A 4b fixou 32 regiões por processo (`REGION_CAPACITY` em `kernel/src/loader.rs`, 1 KiB): no máximo 16 `PT_LOAD`, a pilha e folga para os mapeamentos da 4c. O `init` e os filhos da fase 4 têm dezenas de regiões (inferência, não medida em processo real). O vetor ordenado acha em O(log N), custa 32 bytes por região e não aloca sozinho; uma árvore balanceada pesaria em código e memória por nó sem caso que a peça.
 
 ## Gatilho
 
