@@ -703,10 +703,14 @@ pub fn copy_to_user(range: UserRange, src: &[u8]) -> bool {
     missing == 0
 }
 
-/// O kernel roda com `EFLAGS.AC` ligado (SMAP desarmado)?
+/// O kernel roda com `EFLAGS.AC` ligado, desarmando o SMAP? Sem SMAP na CPU a entrada de exceção
+/// não faz `clac` e o `AC` no anel 0 não tem efeito: não conta.
 #[cfg(feature = "selftest")]
 pub fn ac_set() -> bool {
-    rustos_arch_x86_64::ac_flag_set()
+    let has_smap = protections()
+        .iter()
+        .any(|protection| protection.name == "smap" && protection.enabled);
+    has_smap && rustos_arch_x86_64::ac_flag_set()
 }
 
 /// Faltas de cópia recuperadas e quantas rodaram o tratador com `AC` ligado.
