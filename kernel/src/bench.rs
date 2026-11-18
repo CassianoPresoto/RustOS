@@ -214,9 +214,6 @@ pub fn wake_jitter_ns(samples: u32, loaded: bool) -> Option<(u64, u64)> {
 const WAKE_TASK_MAX_SAMPLES: usize = 200;
 /// Fatia curta do dorminhoco: menor que a do acordador, para `PREEMPT_SHORT` valer.
 const SLEEPER_SLICE_NS: u64 = 100_000;
-/// Passa se a mediana de acordar fica abaixo disto. Sem a troca no fim de `unpark` a espera é a
-/// da IRQ do timer: 100 us medidos no HVF (SDD 07).
-const WAKE_TASK_LIMIT_NS: u64 = 50_000;
 /// Rodadas que não contam: a tarefa nova gasta os primeiros ciclos com lag negativo, sem
 /// elegibilidade para preemptar (EEVDF).
 const WAKE_WARM_UP: usize = 2;
@@ -309,9 +306,10 @@ pub struct WakeLatency {
 }
 
 impl WakeLatency {
-    /// A preempção ao acordar funciona: nenhuma amostra se perdeu e a mediana é curta.
+    /// A preempção ao acordar funciona: em 90% das amostras o dorminhoco já tinha rodado quando
+    /// `unpark` voltou. Sem a troca no fim de `unpark` são 0 de 20, em qualquer velocidade de CPU.
     pub const fn passes(&self) -> bool {
-        self.samples > 0 && self.median_ns <= WAKE_TASK_LIMIT_NS
+        self.samples > 0 && self.direct * 10 >= self.samples * 9
     }
 }
 

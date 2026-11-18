@@ -114,7 +114,7 @@ Comandos, os mesmos antes e depois (`perf/scheduler-switch` contra a `main` `298
 | `pick_next` e `tick` da política, 8 prontas (ns) | 34 a 39 e 2 | 35 a 39 e 2 |
 | x86_64 TCG, troca, linha do boot (ns), 3 boots | 1 398 / 1 519 | 1 294 / 1 307 |
 | x86_64 TCG, troca, comando `bench` (ns), 3 boots | 1 595 / 1 603 | 1 276 / 1 282 |
-| x86_64 TCG, acordar entre tarefas, mediana (`wake self-test:`) | não medido | 1 a 2 µs (a resolução do relógio do TCG) |
+| x86_64 TCG, acordar entre tarefas, mediana (`wake self-test:`) | não medido | 1 a 3 µs (a resolução do relógio do TCG); no `dev` com uma CPU a troca de contexto inteira sai a 30 µs em parte dos boots, antes (2 de 24) e depois (cerca de metade; SDD 15) |
 
 O "antes" do comando varia de 73 a 158 ns porque ele chega depois de segundos ociosos e o hospedeiro mantém a vCPU em
 frequência baixa (a árvore de antes não tem aquecimento); o "depois" mede com 300 ms de aquecimento (SDD 15, "Medidas"). O

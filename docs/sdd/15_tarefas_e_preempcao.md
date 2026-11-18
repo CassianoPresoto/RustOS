@@ -377,10 +377,13 @@ ISAs (`make smoke` sai com erro); `[rustos] task self-test: ok` é linha exigida
   mentira (`policy_ns`), melhor de 4 rodadas: o custo do código da política no alvo, com o
   `i128` do EEVDF.
 - **Tique ocioso:** a linha `idle:` (acima).
-- **Autoteste de acordar** (`wake self-test:`, dentro do `smp_self_test`): a mesma medida com 20 amostras. Passa se a
-  mediana fica abaixo de 50 µs (sem a troca no fim do `unpark` ficava em 100 µs, o fim da fatia); imprime média, mediana,
-  máximo e `direct`. Uma amostra em umas 350 chega a esperar o fim da fatia (350 µs no HVF: lag negativo, a regra do
-  EEVDF), e por isso o critério é a mediana. É linha exigida do boot (`make smoke`).
+- **Autoteste de acordar** (`wake self-test:`, dentro do `smp_self_test`): a mesma medida com 20 amostras. Passa se em 90%
+  delas o dorminhoco já tinha rodado quando `unpark` voltou (`direct`); sem a troca no fim do `unpark` são 0 de 20. O critério
+  é contar, não um tempo: o x86_64 em TCG `dev` com uma CPU tem dois modos por boot, com a troca de contexto em 3 µs ou em 30 µs
+  (também na `main`, em 2 de 24 boots, e em cerca de metade deles com este código; sem IRQ por troca nem `rdtsc` lento, a causa não foi
+  isolada; hipótese: a TLB do TCG batendo no layout sorteado pelo KASLR; não visto no `release` nem no HVF), e um limite em µs reprovava o modo lento. Imprime média, mediana, máximo e `direct`. Uma amostra em
+  umas 350 chega a esperar o fim da fatia (350 µs no HVF: lag negativo do dorminhoco, a regra do EEVDF). É linha exigida do
+  boot (`make smoke`).
 - **Autoteste SMP** (`smp self-test:`): 8 tarefas rodam, cedem e dormem por 40 ms nas CPUs todas. Cada volta sobe uma bandeira por tarefa e a baixa ao fim: duas CPUs
   rodando a mesma tarefa fariam a segunda ver a bandeira subida. Passa se nenhuma tarefa se perdeu e a bandeira nunca foi vista subida; imprime voltas e migrações.
   Repetido 16 vezes (8 em cada ISA, `dev`) sem falha.
