@@ -5,7 +5,7 @@
 > de syscall, handles, ABI nativa), como o primeiro programa chega à memória, e quais
 > decisões do dono o desenho aplica.
 
-**Estado: desenho aprovado no #9 (2026-11-18). As fatias 4a ([abaixo](#a-fatia-4a-como-entrou)) e 4b ([abaixo](#a-fatia-4b-como-entrou)) estão implementadas; da 4c só o crate puro `core/object` ([abaixo](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)); as demais, não.** A ABI de
+**Estado: desenho aprovado no #9 (2026-11-18). As fatias 4a ([abaixo](#a-fatia-4a-como-entrou)) e 4b ([abaixo](#a-fatia-4b-como-entrou)) estão implementadas; da 4c, o crate puro `core/object` ([abaixo](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) e a parte 1, objetos, handles, canais, espera e canal de boot no kernel ([abaixo](#a-fatia-4c-parte-1-como-entrou)); as demais, não.** A ABI de
 syscall e o formato de executável são contrato que o mundo de fora enxerga (caso 6 do
 [`AGENTS.md`](../../AGENTS.md)), e crate novo em `core/` e pasta nova de primeiro nível são
 o caso 1; por isso o desenho nasceu num PR em Draft só com docs. O dono aprovou as nove
@@ -57,13 +57,12 @@ número novo no [SDD 07](07_desempenho_e_recursos.md).
 | --- | --- | --- |
 | 4a (**feita**) | Entrada de syscall e saída para anel 3/EL0 nas duas ISAs; `PageFlags.user`; `Fault.from_user`; `#DB` com IST; cópia usuário↔kernel; espaço de **um** processo, sem objetos; **limpeza da pilha do kernel na volta ao usuário** (pagou a dívida do resíduo do ChaCha20 na pilha); a troca para o par `swapgs` e os MSRs de syscall em cada CPU; `nop`, `clock_get_monotonic`, `random_get`, `process_exit` e **`debug_write(ptr, len)` provisória, sem handle**; um programa embutido no kernel só para esta fatia | `hello` imprime de anel 3 e de EL0; falha de usuário mata o processo e o kernel segue (pagou a dívida da exceção de usuário só para a CPU) |
 | 4b (**feita**) | `core/cpio`, `core/elf`; a árvore de regiões em `core/mm/src/vmar.rs`, **interna ao kernel** (o carregador mapeia frames direto, sem objeto VMO nem VMAR e sem handle); módulo do Limine; `user/` (runtime e `init`); o xtask monta o initramfs | O `init` do initramfs roda, imprime pelo `debug_write` provisório e sai; o smoke exige a linha dele (**no modo de teste**: [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)) |
-| 4c | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (muda a assinatura da 4a: a ABI é provisória até aqui); página zero; ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; ***shootdown* de TLB** e parada de thread em outra CPU na morte do processo (**paga** [DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md)); o `init` recebe os handles pelo canal de boot | Um processo cria outro, que escreve no console por um handle que recebeu |
+| 4c (**em partes**; a parte 1, **feita**: `core/object` ligado ao kernel, tabela de handles por processo, canais, `object_wait_one`, `debug_write` com `console`, canal de boot; o resto vem nas partes seguintes) | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (muda a assinatura da 4a: a ABI é provisória até aqui); página zero; ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; ***shootdown* de TLB** e parada de thread em outra CPU na morte do processo (**paga** [DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md)); o `init` recebe os handles pelo canal de boot | Um processo cria outro, que escreve no console por um handle que recebeu |
 | 4d | SIMD de usuário, canal de eventos do processo, teste de `xmm0`/`v0` entre processos | Dois processos preservam `xmm0`/`v0`; o culpado de uma falha chega ao pai (**paga** [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md)) |
 | 4e | KPTI, PCID/ASID com a regra de geração entre CPUs, mitigações de CPU ([seção](#mitigações-de-cpu)), relatório no boot. **Parte 1 (feita):** detecção de vulnerabilidade e de recurso nas duas ISAs, a linha `mitigations:`, a chave `kpti=` (só no relatório) e o clamp do Spectre v1. **Parte 2:** o KPTI, o PCID/ASID na troca e o IBPB na troca | Linha `mitigations:` no boot; custo de cada uma medida |
 | 4f | As medidas da fase (inclui a falta de página que zera, [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)) ([abaixo](#medidas-da-fase)) e este capítulo virando descritivo | Fecha a fase: "syscall nula medida; processo que toca o kernel morre sem derrubar nada" |
 
-**A ABI da 4a e da 4b é provisória.** Só `process_exit`, `nop`, `clock_get_monotonic` e
-`random_get` já têm a forma final; `debug_write` muda na 4c. A ABI nativa é experimental
+**A ABI da 4a e da 4b era provisória.** `debug_write` ganhou o argumento `console` na parte 1 da 4c e todas as chamadas já implementadas têm a forma final. A ABI nativa é experimental
 até o fim da fase 5, então a mudança não quebra contrato.
 
 ## A fatia 4a, como entrou
@@ -99,7 +98,7 @@ capítulo segue como desenho. Os números estão em
 
 | Decisão | O que ficou | Por quê |
 | --- | --- | --- |
-| Syscall roda mascarada | O despacho roda com a IRQ mascarada, como uma exceção | Nenhuma chamada da 4a bloqueia; a 4c liga a IRQ no despacho junto com `object_wait_one` |
+| Syscall roda mascarada | O despacho roda com a IRQ mascarada, como uma exceção | Nenhuma chamada da 4a bloqueia. A parte 1 da 4c **não ligou** a IRQ: `object_wait_one` cede a CPU como `sleep_until` ([DEBT-0081](../tech-debt/0081-debug-write-de-512-bytes-com-a-irq-mascarada.md)) |
 | `IRETQ` que falha | A saída para o usuário confere `RIP` e `RSP` canônicos no quadro e mata o processo se algum não for, em vez do *fixup* nos vetores 11, 12 e 13 | `RSP` não canônico é a única causa que o usuário controla; o *fixup* é a [DEBT-0077](../tech-debt/0077-iretq-sem-fixup-de-falha-fora-do-rip-e-do-rsp.md) |
 | `#DB` do usuário | O stub da IST4 faz `swapgs`, copia o quadro para a pilha da tarefa e segue como entrada normal; o processo morre na pilha da tarefa | Como o SDD manda; exercido pelo caso `fault_trap` (`TF` ligado) |
 | Pilha de falhas do aarch64 | O `vector_fault` lê o topo pelo `TPIDR_EL1` e guarda o `x0` no `TPIDRRO_EL0`; exceção síncrona de EL1h segue na pilha de falhas, sem o teste de estouro da pilha da tarefa | O `SP_EL0` agora é a pilha do usuário; a ordem do Linux fica na [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md) |
@@ -172,18 +171,18 @@ Duas ordens valem no kernel; o `core/object` as obedece e o teste de threads as 
 | Um lock por par | O `Channel` guarda as duas pontas e as duas filas: A→B e B→A pegam o mesmo lock |
 | `channel_write` | Segura a tabela do escritor do começo ao fim e toma o lock do par duas vezes, só por dentro dela: reservar (passo 2) e *commit* (passo 5). Entre as duas, nenhum outro lock é tomado |
 | `channel_read` | Passo 1: valida `ch` sob a tabela e, dentro dela, espia sob o par. Passo 2: reserva slots sob a tabela. Passo 3: **sem lock**. Passo 5: sob a tabela, retira sob o par e instala os handles |
-| Fechar | `handle_close`, o descarte do array e `drain` removem **sob** a tabela e fecham **depois de soltá-la**, sem lock nenhum. `on_handle_closed` toma só o lock do par da ponta; a morte tira as mensagens sob esse lock e **empurra** os handles para a lista de trabalho; fechá-los (que pode tomar outro par) acontece depois de soltar o primeiro |
-| Ganchos | `on_zero_handles` roda sem lock. `on_end_died` roda sem o lock do par; na escrita (morte da ponta de destino pelo ciclo) roda ainda com a tabela do escritor, então o código dele só pode tomar locks que ficam abaixo da tabela, como o do escalonador |
+| Fechar | `handle_close`, o descarte do array e `drain` removem **sob** a tabela e fecham **depois de soltá-la**, sem lock nenhum. `on_handle_closed` toma só o lock do par da ponta; a morte **só marca** a ponta (`on_handles_changed`, sob o lock do par). Solto o lock, `drain_dead` retira as mensagens da ponta morta uma a uma (`pop_dead`, cada retirada sob o lock do par) e empurra os handles para a lista de trabalho, **sem lock preso**; fechá-los (que pode tomar outro par) acontece depois |
+| Ganchos | `on_zero_handles` roda sem lock. `on_end_died` roda sem o lock do par; na escrita (morte da ponta de destino pelo ciclo) roda ainda com a tabela do escritor, então o código dele só pode tomar locks que ficam abaixo da tabela, como o do escalonador. A fila da ponta que morreu na escrita se esvazia depois de soltar a tabela (`channel_write` leva a ponta no resultado) |
 | Contagem | `HandleCount` é atômico e fica fora do lock do par. A checagem de morte **relê** `handle_count` sob o lock do par, no momento da checagem; o `remaining` que `release` devolveu, sem lock, pode estar velho (outra thread duplica ou escreve um handle da ponta entre o desconto e o lock) e **não** serve para decidir. Quando `handle_count == own_in_queue` sob o par, ninguém mais alcança a ponta e a contagem não sobe. Teste: `a_stale_remaining_count_does_not_kill_an_end_that_is_still_reachable` |
 
 ### O que fechou das lacunas
 
 | # | Parte pura, feita e testada em `core/object` | O que fica para a 4c |
 | --- | --- | --- |
-| L1 | `Channel::commit` reconfere a ponta oposta sob o lock do par e devolve a mensagem se ela morreu; `channel_write` fecha os handles dela e responde `PeerClosed` (teste `the_peer_dying_between_reserve_and_commit_…`; e threads que fecham o par durante a escrita) | A ligação com o `IrqLock` e a SMP real |
-| L2 | `channel_read` repete desde o passo 1 se a frente mudou e **cancela** as reservas, e `cancel` sobe a geração: o valor reservado e solto não volta (testes do `a_competing_read_…` e do modelo, que confere que nenhum valor reaparece) | `copy_to_user` real no passo 3 |
-| L3 | A tabela acima | O `IrqLock` por processo e o lock por par, na ordem |
-| L4 | `reserve` → `commit` ou `cancel` na tabela; a reserva desfeita não deixa handle, não conta em `len` e consome a geração (o modelo cria canais com 20% de desistência) | `channel_create` e `process_create` com `copy_to_user` em `out` |
+| L1 | `Channel::commit` reconfere a ponta oposta sob o lock do par e devolve a mensagem se ela morreu; `channel_write` fecha os handles dela e responde `PeerClosed` (teste `the_peer_dying_between_reserve_and_commit_…`; e threads que fecham o par durante a escrita) | **Feito** (a ligação com o `IrqLock`; o teste de SMP é o smoke com `handles` e `init` nos núcleos) |
+| L2 | `channel_read` repete desde o passo 1 se a frente mudou e **cancela** as reservas, e `cancel` sobe a geração: o valor reservado e solto não volta (testes do `a_competing_read_…` e do modelo, que confere que nenhum valor reaparece) | **Feito** (`copy_to_user` real no passo 3; o programa `handles` o exerce com ponteiro ruim) |
+| L3 | A tabela acima | **Feito na parte 1 da 4c** (`IrqLock` por processo e por par, na ordem) |
+| L4 | `reserve` → `commit` ou `cancel` na tabela; a reserva desfeita não deixa handle, não conta em `len` e consome a geração (o modelo cria canais com 20% de desistência) | **`channel_create` feito** (reserva, cópia, confirmação); `process_create` vem na parte 3 |
 
 ### Decisões do agente
 
@@ -198,7 +197,7 @@ Nenhuma é dos seis casos do [`AGENTS.md`](../../AGENTS.md); cada uma diz o que 
 | Limites do canal | Mais de 1 024 bytes ou 8 handles é `InvalidArgs` e **consome** o array (a regra geral só poupa `ShouldWait` e a falha ao ler o array). O Zircon devolve `OUT_OF_RANGE` (lido em `channel_write`); a tabela de erros do RustOS reserva `OutOfRange` a ponteiro e intervalo de usuário e define `InvalidArgs` como "argumento fora do domínio", então o código segue a tabela, sem status novo. Mensagem vazia e sem handle é válida. O kernel limita a cópia do array a 64 entradas (o teto do Zircon); acima disso não sabe quais handles são e responde `InvalidArgs` sem consumir | Se o dono quiser `OutOfRange`, muda a tabela de erros e aqui |
 | Bytes da mensagem | O kernel os copia para um `Object::Bytes` (um `Arc<[u8]>`) **antes** de chamar `channel_write`; a espiada da leitura clona esse `Arc`, e por isso o passo 3 copia sem lock | — |
 | Fila inline | Cada ponta guarda 16 mensagens inline; o par mede 7 256 bytes ([DEBT-0091](../tech-debt/0091-fila-do-canal-com-armazenamento-inline.md)) | — |
-| Lista de trabalho | `Worklist` é trait, e `push` não falha. **Requisito da 4c, não dívida:** a morte da ponta empurra de dentro de `with_channel`, então o `push` roda com o lock do par preso e a IRQ mascarada e não pode alocar nem bloquear. A implementação do kernel é uma lista intrusiva (cada ponta morre uma vez e guarda o elo) ou uma reserva prévia por `try_reserve` no `channel_create` | — |
+| Lista de trabalho | `Worklist` é trait, e `push` não falha. A morte da ponta **só marca** sob o lock do par; os handles da fila dela vão para a lista **depois** de soltá-lo (`drain_dead`), então o `push` nunca roda com lock preso e a lista do kernel é um `Vec` que cresce. Era requisito da 4c que o `push` não alocasse com o lock do par preso; a mudança de lugar da retirada o cumpre sem lista intrusiva nem reserva por canal (7 KiB por par a mais). O teste `Unlocked` confere que nenhum `push` roda com o lock da tabela ou do par preso | — |
 | Número de sequência | `seq` é `u32` por ponta, com `wrapping_add`. Só separa a mensagem da frente da que a substituiu durante uma cópia: repetir um valor pede 2^32 mensagens escritas e lidas naquela fila entre o passo 1 e o passo 5 de **uma** leitura, com a fila em 16, o que é impraticável | — |
 | Identidade da ponta | `Object::channel_end` devolve `EndId { channel, side }`, sem lock; a regra "a própria ponta não viaja" compara essa identidade, não o valor do handle | — |
 | Ordem dos erros do array | Para cada handle, na ordem: existe, não repete, tem o direito, não é a própria ponta; o primeiro erro vence | — |
@@ -232,7 +231,7 @@ zera as contagens que estão em ciclos entre filas: é o limite documentado e a
 | Linker scripts | `user/link/{x86_64,aarch64}.ld` |
 | `cargo xtask user`, o initramfs da imagem (`init`, mais `big` com `selftest`), as linhas do smoke | `xtask/src/{user,image,initramfs,qemu}.rs` |
 
-**O que o `init` confere** (e sai com 0 se tudo bate): `argc` é 0; `sp` alinhado a 16; handle de boot `0` (não há handle até a 4c);
+**O que o `init` confere** (e sai com 0 se tudo bate): `argc` é 0; `sp` alinhado a 16; handle de boot `0` (na 4b; passou a `1` na parte 1 da 4c);
 `AT_PAGESZ` 4096; `AT_ENTRY` igual ao endereço do `_start`; `AT_PHDR` aponta para uma tabela de `AT_PHENT = 56` com ao menos
 dois `PT_LOAD`; `AT_HWCAP` e `AT_HWCAP2` zero; `AT_RANDOM` presente e não zerado; `clock_get_monotonic` positivo e não
 decrescente; `random_get` de 16 bytes diferentes dos de `AT_RANDOM`. Imprime uma linha, `init: ok (...)`, que o smoke exige com o
@@ -264,7 +263,7 @@ sobre a pilha inicial (`sysdeps/aarch64/start.S` da glibc e `crt1.c` do musl, **
 fora do Linux segue **NÃO VERIFICADO**).
 
 **O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs), além dos casos da 4a: o `init` carrega (`init loaded (N
-segments)`: 3 no x86_64, 2 no aarch64), roda, imprime `[user] init: ok (...)` e sai com 0 (`pid 1 exited (code 0`); o `big` sai com 0 e os
+segments)`: 3 no x86_64, 2 no aarch64 na 4b e 3 nas duas desde a parte 1 da 4c), roda, imprime `[user] init: ok (...)` e sai com 0 (`pid 1 exited (code 0`); o `big` sai com 0 e os
 frames voltam **exatamente** como depois do `init` (a folga é medida uma vez, depois de uma rodada de aquecimento, com o processo preso à CPU de
 quem testa, para o frame devolvido cair no cache que `free_frames` conta); o carregador recusa o arquivo cortado na tabela de program
 headers, o de outra máquina, o sem magic e o vazio, e, com um gancho de teste que acaba com o frame na página 1, 3, 5 ou 18, devolve cada frame
@@ -273,6 +272,79 @@ numa falha **tardia** (depois de segmentos e de parte da pilha mapeados); e um E
 do espaço, sem rodar: um programa em `forbid(unsafe_code)` não lê antes do próprio `p_vaddr`). O teste exato achou um vazamento da 4a: o
 `Box<Process>` nunca era solto, porque `terminate` não volta; agora `terminate` solta a árvore de regiões antes de encerrar a tarefa. O
 `user/rt` não deixa o programa forjar ponteiro: `Env` tem campos privados e a contagem de `PT_LOAD` sai de `from_stack`, que é `unsafe`.
+
+## A fatia 4c, parte 1, como entrou
+
+**Descritivo.** O que a parte 1 da 4c (PR `feat/phase4c-handles`) tornou verdade, nas duas ISAs: o
+`core/object` ligado ao kernel, as chamadas de handle, canal e espera, `debug_write` por handle e o canal
+de boot. VMO, VMAR, `process_create`, `thread_create` e `process_kill` são as partes seguintes (o
+`thread_create` e o `process_kill` seguem `NotSupported`). A paginação sob demanda, a página zero e o
+*shootdown* de TLB são de outra PR, em paralelo. Os números estão em
+[SDD 07](07_desempenho_e_recursos.md#handles-canais-e-espera-no-kernel-fatia-4c-parte-1).
+
+| Peça | Onde mora |
+| --- | --- |
+| `Obj`, o enum fechado de `Arc` (`Process`, `Channel`, `Console`; `Vmo`, `Vmar` e `Thread` entram com as chamadas que os criam), `Lock` sobre o `IrqLock`, `VecSlots` (`try_reserve`, e o clamp do índice do handle por `platform::array_index_nospec`), `Work` (a lista de trabalho), o par de pontas, a cobrança de pontas por processo | `kernel/src/object.rs` |
+| `Process` com a tabela de handles, o objeto `ProcessObj` e a cobrança; `with_current`; a morte esvazia a tabela (`drain`) antes de liberar o espaço e levanta `TERMINATED` depois | `kernel/src/process.rs` |
+| O canal de boot e o console de um programa plano de teste | `kernel/src/process/boot.rs` |
+| `handle_close`, `handle_duplicate`, `handle_replace`, `object_wait_one`, `channel_create`, `channel_write`, `channel_read`, `debug_write(console, ptr, len)`; a tabela de despacho ganhou as entradas | `kernel/src/syscall.rs`, `kernel/src/syscall/handles.rs` |
+| `block_until`, `wake_waiters`, `wait_bit`, `clear_permit`, `current_process` (a ponte com o escalonador) | `kernel/src/task.rs` |
+| `ReadActual`, `encode_boot_message`, `parse_boot_message`, `MAX_CHANNEL_ENDS`, `USER_HANDLE_ARRAY_MAX` | `core/hal/src/abi.rs` |
+| Syscalls seguras, `boot::{read, attach_console}`, `set_console` (o `println!` escreve pelo console por handle) e a feature `raw-syscalls` | `user/rt` |
+| O `init` e o programa de teste `handles` (casos hostis, medida e espera bloqueante com o kernel do outro lado) | `user/init`, `user/tests/handles` |
+
+**A espera.** `object_wait_one` bloqueia a tarefa (`block_until`: `Blocked` sem prazo, `Sleeping` com prazo) e quem
+muda o sinal a acorda. O objeto guarda uma máscara de 64 bits com **um bit por slot de tarefa** (`Waiters`; um
+`const _` confere `MAX_TASKS <= 64`): registrar é um `fetch_or`, acordar é `swap(0)` e `wake_waiters`, sem alocar e
+com qualquer lock preso. O par de pontas compara os sinais das duas pontas antes e depois de cada operação sob o lock
+dele e acorda só a ponta cujo sinal mudou. A ordem é registrar, **reconferir o sinal**, bloquear: um aviso que chega
+entre a conferência e o bloqueio fica como *permit* da tarefa (`wake_task` com `Wake::Signal` o deixa em quem está
+`Running` ou `Ready`) e `block_until` o consome, então não se perde acordar. A chamada volta sem motivo certo e
+reavalia em laço, por isso o acordar falso não aparece ao usuário. O despacho segue com a IRQ mascarada
+([DEBT-0081](../tech-debt/0081-debug-write-de-512-bytes-com-a-irq-mascarada.md)): a tarefa bloqueada cede a CPU como
+`sleep_until` faz, e a CPU roda as outras com a IRQ ligada.
+
+**O canal de boot, e como a mensagem fica até a parte 3.** Todo programa carregado do initramfs
+nasce com a ponta B de um canal na tabela, no handle `1`, e recebe esse valor em `rdi`/`x0`. O kernel monta a
+mensagem por uma tabela de handles própria dele (a mesma `channel_write` do usuário), escreve e **fecha a ponta A**:
+o programa lê a mensagem e vê `PEER_CLOSED`. A mensagem de boot é a do contrato (`magic`, `version`, `count`, `reserved`
+e um `u32` de `kind` por item), com `count = 2` e `kind`s `[1 Process, 3 Console]`, na ordem dos handles da mensagem:
+o Process do próprio programa (todos os direitos de processo) e o console (`WRITE`, `DUPLICATE`, `TRANSFER`). O
+VMAR raiz (`kind` 2) e o VMO do initramfs (`kind` 4) **entram na parte seguinte**, quando existirem como objetos; o
+leitor casa por `kind` e não por posição, então a mensagem maior não quebra o `init`. O programa plano de teste
+(`Source::Flat`) não tem canal de boot: recebe só o console, no handle `1`.
+
+**Divergências e preenchimentos do desenho** (decisões do agente; nenhuma muda número, `Status` nem o layout da mensagem
+de boot):
+
+| Decisão | O que ficou | Por quê |
+| --- | --- | --- |
+| `actual` do `channel_read` | `actual*` aponta para dois `u64` seguidos, `{ bytes, handles }` (`hal::abi::ReadActual`), como o `out` do `channel_create`. É gravado **antes** de a mensagem sair da fila (a falha da gravação é `OutOfRange` e a mensagem fica) e também em `BufferTooSmall`, com o que a mensagem pede. O contrato só dizia "tamanhos em `actual`" | Preenche o que o contrato numérico deixava aberto; **a confirmar pelo dono**, é parte do que o mundo de fora enxerga |
+| Sinais desconhecidos | `signals` com bit além dos quatro definidos é `InvalidArgs`, como `signals == 0` | Bit reservado é `InvalidArgs` em toda a ABI; deixa o bit livre para sinal novo |
+| `debug_write` sem console | Handle que não é de console é `WrongType`; sem `WRITE`, `AccessDenied`; o handle é conferido antes de `len` | A ordem das outras chamadas: o handle que autoriza primeiro |
+| A morte da ponta esvazia a fila fora do lock | Ver [Ordem de lock](#ordem-de-lock-lacuna-l3) e a decisão "Lista de trabalho" | Cumpre o requisito de não alocar com o lock do par preso sem pagar 6 KiB por par numa lista reservada |
+| O par de pontas nasce por cópia de um modelo | `EMPTY_PAIR` (7 KiB na imagem, `rodata`) é copiado para o `Arc` com `copy_nonoverlapping` e o número do par é dado depois (`Channel::assign_id`). Construir o `Channel` na pilha (7 256 bytes, mais as cópias do `Arc::new`) estourava a pilha de 16 KiB: o `init` morria em `#DF` | Dois `unsafe` com `// SAFETY:` em `kernel/`; sai quando a fila deixar de ser inline ([DEBT-0091](../tech-debt/0091-fila-do-canal-com-armazenamento-inline.md)) |
+| Cobrança de pontas | `MAX_CHANNEL_ENDS = 256` (`hal::abi`); cada ponta guarda uma `Charge` do criador e a devolve no `Drop`. O canal de boot do kernel não é cobrado | A defesa que o SDD escolheu para o vazamento entre filas ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md)) |
+| Teto de 64 handles no array de usuário | `USER_HANDLE_ARRAY_MAX = 64`; acima disso, `InvalidArgs` sem consumir (o kernel não leu quais são). Entre 9 e 64, `InvalidArgs` **consumindo** (a regra do canal) | O teto do Zircon, como o SDD já dizia |
+| O erro depois de ler o array consome | Bytes acima do limite, ponteiro de bytes ruim e canal inválido consomem o array; só `ShouldWait` e a falha ao **ler** o array não | A regra geral para quem move handle |
+| Alocação de objeto e de mensagem | Falta de heap num `Arc` ou na cópia dos bytes aborta (`handle_alloc_error`); só os slots da tabela usam `try_reserve` ([DEBT-0110](../tech-debt/0110-objeto-e-mensagem-abortam-na-falta-de-heap.md)) | `Arc` não tem alocação fracassável na toolchain estável |
+| `init` no boot normal | Segue só no modo de teste ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)): o `init` ainda não lança processo | O gatilho da dívida pede também o lançamento de outros processos, da parte 3 |
+
+**O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs), além dos casos anteriores: o `init`
+lê a mensagem de boot (`process` e `console`), vê `PEER_CLOSED` na ponta do kernel e nenhuma segunda mensagem,
+escreve pelo console, **recusa** duplicar o console com `READ`, cria um canal, vê `TimedOut` com a fila vazia,
+escreve 64 bytes, espera `READABLE`, lê, transfere um handle e o recebe de volta, fecha a ponta e vê `PEER_CLOSED`
+(`[user] init: boot channel, console and handles ok`). O programa `handles` (`[user] handles: ok (N cases)`):
+handle forjado de seis formas em cada chamada, handle velho (fechado duas vezes, e o valor segue morto com o slot
+reusado), sem direito (`DUPLICATE`, `WRITE`, `READ`, `WAIT`), de outro tipo, `replace` com direito maior (o velho
+morre), bits de direito reservados, a própria ponta e o mesmo handle duas vezes no array, handle sem `TRANSFER`,
+array com ponteiro ruim (nulo, faixa nula, não mapeado, do kernel), mais de 64 e 9 handles, bytes acima do limite
+e contagem absurda, leitura que não consegue copiar (a mensagem e o handle ficam na fila, inteiros, depois de cada
+falha), `BufferTooSmall`, fila cheia (`ShouldWait` não consome), `PeerClosed`, os 256 pontas da cobrança e o
+`NoMemory` da 257ª, os 4 096 handles da tabela (que a morte do processo fecha), `object_wait_one` com prazo vencido,
+com prazo no futuro (espera até o prazo), sem sinal e com bit desconhecido, e a espera **bloqueante**: o kernel guarda
+a outra ponta do canal de boot, o programa bloqueia com prazo de 10 s e só volta quando o kernel escreve (depois de
+20 ms) e, na segunda espera, quando o kernel fecha a ponta; o kernel confere que tudo levou menos de 5 s.
 
 ## Entrada de syscall por ISA
 
@@ -1092,7 +1164,7 @@ O contrato de como um programa **começa**, igual para o `init` e para qualquer 
 | --- | --- | --- |
 | Modo | CPL 3; `CS` e `SS` de usuário; `RFLAGS = 0x202` | EL0t; `DAIF` limpo |
 | `arg0`, `arg1` | `rdi`, `rsi` (os argumentos de `thread_create`) | `x0`, `x1` |
-| Handle de boot | `process_create` **move** o `bootstrap` para a tabela do filho como o **primeiro handle, de valor `1`**. Quem chama `thread_create` passa `arg0` (o `user/rt` passa `1`); para o `init`, o kernel põe `arg0 = 1` (**na 4b, `0`**: ainda não há handle) | idem |
+| Handle de boot | `process_create` **move** o `bootstrap` para a tabela do filho como o **primeiro handle, de valor `1`**. Quem chama `thread_create` passa `arg0` (o `user/rt` passa `1`); para o `init`, o kernel põe `arg0 = 1` (**feito na parte 1 da 4c**; na 4b era `0`) | idem |
 | Demais registradores | Zero, **`rdx` inclusive** (o psABI o lê como ponteiro de `atexit`) | Zero (a glibc lê o `x0` como `rtld_fini`: [conflito](#a-fatia-4b-como-entrou)) |
 | Pilha | `rsp = sp` de `thread_create`, **alinhado a 16 na entrada**: o psABI diz "guaranteed to be 16-byte aligned at process entry" (**verificado**, [x86-64 psABI](https://github.com/hjl-tools/x86-psABI), `low-level-sys-info.tex`) | `SP_EL0 = sp`, `sp mod 16 = 0` ("The stack must be quad-word aligned", **verificado**, [AAPCS64](https://github.com/ARM-software/abi-aa)) |
 | Conteúdo da pilha | O `init`: o kernel monta `argc = 0`, `argv`, `envp` e o [auxv](#auxv-mínimo). Filho: quem o criou (o `user/rt` do pai) monta o que quiser; o `user/rt` do filho lê o auxv se houver | idem |
@@ -1130,7 +1202,7 @@ ilegal, falta sem região) mata, pelo [canal de eventos](#falhas-de-usuário).
 | `0x00` | `nop` | — | — | Nenhum. Só para a medida da syscall nula |
 | `0x01` | `process_exit` | `code: i64` | não volta | Nenhum |
 | `0x02` | `thread_exit` | — | não volta | Nenhum |
-| `0x03` | `debug_write` | `console`, `ptr`, `len` (**4a: sem `console`**) | bytes escritos | `console`: `WRITE` |
+| `0x03` | `debug_write` | `console`, `ptr`, `len` | bytes escritos | `console`: `WRITE` |
 | `0x04` | `clock_get_monotonic` | — | ns (`u64`), ver [contrato](#contrato-numérico) | Nenhum |
 | `0x05` | `random_get` | `ptr`, `len` (até 256) | — | Nenhum |
 | `0x10` | `handle_close` | `h` | — | Nenhum |
@@ -1145,7 +1217,7 @@ ilegal, falta sem região) mata, pelo [canal de eventos](#falhas-de-usuário).
 | `0x32` | `process_kill` | `process` | — | `process`: `DESTROY` |
 | `0x40` | `channel_create` | `flags` (0), `out` | — (as duas pontas, dois `u64`, em `out`) | Nenhum |
 | `0x41` | `channel_write` | `ch`, `bytes`, `nbytes`, `handles` (array de `u64`), `nhandles` | — | `ch`: `WRITE`; cada handle: `TRANSFER`. [Consome o array](#operações-sobre-handle) |
-| `0x42` | `channel_read` | `ch`, `bytes`, `bytes_cap`, `handles` (array de `u64`), `handles_cap`, `actual*` | — (tamanhos em `actual`) | `ch`: `READ`. Só retira a mensagem **depois** da cópia ([ordem](#operações-sobre-handle)) |
+| `0x42` | `channel_read` | `ch`, `bytes`, `bytes_cap`, `handles` (array de `u64`), `handles_cap`, `actual*` | — (tamanhos em `actual`: dois `u64`, `{ bytes, handles }`) | `ch`: `READ`. Só retira a mensagem **depois** da cópia ([ordem](#operações-sobre-handle)) |
 
 - **`thread_create` e o carregador validam `USER_MIN <= entry < USER_TOP`, `sp <= USER_TOP` e `sp` alinhado a 16** antes de qualquer outra coisa; fora disso, `InvalidArgs`. Teste no host com `0xFFFF_8000_0000_0000`, `0x0000_8000_0000_0000` e `USER_TOP` (o `RIP` que o `IRETQ` restaura vem daqui: [exceções do anel 3](#exceções-vindas-do-anel-3)).
 - **`vmar_map`:** `flags` leva `READ`/`WRITE`/`EXECUTE` e, opcionalmente, `FIXED` (`vmar_off` exato; **recusa** sobrepor mapeamento existente, o equivalente do `MAP_FIXED_NOREPLACE` do Linux, **verificado** em [mmap(2)](https://man7.org/linux/man-pages/man2/mmap.2.html); o `MAP_FIXED` do Linux apaga o que havia, e o RustOS não o oferece). Sem `FIXED` o kernel escolhe o endereço, com o [ASLR](#aslr-quantos-bits), e `vmar_off` tem de ser 0. W+X é `InvalidArgs`. Intervalo na faixa nula ou acima de `USER_TOP` é `OutOfRange`.
@@ -1568,6 +1640,7 @@ Em inglês, como toda saída serial. As da 4a e da 4b valem hoje, no modo de tes
 | `[rustos] user: fault contained (pid N)` | 4a |
 | `[rustos] user self-test: ok` (os casos acima) | 4a |
 | `[rustos] user: init loaded (N segments)`, `[rustos] user: pid 1 exited (code 0,` e, do `init`, `[user] init: ok` | 4b |
+| `[user] init: boot channel, console and handles ok` e `[user] handles: ok (` (os casos hostis); `[rustos] initramfs: 3 files,` | 4c, parte 1 |
 | `[rustos] mitigations: ` (nos dois modos) | 4e, parte 1 (**feito**) |
 | `[rustos] cpu features: ` (só o modo de teste) | 4e, parte 1 (**feito**) |
 | `[rustos] user: self-test ok` (handles, SIMD, falha, canal) | 4d |
@@ -1632,7 +1705,9 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 | Dívida 0037, pilha sem medida de pico (paga no #19: 16 KiB pelo pico medido) e [DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) | A 4a remediu com syscall e falta fatal: 2,0 KiB e 1,6 KiB de 16 (`release`). Os 16 KiB ficam; a 0070 segue aberta até a 4c e a 4f medirem handles, canais e a falta resolvida |
 | [DEBT-0052](../tech-debt/0052-afinidade-so-no-spawn.md) Afinidade só no `spawn` | Não dispara: a ABI nativa não tem afinidade |
 | **Abertas pela 4a:** [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md) (limpeza da pilha até 128 bytes limpos), [DEBT-0077](../tech-debt/0077-iretq-sem-fixup-de-falha-fora-do-rip-e-do-rsp.md) (`iretq` sem *fixup*), [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md) (EL1h na pilha de falhas); [DEBT-0081](../tech-debt/0081-debug-write-de-512-bytes-com-a-irq-mascarada.md) (`debug_write` com a IRQ mascarada) e [DEBT-0082](../tech-debt/0082-sem-lfence-depois-do-swapgs-condicional.md) (sem `lfence` depois do `swapgs`); [DEBT-0072](../tech-debt/0072-pilhas-de-excecao-sem-medida-permanente.md) agora inclui a IST4 | A 4a fecha os itens dela |
-| **A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md), registrada com o `core/object`); imagem de usuário sem ASLR (4b; [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois), registrada: [DEBT-0083](../tech-debt/0083-imagem-de-usuario-sem-aslr.md)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
+| **Pagas ou reescritas na parte 1 da 4c:** [DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) (a pilha foi remedida com handles e canais: 4,8 KiB de 16 no pico das tarefas, 5,0 KiB na syscall; resta a falta resolvida); [DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md) (a cobrança de 256 pontas existe); [DEBT-0091](../tech-debt/0091-fila-do-canal-com-armazenamento-inline.md) (agora com o custo do modelo do par); [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md) (a primeira metade do gatilho, o canal de boot, ocorreu; a outra, o lançamento de processos, é da parte 3). **Abertas:** [DEBT-0110](../tech-debt/0110-objeto-e-mensagem-abortam-na-falta-de-heap.md), [DEBT-0111](../tech-debt/0111-espera-de-objeto-por-mascara-de-slots-de-tarefa.md) e [DEBT-0112](../tech-debt/0112-process-terminated-sem-teste-de-espera-bloqueante.md).
+
+**A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md), registrada com o `core/object`); imagem de usuário sem ASLR (4b; [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois), registrada: [DEBT-0083](../tech-debt/0083-imagem-de-usuario-sem-aslr.md)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
 
 **Pagas antes da fase:** 0011 (GIC e timer só na CPU 0), 0018 (frames sem cache por CPU), 0036
 (estado de troca global) e 0039 (escalonador de uma CPU), no #13; 0020 (zerar página pelo `memset`) e
@@ -1649,10 +1724,10 @@ do dono. Cada uma vira texto no SDD e teste no mesmo PR.
 
 | # | Lacuna | O que o PR da 4c escreve e testa |
 | --- | --- | --- |
-| L1 | Entre a reserva do slot e o *commit* do `channel_write`, a ponta oposta pode morrer em outra CPU (SMP) | O *commit* reconfere a ponta viva sob o lock do canal; se morreu, os handles seguem a regra de descarte. **Parte pura feita** ([seção](#o-que-fechou-das-lacunas)) |
-| L2 | A repetição do `channel_read` (sequência mudou) | A repetição libera as reservas do passo 2, e um valor de handle reservado e solto não reaparece. **Parte pura feita** |
+| L1 | Entre a reserva do slot e o *commit* do `channel_write`, a ponta oposta pode morrer em outra CPU (SMP) | O *commit* reconfere a ponta viva sob o lock do canal; se morreu, os handles seguem a regra de descarte. **Feita** ([seção](#o-que-fechou-das-lacunas)) |
+| L2 | A repetição do `channel_read` (sequência mudou) | A repetição libera as reservas do passo 2, e um valor de handle reservado e solto não reaparece. **Feita** |
 | L3 | Regra de lock dos canais não está escrita (**escrita**, [acima](#ordem-de-lock-lacuna-l3)) | Um lock por par de pontas (A→B e B→A pegam o mesmo); a destruição tira as mensagens sob o lock e fecha os handles **depois** de soltá-lo; o passo 1 do `channel_read` valida `ch` sob a tabela antes do canal; ordem global tabela → canal |
-| L4 | Chamadas que devolvem handle por ponteiro de saída (`channel_create`, `process_create`) | O mesmo padrão reserva → copia → *commit*: falha no `copy_to_user` desfaz a criação, sem objeto órfão. **Parte pura feita** (a tabela) |
+| L4 | Chamadas que devolvem handle por ponteiro de saída (`channel_create`, `process_create`) | O mesmo padrão reserva → copia → *commit*: falha no `copy_to_user` desfaz a criação, sem objeto órfão. **Feita** para `channel_create`; `process_create` na parte 3 |
 | L5 | `fault_kind` contra a tabela do `ProcessEvent` | Já concordam (`breakpoint` incluído); manter um teste que compare as duas |
 | L6 | O `check-layers` não expressa "o `user/` depende só de `elf` e `cpio` entre os crates de `core/`", nem a isenção de `unsafe` só do `user/rt` | Lista por nome no `xtask`, com teste vermelho antes do verde (já pedido para a 4a, ver [guidelines 03](../guidelines/03_camadas_e_dependencias.md)) |
 

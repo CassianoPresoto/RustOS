@@ -19,7 +19,8 @@ para sempre: nenhum handle em tabela as alcança e a contagem nunca baixa. O mod
 ## Por que foi aceito
 
 Coletar por alcançabilidade percorre todos os canais, um coletor no kernel. A fase 4 limita os
-canais por processo (`MAX_CHANNELS`) e nenhum programa da fase os produz.
+pontas de canal por processo (`MAX_CHANNEL_ENDS`, 256, cobrada ao criador; feita na parte 1 da 4c e
+testada no programa `handles`) e nenhum programa da fase produz o ciclo.
 
 ## Gatilho
 

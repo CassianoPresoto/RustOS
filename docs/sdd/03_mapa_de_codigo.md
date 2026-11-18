@@ -23,11 +23,12 @@
 │       ├── console.rs          # console global e kprintln!: serial e tela
 │       ├── screen.rs           # tela: framebuffer + grade do term + desenho do gfx, tema e barra
 │       ├── interrupts.rs       # IRQ do timer (o que o escalonador pede: acordar, fim de fatia, próximo disparo), fila de entrada e o relatório de falha
-│       ├── process.rs          # processo de usuário (um espaço, uma thread, uma árvore de regiões, sem handles): `spawn` de um ELF ou, no modo de teste, de um programa plano, `process_main`, `exit`, `user_fault` (mata o processo e o kernel segue); `process/selftest.rs`: o autoteste dos casos de usuário (feature `selftest`)
+│       ├── process.rs          # processo de usuário (um espaço, uma thread, uma árvore de regiões, a tabela de handles): `spawn` de um ELF ou, no modo de teste, de um programa plano, `process_main`, `exit`, `user_fault` (mata o processo, esvazia a tabela e o kernel segue); `process/boot.rs`: o canal de boot; `process/selftest.rs`: o autoteste dos casos de usuário (feature `selftest`)
+│       ├── object.rs           # os objetos do kernel sobre o `core/object` (4c): o enum `Obj` de `Arc`, o `Lock` do `IrqLock`, os slots da tabela, a espera por máscara de tarefas, o par de pontas de canal, a cobrança de pontas
 │       ├── loader.rs           # o carregador de ELF do initramfs (4b): `core/cpio` + `core/elf`, `PT_LOAD` em frames novos, `Vmar` do processo e a pilha inicial com guarda e topo sorteado
 │       ├── init.rs             # (feature `selftest`) lança o `init` do initramfs, espera e confere o código de saída; mede o custo do menor processo
 │       ├── uspace.rs           # UserSpace: tabelas da metade baixa, mapeamento de frames zerados (`map_at`) e a devolução zerada na morte
-│       ├── syscall.rs          # o despacho da ABI nativa: `nop`, `clock_get_monotonic`, `random_get`, `process_exit` e a `debug_write` provisória; o resto devolve `NotSupported`
+│       ├── syscall.rs          # o despacho da ABI nativa por tabela com clamp: `nop`, `clock_get_monotonic`, `random_get`, `process_exit`, `debug_write(console, …)`; `syscall/handles.rs`: handle, canal e espera (4c); VMO, VMAR, processo e thread ainda devolvem `NotSupported`
 │       ├── scrub.rs            # a limpeza da pilha do kernel na volta ao usuário (`Handlers::leave_user`)
 │       ├── stack.rs            # marca d'água das pilhas: pinta com um padrão e lê o pico varrendo do fundo (SDD 15)
 │       ├── sync.rs             # IrqLock: spinlock que mascara IRQ, conta os presos por CPU e as disputas; `bump` para contador de uma CPU só
@@ -60,9 +61,10 @@
 │   └── aarch64/                # Aarch64Cpu, Aarch64CpuLocal (TPIDR_EL1), Aarch64Ipi (SGI), MmioBus, Aarch64Mmu e DirectMapTables (TTBR1), `early` (a PL011 por TTBR0 antes das tabelas próprias), Aarch64Entropy; vetores (EL1h e EL0, `SVC`), `usercopy` (`ldtr`/`sttr`), `user` (`eret`, `TTBR0_EL1`, `CNTKCTL_EL1`), ICC_*, CNTV de um tiro, PAN, `Context`/`switch` e `fpu`;
 │                               # puros: descriptor (com `Aarch64Format`), esr, prefix, time, intid, sgi, features
 ├── user/                       # o segundo anel de composição: só alvos bare-metal, fora do `default-members` (guidelines 03, regra 11)
-│   ├── rt/                     # rustos-user-rt: ponto de entrada em Rust, leitor do auxv (`Env`), `println!`, wrappers seguros das syscalls, pânico e alocador de avanço; o único `unsafe` de usuário
+│   ├── rt/                     # rustos-user-rt: ponto de entrada em Rust, leitor do auxv (`Env`), `println!`, wrappers seguros das syscalls, a leitura da mensagem de boot, pânico e alocador de avanço; o único `unsafe` de usuário
 │   ├── init/                   # rustos-user-init: o `init`, `forbid(unsafe_code)`
 │   ├── tests/big/              # rustos-user-test-big: programa de teste de 1,3 MiB (carregador e `code-model=small`); só entra na imagem com `selftest`
+│   ├── tests/handles/          # rustos-user-test-handles: os casos hostis de handle, canal e espera (usa `rt` com `raw-syscalls`); só entra na imagem com `selftest`
 │   └── link/                   # x86_64.ld, aarch64.ld: `ET_EXEC` em `0x40_0000`, uma página por permissão
 ├── boot/
 │   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 (inclusive MP e módulos) escrito aqui → hal::BootInfo
@@ -150,7 +152,7 @@ entrada hostil vira `Error` (enum, uma variante por regra), nunca pânico. Todo 
 de tamanho e de offset é `checked_*`. Os testes de host ([SDD 06](06_testes.md)) têm um
 caso por regra de recusa, as truncações em todos os comprimentos e os campos nos extremos.
 
-`core/cpio` e `core/elf` estão em `[workspace.dependencies]` desde a 4b, com o primeiro consumidor, o carregador do `kernel/` (`kernel/src/loader.rs`); o `core/object` entra com o dele (4c).
+`core/cpio` e `core/elf` estão em `[workspace.dependencies]` desde a 4b, com o primeiro consumidor, o carregador do `kernel/` (`kernel/src/loader.rs`); o `core/object` entrou com o dele na parte 1 da 4c (`kernel/src/object.rs`).
 
 **`core/cpio`** (`Reader`, `Entry`, `find`). Regras do `newc` como no
 [early-userspace buffer format](https://docs.kernel.org/driver-api/early-userspace/buffer-format.html):
