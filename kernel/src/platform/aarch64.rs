@@ -9,6 +9,7 @@ pub use rustos_arch_aarch64::fpu::{
     save as fpu_save, write_probe as fpu_write_probe,
 };
 use rustos_arch_aarch64::intid::{QEMU_VIRT_PL011_INTID, VIRTUAL_TIMER_INTID};
+pub use rustos_arch_aarch64::zero::zero_aligned;
 use rustos_arch_aarch64::{
     Aarch64Cpu, Aarch64Entropy, Aarch64Mmu, DirectMapTables, MmioBus, QEMU_VIRT_GICD,
     QEMU_VIRT_GICR, QEMU_VIRT_PL011, active_root, exception, gic_cpu, intid, prepare_space,

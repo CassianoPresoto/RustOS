@@ -133,6 +133,15 @@ pub fn harden() {
     publish_protections(unsafe { enable_protections() });
 }
 
+/// Zera `[ptr, ptr + len)` com o `memset` do alvo, que já é `rep stosq` (DEBT-0058).
+///
+/// # Safety
+/// `ptr` e `len` múltiplos de 64; a faixa é memória gravável do kernel, sem outro acesso.
+pub unsafe fn zero_aligned(ptr: *mut u8, len: usize) {
+    // SAFETY: o contrato desta função.
+    unsafe { ptr.write_bytes(0, len) };
+}
+
 pub fn cpu() -> X86Cpu {
     // SAFETY: o Limine entrega o kernel em ring 0, e ele nunca sai de lá.
     unsafe { X86Cpu::new() }

@@ -110,7 +110,7 @@ impl Arch {
         let mut push = |items: &[&str]| args.extend(items.iter().map(|&item| item.to_owned()));
         match self {
             Self::X86_64 => {
-                push(&["-machine", "q35", "-cpu", "max", "-m", "256M"]);
+                push(&["-machine", "q35", "-cpu", &Self::cpu_model(), "-m", "256M"]);
                 push(&[
                     "-drive",
                     &format!("if=pflash,format=raw,readonly=on,file={firmware}"),
@@ -123,7 +123,7 @@ impl Arch {
                     "-machine",
                     "virt,gic-version=3",
                     "-cpu",
-                    "max",
+                    &Self::cpu_model(),
                     "-m",
                     "256M",
                     "-bios",
@@ -147,6 +147,12 @@ impl Arch {
         args
     }
 
+    /// `RUSTOS_CPU` escolhe o modelo de CPU da QEMU (`a64fx` tem `DC ZVA` de 256 bytes);
+    /// sem ela, `max`.
+    fn cpu_model() -> String {
+        choose_cpu(std::env::var("RUSTOS_CPU").ok().as_deref())
+    }
+
     /// `RUSTOS_ACCEL` (`tcg`, `hvf` ou `kvm`) manda; sem ela, aceleração de
     /// hardware quando host e alvo coincidem, com TCG sempre como reserva.
     fn accelerators(self) -> Vec<&'static str> {
@@ -155,6 +161,13 @@ impl Arch {
         let kvm = std::path::Path::new("/dev/kvm").exists();
         choose_accelerators(forced.as_deref(), std::env::consts::OS, same_isa, kvm)
     }
+}
+
+fn choose_cpu(forced: Option<&str>) -> String {
+    forced
+        .filter(|cpu| !cpu.is_empty())
+        .unwrap_or("max")
+        .to_owned()
 }
 
 /// Aceleração forçada vale sozinha, sem reserva: falhar alto é o ponto de forçar.
@@ -185,6 +198,13 @@ fn choose_accelerators(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cpu_model_defaults_to_max_and_can_be_forced() {
+        assert_eq!(choose_cpu(None), "max");
+        assert_eq!(choose_cpu(Some("")), "max");
+        assert_eq!(choose_cpu(Some("a64fx")), "a64fx");
+    }
 
     #[test]
     fn parses_all_into_both_arches() {

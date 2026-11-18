@@ -62,6 +62,7 @@ size: ## tamanho das seções do kernel
 
 pr: check test ## checklist antes do PR: gates, testes e smoke nas duas ISAs
 	$(XTASK) smoke --arch all --profile $(PROFILE)
+	RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx $(XTASK) smoke --arch aarch64 --profile $(PROFILE)
 
 clean: ## apaga target/ (inclusive o Limine baixado)
 	cargo clean

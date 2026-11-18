@@ -25,6 +25,11 @@ pub use x86_64::{
     protections, serial_irq_done, switch, timer_mode, trigger,
 };
 
+#[cfg(target_arch = "aarch64")]
+pub use aarch64::zero_aligned;
+#[cfg(target_arch = "x86_64")]
+pub use x86_64::zero_aligned;
+
 /// Por que a plataforma não ligou as interrupções.
 #[derive(Clone, Copy, Debug)]
 pub enum PlatformError {

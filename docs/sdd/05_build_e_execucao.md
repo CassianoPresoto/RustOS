@@ -37,7 +37,7 @@ Os dois alvos são Tier 2 com `core` pré-compilado: não há `build-std` nem ni
 | `make size` | `size` | Lê o ELF e soma `text`, `rodata`, `data`, `bss` |
 | `make check` | `check-layers`, `check-comments`, `check-docs` | Mais `cargo fmt --check` e `cargo clippy -D warnings` no host e nos dois alvos |
 | `make test` | — | `cargo test` dos membros padrão (todos menos o kernel) |
-| `make pr` | — | `check` + `test` + `smoke` nas duas ISAs |
+| `make pr` | — | `check` + `test` + `smoke` nas duas ISAs, mais o aarch64 em TCG com `RUSTOS_CPU=a64fx` (bloco de `DC ZVA` de 256 bytes, [DEBT-0060](../tech-debt/0060-recuo-do-zerar-sem-cobertura-no-smoke.md)) |
 
 `A` é `x86_64` (padrão), `aarch64` ou `all`; `P` é `dev` (padrão), `release` ou
 `release-small`. No `make`: `ARCH=` e `PROFILE=`.
@@ -71,7 +71,7 @@ QEMU sai antes do boot sem ela. TCG é sempre a reserva (`-accel <nativo> -accel
 
 `RUSTOS_ACCEL=tcg|hvf|kvm` troca a lista inteira por esse acelerador, sem reserva
 (`xtask/src/arch.rs`): serve para rodar o TCG no Mac, o caminho do CI (que não
-tem HVF): `RUSTOS_ACCEL=tcg make smoke ARCH=aarch64`. Valor desconhecido é ignorado, com aviso. O `gic-version=3` é fixo porque, sem ele, a
+tem HVF): `RUSTOS_ACCEL=tcg make smoke ARCH=aarch64`. Valor desconhecido é ignorado, com aviso. `RUSTOS_CPU=<modelo>` troca o `-cpu max` (por exemplo `RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx make smoke ARCH=aarch64`, que tem `DC ZVA` de 256 bytes). O `gic-version=3` é fixo porque, sem ele, a
 `virt` escolhe a versão pelo acelerador (TCG: v2; HVF com o vGIC da Apple: v3).
 
 O firmware é procurado nos

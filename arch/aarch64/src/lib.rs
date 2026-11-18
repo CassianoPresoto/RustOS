@@ -8,6 +8,7 @@ pub mod esr;
 pub mod features;
 pub mod intid;
 pub mod time;
+pub mod zero_plan;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod context;
@@ -31,6 +32,8 @@ pub mod protection;
 mod stack;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod timer;
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub mod zero;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use context::{Context, switch};
