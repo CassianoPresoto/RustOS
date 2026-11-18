@@ -4,10 +4,13 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod asid;
 #[cfg(test)]
 mod bench;
 #[cfg(test)]
 mod bench_bitmap;
+#[cfg(test)]
+mod bench_vmar;
 mod bittree;
 pub mod buddy;
 pub mod cache;
@@ -19,6 +22,7 @@ pub mod ranges;
 pub mod tables;
 #[cfg(test)]
 mod testing;
+pub mod vmar;
 pub mod watermark;
 pub mod window;
 pub mod wx;

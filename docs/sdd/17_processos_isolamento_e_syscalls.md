@@ -291,7 +291,7 @@ supunha o SMP "por vir".
 | Quando | Regra |
 | --- | --- |
 | 4a a 4d (sem PCID/ASID) | Toda troca de processo esvazia o TLB local (x86_64: `mov cr3` sem `NOFLUSH`; aarch64: um ASID reservado só e `tlbi vmalle1`). Uma CPU que o processo deixou **não guarda entrada dele**: correto e mais lento |
-| 4e (com PCID/ASID) | Gerador global com **geração**; cada CPU guarda a `generation_seen`. Um valor de PCID/ASID só é **reusado** (geração nova) depois que **toda CPU** esvaziou o TLB desde que ele foi liberado: subir a geração marca `flush_pending` em todas as CPUs, e cada uma esvazia na próxima troca de processo, **antes** de carregar um valor da geração nova (x86_64: `INVPCID` tipo 2 ou 3, ou `mov cr3` sem `NOFLUSH`; aarch64: `tlbi vmalle1`) e atualiza a `generation_seen`. É o esquema do `asid.c` do Linux arm64: **NÃO VERIFICADO**, não foi lido |
+| 4e (com PCID/ASID) | Gerador global com **geração**; cada CPU guarda a `generation_seen`. Um valor de PCID/ASID só é **reusado** (geração nova) depois que **toda CPU** esvaziou o TLB desde que ele foi liberado: subir a geração marca `flush_pending` em todas as CPUs, e cada uma esvazia na próxima troca de processo, **antes** de carregar um valor da geração nova (x86_64: `INVPCID` tipo 2 ou 3, ou `mov cr3` sem `NOFLUSH`; aarch64: `tlbi vmalle1`) e atualiza a `generation_seen`. É o esquema do `arch/arm64/mm/context.c` do Linux, conferido pelo revisor do PR do gerador ([abaixo](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)) |
 | 4e, processo que migra | Com PCID/ASID o TLB da CPU antiga **guarda** o valor. Cada Process tem um `tlb_gen` que sobe a cada `unmap`; a CPU que volta a rodá-lo compara com o que ela viu e esvazia só aquele PCID/ASID (`INVPCID` tipo 1; `tlbi aside1`). A ideia é a do `tlb_gen` do Linux x86: **NÃO VERIFICADO** |
 
 #### *Shootdown* de TLB ([DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md))
@@ -362,8 +362,54 @@ O sorteio é **por região, não por mapeamento**: o `ANY` aloca em sequência a
 (**inferência**, não medida). A semente vem de `random::next_u64`
 ([SDD 09](09_seguranca.md)): **em CPU sem RDSEED/RDRAND/RNDR o ASLR herda o jitter
 fraco** ([DEBT-0019](../tech-debt/0019-aleatorio-sem-fonte-de-hardware-fraco.md); no
-Mac com HVF a CPU não anuncia `RNDR`). O boot relata a fonte e o PR de código mede a entropia efetiva
-de 5 000 processos (teste de propriedade com o gerador próprio, como em `core/sched`).
+Mac com HVF a CPU não anuncia `RNDR`). O boot relata a fonte e os bits efetivos (`aslr_bits`,
+abaixo); o PR do kernel que liga o `random::next_u64` ainda mede a entropia de 5 000 processos
+com a fonte real (teste de propriedade com o gerador próprio, como em `core/sched`).
+
+**Como `vmar.rs` entrega isso** (implementado, testado no host): `aslr_base(floor, limit, rng)`
+sorteia a base de uma região, uniforme entre `2^28` páginas (`ASLR_BITS = 28`) a partir de
+`floor`, cortada em `limit`; é o `mmap_base` e o topo da pilha. Dentro da região o `ANY` usa
+`Placement::Lowest` (primeira faixa livre que serve, sem entropia), como o parágrafo acima manda.
+`Placement::Random` também existe: escolhe **uniformemente entre todas as posições alinhadas
+que servem** (conta as posições de cada buraco, sorteia um índice e o localiza), mas o
+kernel **não o usa na 4b nem na 4c**, pelo custo de tabelas de página acima. O sorteio do índice
+é a multiplicação de Lemire com rejeição, no máximo **9 palavras** (1 e mais 8 rejeições):
+esgotadas as rejeições, a nona palavra é usada sem conferir, para uma fonte travada não prender o
+laço. A chance de chegar lá é `(limiar / 2^64)^8`, no máximo 2^-96 para até 2^52 posições. A
+fonte é um `FnMut() -> u64`: o kernel passa `random::next_u64`, o teste passa um xorshift ou
+palavras escolhidas à mão.
+
+**A entropia cai sem aviso se o intervalo é curto.** Com `limit - floor` menor que `2^28` páginas,
+`aslr_base` sorteia entre as páginas que cabem; `aslr_bits(floor, limit)` devolve o `log2` delas
+(arredondado para baixo; 28 com o intervalo cheio; 0 se `aslr_base` daria `None`, o que inclui
+intervalo sem uma página inteira) e **o boot relata esse valor** ao fixar o `mmap_base` e a janela
+da pilha. O teste do host (`aslr_base_has_28_bits_of_page_entropy`) faz 20 000 sorteios com um
+xorshift de semente fixa e confere: base de página, dentro do intervalo, os 28 bits baixos
+todos vistos e metade dos sorteios acima do meio.
+
+### A árvore de regiões (`core/mm/src/vmar.rs`)
+
+A peça pura que a 4b usa direto (o carregador reserva as regiões do `init` e a pilha) e que a
+4c embrulha como objeto VMAR. Ela só diz **o que está reservado e com que permissão**; quem
+mapeia a página e aloca o frame é o `kernel/`. Faixa `[USER_MIN, USER_TOP)` entra por
+parâmetro (`Vmar::new(storage, lo, hi)`), porque o `hal::abi` ainda não existe.
+
+| Decisão | Valor |
+| --- | --- |
+| Estrutura | **Vetor ordenado por início**, em armazenamento dado de fora (`[Region; N]` ou `Box<[Region]>`: o kernel monta o `Box` no heap, sem passar pela pilha de 16 KiB). Capacidade **fixa**; cheio é `VmarError::Full`, sem alocação escondida |
+| Custo ([DEBT-0075](../tech-debt/0075-vmar-com-capacidade-fixa-de-regioes.md)) | `find` e `check_fault` em **O(log N)**; `reserve` e `unmap` em O(log N) mais o deslocamento de até N regiões (`memmove`); `allocate` em **O(N)** (varre os buracos; `Random` varre duas vezes). Números em [SDD 07](07_desempenho_e_recursos.md#árvore-de-regiões-e-gerador-de-asid-fase-4-medido-no-host) |
+| Memória | **32 bytes por região** (`start`, `end`, `Option<Backing>` de 8, permissões, tipo e duas guardas), fixados por `const _: () = assert!`. Armazenamento de N regiões custa `32 N`; sugestão para a 4b: N = 128 (4 KiB por processo) |
+| Guarda | Uma página reservada **abaixo** e/ou **acima**, marcada na própria região (sem região extra, sem gastar vaga). Conta na sobreposição e na alocação; a falta nela é `FaultError::Guard` (estouro de pilha) e nunca resolve |
+| Permissões | `Perms` (`READ`, `WRITE`, `EXECUTE`); **W+X é recusado** (`VmarError::WriteExecute`) em `reserve` e `allocate`. Região sem permissão nenhuma é válida (reserva que sempre falta) |
+| O que a falta precisa | `check_fault(addr, access)` devolve a região (a falta resolve) ou `NoRegion`, `Guard`, `Permission` (o processo morre, [falhas](#falhas-de-usuário)). `Attrs.backing` guarda o **objeto e a página dentro dele** (`Backing { object: NonZeroU32, page_offset: u32 }`); sem `backing`, a região é anônima (página zero na leitura, frame novo na escrita). **Nenhum endereço físico** vive aqui |
+| `unmap(start, len)` | Remove as regiões inteiras e **apara ou parte** as que o intervalo cobre em parte (o `vmar_unmap` aceita qualquer faixa). A guarda de uma ponta aparada deixa de existir; a metade alta de uma região partida soma ao `page_offset` do `backing`. Partir exige uma vaga: sem ela é `Full` **e a árvore não muda**. Faixa sem região é sucesso, sem efeito |
+| Estouro | Todo `base + len` e `base - guarda` é aritmética conferida: estouro é `OutOfRange`, nunca volta ao início do espaço. Testado com uma faixa terminando em `0xFFFF_FFFF_FFFF_F000` |
+| Alinhamento | `align` potência de dois, `>= PAGE` (até `2^63`); `len` e endereços múltiplos de página. A janela do pedido (`Fit.window`) limita a faixa reservada, guardas incluídas |
+
+O `reserve` de faixa fixa é o `FIXED` do [`vmar_map`](#as-chamadas): recusa sobrepor
+(`Overlap`), o equivalente do `MAP_FIXED_NOREPLACE`. Testes: modelo ingênuo (vetor ordenado,
+varredura de página a página) contra 30 000 operações aleatórias com semente fixa em cinco
+configurações, mais as bordas ([SDD 06](06_testes.md)).
 
 ### Página zero compartilhada e COW
 
@@ -431,7 +477,7 @@ kernel. Entrada nova depois do boot dessincronizaria as raízes (o Linux resolve
 | Raiz do processo | `CR3` | `TTBR0_EL1`; `TCR_EL1.EPD0` (bit 7) volta a 0, `T0SZ` (bits 5:0) fica em 17 para 47 bits, `TG0` (15:14) em `0b00` (**verificado pelo Linux**; ARM ARM por ler) |
 | Etiqueta | PCID nos 12 bits baixos do CR3 (`CR3_PCID_MASK = 0xFFF`, `CR3_NOFLUSH = BIT(63)`: `processor-flags.h` do Linux); o Linux liga `CR4.PCIDE` se a CPU anuncia `PCID` (`cr4_init`). **Verificado** (espelho do SDM, [mov cr3](https://www.felixcloutier.com/x86/mov-1) e [invpcid](https://www.felixcloutier.com/x86/invpcid)): com `PCIDE = 1`, o bit 63 do operando do `mov cr3` decide se o TLB é invalidado; com `PCIDE = 0`, os bits 2:0 e 11:5 do CR3 são ignorados. `INVPCID`: tipo 0 = um endereço de um PCID, 1 = um PCID inteiro, 2 = tudo (global inclusive), 3 = tudo menos o global; **`#GP`** com `PCIDE = 0` e tipo 0 ou 1 com PCID diferente de zero, e com tipo maior que 3 | ASID em `TTBR0_EL1[63:48]` quando `TCR_EL1.A1 = 0`; largura em `ID_AA64MMFR0_EL1.ASIDBits[7:4]` (`0b0000` = 8, `0b0010` = 16) e `TCR_EL1.AS` (bit 36) escolhe 16 bits (**verificado pelo Linux**) |
 | Troca de processo | Escreve CR3 com o PCID do processo; sem esvaziar o TLB | Escreve `TTBR0_EL1` com o ASID; sem `tlbi` |
-| Alocação | Gerador global de ASID/PCID por CPU, com contador de geração: esgotou, esvazia tudo e começa outra geração. Módulo puro em `core/mm/src/asid.rs`, testado no host | idem |
+| Alocação | Gerador global de ASID/PCID, com contador de geração: esgotou, esvazia tudo e começa outra geração. Módulo puro em `core/mm/src/asid.rs`, testado no host ([abaixo](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)); o estado por CPU (`active`, `reserved`, `flush_pending`) mora dentro dele, indexado pela CPU | idem |
 | Com KPTI | Dois PCIDs por processo (raiz de kernel e raiz de usuário): o custo é metade do espaço de PCID | O ASID já distingue; o `USER_ASID_FLAG` do Linux marca a variante de usuário |
 | Fallback | Sem PCID, todo CR3 esvazia o TLB: correto e mais lento | Sem ASID útil, `tlbi` por troca |
 | `PageFlags` | `user` liga U/S (bit 2) | `user` liga o acesso de EL0 e `nG`; o kernel segue com UXN e PXN |
@@ -440,6 +486,46 @@ Folhas de usuário: x86_64 `U/S = 1`, NX salvo se a permissão for execução; c
 kernel não executa, com SMAP não acessa sem `AC`. aarch64: código de usuário com
 `PXN = 1, UXN = 0`; dado de usuário com `UXN = 1`. **O W^X do usuário já é do mapeador**
 (`MapError::WriteExecute`): `vmar_map` e as permissões de `vmar` recusam W+X.
+
+#### O gerador de PCID e ASID (`core/mm/src/asid.rs`)
+
+`AsidAllocator<WORDS, CPUS>` é o gerador global da regra de geração
+([PCID e ASID com várias CPUs](#pcid-e-asid-com-várias-cpus)). Implementado e testado no host;
+a ligação (o lock, o `CR3`, o `INVPCID`, o `tlbi`) é da 4e. A regra foi escrita a partir da
+descrição do SDD; o revisor independente a conferiu contra o
+[`arch/arm64/mm/context.c`](https://raw.githubusercontent.com/torvalds/linux/master/arch/arm64/mm/context.c)
+do Linux, e a conferência pegou um caso: o `flush_context` do Linux diz que, no esgotamento,
+"we must preserve its reserved ASID, as this is the only trace we have of the process it is
+still running", então a CPU ociosa mantém o `reserved` por **vários** esgotamentos
+(`double_rollover_idle_cpu_keeps_index`). A outra evidência é a simulação de TLB abaixo.
+
+**Fora do `AsidAllocator`:** a migração entre CPUs (o `tlb_gen` por processo, que esvazia só o
+PCID/ASID de quem volta a uma CPU que o guardou) **não é do gerador**; fica para a 4e.
+
+| Ponto | Decisão |
+| --- | --- |
+| Valor | `Asid = geração << bits | índice`, nunca zero (a geração começa em 1). A largura `bits` é parâmetro de execução (PCID 12; ASID 8 ou 16), limitada pela capacidade `WORDS * 64` do bitmap; índices abaixo de `first` nunca saem (PCID 0, o ASID da raiz vazia). Com KPTI o chamador usa `bits - 1` e deriva os dois valores do processo |
+| Estado por CPU | No lugar da `generation_seen`, um `flush_pending` por CPU **dentro** do gerador (a mesma regra: sobe a geração, toda CPU esvazia antes de carregar valor novo), mais `active` (o que a CPU roda) e `reserved` (o que ela rodava no último esgotamento) |
+| Chamada | `switch(cpu, current) -> Switch { asid, flush }`: a CPU vai rodar o espaço que tem `current` (`None` se nunca teve). Se `current` é da geração em curso, volta igual; senão o gerador renova. `flush` manda esvaziar o TLB desta CPU **antes** de carregar `asid` |
+| Renovar | Se o valor velho estava **reservado** por alguma CPU (rodava no esgotamento), todas as reservas dele passam ao valor novo e o **índice se mantém**; senão tenta o mesmo índice, se livre; senão toma o próximo. Quem renova **sempre** recebe um valor novo (a geração difere) |
+| Esgotamento | Sem índice livre: sobe a geração, esvazia o bitmap, **reserva o que cada CPU roda agora** e marca `flush_pending` em todas. Exige-se mais índices utilizáveis que CPUs (`TooFewIds`), então o esgotamento sempre acha lugar |
+| **Sem liberação individual** | Não há `release`. O espaço que morre apenas larga o valor; o índice só volta no esgotamento seguinte. Reusar um índice na mesma geração deixaria entrada velha no TLB de outra CPU, sem esvaziamento que a cobrisse. É o que o Linux faz com o ASID |
+| Geração | `u64`, soma 1 por esgotamento. Se `geração << bits` estoura: `GenerationOverflow`, **sem mudar o estado** (inalcançável na prática: 2^48 esgotamentos com 16 bits) |
+| Memória | `AsidAllocator<64, 8>` (PCID de 12 bits, 8 CPUs, `hal::MAX_CPUS`) ocupa **672 bytes**; `<1024, 8>` (ASID de 16 bits) ocupa **8 352 bytes** (cerca de 8,2 KiB). `const fn new`: vive num `static`, sem pilha |
+| Fast path | O gerador é `&mut self`: o kernel o põe atrás de um lock e **toda troca o toma**. O desvio sem lock (como o do Linux: `active` atômico por CPU) não existe; é a [DEBT-0076](../tech-debt/0076-asid-sem-caminho-rapido-sem-lock.md) |
+
+**Evidência.** `fuzz` roda 20 000 trocas aleatórias em 4 CPUs e 40 espaços (nascem e morrem),
+com 4 a 6 bits de índice (muitas gerações), em cinco sementes (a CPU 0 quase não troca, para deixar um espaço rodando por vários
+esgotamentos), e confere: o valor devolvido é da
+geração em curso; **dois espaços vivos da mesma geração nunca dividem um índice**; quem estava
+em geração velha recebe valor diferente; a geração sobe de 1 em 1 e, ao subir, o bitmap tem no
+máximo `CPUS + 1` índices (esvaziou) e a CPU da virada esvazia. A prova central é uma
+**simulação de TLB**: cada CPU guarda, por índice, o espaço que o carregou, esvazia quando
+`flush` manda, e o teste exige que **nenhuma CPU carregue um índice que guarda entrada de outro
+espaço**. Mais uma invariante: o índice carregado numa CPU que ainda roda o espaço é igual ao
+do valor atual dele. O mesmo roteiro com o `flush` ignorado **falha** (o teste prova que a
+simulação pega o erro), e a invariante também falha se o `reserved` de uma CPU ociosa se perde
+(mutação testada à mão).
 
 ## Mitigações de CPU
 
@@ -1107,8 +1193,8 @@ Sem crate novo (decisão do agente, [`AGENTS.md`](../../AGENTS.md)):
 
 | Peça | Onde |
 | --- | --- |
-| Árvore de regiões do VMAR, alocação com ASLR, bookkeeping de mapeamentos | `core/mm/src/vmar.rs` (módulo novo) |
-| Gerador de ASID/PCID | `core/mm/src/asid.rs` |
+| Árvore de regiões do VMAR, alocação com ASLR, bookkeeping de mapeamentos | `core/mm/src/vmar.rs` (**feito**, [seção](#a-árvore-de-regiões-coremmsrcvmarrs)) |
+| Gerador de ASID/PCID | `core/mm/src/asid.rs` (**feito**, [seção](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)) |
 | `UserRange` | `core/mm/src/user.rs` |
 | Entrada de syscall (`asm!`), `enter_user`, `usercopy`, área por CPU | `arch/<isa>/src/{syscall,user,usercopy,percpu}.rs`; a parte pura (a checagem do `SYSRET`, o valor do `STAR`, a decodificação do `EC` de SVC) em módulo próprio, testada no host |
 | `PageFlags.user` e as codificações | `core/hal/src/paging.rs`, `arch/*/src/{pte,descriptor}.rs` |
@@ -1360,6 +1446,8 @@ lista acima por não serem dos seis casos; cada uma diz o que a faria subir ao d
 | **Framebuffer e entrada** | Ficam na fase 5, onde o [SDD 08](08_roadmap.md#decisões-futuras-casos-do-agentsmd) já os lista. O desenho deixa o caminho (VMO físico com política de cache no `vmar_map`; teclado por canal) | A interface é caso 6 quando chegar; nada a decidir na fase 4 |
 | **Alvo de compilação dos programas** | Os mesmos alvos `*-unknown-none`, com `-C code-model=small` (x86_64) e `-C relocation-model=static`, linker script próprio e `--target-dir` separado ([SDD 05](05_build_e_execucao.md): sem nightly nem `build-std`). **Testado** com `rustc 1.100.0` nos dois alvos: compila e liga em `0x40_0000` ([o linker e o alvo](#o-que-muda-no-linker-e-no-alvo)). **Mudança de plano:** as quatro fontes de `rustflags` do Cargo são **exclusivas**, então o xtask passa a lista inteira por `CARGO_ENCODED_RUSTFLAGS` e as flags do `.cargo/config.toml` (o `pie` do kernel) não somam | O risco que sobra é `code-model` em programa maior (o teste mínimo não distingue `small` de `kernel`). Se um alvo JSON virar necessário, exige `build-std`: **volta ao dono** (ferramenta de build nova, caso 2) |
 | **`arch/<isa>-user`** | Crates de adaptador do lado do usuário (`asm!` de `syscall`/`svc`, de `_start`, de `xmm0`/`v0` do teste). Cabem nas regras 4 e 8 do guidelines 03 (adaptador, crate numa pasta existente) | — |
+| **Árvore de regiões em vetor ordenado, de capacidade fixa** | `core/mm/src/vmar.rs` ([seção](#a-árvore-de-regiões-coremmsrcvmarrs)): vetor ordenado em armazenamento do chamador, 32 bytes por região, guarda como marca da região, `unmap` que apara e parte, `Placement::Lowest` e `Random` | Registrada como [DEBT-0075](../tech-debt/0075-vmar-com-capacidade-fixa-de-regioes.md): se o primeiro processo real passar de umas centenas de regiões, o `memmove` de `reserve` e `unmap` (1,1 µs com 4 096) pede uma árvore; o desenho muda por trás da mesma API |
+| **ASID/PCID sem liberação individual** | `core/mm/src/asid.rs` ([seção](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)): o índice só volta no esgotamento; `flush_pending` por CPU no lugar da `generation_seen` | Se a 4e medir esgotamento frequente, o remédio é largura maior ou menos PCID por processo, não `release`. O lock em toda troca é a [DEBT-0076](../tech-debt/0076-asid-sem-caminho-rapido-sem-lock.md) |
 | **ABI no `hal`** | Módulo `abi` em `core/hal` (a "porta de entrada" do [SDD 02](02_arquitetura.md)): números, `Status`, direitos, mensagens, `USER_TOP`. Porta nova no `hal` é do agente | Um crate `core/abi` é a opção A' da decisão 7 |
 
 ### O diff dos guidelines

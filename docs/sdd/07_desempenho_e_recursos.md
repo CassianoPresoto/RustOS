@@ -352,6 +352,40 @@ o TCG sem número de hardware que o pague. Não entrou ([DEBT-0058](../tech-debt
 Número do x86_64 hoje, o mesmo antes e depois: 1 KiB 290 a 310 ns, 4 KiB 1,1 µs, par de
 4 KiB 2,0 µs.
 
+### Árvore de regiões e gerador de ASID (fase 4, medido no host)
+
+Comando: `cargo test --release -p rustos-mm bench_vmar -- --ignored --nocapture
+--test-threads=1` (`core/mm/src/bench_vmar.rs`; o filtro `bench` do comando da seção anterior
+também o roda). Máquina: Apple M5 (aarch64), rustc 1.100.0, `release` (LTO), melhor de 7 rodadas, mesma
+máquina do resto desta seção, com carga alheia (load average 5,5). **Medida de host, não de
+QEMU nem de metal.** N regiões de 1 página nas páginas pares, buracos de 1 página entre
+elas; `Vmar<Vec<Region>>`. ns por operação, cinco execuções do comando (a faixa é o mínimo
+e o máximo delas):
+
+| N | `find` | `check_fault` | `reserve` + `unmap` (par, no meio) | `allocate` + `unmap`, `Lowest` | idem, `Random` |
+| --- | --- | --- | --- | --- | --- |
+| 16 | 10 | 9 a 10 | 36 | 36 a 37 | 66 a 68 |
+| 256 | 16 | 16 | 120 a 124 | 442 a 450 | 905 a 1 002 |
+| 4 096 | 24 a 28 | 24 a 25 | 1 088 a 1 105 | 6 830 a 6 970 | 14 060 a 14 250 |
+
+- **Achar é logarítmico** (10 para 24 ns de 16 a 4 096 regiões) e é o caminho da falta de
+  página: a decisão inteira (`check_fault`) custa o mesmo que `find`.
+- **Reservar e soltar é linear** pelo deslocamento: o par custa 36 ns com 16 regiões e
+  1,1 µs com 4 096 (em média 64 KiB movidos duas vezes). O `init` terá dezenas de regiões
+  (inferência): ali o par fica na casa de dezenas de ns.
+- **`allocate` mede o pior caso**: nenhum buraco serve, então varre todos os N + 1 (a
+  região livre fica depois da última). Com buraco cedo, `Lowest` para no primeiro. `Random`
+  varre duas vezes (conta, depois localiza) e custa 2x.
+- **Memória:** 32 bytes por região (`size_of::<Region>() == 32`, verificado em tempo de
+  compilação): 512 B com N = 16, 8 KiB com 256, 128 KiB com 4 096. O `AsidAllocator` custa 672
+  bytes com PCID de 12 bits e 8 CPUs.
+- Uma compilação anterior do mesmo algoritmo mediu `allocate` em 2 217 ns (`Lowest`) e
+  4 888 ns (`Random`) com N = 4 096: a varredura é sensível ao que o compilador faz com
+  `lo()` e `hi()`. Não foi investigado; os números da tabela são os da versão que entrou.
+
+O `AsidAllocator` não tem medida de ciclos: o custo que importa é o da 4e (o `INVPCID`, o
+`tlbi` e o lock), que só vale sob KVM/HVF ou metal.
+
 ### Escalonador (fase 3, medido no host; o alvo está acima)
 
 Comando: `cargo test --release -p rustos-sched bench -- --ignored --nocapture
