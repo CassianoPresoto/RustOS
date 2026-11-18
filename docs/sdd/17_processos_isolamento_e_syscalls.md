@@ -1051,7 +1051,7 @@ o kernel escreve **uma** mensagem de `ProcessEvent` nela:
 | `pc`, `sp`, `addr` | — | do usuário |
 | `isa_code` | — | o `code` cru da ISA (vetor e erro; `ESR_EL1`) |
 
-Regras: **só endereço de usuário** na mensagem (o endereço do kernel não sai: [DEBT-0022](../tech-debt/0022-endereco-do-kernel-no-log-de-boot.md)); sem canal, o processo morre do mesmo
+Regras: **só endereço de usuário** na mensagem (o endereço do kernel não sai: o `Addr` e o `Scrubber` do [SDD 09](09_seguranca.md#endereços-do-kernel-no-log), pagos no #14); sem canal, o processo morre do mesmo
 jeito e o pai só vê `TERMINATED`. Na fase 4 o fim é sempre a morte: **não há retomada**
 de exceção. O Linux usa sinais síncronos (SIGSEGV, SIGBUS, SIGILL, SIGFPE) entregues à
 thread, com ação padrão `Core` (**verificado**, [signal(7)](https://man7.org/linux/man-pages/man7/signal.7.html)); a ABI nativa não os copia.
@@ -1205,7 +1205,7 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 | [DEBT-0057](../tech-debt/0057-tsc-entre-nucleos-sem-verificacao.md) TSC entre núcleos | Não paga; o contrato de `clock_get_monotonic` diz "monotônico por CPU" no x86_64 até lá |
 | [DEBT-0035](../tech-debt/0035-sve-sme-e-amx-sem-estado-por-tarefa.md) SVE, SME e AMX | O gatilho dispara, mas a fase **não liga** nada: o acesso trapeia e o processo morre. Reescrever o gatilho no PR da 4d |
 | [DEBT-0019](../tech-debt/0019-aleatorio-sem-fonte-de-hardware-fraco.md) Aleatório fraco | O ASLR é o primeiro consumidor de segurança: em CPU sem fonte de hardware o ASLR é fraco, e o boot o diz |
-| [DEBT-0022](../tech-debt/0022-endereco-do-kernel-no-log-de-boot.md) Endereço do kernel no log | Nenhum endereço do kernel sai no `ProcessEvent` nem no `debug_write` |
+| Dívida 0022, endereço do kernel no log (paga no #14) | O `ProcessEvent` e o `debug_write` seguem a mesma regra: nenhum endereço do kernel sai; o `Fault` leva só endereço de usuário |
 | [DEBT-0023](../tech-debt/0023-aarch64-sem-wxn.md) aarch64 sem `WXN` | O gatilho dispara (primeiro mapeamento de usuário). Ligar na 4a, junto com `PageFlags.user`, se o Arm ARM confirmar o efeito sobre EL0 |
 | [DEBT-0037](../tech-debt/0037-pilha-de-tarefa-sem-medida-de-pico.md) Pilha sem medida de pico | O gatilho dispara. A 4a mede o pico (syscall e falta de página) antes de fixar as 8 páginas |
 | [DEBT-0052](../tech-debt/0052-afinidade-so-no-spawn.md) Afinidade só no `spawn` | Não dispara: a ABI nativa não tem afinidade |
