@@ -173,6 +173,9 @@ precisa estar de pé para a linha `random bench:`).
    SDD 07; depois, 0 e 0 nos seis.
    - **É heurística que depende do código gerado**: imprime `FAILED` e o boot segue; o
      `make smoke` reprova pelo `FAILED`.
+   - **Roda com a IRQ mascarada.** A IRQ cai na pilha da tarefa e empilha o quadro abaixo
+     do `sp`, exatamente na faixa varrida: com ela ligada, a sonda dava `0 of 4` ao acaso
+     (smoke do x86_64 no CI, TCG lento) e um resíduo real podia sumir antes da leitura.
    - **Sonda de sensibilidade.** Uma segunda passada planta 4 estados falsos no quadro do
      primeiro callee e exige achá-los (`probe 4 of 4`). Sem ela, a varredura tinha uma zona
      cega nos cerca de 64 bytes logo abaixo do `sp` (o quadro da própria varredura caía

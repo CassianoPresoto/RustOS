@@ -265,8 +265,14 @@ fn report_random(source: random::Source) {
 /// Procura cópias da chave na pilha depois de semear e de um pedido (SDD 09). Heurística
 /// que depende do código gerado: só imprime, o `make smoke` reprova pelo `FAILED`.
 fn report_key_residue() {
+    use rustos_hal::Cpu;
+    // A IRQ empilha o quadro dela abaixo do `sp`, sobre o que a varredura lê: com ela
+    // ligada, a sonda falha e o resíduo some ao acaso (visto no smoke do CI, TCG lento).
+    let cpu = platform::cpu();
+    let were_enabled = cpu.save_and_disable_interrupts();
     let residue = random::stack_residue(false);
     let probe = random::stack_residue(true);
+    cpu.restore_interrupts(were_enabled);
     let sees = probe.states == random::PLANTED;
     let clean = residue == random::Residue::default();
     kprintln!(
