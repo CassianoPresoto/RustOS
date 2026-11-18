@@ -8,6 +8,7 @@ mod cargo;
 mod checks;
 mod font_preview;
 mod image;
+mod initramfs;
 mod leak;
 mod limine;
 mod manifest;
@@ -42,6 +43,8 @@ comandos:
   check-comments  política de comentários e referências a DEBT-NNNN
   check-docs      índices, frontmatter das dívidas e links de docs/
   check           os três check-*
+  initramfs       escreve target/initramfs/<arch>.cpio (newc) com os arquivos dados:
+                  `initramfs [--arch A] [--out caminho] [nome=]arquivo...`
   font-preview    gera target/font-preview.png com a grade da fonte (--scale N, 1 a 8)
 
   A = x86_64 | aarch64 | all  (padrão: x86_64)
@@ -72,6 +75,9 @@ fn run(args: &[String]) -> Result<(), String> {
     let root = workspace::root();
     if command == "font-preview" {
         return font_preview::run(&root, rest);
+    }
+    if command == "initramfs" {
+        return initramfs::run(&root, rest);
     }
     let options = parse_options(rest)?;
     match command.as_str() {
