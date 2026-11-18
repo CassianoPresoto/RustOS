@@ -10,6 +10,12 @@ publish.workspace = true
 [lib]
 bench = false
 
+[features]
+# O comando `bench`. O kernel só a liga com a sua `selftest`; sem ela o comando diz que não
+# está no build (SDD 05). Ligada por padrão para o `cargo test` do host cobrir o comando.
+default = ["bench"]
+bench = []
+
 [lints]
 workspace = true
 

@@ -7,7 +7,7 @@
 
 | Métrica | Como | Valor hoje (QEMU, 256 MiB) |
 | --- | --- | --- |
-| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 325 616 / 192 900 bytes · aarch64: 272 641 / 174 457 bytes (a otimização da troca e do acordar custou +7 704 / +2 472 e +5 164 / +2 368 sobre os 317 912 / 190 428 e 267 477 / 172 089 da `main` `5fe47b4`: o ponto de preempção de `unpark`, `TickScale`, a medida e o autoteste de acordar entre tarefas e o aquecimento do `bench`; o `.bss` ficou igual, as amostras vão para a pilha do acordador e a ordenação é por inserção). Antes dela: x86_64: 317 912 / 190 428 bytes · aarch64: 267 477 / 172 089 bytes (log sem endereço do kernel e pânico visível desde a entrada: +9 400 / +4 896 e +7 752 / +5 220 sobre a `main` `29882df`, mesmo comando: o filtro de endereço, a linha `kaslr:`, os vetores mínimos, a serial precoce e o `early::print`; sem `.bss` novo, porque as tabelas do `TTBR0_EL1` do aarch64 vivem na pilha do Limine). Antes: x86_64: 308 512 / 185 532 bytes · aarch64: 259 725 / 166 869 bytes (o SMP da fase 3 custou +47 024 / +26 512 e +38 148 / +25 088 sobre os 261 488 / 159 020 e 221 577 / 141 781 que seguem, sem ele: fila por CPU, migração, IPI, pânico, cache de frames e o `bench` de SMP; o `.bss` do SMP é de poucos KiB, porque a política de cada CPU vem do heap). Antes do SMP: x86_64: 261 488 / 159 020 bytes · aarch64: 221 577 / 141 781 bytes (sobre 250 448 / 155 388 e 213 693 / 138 573 da `main` `85ae25e`, mesmo comando: +11 040 / +3 632 e +7 884 / +3 208. É o zerar por `DC ZVA`, o autoteste de faixas e a linha `zero bench:`, mais o resíduo de chave (`Words`, o autoteste `key residue:` com a sonda e o `next_u64` do `random bench:`); boa parte é a formatação das duas linhas de medida). Antes, fase 3 com o EEVDF no kernel: +24 584 / +12 136 (x86_64) e +20 520 / +11 824 (aarch64) sobre o mesmo kernel com o rodízio; `.data` do `SCHED`, 3 968 bytes; o resto é a política, o `i128` do EEVDF e a medida da política no `bench`). Antes, a fase 3 só com o rodízio, tarefas, preempção, estado de SIMD, timer de um tiro e `ps` e `bench`: 211 096 / 135 356 e 182 421 / 120 201, medidos de novo no commit anterior (+26 763 / +13 856 e +29 440 / +16 956 sobre a fase 2, que a linha a seguir descreve). Antes, a fase 2 depois da revisão do PR 5: 184 093 / 121 404 e 153 101 / 103 129 (`.data.rel.ro` só leitura, caminhada única em `core/mm`, bit de livre no slab). Antes da revisão: 183 669 / 120 004 e 155 889 / 102 021. Antes: com buddy, heap e gerador, 166 544 / 106 095 e 136 292 / 88 364; antes do buddy, 133 304 / 88 735 e 105 448 / 71 508; na fase 0.5, 100 541 / 61 725 e 86 500 / 59 952. O PIE do KASLR custa 3 289 / 5 581 (x86_64) e 5 361 / 6 265 (aarch64), de 1,8% a 6,6% ([SDD 13](13_memoria_virtual.md)) |
+| Kernel carregado | `make size PROFILE=release` / `release-small` | **Hoje** (sobre a `main` `b495b0c`, que tinha 346 760 / 210 692 bytes no x86_64 e 292 633 / 189 501 no aarch64): x86_64: 346 448 / **183 556** bytes · aarch64: 292 309 / **166 665** bytes. A `release-small` deixou de levar o modo de teste (−12,9% e −12,1%, [abaixo](#imagem-enxuta-sem-o-modo-de-teste)); a `release` o leva (`selftest`). Antes disso: x86_64: 325 616 / 192 900 bytes · aarch64: 272 641 / 174 457 bytes (a otimização da troca e do acordar custou +7 704 / +2 472 e +5 164 / +2 368 sobre os 317 912 / 190 428 e 267 477 / 172 089 da `main` `5fe47b4`: o ponto de preempção de `unpark`, `TickScale`, a medida e o autoteste de acordar entre tarefas e o aquecimento do `bench`; o `.bss` ficou igual, as amostras vão para a pilha do acordador e a ordenação é por inserção). Antes dela: x86_64: 317 912 / 190 428 bytes · aarch64: 267 477 / 172 089 bytes (log sem endereço do kernel e pânico visível desde a entrada: +9 400 / +4 896 e +7 752 / +5 220 sobre a `main` `29882df`, mesmo comando: o filtro de endereço, a linha `kaslr:`, os vetores mínimos, a serial precoce e o `early::print`; sem `.bss` novo, porque as tabelas do `TTBR0_EL1` do aarch64 vivem na pilha do Limine). Antes: x86_64: 308 512 / 185 532 bytes · aarch64: 259 725 / 166 869 bytes (o SMP da fase 3 custou +47 024 / +26 512 e +38 148 / +25 088 sobre os 261 488 / 159 020 e 221 577 / 141 781 que seguem, sem ele: fila por CPU, migração, IPI, pânico, cache de frames e o `bench` de SMP; o `.bss` do SMP é de poucos KiB, porque a política de cada CPU vem do heap). Antes do SMP: x86_64: 261 488 / 159 020 bytes · aarch64: 221 577 / 141 781 bytes (sobre 250 448 / 155 388 e 213 693 / 138 573 da `main` `85ae25e`, mesmo comando: +11 040 / +3 632 e +7 884 / +3 208. É o zerar por `DC ZVA`, o autoteste de faixas e a linha `zero bench:`, mais o resíduo de chave (`Words`, o autoteste `key residue:` com a sonda e o `next_u64` do `random bench:`); boa parte é a formatação das duas linhas de medida). Antes, fase 3 com o EEVDF no kernel: +24 584 / +12 136 (x86_64) e +20 520 / +11 824 (aarch64) sobre o mesmo kernel com o rodízio; `.data` do `SCHED`, 3 968 bytes; o resto é a política, o `i128` do EEVDF e a medida da política no `bench`). Antes, a fase 3 só com o rodízio, tarefas, preempção, estado de SIMD, timer de um tiro e `ps` e `bench`: 211 096 / 135 356 e 182 421 / 120 201, medidos de novo no commit anterior (+26 763 / +13 856 e +29 440 / +16 956 sobre a fase 2, que a linha a seguir descreve). Antes, a fase 2 depois da revisão do PR 5: 184 093 / 121 404 e 153 101 / 103 129 (`.data.rel.ro` só leitura, caminhada única em `core/mm`, bit de livre no slab). Antes da revisão: 183 669 / 120 004 e 155 889 / 102 021. Antes: com buddy, heap e gerador, 166 544 / 106 095 e 136 292 / 88 364; antes do buddy, 133 304 / 88 735 e 105 448 / 71 508; na fase 0.5, 100 541 / 61 725 e 86 500 / 59 952. O PIE do KASLR custa 3 289 / 5 581 (x86_64) e 5 361 / 6 265 (aarch64), de 1,8% a 6,6% ([SDD 13](13_memoria_virtual.md)) |
 | Memória livre depois do boot (o "pronto quando" da fase 2) | `frames:` do boot (QEMU 256 MiB, `dev`) e `mem` | x86_64: 63 811 frames (249,3 MiB, 97,4% da RAM), antes 52 321 (204,4 MiB) · aarch64: 63 237 (247,0 MiB, 96,5%), antes 54 991 (214,8 MiB). Devolvido: 46 432 e 33 424 KiB |
 | Tabelas de página do kernel | `vm:` do boot | 60 a 64 KiB (x86_64) e 44 a 48 KiB (aarch64) com 2 MiB no mapa direto; 548 e 536 KiB só com 4 KiB. Varia com o deslocamento sorteado do mapa direto |
 | Grade do terminal | 8 bytes por célula (`size_of::<Cell>()`), em frames contíguos | x86_64 1280x800: 158x47 células, 59 408 bytes (15 frames) · aarch64 1024x768: 126x45, 45 360 bytes (12 frames) |
@@ -470,6 +470,46 @@ precisar de um descritor por frame, e a meta é ficar na faixa de 8–32 bytes. 
 custa 0,25 byte por frame, sem descritor: o descritor entra com a contagem de
 referências (fase 4), não com o buddy.
 
+### Imagem enxuta: sem o modo de teste
+
+Medido em 2026-11-18, `make size` e `llvm-nm --size-sort` (do componente `llvm-tools` do `rust-toolchain.toml`: o `cargo bloat` é crate externo), rustc 1.100.0, na `main` `b495b0c` (antes) e nesta mudança (depois). O modo de teste ([SDD 04](04_boot.md#modos-de-boot)) ia em toda imagem, inclusive na `release-small`, a de produção. Agora é a feature `selftest` ([SDD 05](05_build_e_execucao.md#perfis)): `dev` e `release` a levam, a `release-small` não. Cada linha abaixo é `carregado / arquivo` em bytes; **negrito** é o que o perfil monta por padrão.
+
+| ISA | Perfil | Antes | Depois, com `selftest` | Depois, sem `selftest` | Ganho do que o perfil monta (carregado) |
+| --- | --- | --- | --- | --- | --- |
+| x86_64 | `dev` | 381 498 / 5 428 968 | **381 562 / 5 464 600** | 322 494 / 4 741 640 | +64 (com a feature; sem ela, −59 004, −15,5%) |
+| x86_64 | `release` | 346 760 / 388 184 | **346 448 / 388 240** | 283 612 / 319 392 | −312 (sem ela, −63 148, −18,2%) |
+| x86_64 | `release-small` | 210 692 / 286 080 | 210 620 / 286 072 | **183 556 / 251 248** | **−27 136 (−12,9%)**; arquivo −34 832 (−12,2%) |
+| aarch64 | `dev` | 311 821 / 5 257 616 | **310 333 / 5 299 208** | 265 861 / 4 604 416 | −1 488 (sem ela, −45 960, −14,7%) |
+| aarch64 | `release` | 292 633 / 363 152 | **292 309 / 359 104** | 240 641 / 300 864 | −324 (sem ela, −51 992, −17,8%) |
+| aarch64 | `release-small` | 189 501 / 320 024 | 189 489 / 319 968 | **166 665 / 279 368** | **−22 836 (−12,1%)**; arquivo −40 656 (−12,7%) |
+
+A imagem de produção cai de 205,7 para 179,2 KiB (x86_64) e de 185,0 para 162,7 KiB (aarch64). Ligar a feature não custa nada: a `release-small` com `selftest` tem 210 620 e 189 489 bytes, dentro de 100 bytes da `main`. O `.bss` cai 248 bytes (x86_64) e 200 (aarch64), das estáticas das medidas. O boot normal não muda: 25 ms no x86_64 (TCG) e 2 ms no aarch64 (HVF), antes e depois, porque o modo normal já não rodava o que saiu.
+
+**O que saiu, em duas etapas** (`release-small`, x86_64 / aarch64): o código do kernel, 187 620 / 170 221 bytes carregados (−23 072 / −19 280); depois o comando `bench` do `core/shell`, atrás da feature `bench` do crate (−4 536 / −3 692), para 183 084 / 166 529. Depois, ao mover o código de teste de `task` e `frames` para submódulos e deixar `FpuSummary`, `boot_time::Summary` e `VmStats` sempre completos (menos `cfg` espalhado), a imagem enxuta ficou 472 / 136 bytes maior: 183 556 / 166 665. Os números do `nm` abaixo são da etapa anterior. O `nm` do que só existe com a feature soma 20 246 (x86_64) e 17 669 bytes (aarch64) em símbolos próprios, e o resto da diferença está no que o compilador tinha embutido em funções que ficam (`boot_kernel` encolhe 4 884 / 3 752 bytes, `report_boot_time` 592 / 196) e em `.rodata` (−3 800 / −3 416 bytes, cadeias de formatação das linhas de medida). Os maiores, no x86_64 `release-small`:
+
+| Símbolo | Bytes | O que é |
+| --- | --- | --- |
+| `selftest::before_tasks` | 2 951 | heap, resíduo de chave, timer, `random bench:` e `zero bench:`, com o que o compilador embutiu |
+| `bench::run` | 2 517 | as medidas de tarefa: troca, IPI, escala, tempestade, jitter |
+| `shell::bench::run` | 2 436 | o comando `bench` do shell |
+| `Rng::fill_bytes` | 1 120 | o gerador em bloco; só existe como símbolo na imagem com a feature |
+| `heap::selftest::zero_benchmark` | 863 | a medida de zerar |
+| `bench::storm_ns` | 712 | a tempestade de alocação |
+| `random::selftest::stack_residue` | 668 | a varredura de resíduo de chave |
+
+**Fica de propósito**: o autoteste de frame, o `w^x:` e o de exceção ([SDD 04](04_boot.md#modos-de-boot)), e a pintura das pilhas que o `ps` mostra. **Não foi medido**: o que o `lto = "fat"` ainda guarda do modo de teste em funções compartilhadas (por exemplo `Frames::allocate`, que ficou 132 bytes menor sem a feature), nem a diferença em hardware real.
+
+**Memória no boot normal, com e sem a feature** (`release-small`, `-smp 4`, `make smoke-fast` e `mem`, 3 boots cada; os frames são exatos, de uma linha `frames:` temporária no `report` que não está no kernel, porque o modo normal não a imprime):
+
+| ISA | Imagem | `kernel` do `mem` | `reclaimed:` | Frames livres | Usável | `mem`: livre / em uso |
+| --- | --- | --- | --- | --- | --- | --- |
+| x86_64 (TCG) | com `selftest` | 216,0 KiB | 43 716 a 43 720 KiB | 63 646 a 63 647 | 255 444 KiB | 248,5 MiB / 888 KiB |
+| x86_64 (TCG) | sem | 192,0 KiB | 43 680 a 43 684 KiB | 63 652 | 255 468 KiB | 248,6 MiB / 888 a 896 KiB |
+| aarch64 (HVF) | com `selftest` | 196,0 KiB | 30 588 KiB | 63 198 | 253 160 KiB | 246,8 MiB / 400 KiB |
+| aarch64 (HVF) | sem | 172,0 KiB | 30 548 a 30 552 KiB | 63 202 a 63 203 | 253 184 KiB | 246,8 MiB / 404 KiB |
+
+(Os frames exatos são da etapa anterior à mudança de `cfg` acima; o `kernel` do x86_64 sem a feature subiu de 188 para 192 KiB por arredondamento de segmento, e a memória livre do `mem` seguiu em 248,6 MiB.) A região da imagem encolhe 24 a 28 KiB, mas a memória livre cresce só de 5 frames (20 KiB) no x86_64 e de 4 a 5 (16 a 20 KiB) no aarch64: 0,008% dos 256 MiB, abaixo da resolução do `mem` (0,1 MiB). O ganho é do tamanho da imagem, que é o que pesa em hardware pequeno (disco, flash, carga), não da memória ociosa.
+
 ### Linha de base de memória ociosa (Linux de distro com raiz mínima)
 
 Passo 1 do método do [SDD 08](08_roadmap.md#memória-ociosa-o-alvo-vem-de-uma-medida),
@@ -492,8 +532,8 @@ uma raiz mínima, não um kernel enxuto: o `tinyconfig` não foi medido (próxim
 - **Mesmas flags do RustOS** (`xtask/src/arch.rs`, `qemu_machine_args`), QEMU 11.1.3, host
   Apple M5 com macOS 26.4: `-machine q35 -cpu max -m 256M -accel tcg` (x86_64) e
   `-machine virt,gic-version=3 -cpu max -m 256M -accel hvf` (aarch64, com `-boot menu=on,splash-time=0`), `-nic none`,
-  `-no-reboot`, `-display none -serial stdio -monitor none`, mais `-smp N`. O RustOS não passa
-  `-smp` hoje (1 CPU); mediu-se com 1 e com 4.
+  `-no-reboot`, `-display none -serial stdio -monitor none`, mais `-smp N`. O RustOS sobe com
+  `-smp 4` (o padrão do `make`; `RUSTOS_SMP=N` troca, [SDD 05](05_build_e_execucao.md)); o Linux foi medido com 1 e com 4, e o RustOS com 4 (a medida atual) e com 1.
 - **Pelo EDK2, como o RustOS:** `-bios edk2-aarch64-code.fd -boot menu=on,splash-time=0` (aarch64) e `-drive
   if=pflash,format=raw,readonly=on,file=edk2-x86_64-code.fd` (x86_64), com `-kernel` e `-initrd`:
   o EDK2 carrega o Linux pelo stub EFI. O disco FAT e o `ramfb` do RustOS ficaram de fora:
@@ -550,31 +590,44 @@ EDK2 e 53 500 direto) e nos 8 996 KiB do RustOS.
 | aarch64 (HVF) | 1 | 173,3 / 175,2 / 173,3 | 173,3 | 82,7 |
 | aarch64 (HVF) | 4 | 167,7 / 166,9 / 168,4 | 167,7 | 88,3 |
 
-**RustOS** (`main` em `24be32a`, `release`, 1 CPU, `make smoke` e `make screenshot ... CMDS="mem"`):
+**RustOS** (`perf/lean-image` sobre a `main` `b495b0c`, `release-small` **sem a feature `selftest`** (a imagem de produção, [acima](#imagem-enxuta-sem-o-modo-de-teste)), `-smp 4` (o padrão do `make`), pilhas de 16 KiB, 2026-11-18; `make smoke-fast` para o `reclaimed:` e `make screenshot ... CMDS="mem"` para o `mem`, 3 boots cada, QEMU 11.1.3, o mesmo host). O modo normal não imprime `memory:` nem `frames:`: o disponível sai do `mem`.
 
-| ISA | `memory:` | `reclaimed:` | `frames:` | `mem`: livre | Disponível (livre + cache devolvível) | Usado: 256 − disponível |
-| --- | --- | --- | --- | --- | --- | --- |
-| x86_64 (TCG) | 255 520 KiB usable | 43 332 KiB | 63 809 livres de 65 268 | 249,1 MiB (usado 380 KiB, reservado 2,0 MiB) | **249,1 MiB** | **6,9 MiB** |
-| aarch64 (HVF) | 253 148 KiB usable | 30 316 KiB | 63 231 livres de 65 536 | 246,9 MiB (usado 320 KiB, reservado 12 KiB) | **246,9 MiB** | **9,1 MiB** |
+| ISA | `-smp` | `reclaimed:` (3 boots) | `mem`: livre (3 boots) | em uso (`mem`) | reservado (`mem`) | Disponível (livre + cache devolvível) | Usado: 256 − disponível |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| x86_64 (TCG) | 4 | 43 680 / 43 680 / 43 680 KiB | 248,6 / 248,6 / 248,6 MiB | 892 / 892 / 896 KiB | 2,1 MiB | **248,6 MiB** | **7,4 MiB** |
+| aarch64 (HVF) | 4 | 30 548 / 30 548 / 30 548 KiB | 246,8 / 246,8 / 246,8 MiB | 404 / 404 / 404 KiB | 12 KiB | **246,8 MiB** | **9,2 MiB** |
+| x86_64 (TCG) | 1 | 1 boot | 248,9 MiB | 692 KiB | 2,0 MiB | 248,9 MiB | 7,1 MiB |
+| aarch64 (HVF) | 1 | 1 boot | 246,9 MiB | 296 KiB | 12 KiB | 246,9 MiB | 9,1 MiB |
 
 O cache de página do RustOS não existe ainda, então o disponível é o livre do buddy. Dos
-6,9 e 9,1 MiB "usados", só 0,4 e 0,3 MiB são memória em uso dentro do mapa usável; o resto
-(6,5 e 8,8 MiB) é o que o firmware e o bootloader não entregam como RAM. O mesmo buraco existe do lado
-do Linux (ver acima), e a imagem do kernel do RustOS está nesse resto, não nos 0,4 MiB "em uso".
+7,4 e 9,2 MiB "usados", só 0,9 e 0,4 MiB são memória em uso dentro do mapa usável; o resto
+(6,5 e 8,8 MiB) é o que o firmware e o bootloader não entregam como RAM, como antes. O mesmo buraco existe do lado
+do Linux (ver acima), e a imagem do kernel do RustOS está nesse resto, não nos 0,9 e 0,4 MiB "em uso". Contra a medida anterior (`main` `24be32a`, 1 CPU, `release`: 6,9 e 9,1 MiB, em uso 380 e 320 KiB), com a mesma 1 CPU: **x86_64 +0,2 MiB** (em uso 380 para 692 KiB, dos quais cerca de 316 KiB são o histórico de rolagem de 256 linhas, 158 colunas × 8 bytes, que veio depois, [SDD 16](16_terminal.md)) e **aarch64 0,0** (em uso 320 para 296 KiB; o aarch64 da `virt` não aloca histórico). Os núcleos a mais custam 200 KiB (x86_64: 692 para 892 KiB) e 108 KiB (aarch64: 296 para 404 KiB) para 3 CPUs, 67 e 36 KiB por CPU, com a pilha de 16 KiB, as pilhas de exceção e a política no heap ([SDD 15](15_tarefas_e_preempcao.md#custo-por-tarefa-e-por-cpu)); não os decompus por item.
+
+**Razão contra o Linux de distro com raiz mínima, com o mesmo `-smp`** (as mesmas ressalvas da seção; Linux: mediana do `MemAvailable`, 3 boots, tabela acima):
+
+| ISA | `-smp` | Linux mínimo: usado | RustOS (sem `selftest`): usado | RustOS / Linux | Linux gasta |
+| --- | --- | --- | --- | --- | --- |
+| x86_64 | 4 | 70,9 MiB | 7,4 MiB | **10,4%** | 9,6x |
+| aarch64 | 4 | 70,0 MiB | 9,2 MiB | **13,1%** | 7,6x |
+| x86_64 | 1 | 72,2 MiB | 7,1 MiB | 9,8% | 10,2x |
+| aarch64 | 1 | 61,7 MiB | 9,1 MiB | 14,7% | 6,8x |
+
+Antes (`24be32a`, RustOS com 1 CPU contra o Linux com 1): 9,6% no x86_64 (6,9 contra 72,2) e 14,7% no aarch64 (9,1 contra 61,7). Com 4 CPUs dos dois lados a razão sobe no x86_64 (10,4%) e cai no aarch64 (13,1%): o Linux gasta 5 a 8 MiB a mais com 4 CPUs no aarch64 (`Slab`, pilhas, dados por CPU) e nada no x86_64, e o RustOS gasta 0,3 (x86_64) e 0,1 MiB (aarch64) a mais. As ressalvas são as da seção: o Linux é a raiz mínima, e o `MemAvailable` já desconta de 2,5 a 3 MiB que o RustOS não desconta.
 
 **O que cada lado tem**
 
 - **Linux:** kernel `virt` de distro (a linha `Memory:` do `dmesg` soma code, rwdata, rodata, `init` e
   `bss`: 30 MiB no x86_64 e 34 no aarch64; o `init`, de 2 a 3 MiB, é liberado depois), `struct page` por frame, caches do slab (7 a 12 MiB), um BusyBox e a raiz em `tmpfs`.
   Sem módulos carregados, sem rede (`-nic none`), sem disco montado.
-- **RustOS:** kernel carregado de 230,7 KiB (x86_64) e 198,9 KiB (aarch64) (`make size PROFILE=release`: 236 320 e 203 729 bytes), shell embutido no kernel, console na
+- **RustOS:** kernel carregado de 179,2 KiB (x86_64) e 162,7 KiB (aarch64) (`make size PROFILE=release-small`, sem `selftest`: 183 556 e 166 665 bytes; o `mem` mostra 192 e 172 KiB na linha `kernel`, com o arredondamento por segmento), shell embutido no kernel, console na
   tela e na serial, buddy, heap, escalonador, tarefas. Sem espaço de usuário, sem cache de
   página, sem drivers de disco ou de rede.
 
 **O que a diferença não prova**
 
-- Que o RustOS final vai gastar de 10 a 15% do que a base gasta (hoje 6,9 contra 72,2 MiB no x86_64 e 9,1
-  contra 61,7 no aarch64). Hoje ele não tem nada que custe memória por processo, por arquivo ou por
+- Que o RustOS final vai gastar de 10 a 15% do que a base gasta (hoje, com `-smp 4` dos dois lados, 7,4 contra 70,9 MiB no x86_64 e 9,2
+  contra 70,0 no aarch64). Hoje ele não tem nada que custe memória por processo, por arquivo ou por
   dispositivo; o Linux também não tem na base, mas paga o custo fixo do kernel de distro inteiro.
 - **Que o RustOS ganha de um Linux enxuto.** A base é um kernel de distro; contra um `tinyconfig` o
   Linux gastaria menos e a razão do RustOS subiria. Por isso o alvo "≤ metade" é uma barra frouxa.
@@ -593,7 +646,7 @@ Metade da base deixa de folga de 29 MiB (x86_64) e 22 MiB (aarch64) sobre o que 
 hoje, para espaço de usuário, cache e drivers. Se a fase 5 estourar isso, a hipótese está
 errada e muda com o número na mão, pelo caminho de Decisões. Ao confirmar: repetir a base com o `-smp`
 que o RustOS tiver e com a mesma ferramenta, porque no aarch64 o Linux gasta de 5 a 8 MiB a mais com 4 CPUs
-(`Slab`, pilhas e dados por CPU); no x86_64 não houve aumento.
+(`Slab`, pilhas e dados por CPU); no x86_64 não houve aumento. O alvo acima foi escrito com a base de `-smp 1` (36 e 30,8 MiB); com a base de `-smp 4`, que é o que o RustOS roda hoje, a metade seria 35,5 (x86_64) e 35,0 MiB (aarch64). **Não mudei o alvo**: trocar a base dele é decisão do dono.
 
 **Próximo passo:** medir um Linux enxuto (`tinyconfig` mais BusyBox e init) nas mesmas condições, para a
 base deixar de ser a de uma distro; se ele ficar bem abaixo, o alvo acima aperta.

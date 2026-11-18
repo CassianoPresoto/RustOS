@@ -10,6 +10,7 @@ extern crate alloc;
 compile_error!("o kernel só compila para alvos bare-metal: use `cargo xtask build`");
 
 mod addr;
+#[cfg(feature = "selftest")]
 mod bench;
 mod boot;
 mod boot_time;
@@ -26,6 +27,11 @@ mod percpu;
 mod platform;
 mod random;
 mod screen;
+#[cfg(feature = "selftest")]
+mod selftest;
+#[cfg(not(feature = "selftest"))]
+#[path = "selftest_off.rs"]
+mod selftest;
 mod smp;
 mod stack;
 mod sync;
@@ -34,12 +40,10 @@ mod task;
 mod vm;
 
 use alloc::boxed::Box;
-use alloc::format;
-use alloc::string::String;
 
 use rustos_boot_limine::LimineBoot;
+use rustos_hal::BootInfo;
 use rustos_hal::redact;
-use rustos_hal::{BootInfo, PAGE_SIZE};
 use rustos_shell::DisplayInfo;
 
 use crate::boot::BootRecord;
@@ -57,7 +61,7 @@ struct Handoff {
     memory: memory::Memory,
     vm: vm::Vm,
     entry_cycles: u64,
-    /// `rustos.selftest=1`: autotestes e benchmarks completos no boot (SDD 04).
+    /// `rustos.selftest=1`: autotestes e benchmarks completos no boot (SDD 04); a imagem enxuta o recusa.
     selftest: bool,
 }
 
@@ -181,12 +185,13 @@ fn boot_kernel(handoff: Handoff) -> ! {
     };
     boot_time::enter(boot_time::Phase::Setup);
     let source = random::init(&boot_marks(&boot, &memory, entry_cycles));
-    report(&boot, &memory, display, reclaimed, selftest);
+    report(&boot, reclaimed);
+    let selftest = selftest::enabled(selftest);
     if selftest {
-        report_vm(&vm);
+        selftest::details(&boot, &memory, display, &vm, source);
     }
     let cpus_ok = cpus.is_none_or(report_cpus);
-    report_random(source, selftest);
+    report_random(source);
     boot_time::enter(boot_time::Phase::SelfTests);
     // SAFETY: o mapa direto cobre todo frame utilizável, de onde vem o frame do teste.
     let frames_ok = unsafe { memory.self_test(boot.direct_map_offset()) };
@@ -196,7 +201,7 @@ fn boot_kernel(handoff: Handoff) -> ! {
     );
     let wx_ok = report_wx(&vm);
     let exception_ok = interrupts_on && system::exception_self_test();
-    let full_ok = !selftest || report_full_self_tests();
+    let full_ok = !selftest || selftest::before_tasks();
     let tasks_ok = exception_ok && full_ok && report_tasks(&boot, &memory, selftest);
     if !frames_ok || !wx_ok || !tasks_ok || !cpus_ok {
         rustos_hal::Cpu::halt_forever(&platform::cpu());
@@ -207,37 +212,12 @@ fn boot_kernel(handoff: Handoff) -> ! {
     system::run_shell(&mut system)
 }
 
-/// O que só o modo de teste roda antes das tarefas: heap, resíduo de chave, o timer contra o
-/// relógio e as medidas de zerar e do gerador. Devolve `false` se algum autoteste falhou.
-fn report_full_self_tests() -> bool {
-    report_key_residue();
-    let heap_ok = heap::self_test();
-    kprintln!(
-        "[rustos] heap self-test: {}",
-        if heap_ok { "ok" } else { "FAILED" }
-    );
-    let timer_ok = system::timer_self_test();
-    boot_time::enter(boot_time::Phase::Benches);
-    report_random_bench();
-    report_zero_bench();
-    boot_time::enter(boot_time::Phase::SelfTests);
-    heap_ok && timer_ok
-}
-
 /// As linhas de tempo do boot, as últimas antes do prompt.
 fn report_boot_time(selftest: bool) {
     let time = boot_time::finish();
     let ms = |us: u64| (us + 500) / 1000;
     if selftest {
-        let tsc = platform::clock_error_ppm()
-            .map_or_else(String::new, |ppm| format!(", tsc error at most {ppm} ppm"));
-        kprintln!(
-            "[rustos] boot phases: console {} us, interrupts {} us, reclaim {} us, setup {} us{tsc}",
-            time.console,
-            time.interrupts,
-            time.reclaim,
-            time.setup
-        );
+        selftest::boot_phases(&time);
     }
     kprintln!(
         "[rustos] boot time: kernel {} ms to prompt (memory {}, smp {}, self-tests {}, benches {})",
@@ -281,102 +261,8 @@ fn report_tasks(boot: &impl BootInfo, memory: &memory::Memory, selftest: bool) -
             return false;
         }
     };
-    if selftest {
-        kprintln!(
-            "[rustos] fpu: {}, {} bytes per task, {}",
-            summary.mode,
-            summary.bytes,
-            summary.components
-        );
-    }
     smp::release();
-    if !selftest {
-        return true;
-    }
-    boot_time::enter(boot_time::Phase::SelfTests);
-    kprintln!(
-        "[rustos] sched: fifo+eevdf per cpu, {} us base slice, {} tasks max, {} cpus, timer {}",
-        rustos_sched::eevdf::BASE_SLICE_NS / 1000,
-        task::MAX_TASKS - rustos_hal::MAX_CPUS,
-        task::active_cpus().count_ones(),
-        platform::timer_mode()
-    );
-    let (irqs, window_ms) = bench::idle_timer_irqs();
-    kprintln!("[rustos] idle: {irqs} timer irqs in {window_ms} ms (tickless)");
-    let preempted = bench::simd_self_test();
-    match preempted {
-        Some(count) => {
-            kprintln!("[rustos] task self-test: ok (simd state intact, {count} switches)");
-        }
-        None => kprintln!("[rustos] task self-test: FAILED"),
-    }
-    let smp_ok = if let Some((migrations, turns)) = bench::smp_self_test() {
-        kprintln!("[rustos] smp self-test: ok ({turns} turns, {migrations} migrations)");
-        true
-    } else {
-        kprintln!("[rustos] smp self-test: FAILED");
-        false
-    };
-    boot_time::enter(boot_time::Phase::Benches);
-    let measured = bench::run(bench::BOOT);
-    boot_time::enter(boot_time::Phase::SelfTests);
-    match measured {
-        Some(report) => {
-            kprintln!(
-                "[rustos] switch: {} ns ({} with simd, {} cross-core), ipi round trip {} ns, pick_next {} ns, tick {} ns, wake: mean {} ns, max {} ns, {} samples",
-                report.switch_ns,
-                report.switch_simd_ns,
-                report.switch_cross_ns,
-                report.ipi_rtt_ns,
-                report.pick_next_ns,
-                report.tick_ns,
-                report.wake_mean_ns,
-                report.wake_max_ns,
-                report.wake_samples
-            );
-            report_scale(&report);
-            report_storm(&report.storm);
-        }
-        None => kprintln!("[rustos] switch: not measured"),
-    }
-    let stacks_ok = task::log_stacks();
-    preempted.is_some() && smp_ok && stacks_ok
-}
-
-/// O tempo total das tarefas de CPU em 1, 2 e 4 núcleos, em microssegundos.
-fn report_scale(report: &rustos_shell::BenchReport) {
-    let mut line = fmt::Buffer::<128>::new();
-    for sample in report.scale.iter().filter(|sample| sample.total_ns > 0) {
-        core::fmt::Write::write_fmt(
-            &mut line,
-            format_args!(" {} cpu: {} us,", sample.cpus, sample.total_ns / 1000),
-        )
-        .ok();
-    }
-    if !line.as_str().is_empty() {
-        let tasks = report.scale[0].tasks;
-        kprintln!(
-            "[rustos] scale: {tasks} tasks,{}",
-            line.as_str().trim_end_matches(',')
-        );
-    }
-}
-
-/// A contenção da memória: frames pelo lock do buddy, com o cache por CPU, e o heap.
-fn report_storm(storm: &rustos_shell::StormSample) {
-    if storm.locked_ns > 0 {
-        kprintln!(
-            "[rustos] alloc storm: {} cpus x {}, frames locked {} us ({} contended), cached {} us ({}), heap {} us ({})",
-            storm.cpus,
-            storm.iterations,
-            storm.locked_ns / 1000,
-            storm.locked_contention,
-            storm.cached_ns / 1000,
-            storm.cached_contention,
-            storm.heap_ns / 1000,
-            storm.heap_contention
-        );
-    }
+    !selftest || selftest::after_tasks(summary)
 }
 
 /// O que o boot tem de impredizível: contadores de ciclo e os tempos do bootloader.
@@ -407,17 +293,6 @@ fn report_kaslr(virtual_base: u64) {
     }
 }
 
-fn report_vm(vm: &vm::Vm) {
-    let stats = vm.stats();
-    kprintln!(
-        "[rustos] vm: direct map in {} 2M and {} 4K pages, {} KiB of tables, stack {} KiB",
-        stats.large_pages,
-        stats.small_pages,
-        (stats.table_frames * PAGE_SIZE) >> 10,
-        (KERNEL_STACK_PAGES * PAGE_SIZE) >> 10
-    );
-}
-
 /// Percorre as tabelas novas: nenhuma página gravável e executável (guidelines 09).
 fn report_wx(vm: &vm::Vm) -> bool {
     let verdict = vm.check_wx();
@@ -431,66 +306,10 @@ fn report_wx(vm: &vm::Vm) -> bool {
     verdict.is_ok()
 }
 
-/// A fonte de entropia; no modo normal só o aviso de fonte fraca (DEBT-0019).
-fn report_random(source: random::Source, verbose: bool) {
-    match source {
-        random::Source::Hardware(name) if verbose => kprintln!("[rustos] random: {name}"),
-        random::Source::Hardware(_) => {}
-        random::Source::Jitter => kprintln!("[rustos] random: jitter (weak)"),
-    }
-}
-
-fn report_random_bench() {
-    if let Some(bench) = random::benchmark() {
-        kprintln!(
-            "[rustos] random bench: chacha20 {} MB/s, reseed {} us, next_u64 {}.{} ns",
-            bench.mb_per_s,
-            bench.reseed_ns / 1000,
-            bench.u64_tenths_ns / 10,
-            bench.u64_tenths_ns % 10
-        );
-    }
-}
-
-/// Procura cópias da chave na pilha depois de semear e de um pedido (SDD 09). Heurística
-/// que depende do código gerado: só imprime, o `make smoke` reprova pelo `FAILED`.
-fn report_key_residue() {
-    use rustos_hal::Cpu;
-    // A IRQ empilha o quadro dela abaixo do `sp`, sobre o que a varredura lê: com ela
-    // ligada, a sonda falha e o resíduo some ao acaso (visto no smoke do CI, TCG lento).
-    let cpu = platform::cpu();
-    let were_enabled = cpu.save_and_disable_interrupts();
-    let residue = random::stack_residue(false);
-    let probe = random::stack_residue(true);
-    cpu.restore_interrupts(were_enabled);
-    let sees = probe.states == random::PLANTED;
-    let clean = residue == random::Residue::default();
-    kprintln!(
-        "[rustos] key residue: {} chacha states, {} key copies on the stack, probe {} of {}: {}",
-        residue.states,
-        residue.keys,
-        probe.states,
-        random::PLANTED,
-        if clean && sees { "ok" } else { "FAILED" }
-    );
-}
-
-fn report_zero_bench() {
-    if let Some(bench) = heap::zero_benchmark() {
-        let tenths = |value: u64| (value / 10, value % 10);
-        let (kib, page) = (tenths(bench.kib), tenths(bench.page));
-        let (cold, pair) = (tenths(bench.cold_page), tenths(bench.pair));
-        kprintln!(
-            "[rustos] zero bench: 1 KiB {}.{} ns, 4 KiB {}.{} ns, 4 KiB over 1 MiB {}.{} ns, 4 KiB alloc+free {}.{} ns",
-            kib.0,
-            kib.1,
-            page.0,
-            page.1,
-            cold.0,
-            cold.1,
-            pair.0,
-            pair.1
-        );
+/// Só o aviso de fonte fraca (DEBT-0019); a fonte de hardware é do modo de teste.
+fn report_random(source: random::Source) {
+    if source == random::Source::Jitter {
+        kprintln!("[rustos] random: jitter (weak)");
     }
 }
 
@@ -506,23 +325,14 @@ fn display_info(screen: &screen::Screen) -> DisplayInfo {
     }
 }
 
-/// O que o boot conta. O modo normal só diz o que um gate confere ou o que avisa; o resto
-/// (`verbose`) é do modo de teste e do shell: cada linha custa tempo na serial (SDD 04).
-fn report(
-    boot: &impl BootInfo,
-    memory: &memory::Memory,
-    display: Option<DisplayInfo>,
-    reclaimed: u64,
-    verbose: bool,
-) {
+/// O que o boot conta. O modo normal só diz o que um gate confere ou o que avisa; o resto é do
+/// modo de teste (`selftest::details`) e do shell: cada linha custa tempo na serial (SDD 04).
+fn report(boot: &impl BootInfo, reclaimed: u64) {
     kprintln!(
         "[rustos] RustOS {} ({})",
         env!("CARGO_PKG_VERSION"),
         platform::ARCH
     );
-    if let Some(loader) = boot.bootloader().filter(|_| verbose) {
-        kprintln!("[rustos] bootloader: {} {}", loader.name, loader.version);
-    }
     if let Some(timeline) = boot.timeline() {
         kprintln!(
             "[rustos] boot timeline: firmware {} us, bootloader {} us",
@@ -539,22 +349,10 @@ fn report(
             image.physical_base.as_u64()
         );
     }
-    let summary = memory.summary;
-    if verbose {
-        kprintln!(
-            "[rustos] memory: {} KiB usable, {} KiB other, {} regions",
-            summary.usable_bytes >> 10,
-            summary.other_bytes >> 10,
-            summary.regions
-        );
-    }
     kprintln!(
         "[rustos] reclaimed: {} KiB from the bootloader",
         reclaimed >> 10
     );
-    if verbose {
-        report_frames_and_screen(memory, display);
-    }
     let mut line = fmt::Buffer::<128>::new();
     for protection in platform::protections() {
         let mark = if protection.enabled { '+' } else { '-' };
@@ -562,29 +360,5 @@ fn report(
     }
     if !line.as_str().is_empty() {
         kprintln!("[rustos] protections:{}", line.as_str());
-    }
-}
-
-fn report_frames_and_screen(memory: &memory::Memory, display: Option<DisplayInfo>) {
-    kprintln!(
-        "[rustos] frames: {} free of {} tracked, metadata {} bytes",
-        memory.frames.free_frames(),
-        memory.frames.total_frames(),
-        memory.metadata_bytes
-    );
-    match display {
-        Some(display) => {
-            let (alt, history) = console::screen_modes().unwrap_or_default();
-            kprintln!(
-                "[rustos] screen: {}x{}, grid {}x{}, alt {}, history {} lines",
-                display.width,
-                display.height,
-                display.cols,
-                display.rows,
-                if alt { "on" } else { "off" },
-                history
-            );
-        }
-        None => kprintln!("[rustos] screen: none"),
     }
 }

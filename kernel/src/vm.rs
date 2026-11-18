@@ -51,6 +51,10 @@ impl From<MapError> for VmError {
 }
 
 /// O que `Vm::build` montou, para o relatório do boot.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "lido só pelo modo de teste")
+)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VmStats {
     pub table_frames: u64,
@@ -79,6 +83,10 @@ pub struct Vm {
     image_phys: (u64, u64),
     /// Faixa virtual do mapa direto, `[início, fim)`.
     direct: (u64, u64),
+    #[cfg_attr(
+        not(feature = "selftest"),
+        allow(dead_code, reason = "lido só pelo modo de teste")
+    )]
     stats: VmStats,
 }
 
@@ -204,6 +212,10 @@ impl Vm {
         &mut self.space
     }
 
+    #[cfg_attr(
+        not(feature = "selftest"),
+        allow(dead_code, reason = "lido só pelo modo de teste")
+    )]
     pub fn stats(&self) -> VmStats {
         self.stats
     }

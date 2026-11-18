@@ -18,6 +18,9 @@ bench = false
 debug-addrs = []
 # Pontos de falha na linha de comando do Limine (`rustos.panic_early=N`), para o `make smoke-panic`.
 panic-tests = []
+# Modo de teste: autotestes e medidas do boot (`rustos.selftest=1`) e o `bench` do shell (SDD 05).
+# Fora da `release-small`: sem ela o kernel os recusa e a imagem não os carrega.
+selftest = ["rustos-shell/bench"]
 
 [dependencies]
 rustos-hal.workspace = true

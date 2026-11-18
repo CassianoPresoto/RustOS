@@ -11,13 +11,13 @@
 │   ├── build.rs                # escolhe o linker script da ISA alvo
 │   ├── linker/                 # x86_64.ld, aarch64.ld: metade alta, um segmento por permissão, símbolos de cada seção e PT_DYNAMIC (KASLR)
 │   └── src/
-│       ├── main.rs             # kmain: boot → memória → serial → tela → relatório → tarefas → boot ok → shell; modo normal ou de teste (`rustos.selftest=1`); `boot_time.rs`: o relógio por fase do boot
+│       ├── main.rs             # kmain: boot → memória → serial → tela → relatório → tarefas → boot ok → shell; modo normal ou de teste (`rustos.selftest=1`, só na imagem com a feature `selftest`); `boot_time.rs`: o relógio por fase do boot
 │       ├── boot.rs             # BootRecord: o que o Limine entregou, copiado para o heap (BootInfo)
 │       ├── vm.rs               # Vm: tabelas próprias, W^X por seção, mapa direto, conferência e fault text
 │       ├── memory.rs           # Memory::init: buddy e heap; janelas de dispositivos e de pilhas; map_stack; devolução da memória do bootloader
 │       ├── frames.rs           # alocador de frames global (IrqLock), o cache de frames por CPU na frente do buddy e o handle Frames
-│       ├── heap.rs             # GlobalAlloc sobre KernelHeap, DirectMap (FrameMemory) e o autoteste
-│       ├── random.rs           # gerador global: semente de hardware ou jitter, reposição
+│       ├── heap.rs             # GlobalAlloc sobre KernelHeap e DirectMap (FrameMemory); `heap/selftest.rs`: o autoteste e a medida de zerar (feature `selftest`)
+│       ├── random.rs           # gerador global: semente de hardware ou jitter, reposição; `random/selftest.rs`: a medida e o resíduo de chave (feature `selftest`)
 │       ├── addr.rs             # Addr (`kernel+0x…`) e o filtro de literais `0x…` do log; as regiões que ele nomeia (imagem, mapa direto, janelas); feature `debug-addrs`
 │       ├── early.rs            # vetores mínimos e serial sem lock para o pânico e a exceção antes do console (e com o lock preso); `panic-tests`: pontos de falha da linha de comando
 │       ├── console.rs          # console global e kprintln!: serial e tela
@@ -29,9 +29,10 @@
 │       ├── smp.rs              # núcleos secundários: solta pelo pedido MP, entrada na pilha do Limine, init por CPU, espera do escalonador
 │       ├── system.rs           # porta Host do shell (inclui `tasks` e `bench`) e o laço de entrada
 │       ├── task.rs             # tarefas do kernel: tabela, uma fila por CPU sobre o `Composite` de `core/sched`, spawn/yield/sleep/park/exit, migração, IPI de reescalonar e a preempção (SDD 15)
-│       ├── bench.rs            # autotestes de SIMD e de SMP; troca de contexto (mesma CPU e entre CPUs), IPI de ida e volta, escala, contenção da memória, jitter de acordar e latência de acordar entre tarefas (e o autoteste dela)
+│       ├── selftest.rs         # o modo de teste do boot: as linhas extras, os autotestes e as medidas (feature `selftest`); sem a feature, `selftest_off.rs` recusa o `rustos.selftest=1` e não faz mais nada
+│       ├── bench.rs            # (feature `selftest`) autotestes de SIMD e de SMP; troca de contexto (mesma CPU e entre CPUs), IPI de ida e volta, escala, contenção da memória, jitter de acordar e latência de acordar entre tarefas (e o autoteste dela)
 │       ├── fmt.rs              # texto formatado em buffer fixo
-│       ├── panic.rs            # pânico: o primeiro núcleo para os outros por IPI, toma o console e escreve; o dono refaz o relatório se panicar de novo
+│       ├── panic.rs            # pânico: o primeiro núcleo para os outros por IPI, toma o console e escreve; o dono refaz o relatório se panicar de novo; `fault cpu` e, com `panic-tests`, os outros `fault`
 │       └── platform/           # um módulo por ISA: ARCH, PlatformConsole, cpu(), console()
 ├── core/                       # o centro do hexágono: no_std, forbid(unsafe_code), testado no host
 │   ├── hal/                    # rustos-hal: as portas (traits), os tipos de fronteira e `redact` (endereço no log), `clock` (`TickScale`, ticks para ns) e `cmdline` (a linha de comando do kernel), puros
@@ -40,7 +41,7 @@
 │   ├── sched/                  # rustos-sched: trait Scheduler, TaskId, RunQueue; RoundRobin, Eevdf (treap de prazos), Fifo e Composite (teto de 95% para o tempo real); sim, property e bench só em teste (SDD 14; o kernel usa o `Composite`)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16
 │   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células, tela alternativa, histórico, DEC Special Graphics, tabulação; SDD 16), Cell, Key, Keyboard (layouts)
-│   └── shell/                  # rustos-shell: Shell (edição de linha, histórico, comandos) e a porta Host
+│   └── shell/                  # rustos-shell: Shell (edição de linha, histórico, comandos) e a porta Host; o comando `bench` (`bench.rs`) é da feature `bench`, que o `selftest` do kernel liga
 ├── lib/
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set, conta disputas, `force_unlock` para o pânico)
 ├── arch/                       # adaptadores de ISA: o único lugar com asm!

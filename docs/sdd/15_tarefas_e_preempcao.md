@@ -23,8 +23,8 @@ sobem, no [SDD 04](04_boot.md).
 | `task.rs` | `kernel/src/task.rs` | Tabela de tarefas, a fila por CPU (`Queue`), `spawn`, `yield_now`, `sleep_until`, `park`/`unpark`, `exit`, a troca, a migração, o IPI de reescalonar e a preempção |
 | `panic.rs` | `kernel/src/panic.rs` | O pânico de um núcleo para os outros por IPI e toma o console |
 | `interrupts.rs` | `kernel/src/interrupts.rs` | IRQ do timer: o que o escalonador pede (acordar, fim de fatia) e o rearme do disparo |
-| `bench.rs` | `kernel/src/bench.rs` | Autoteste de SIMD, latência de troca e jitter de acordar |
-| `ps`, `bench` | `core/shell`, porta `Host` (`tasks`, `bench`) | Os dois comandos do shell |
+| `bench.rs` | `kernel/src/bench.rs` | Autoteste de SIMD, latência de troca e jitter de acordar. **Só com a feature `selftest`** ([SDD 05](05_build_e_execucao.md#perfis)) |
+| `ps`, `bench` | `core/shell`, porta `Host` (`tasks`, `bench`) | Os dois comandos do shell; o `bench` é da feature `selftest` (sem ela responde `bench: not in this build`) |
 
 `hal` não ganhou porta de contexto: nenhum crate de `core/` troca de contexto, e quem
 a usa é só o `kernel/`, pelo `platform`. `core/sched` só decide.
@@ -99,7 +99,7 @@ foi repintar tudo a cada `spawn`.
 
 A pintura vale nos dois [modos de boot](04_boot.md#modos-de-boot) (são 5 pilhas no normal: a do boot, as 3 dos secundários com 4 CPUs e a ociosa). O pico aparece no `ps` (coluna `stack`, `3.4/16K`: pico e tamanho), nos dois modos, e, **só no modo de teste**, no boot, na linha
 `[rustos] stacks: idle peak X KiB of 16, task peak Y KiB of 16, shell peak Z KiB of 64, probe N of 3000 B ok`: o maior pico de cada tipo desde o boot,
-incluídas as tarefas já encerradas (`idle`: as de todas as CPUs; `shell`: a tarefa `init`, que corre na pilha de 64 KiB do boot). A linha (e o `stack_probe`, que faz `spawn`) é do modo de teste: o `smoke-fast` a proíbe. Ela é **gate** do `make smoke`: termina em
+incluídas as tarefas já encerradas (`idle`: as de todas as CPUs; `shell`: a tarefa `init`, que corre na pilha de 64 KiB do boot). A linha (e o `stack_probe`, que faz `spawn`) é do modo de teste: o `smoke-fast` a proíbe. Na imagem enxuta, que não tem a linha nem a sonda, o gate é o `ps` do `smoke-fast` (pico de cada tarefa abaixo de 75% da pilha da linha, [SDD 06](06_testes.md#andar-3c--modo-normal-make-smoke-fast)). Ela é **gate** do `make smoke`: termina em
 `FAILED` (que o `make smoke` recusa) se algum pico passa de 75% da pilha ou se a prova falha. A prova (`stack_probe`) é uma tarefa que escreve 3 000 bytes
 na pilha e encerra; o pico lido depois tem de ser pelo menos isso, como o `probe 4 of 4` do resíduo de chave. O `make smoke-panic` reprova o shell acima de 48 KiB no cenário do `ps`.
 

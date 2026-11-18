@@ -18,11 +18,15 @@ Os dois alvos são Tier 2 com `core` pré-compilado: não há `build-std` nem ni
 
 ## Perfis
 
-| Perfil | Para quê | Configuração |
-| --- | --- | --- |
-| `dev` | Desenvolvimento: asserts de debug ligados | `opt-level = 1` |
-| `release` | Medição de desempenho | `opt-level = 3`, `lto = "fat"`, `codegen-units = 1` |
-| `release-small` | Hardware pequeno | `release` com `opt-level = "z"` |
+| Perfil | Para quê | Configuração | Modo de teste (`selftest`) |
+| --- | --- | --- | --- |
+| `dev` | Desenvolvimento: asserts de debug ligados | `opt-level = 1` | sim |
+| `release` | Medição de desempenho e CI | `opt-level = 3`, `lto = "fat"`, `codegen-units = 1` | sim |
+| `release-small` | **A imagem de produção**, hardware pequeno | `release` com `opt-level = "z"` | **não** |
+
+**A feature `selftest` e a imagem enxuta.** O modo de teste ([SDD 04](04_boot.md#modos-de-boot)) é a feature `selftest` do kernel: com ela entram os autotestes e as medidas do boot (`heap`, resíduo de chave, `timer:`, `idle:`, `task`/`smp`/`wake self-test:`, `switch:`, `scale:`, `alloc storm:`, `zero bench:`, `random bench:`, `stacks:`) e o comando `bench` do shell (a feature `bench` do `core/shell`, que a `selftest` liga). Sem ela, `rustos.selftest=1` na linha de comando é recusado com `[rustos] selftest: not in this build`, o boot segue no modo normal, e `bench` responde `bench: not in this build`, como os `fault` sem `panic-tests`. O código não é compilado, então a imagem não o carrega (tamanhos em [SDD 07](07_desempenho_e_recursos.md#imagem-enxuta-sem-o-modo-de-teste)). **Quem decide é o perfil**: `selftest` fica ligada em `dev` e `release` (o `make smoke` e o CI usam a `release`) e desligada na `release-small`. `RUSTOS_SELFTEST=1|0` troca o padrão do perfil (`1` para medir a `release-small` com ela; `0` para a `release` sem ela). O `make smoke` liga a feature em qualquer perfil, porque sem ela o modo de teste não existe. **Fora do xtask a feature fica desligada**: `cargo build -p rustos-kernel` direto e o rust-analyzer compilam a imagem enxuta e não veem o código do modo de teste (nem o `bench` do shell). Para ligá-la, `--features selftest` no `cargo`, ou `rust-analyzer.cargo.features = ["rustos-kernel/selftest"]` (ou `"selftest"` com o kernel como pacote ativo) na configuração do editor.
+
+**Por que a `release-small` e não um perfil novo.** O perfil `release-small` já é "hardware pequeno", a imagem que se entrega; é nele que cada KiB conta. Um quarto perfil (`release-lean`) repetiria a configuração do `release` para só tirar o teste, e o `release` seguiria sendo uma imagem que ninguém entrega mas que carrega o teste; assim o CI mede com o `release` e entrega o `release-small`. Se o `release-small` um dia precisar do modo de teste em produção, a saída é `RUSTOS_SELFTEST=1`, não um perfil.
 
 ## Comandos
 
@@ -31,18 +35,18 @@ Os dois alvos são Tier 2 com `core` pré-compilado: não há `build-std` nem ni
 | `make build` | `build --arch A --profile P` | Compila `rustos-kernel` para o alvo da ISA |
 | `make image` | `image` | Monta `target/esp/<isa>/`: `EFI/BOOT/<loader>`, `EFI/BOOT/limine.conf`, `boot/rustos` |
 | `make run` | `run` | Sobe na QEMU: a tela numa janela, o shell e a serial no terminal (`-serial mon:stdio`); Ctrl-A X sai |
-| `make smoke` | `smoke` | Sobe sem tela **no modo de teste** (`rustos.selftest=1`, [SDD 04](04_boot.md#modos-de-boot)), lê a serial até `[rustos] boot ok`, pânico ou 120 s; imprime as linhas do kernel e o tempo de parede. Exige as linhas `protections:`, `w^x: ok`, `reclaimed:` e `kaslr: on`, `boot time:`, e a de cada autoteste e medida do modo de teste (`switch:`, `scale:`, `alloc storm:`, `zero bench:`, `random bench:`, `timer:`, `idle:`…), e reprova endereço do kernel no log |
-| `make smoke-fast` | `smoke-fast` | O mesmo no **modo normal**, o boot que o usuário vê: exige `boot ok`, `boot time:`, as linhas comuns e que as do modo de teste não apareçam; imprime o tempo do kernel até o prompt |
+| `make smoke` | `smoke` | Sobe sem tela **no modo de teste** (`rustos.selftest=1`, [SDD 04](04_boot.md#modos-de-boot)) numa imagem com a feature `selftest` (ligada à força, em qualquer perfil), lê a serial até `[rustos] boot ok`, pânico ou 120 s; imprime as linhas do kernel e o tempo de parede. Exige as linhas `protections:`, `w^x: ok`, `reclaimed:` e `kaslr: on`, `boot time:`, e a de cada autoteste e medida do modo de teste (`switch:`, `scale:`, `alloc storm:`, `zero bench:`, `random bench:`, `timer:`, `idle:`…), e reprova endereço do kernel no log |
+| `make smoke-fast` | `smoke-fast` | O mesmo no **modo normal**, o boot que o usuário vê: exige `boot ok`, `boot time:`, as linhas comuns e que as do modo de teste não apareçam; imprime o tempo do kernel até o prompt. **Na imagem sem a feature `selftest` (`PROFILE=release-small`) sobe também um segundo boot com `rustos.selftest=1`**, que tem de imprimir `selftest: not in this build`, subir normal e responder `bench: not in this build` no shell: é o que mantém a imagem enxuta testada, já que o `make smoke` não a cobre |
 | `make smoke-panic` | `smoke-panic` | Derruba o kernel de propósito (pânico na entrada, falha antes dos vetores, console preso, pânico aninhado) e confere a mensagem na serial, sem endereço do kernel ([SDD 06](06_testes.md)) |
-| `make screenshot CMDS="fetch;mem"` | `screenshot -- fetch mem` | Sobe sem janela, digita cada comando no shell pela serial e espera o prompt voltar (até 30 s: o `bench` leva alguns segundos), captura a tela pelo `screendump` do monitor da QEMU e grava `target/screenshots/<isa>.png`. Comando que começa com `keys:` vai pelo teclado da máquina (`sendkey`), em qcodes da QEMU: `keys: e c h o spc semicolon ret` |
+| `make screenshot CMDS="fetch;mem"` | `screenshot -- fetch mem` | Sobe sem janela, digita cada comando no shell pela serial e espera o prompt voltar (até 30 s: o `bench` leva alguns segundos), imprime o que o comando respondeu (é como se lê o `mem` num boot), captura a tela pelo `screendump` do monitor da QEMU e grava `target/screenshots/<isa>.png`. Comando que começa com `keys:` vai pelo teclado da máquina (`sendkey`), em qcodes da QEMU: `keys: e c h o spc semicolon ret` |
 | `make font-preview` | `font-preview` | Desenha todos os glifos da fonte própria em `target/font-preview.png` |
-| `make size` | `size` | Lê o ELF e soma `text`, `rodata`, `data`, `bss` |
-| `make check` | `check-layers`, `check-comments`, `check-docs` | Mais `cargo fmt --check` e `cargo clippy -D warnings` no host e nos dois alvos |
-| `make test` | — | `cargo test` dos membros padrão (todos menos o kernel) |
-| `make pr` | — | `check` + `test` + `smoke`, `smoke-fast` e `smoke-panic` nas duas ISAs, mais o aarch64 em TCG com `RUSTOS_CPU=a64fx` (bloco de `DC ZVA` de 256 bytes, [DEBT-0060](../tech-debt/0060-recuo-do-zerar-sem-cobertura-no-smoke.md)) |
+| `make size` | `size` | Lê o ELF e soma `text`, `rodata`, `data`, `bss`, do perfil como o `make build` o monta (com `selftest` ou sem) |
+| `make check` | `check-layers`, `check-comments`, `check-docs` | Mais `cargo fmt --check` e `cargo clippy -D warnings` no host e nos dois alvos, com e sem `selftest` e `debug-addrs,panic-tests` (as quatro combinações) |
+| `make test` | — | `cargo test` dos membros padrão (todos menos o kernel), e o `core/shell` sem a feature `bench` |
+| `make pr` | — | `check` + `test` + `smoke`, `smoke-fast` e `smoke-panic` nas duas ISAs, o `smoke-fast` e o `smoke-panic` da `release-small` (a imagem enxuta: o `smoke-fast` leva dois boots, cerca de 4 s no x86_64 em TCG e 0,4 s no aarch64 em HVF, fora a compilação; o `smoke-panic` leva cerca de 21 s e 8 s) nas duas, mais o aarch64 em TCG com `RUSTOS_CPU=a64fx` (bloco de `DC ZVA` de 256 bytes, [DEBT-0060](../tech-debt/0060-recuo-do-zerar-sem-cobertura-no-smoke.md)) |
 
 `A` é `x86_64` (padrão), `aarch64` ou `all`; `P` é `dev` (padrão), `release` ou
-`release-small`. No `make`: `ARCH=` e `PROFILE=`.
+`release-small` (sem o modo de teste). No `make`: `ARCH=` e `PROFILE=`.
 
 `cargo build` e `cargo test` sem `-p` rodam no host: o `default-members` deixa o
 kernel de fora, porque ele só compila para alvo bare-metal (`compile_error!` em
@@ -71,7 +75,7 @@ Sem rede de propósito: a placa padrão da `virt` (virtio-net) carrega a option 
 `efi-virtio.rom` do iPXE, que o Ubuntu só instala com o pacote `ipxe-qemu`, e a
 QEMU sai antes do boot sem ela. TCG é sempre a reserva (`-accel <nativo> -accel tcg`).
 
-**Features do kernel:** `RUSTOS_FEATURES=a,b` vira `--features a,b` em todo build do xtask. `debug-addrs` imprime endereço cru ([SDD 09](09_seguranca.md#endereços-do-kernel-no-log)); `panic-tests` liga a leitura de `rustos.panic_early` na linha de comando (a `rustos.selftest` é lida em todo build) e os testes `fault lock`, `fault nested`, `fault all` e `fault held` (o `smoke-panic` a põe sozinho); a imagem de produção não os tem. O `make clippy` roda também com `debug-addrs,panic-tests`.
+**Features do kernel:** `RUSTOS_FEATURES=a,b` vira `--features a,b` em todo build do xtask, mais `selftest` onde o perfil a leva (acima). `selftest`: o modo de teste e o `bench`; `debug-addrs` imprime endereço cru ([SDD 09](09_seguranca.md#endereços-do-kernel-no-log)); `panic-tests` liga a leitura de `rustos.panic_early` na linha de comando (a `rustos.selftest` é lida em todo build) e os testes `fault lock`, `fault nested`, `fault all` e `fault held` (o `smoke-panic` a põe sozinho); a imagem de produção não os tem. `fault break`, `fault page`, `fault text` e `fault cpu` **não** dependem de `panic-tests` nem de `selftest`: existem em toda imagem, inclusive na de produção. O `make clippy` roda as quatro combinações de `selftest` e `debug-addrs,panic-tests`, nos dois alvos.
 
 **Núcleos:** a QEMU sobe com `-smp 4`; `RUSTOS_SMP=N` troca o número (o kernel guarda estado para 8, `MAX_CPUS` de `core/hal`; o resto fica parado). O `make smoke` exige `[rustos] cpus: N online` com esse N. No TCG, neste QEMU 11.1.3 em Apple Silicon, os vCPUs do x86_64 rodam em threads do hospedeiro (observado: 10 threads e cerca de 280% de CPU durante o `bench`); `RUSTOS_ACCEL=tcg-multi` força `-accel tcg,thread=multi`.
 
@@ -110,4 +114,4 @@ e `SHA256` em `xtask/src/limine.rs` no mesmo PR.
 | Job | Roda |
 | --- | --- |
 | `check` | `make check` e `make test` |
-| `smoke (x86_64)`, `smoke (aarch64)` | `make smoke`, `make smoke-fast`, `make size` e `make screenshot CMDS="fetch;colors"` em `release`, com QEMU e EDK2 do Ubuntu; a tela fica como artefato `tela-<isa>` do run |
+| `smoke (x86_64)`, `smoke (aarch64)` | `make smoke`, `make smoke-fast`, `make smoke-panic`, `make size` e `make screenshot CMDS="fetch;colors"` em `release`, mais `make smoke-fast`, `make smoke-panic` e `make size` em `release-small` (a imagem enxuta), com QEMU e EDK2 do Ubuntu; a tela fica como artefato `tela-<isa>` do run |

@@ -30,8 +30,9 @@ comandos:
   image           monta a partição EFI (Limine + kernel) em target/esp/<arch>
   run             sobe no QEMU com a serial no terminal (Ctrl-A X sai)
   smoke           sobe no QEMU no modo de teste (`rustos.selftest=1`: autotestes e benchmarks),
-                  espera o marcador de boot e sai com o resultado
-  smoke-fast      o mesmo no modo normal, o boot que o usuário vê; confere o tempo de boot
+                  espera o marcador de boot e sai com o resultado; liga a feature `selftest`
+  smoke-fast      o mesmo no modo normal, o boot que o usuário vê; confere o tempo de boot e,
+                  na imagem sem a feature `selftest` (release-small), a recusa do modo de teste
   smoke-panic     derruba o kernel de propósito (pânico cedo, com o console preso, aninhado)
                   e confere a mensagem na serial; RUSTOS_FEATURES leva `panic-tests` sozinho
   screenshot      sobe sem janela, digita os comandos depois de `--` (um por argumento
@@ -85,7 +86,7 @@ fn run(args: &[String]) -> Result<(), String> {
             qemu::smoke(&root, arch, options.profile, qemu::BootMode::SelfTest)
         }),
         "smoke-fast" => each_arch(&options, |arch| {
-            qemu::smoke(&root, arch, options.profile, qemu::BootMode::Normal)
+            qemu::smoke_fast(&root, arch, options.profile)
         }),
         "smoke-panic" => each_arch(&options, |arch| {
             panic_smoke::run(&root, arch, options.profile)

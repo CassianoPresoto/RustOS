@@ -390,11 +390,13 @@ fn start_clocks(apic: &ApicAccess) -> Result<(), PlatformError> {
     clippy::unnecessary_wraps,
     reason = "mesma assinatura em todas as ISAs"
 )]
+#[cfg(feature = "selftest")]
 pub fn clock_error_ppm() -> Option<u64> {
     Some(CLOCK_ERROR_PPM.load(Ordering::Relaxed))
 }
 
 /// Como o timer dispara: `tsc-deadline` ou `one-shot` (contador do APIC).
+#[cfg(feature = "selftest")]
 pub fn timer_mode() -> &'static str {
     if TSC_DEADLINE.load(Ordering::Relaxed) {
         "tsc-deadline"
@@ -444,6 +446,7 @@ pub fn fpu_init_area(area: &mut [u8]) {
     xstate::init_area(area);
 }
 
+#[cfg(feature = "selftest")]
 pub use rustos_arch_x86_64::fpu::{read_probe as fpu_read_probe, write_probe as fpu_write_probe};
 
 /// Traduz o número da IRQ para a fonte que o núcleo entende.
