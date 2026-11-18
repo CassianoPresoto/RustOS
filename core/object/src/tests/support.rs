@@ -136,7 +136,10 @@ impl Object for TestObj {
     fn with_channel<R>(&self, f: impl FnOnce(&mut Channel<Self>) -> R) -> Option<R> {
         let end = self.end_ref()?;
         let mut channel = end.channel.lock().unwrap();
-        Some(f(&mut channel))
+        PEER_LOCK_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        let result = f(&mut channel);
+        PEER_LOCK_DEPTH.with(|depth| depth.set(depth.get() - 1));
+        Some(result)
     }
 
     fn on_zero_handles<W: Worklist<Self>>(&self, _work: &mut W) {
@@ -152,9 +155,10 @@ impl Object for TestObj {
 
     fn on_end_died(&self, _dead: Side) {
         if let Some(end) = self.end_ref() {
-            assert!(
-                end.channel.try_lock().is_ok(),
-                "gancho com o lock do par preso"
+            assert_eq!(
+                peer_lock_depth(),
+                0,
+                "gancho com o lock do par preso nesta thread"
             );
             end.peer_closed_calls.fetch_add(1, Ordering::Relaxed);
         }
@@ -188,6 +192,13 @@ pub fn table() -> Table {
 
 thread_local! {
     static LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static PEER_LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Quantas vezes esta thread tem o lock do par trancado agora. Por thread: `try_lock` também
+/// falha quando outra thread o segura, o que é legítimo.
+pub fn peer_lock_depth() -> usize {
+    PEER_LOCK_DEPTH.with(Cell::get)
 }
 
 /// Quantos `Locked` esta thread tem trancados agora.
