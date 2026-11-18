@@ -102,6 +102,7 @@ dependencies = [
  "rustos-gfx",
  "rustos-hal",
  "rustos-mm",
+ "rustos-object",
  "rustos-sched",
  "rustos-shell",
  "rustos-sync",
@@ -162,6 +163,13 @@ dependencies = [
 
 [[package]]
 name = "rustos-user-test-big"
+version = "0.1.0"
+dependencies = [
+ "rustos-user-rt",
+]
+
+[[package]]
+name = "rustos-user-test-handles"
 version = "0.1.0"
 dependencies = [
  "rustos-user-rt",

@@ -140,6 +140,12 @@ impl<T: Object> Channel<T> {
         }
     }
 
+    /// Troca o número do par. Só vale antes de qualquer escrita: o kernel cria o par por cópia de um
+    /// modelo vazio e dá o número depois (o par não cabe na pilha).
+    pub const fn assign_id(&mut self, id: usize) {
+        self.id = id;
+    }
+
     pub const fn id(&self) -> usize {
         self.id
     }

@@ -425,7 +425,12 @@ pub fn encode_boot_message(kinds: &[u32], out: &mut [u8]) -> Option<usize> {
     }
     let header = BootMessageHeader::new(u32::try_from(kinds.len()).ok()?);
     let words = [header.magic, header.version, header.count, header.reserved];
-    for (chunk, word) in out.chunks_exact_mut(4).zip(words.iter().chain(kinds)) {
+    for (chunk, word) in out
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(words.iter().chain(kinds))
+    {
         chunk.copy_from_slice(&word.to_le_bytes());
     }
     Some(len)
