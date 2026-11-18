@@ -39,7 +39,7 @@
 | Código de `core/crypto` | `.text` do crate sem LTO, com todas as funções públicas (`llvm-size`); no kernel, com LTO, só entra o que se usa | `release`: 8 202 (x86_64) e 7 866 (aarch64) bytes · `release-small`: 6 216 e 7 349 bytes |
 | Vazão de ChaCha20, BLAKE2b e do gerador | `cargo run --release -p rustos-crypto --example bench`, no host (Apple M5, `rustc` 1.100.0), melhor de 15 rodadas, sem SIMD (o compilador não vetorizou: o resultado com `-vectorize-loops=false -vectorize-slp=false` é o mesmo) | Ver tabela abaixo. **Números do host**; os do alvo estão abaixo |
 | Escalonador (`core/sched`) | `cargo test --release -p rustos-sched bench -- --ignored --nocapture --test-threads=1` (`core/sched/src/bench.rs`), no host | Host: `pick_next` do EEVDF em 41 a 136 ns com 8 a 512 tarefas; 96 bytes por tarefa ([SDD 14](14_escalonador.md)). No alvo (`bench`, 8 prontas): `pick_next` 34 a 35 ns e `tick` 2 ns no aarch64 HVF; 320 e 36 ns em TCG; 670 a 730 e 85 a 89 ns no x86_64 em TCG (tabela abaixo) |
-| Boot de parede | `make smoke-fast` (modo normal) e `make smoke` (modo de teste) | inclui firmware EDK2: 1,7 a 1,9 s (x86_64, TCG) e 0,17 s (aarch64, HVF; 0,6 s em TCG) no modo normal, dominado pelo firmware (no aarch64, antes da NVRAM com `Timeout = 0`, eram 5,2 s); a tabela de [Tempo de boot](#tempo-de-boot) separa firmware, Limine e kernel |
+| Boot de parede | `make smoke-fast` (modo normal) e `make smoke` (modo de teste) | inclui firmware EDK2: 1,7 a 1,9 s (x86_64, TCG) e 0,17 s (aarch64, HVF; 0,6 s em TCG) no modo normal, dominado pelo firmware (no aarch64, antes de `-boot menu=on,splash-time=0`, eram 5,2 s, [SDD 05](05_build_e_execucao.md#qemu-e-firmware)); a tabela de [Tempo de boot](#tempo-de-boot) separa firmware, Limine e kernel |
 | Tempo do kernel até o prompt | linha `boot time:` do boot (`make smoke-fast ARCH=all PROFILE=release`) | modo normal: 25 a 31 ms (x86_64, TCG) e 2 ms (aarch64, HVF); antes, com os autotestes e medidas no caminho: 964 e 453 ms ([Tempo de boot](#tempo-de-boot)) |
 
 ### Troca de contexto e jitter de acordar (fase 3)
@@ -491,10 +491,10 @@ uma raiz mínima, não um kernel enxuto: o `tinyconfig` não foi medido (próxim
   `mdev`. É o kernel de distro mais um `sh` ocioso, o mais próximo de "kernel + init mínimo".
 - **Mesmas flags do RustOS** (`xtask/src/arch.rs`, `qemu_machine_args`), QEMU 11.1.3, host
   Apple M5 com macOS 26.4: `-machine q35 -cpu max -m 256M -accel tcg` (x86_64) e
-  `-machine virt,gic-version=3 -cpu max -m 256M -accel hvf` (aarch64), `-nic none`,
+  `-machine virt,gic-version=3 -cpu max -m 256M -accel hvf` (aarch64, com `-boot menu=on,splash-time=0`), `-nic none`,
   `-no-reboot`, `-display none -serial stdio -monitor none`, mais `-smp N`. O RustOS não passa
   `-smp` hoje (1 CPU); mediu-se com 1 e com 4.
-- **Pelo EDK2, como o RustOS:** `-bios edk2-aarch64-code.fd` (aarch64) e `-drive
+- **Pelo EDK2, como o RustOS:** `-bios edk2-aarch64-code.fd -boot menu=on,splash-time=0` (aarch64) e `-drive
   if=pflash,format=raw,readonly=on,file=edk2-x86_64-code.fd` (x86_64), com `-kernel` e `-initrd`:
   o EDK2 carrega o Linux pelo stub EFI. O disco FAT e o `ramfb` do RustOS ficaram de fora:
   o Linux não os usa.
@@ -626,7 +626,7 @@ Medido em 2026-11-18, `release`, QEMU 11.1.3 no macOS 26.4 (Apple M5), 256 MiB, 
 - **RustOS, firmware e Limine:** a linha `boot timeline:` (pedido *bootloader performance* do Limine): do reset ao Limine e do Limine ao kernel.
 - **RustOS, de parede:** do `spawn` da QEMU ao `boot ok` na serial (`make smoke`), ou ao prompt do shell (`rustos ~ % `) no script de comparação.
 - **Linux:** Alpine 3.24.4, kernel `6.18.60-0-virt`, com a **raiz mínima** (só o `busybox`) do SDD 07 acima, `-append "console=… rdinit=/bin/sh"`. Kernel sozinho: o carimbo de tempo do `printk` em `Run /bin/sh as init process` (o relógio dele começa no `start_kernel`; o carregamento do `bzImage` e o *stub* EFI ficam de fora, como o Limine fica de fora do RustOS). De parede: do `spawn` da QEMU até o shell **responder** a um `echo` digitado na serial.
-- **Os dois pelo EDK2** (`pflash` no x86_64; no aarch64 o RustOS usa `pflash` e o Linux `-bios`), como o RustOS; o Linux entra pelo `-kernel`, que o EDK2 entrega pelo `fw_cfg`. Também sem firmware (`-kernel` direto, sem EDK2), para isolar o que o EDK2 custa.
+- **Os dois pelo EDK2** (`-bios` / `pflash`; no aarch64, os dois com `-boot menu=on,splash-time=0`), como o RustOS; o Linux entra pelo `-kernel`, que o EDK2 entrega pelo `fw_cfg`. Também sem firmware (`-kernel` direto, sem EDK2), para isolar o que o EDK2 custa.
 
 Os scripts de medida não estão no repositório (viram `xtask` quando a comparação passar a rodar no CI); o método acima os reproduz com o `time.monotonic()` do host em volta de cada leitura da serial.
 
@@ -645,7 +645,7 @@ Os scripts de medida não estão no repositório (viram `xtask` quando a compara
 | Medidas (`benches`) | 553 | 328 a 3 389 (depende do binário) | 0 | 110 | 116 | 0 |
 | **Kernel até o prompt** | **964** | **707 a 3 774** (mediana 2 965) | **30** (24 em silêncio) | **453** | **450** | **2** |
 | Parede até o `boot ok` | 2 700 | 4 857 | 1 915 | 5 650 | 5 619 | 5 169 |
-| Do qual firmware + Limine (`boot timeline:`) | 1 650 | 1 850 | 1 850 | 5 130 | 5 130 | 5 120 (**124** com a NVRAM; parede 172) |
+| Do qual firmware + Limine (`boot timeline:`) | 1 650 | 1 850 | 1 850 | 5 130 | 5 130 | 5 120 (**124** com a flag; parede 172) |
 
 As colunas "normal" têm `setup` e `console` derivados: o modo normal não imprime `boot phases:` (cada linha custa tempo, [SDD 04](04_boot.md#modos-de-boot)), e eles são o total menos o que a linha `boot time:` mostra.
 
@@ -688,11 +688,11 @@ Três boots, mediana. O RustOS está no modo normal; "antes do kernel" é o de p
 | x86_64 (TCG) | **RustOS**, pelo EDK2 e o Limine | **1,67 s** | 1,64 s (EDK2 1,34 s, Limine 0,25 s) | **24 ms** |
 | x86_64 (TCG) | Linux, pelo EDK2 (`-kernel`) | 3,71 s | 2,18 s (EDK2 e o *stub* EFI) | 1,54 s |
 | x86_64 (TCG) | Linux, sem firmware (`-kernel` direto) | 2,33 s | 0,94 s (QEMU, SeaBIOS e o `bzImage`) | 1,39 s |
-| aarch64 (HVF) | **RustOS**, pelo EDK2 e o Limine | **0,17 s** (5,24 s antes da NVRAM) | 0,17 s (EDK2 0,10 s, Limine 0,02 s) | **2 ms** |
-| aarch64 (HVF) | Linux, pelo EDK2 (`-kernel`) | 0,38 s | 0,31 s (EDK2 e o *stub* EFI) | 69 ms |
+| aarch64 (HVF) | **RustOS**, pelo EDK2 e o Limine | **0,17 s** (5,24 s sem a flag) | 0,17 s (EDK2 0,10 s, Limine 0,02 s) | **2 ms** |
+| aarch64 (HVF) | Linux, pelo EDK2 (`-kernel`) | 0,34 s | 0,27 s (EDK2 e o *stub* EFI) | 69 ms |
 | aarch64 (HVF) | Linux, sem firmware (`-kernel` direto) | 0,18 s | 0,11 s | 66 ms |
 
-**O EDK2 não pesava igual nos dois no aarch64, e a causa era o `Timeout` do gerenciador de boot**. Sem NVRAM o EDK2 espera 5 s antes de iniciar a primeira opção de boot, e só pula a espera no `-kernel` (0,3 s para o Linux). Medido antes da correção (HVF, `boot timeline:` de 5,1 s): em TCG os mesmos 5,1 a 5,7 s, então não é do HVF; sem disco, sem `ramfb` ou com NVRAM vazia em pflash, os mesmos 5,2 s (o shell UEFI sobe em 5,2 s); uma tecla na serial durante a espera não adianta; `-kernel BOOTAA64.EFI` pula a espera (0,24 s) mas o Limine, carregado pelo `fw_cfg`, não acha o disco, e não é o caminho de uma máquina real. Com uma NVRAM de variáveis com `Timeout = 0` ([SDD 05](05_build_e_execucao.md#qemu-e-firmware)) o `firmware` cai para 0,10 s (mediana de 5: 95 a 103 ms; TCG 0,47 s) e o Limine leva 0,02 s. Parede: 0,17 s (HVF, host com carga média de 9) contra 0,38 s do Linux pelo EDK2 e `-kernel` (medido antes, sem mudança); o RustOS agora ganha na parede, com a ressalva de que ainda não tem drivers nem espaço de usuário (abaixo). No x86_64 o caminho de disco do EDK2 (1,34 s) já era mais curto que o `-kernel` do Linux com o *stub* (2,18 s). O Linux não poderia ser entregue pelo Limine para igualar o caminho no aarch64: o `vmlinuz-virt` do Alpine é um PE EFI comprimido, não um `Image`.
+**O EDK2 não pesava igual nos dois no aarch64, e a causa era a espera de 5 s do gerenciador de boot** (`PcdPlatformBootTimeOut`; fontes e flag no [SDD 05](05_build_e_execucao.md#qemu-e-firmware)). A QEMU só a zera com `-boot menu=on,splash-time=0`, e o `-kernel` do Linux já a pulava (0,3 s). Medido antes (HVF, `firmware` de 5,1 s): os mesmos 5,1 a 5,7 s em TCG, então não é do HVF; sem disco, sem `ramfb`, ou com NVRAM vazia em pflash, os mesmos 5,2 s; uma tecla na serial durante a espera não adianta; `ramfb`, `bootindex`, `-boot menu=off`, tipo de FAT e disco só leitura não mudam. Com a flag o `firmware` cai para 0,10 s (mediana de 5: 96 a 103 ms; TCG 0,47 s) e o Limine leva 0,02 s. **Mesma configuração nos dois lados** (`-bios` e `-boot menu=on,splash-time=0`): o RustOS leva 0,17 s de parede (host com carga média de 9) e o Linux pelo EDK2 e `-kernel`, com a raiz mínima, 0,34 s (mediana de 6 boots; sem a flag 0,33 s: o `-kernel` não esperava). O RustOS passa a ganhar na parede, com a ressalva de que ainda não tem drivers nem espaço de usuário (abaixo). No x86_64 o caminho de disco do EDK2 (1,32 s) já era mais curto que o `-kernel` do Linux com o *stub* (2,18 s). O Linux não poderia ser entregue pelo Limine para igualar o caminho no aarch64: o `vmlinuz-virt` do Alpine é um PE EFI comprimido, não um `Image`.
 
 **Ressalvas, honestas:**
 

@@ -56,7 +56,7 @@ não há ISO nem `xorriso`.
 | | x86_64 | aarch64 |
 | --- | --- | --- |
 | Máquina | `-machine q35 -cpu max -m 256M` | `-machine virt,gic-version=3 -cpu max -m 256M` |
-| Firmware | EDK2 em `-drive if=pflash,readonly=on` | EDK2 em `-drive if=pflash,readonly=on` (64 MiB) e uma NVRAM em `-drive if=pflash,snapshot=on` |
+| Firmware | EDK2 em `-drive if=pflash,readonly=on` | EDK2 em `-bios`, com `-boot menu=on,splash-time=0` |
 | Disco | AHCI (padrão da q35) | `virtio-blk-pci` |
 | Tela | VGA padrão da q35 (GOP do OVMF) | `-device ramfb` (a `virt` não tem placa de vídeo) |
 | Rede | `-nic none` | `-nic none` |
@@ -80,14 +80,17 @@ QEMU sai antes do boot sem ela. TCG é sempre a reserva (`-accel <nativo> -accel
 tem HVF): `RUSTOS_ACCEL=tcg make smoke ARCH=aarch64`. Valor desconhecido é ignorado, com aviso. `RUSTOS_CPU=<modelo>` troca o `-cpu max` (por exemplo `RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx make smoke ARCH=aarch64`, que tem `DC ZVA` de 256 bytes). O `gic-version=3` é fixo porque, sem ele, a
 `virt` escolhe a versão pelo acelerador (TCG: v2; HVF com o vGIC da Apple: v3).
 
-**NVRAM do aarch64 (`xtask/src/nvram.rs`).** O EDK2 espera `Timeout` segundos (5, o padrão dele) no gerenciador de boot antes de iniciar a
-primeira opção, e só não espera quando o boot é por `-kernel`. Sem NVRAM (o `-bios` de antes) a variável não existe e a espera acontece
-sempre: 5,1 s do reset até o Limine, em HVF e em TCG, com ou sem disco, `ramfb` ou rede. O xtask grava em `target/firmware/aarch64-vars.fd`
-um armazém de variáveis com `Timeout` (UINT16, NV+BS+RT) igual a 0 e o passa em `if=pflash,snapshot=on`: o EDK2 escreve nele (`BootOrder`,
-`Boot0001`), a QEMU descarta ao sair, e todo boot parte do mesmo estado. O boot continua UEFI, com o Limine achado pelo caminho
-`EFI/BOOT/BOOTAA64.EFI` do disco, como numa máquina real com o `Timeout` ajustado. O código do EDK2 também vai em pflash, que exige 64 MiB: um
-`QEMU_EFI.fd` de 2 MiB (Debian/Ubuntu) é completado com zeros em `target/firmware/aarch64-code.fd`. O formato foi conferido contra o
-`edk2-arm-vars.fd` da QEMU ([DEBT-0073](../tech-debt/0073-nvram-do-edk2-do-aarch64-montada-no-xtask.md)).
+**Espera do EDK2 no aarch64 (`-boot menu=on,splash-time=0`).** O EDK2 do `ArmVirtQemu` espera 5 s no gerenciador de boot antes de iniciar a
+primeira opção (`PcdPlatformBootTimeOut|5` em `ArmVirtPkg/ArmVirtQemu.dsc`; o laço é o `BdsWait` de `BdsEntry.c`). O `PlatformBm.c` pergunta o
+tempo à QEMU por `GetFrontPageTimeoutFromQemu()` (`OvmfPkg/Library/QemuBootOrderLib/QemuBootOrderLib.c`), que lê `etc/boot-menu-wait` do
+fw_cfg e devolve `splash-time/1000`, arredondado para cima. Com `menu=off`, o padrão da QEMU, ele devolve o PCD (5 s). Medido (HVF): o
+`firmware` do `boot timeline:` vai de 5,1 s a 0,10 s e a parede do `smoke-fast` de 5,2 s a 0,17 s (TCG: 5,7 s a 0,6 s). O boot continua UEFI e
+Limine. O `-kernel` do Linux já pulava a espera. No x86_64 a flag não muda nada (OVMF: `firmware` 1,32 s com e sem ela), e ela só vai no
+aarch64. O `smoke-fast` do aarch64 falha se o `firmware` passar de 2 s (`xtask/src/qemu.rs`).
+
+**Por que não uma NVRAM com `Timeout = 0`.** Também zera a espera, mas é um armazém de variáveis do EDK2 montado à mão no xtask (pflash,
+`snapshot=on`, código completado até 64 MiB): depende do layout do EDK2 do pacote e, se ele diferir, o EDK2 refaz a NVRAM e a espera volta
+calada. Descartada pela flag, que é do contrato da QEMU com o firmware.
 
 O firmware é procurado nos
 caminhos do Homebrew, Debian/Ubuntu e Fedora/Arch (`xtask/src/arch.rs`), ou nas

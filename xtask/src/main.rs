@@ -11,7 +11,6 @@ mod image;
 mod leak;
 mod limine;
 mod manifest;
-mod nvram;
 mod panic_smoke;
 mod png;
 mod qemu;
