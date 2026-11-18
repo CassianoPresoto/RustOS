@@ -25,6 +25,7 @@ pub const MEMMAP_ID: [u64; 4] = id(0x67cf_3d9d_378a_806f, 0xe304_acdf_c50c_3c62)
 pub const PERFORMANCE_ID: [u64; 4] = id(0x6b50_ad9b_f36d_13ad, 0xdc4c_7e88_fc75_9e17);
 pub const FRAMEBUFFER_ID: [u64; 4] = id(0x9d58_27dc_d881_dd75, 0xa314_8604_f6fa_b11b);
 pub const EXECUTABLE_ADDRESS_ID: [u64; 4] = id(0x71ba_7686_3cc5_5f63, 0xb264_4a48_c516_a487);
+pub const MODULE_ID: [u64; 4] = id(0x3e7e_2797_02be_32af, 0xca1c_4f3b_d128_0cee);
 
 pub const MP_ID: [u64; 4] = id(0x95a6_7b81_9a1b_857e, 0xa0b6_1b72_3b6a_73e0);
 /// `LIMINE_MP_REQUEST_X86_64_X2APIC`: pede ao bootloader o x2APIC ligado, se a CPU o tem.
@@ -283,6 +284,56 @@ pub struct ExecutableAddressResponse {
     pub virtual_base: u64,
 }
 
+/// `struct limine_file`: só `address`, `size` e `string` são lidos; o resto existe pelo tamanho.
+#[derive(Debug)]
+#[allow(dead_code, reason = "campos do limine.h que o kernel não lê")]
+#[repr(C)]
+pub struct File {
+    pub revision: u64,
+    pub address: *const u8,
+    pub size: u64,
+    pub path: *const c_char,
+    pub string: *const c_char,
+    media_type: u32,
+    unused: u32,
+    tftp_ipv4: [u8; 4],
+    tftp_port: u32,
+    partition_index: u32,
+    mbr_disk_id: u32,
+    uuids: [[u8; 16]; 3],
+}
+
+/// Quantos módulos o kernel lê de uma resposta; o resto é ignorado.
+pub const MAX_MODULES: usize = 16;
+
+/// `struct limine_module_response`; o Limine 12.10.0 responde com a revisão 2.
+#[repr(C)]
+pub struct ModuleResponse {
+    pub revision: u64,
+    module_count: u64,
+    modules: *const *const File,
+}
+
+impl ModuleResponse {
+    /// Os primeiros `MAX_MODULES` arquivos; ponteiro nulo na lista é pulado.
+    /// # Safety
+    /// `modules` aponta para `module_count` ponteiros, cada um nulo ou de um `File` válido,
+    /// como o Limine garante.
+    pub unsafe fn files(&self) -> impl Iterator<Item = &'static File> {
+        let len = usize::try_from(self.module_count)
+            .unwrap_or(usize::MAX)
+            .min(MAX_MODULES);
+        let list: &'static [*const File] = if self.modules.is_null() || len == 0 {
+            &[]
+        } else {
+            // SAFETY: ponteiro e tamanho vêm do bootloader, pelo contrato da função.
+            unsafe { slice::from_raw_parts(self.modules, len) }
+        };
+        // SAFETY: cada ponteiro é nulo ou de um `File` válido, pelo contrato da função.
+        list.iter().filter_map(|&file| unsafe { file.as_ref() })
+    }
+}
+
 #[repr(C)]
 pub struct PerformanceResponse {
     pub revision: u64,
@@ -353,6 +404,25 @@ pub(crate) fn test_info(hw_id: u64) -> MpInfo {
     };
 }
 
+/// Um `File` com o endereço, o tamanho e a `string` dados, para os testes do adaptador.
+#[cfg(test)]
+pub(crate) fn test_file(address: u64, size: u64, string: *const c_char) -> File {
+    File {
+        revision: 0,
+        address: ptr::without_provenance(usize::try_from(address).unwrap()),
+        size,
+        path: ptr::null(),
+        string,
+        media_type: 0,
+        unused: 0,
+        tftp_ipv4: [0; 4],
+        tftp_port: 0,
+        partition_index: 0,
+        mbr_disk_id: 0,
+        uuids: [[0; 16]; 3],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +442,7 @@ mod tests {
             PERFORMANCE_ID,
             FRAMEBUFFER_ID,
             EXECUTABLE_ADDRESS_ID,
+            MODULE_ID,
             MP_ID,
         ] {
             assert_eq!(id[..2], COMMON_MAGIC);
@@ -411,6 +482,68 @@ mod tests {
         assert_eq!(core::mem::offset_of!(Framebuffer, edid_size), 48);
         assert_eq!(size_of::<Framebuffer>(), 64);
         assert_eq!(size_of::<FramebufferResponse>(), 24);
+    }
+
+    #[test]
+    #[allow(clippy::unreadable_literal, reason = "cópia literal do limine.h")]
+    fn module_layout_and_id_match_limine_h() {
+        assert_eq!(MODULE_ID[2], 0x3e7e279702be32af);
+        assert_eq!(MODULE_ID[3], 0xca1c4f3bd1280cee);
+        assert_eq!(size_of::<File>(), 112);
+        assert_eq!(core::mem::offset_of!(File, address), 8);
+        assert_eq!(core::mem::offset_of!(File, size), 16);
+        assert_eq!(core::mem::offset_of!(File, path), 24);
+        assert_eq!(core::mem::offset_of!(File, string), 32);
+        assert_eq!(core::mem::offset_of!(File, uuids), 64);
+        assert_eq!(size_of::<ModuleResponse>(), 24);
+        assert_eq!(core::mem::offset_of!(ModuleResponse, module_count), 8);
+        assert_eq!(core::mem::offset_of!(ModuleResponse, modules), 16);
+        assert_eq!(size_of::<Request<ModuleResponse>>(), 48);
+        assert_eq!(core::mem::offset_of!(Request<ModuleResponse>, response), 40);
+    }
+
+    fn response(count: u64, list: &[*const File]) -> ModuleResponse {
+        ModuleResponse {
+            revision: 2,
+            module_count: count,
+            modules: if list.is_empty() {
+                ptr::null()
+            } else {
+                list.as_ptr()
+            },
+        }
+    }
+
+    #[test]
+    fn module_list_skips_null_entries() {
+        let a = test_file(0x1000, 1, ptr::null());
+        let b = test_file(0x2000, 2, ptr::null());
+        let list = [&raw const a, ptr::null(), &raw const b];
+        let module_response = response(3, &list);
+        // SAFETY: a lista tem 3 ponteiros, nulos ou de `File` vivos.
+        let sizes: Vec<u64> = unsafe { module_response.files() }
+            .map(|file| file.size)
+            .collect();
+        assert_eq!(sizes, [1, 2]);
+    }
+
+    #[test]
+    fn a_huge_module_count_reads_only_up_to_the_cap() {
+        let a = test_file(0x1000, 1, ptr::null());
+        let list = [&raw const a; MAX_MODULES];
+        let module_response = response(u64::MAX, &list);
+        // SAFETY: o teto limita a leitura às `MAX_MODULES` posições de `list`.
+        assert_eq!(unsafe { module_response.files() }.count(), MAX_MODULES);
+    }
+
+    #[test]
+    fn module_list_without_pointer_or_count_is_empty() {
+        let a = test_file(0x1000, 1, ptr::null());
+        let (none, zero) = (response(5, &[]), response(0, &[&raw const a]));
+        // SAFETY: lista nula não é lida.
+        assert_eq!(unsafe { none.files() }.count(), 0);
+        // SAFETY: contagem zero não lê a lista.
+        assert_eq!(unsafe { zero.files() }.count(), 0);
     }
 
     #[test]

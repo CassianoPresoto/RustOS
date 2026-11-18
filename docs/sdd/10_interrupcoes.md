@@ -136,6 +136,8 @@ calibração e o teclado.
 | `0xffff_fe80_0000_0000`, 1 GiB | Janela de pilhas (entrada 509), com página de guarda abaixo de cada pilha |
 | `0xffff_ff00_0000_0000`, 1 GiB | Janela de dispositivos (entrada 510): Local APIC (xAPIC) e I/O APIC, com `PCD\|PWT` (PAT[3] = UC no layout do Limine) |
 
+Desde a fase 4b há uma terceira janela, de 1 GiB, a de módulos (initramfs só leitura), logo depois da de pilhas na entrada que o `free_top_level_slot` escolhe ([SDD 13](13_memoria_virtual.md#o-módulo-initramfs)).
+
 ### Fontes
 
 | Afirmação | Fonte |

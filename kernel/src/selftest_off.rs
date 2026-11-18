@@ -25,6 +25,10 @@ pub fn details(
 ) {
 }
 
+pub fn initramfs(_: &vm::Vm) -> bool {
+    true
+}
+
 pub fn before_tasks() -> bool {
     true
 }

@@ -78,6 +78,7 @@ dependencies = [
  "rustos-arch-aarch64",
  "rustos-arch-x86_64",
  "rustos-boot-limine",
+ "rustos-cpio",
  "rustos-crypto",
  "rustos-driver-gicv3",
  "rustos-driver-i8042",

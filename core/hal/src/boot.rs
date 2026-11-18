@@ -56,6 +56,16 @@ pub struct CpuDescriptor {
     pub token: usize,
 }
 
+/// Um arquivo que o bootloader carregou ao lado do kernel, em memória física contígua.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BootModule<'a> {
+    /// Alinhado a uma página.
+    pub start: PhysAddr,
+    pub len: u64,
+    /// O texto que a configuração do bootloader ligou ao arquivo; vazio se não há.
+    pub string: &'a str,
+}
+
 pub trait BootInfo {
     fn memory_regions(&self) -> impl Iterator<Item = MemoryRegion> + '_;
 
@@ -74,6 +84,9 @@ pub trait BootInfo {
 
     /// Os núcleos do bootloader; vazio se ele não respondeu ao pedido de MP.
     fn cpus(&self) -> impl Iterator<Item = CpuDescriptor> + '_;
+
+    /// Os arquivos que o bootloader carregou, já validados; vazio se não há.
+    fn modules(&self) -> impl Iterator<Item = BootModule<'_>> + '_;
 }
 
 #[cfg(test)]

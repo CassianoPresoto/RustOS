@@ -34,5 +34,5 @@ pub use heap::{HeapError, KernelHeap};
 pub use layout::{MemorySummary, find_free_block, summarize};
 pub use memory::FrameMemory;
 pub use tables::PageTables;
-pub use window::{AddressWindow, free_top_level_slot};
+pub use window::{AddressWindow, free_top_level_slot, map_module};
 pub use wx::{Section, Violation, WxChecker};

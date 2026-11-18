@@ -12,11 +12,12 @@ a memória física e o heap, no [SDD 12](12_memoria_fisica_e_heap.md).
 1. Lê as respostas do Limine (`LimineBoot`), sobe o buddy e o heap (`Memory::init`).
 2. **Copia** o que ainda lê do Limine para um `BootRecord` no heap (`kernel/src/boot.rs`):
    mapa de memória, deslocamento do mapa direto, nome e versão do bootloader, marcos
-   de tempo, framebuffer e endereço da imagem. Depois disso nada lê a resposta do Limine.
+   de tempo, framebuffer, endereço da imagem e módulos (faixa física e `string`). Depois disso nada lê a resposta do Limine.
 3. `platform::harden()` liga as proteções da CPU (x86_64: WP, NX, SMEP, SMAP, UMIP;
    aarch64: PAN). No x86_64 o NX precisa estar no `EFER` antes de a tabela usar o bit.
 4. `Vm::build` monta tabelas novas, sem ativá-las. `Memory::place_windows` põe as janelas
-   de dispositivos e de pilhas. `Vm::activate` troca `CR3` / `TTBR1_EL1`.
+   de dispositivos, de pilhas e de módulos. `Vm::map_initramfs` mapeia o initramfs
+   ([abaixo](#o-módulo-initramfs)). `Vm::activate` troca `CR3` / `TTBR1_EL1`.
 5. `Memory::map_stack` cria a pilha do kernel (64 KiB e uma página de guarda) e
    `platform::call_on_stack` passa a rodar nela (`asm!` em `arch/*/src/stack.rs`),
    entregando o `Handoff` (registro de boot, memória e `Vm`) por ponteiro.
@@ -37,7 +38,7 @@ Pânico e exceção antes do console saem direto na serial ([SDD 04](04_boot.md#
 | `[__data_start, __data_end)` | `.data`, `.bss` | leitura e escrita, NX | idem |
 | `hhdm + [início, fim)` | RAM: `Usable` e `BootloaderReclaimable` | leitura e escrita, NX, write-back | Limine sorteia o deslocamento |
 | `hhdm +` framebuffer | O framebuffer da resposta, páginas inteiras | leitura e escrita, NX, write-combining | idem |
-| 1 entrada do nível mais alto | Janela de dispositivos (1 GiB) e janela de pilhas (1 GiB), nessa ordem | dados, NX; dispositivo sem cache | kernel: a mais alta entre 510 e 256 que o mapa direto e a imagem não tocam (`free_top_level_slot`) |
+| 1 entrada do nível mais alto | Janela de dispositivos (1 GiB), janela de pilhas (1 GiB) e janela de módulos (1 GiB), nessa ordem | dados, NX; dispositivo sem cache; módulo só leitura, NX | kernel: a mais alta entre 510 e 256 que o mapa direto e a imagem não tocam (`free_top_level_slot`) |
 
 Os símbolos `__*_start/_end` vêm de `kernel/linker/<isa>.ld`, alinhados a 4 KiB. O
 `Vm::build` recusa o boot se `__image_start` não for o `virtual_base` que o Limine
@@ -46,6 +47,30 @@ informou.
 **O mapa direto não cobre a imagem do kernel.** A região `KernelAndModules` fica fora do
 mapa direto: um alias gravável de `.text` anularia a proteção. O autoteste confere isso.
 **Nem dispositivo, nem ACPI** ([DEBT-0021](../tech-debt/0021-mapa-direto-sem-acpi-nem-reservada-mapeada.md)).
+
+### O módulo initramfs
+
+O módulo que o Limine carrega cai em `KernelAndModules` e, por isso, **fora do mapa direto**
+(só `Usable` e `BootloaderReclaimable` entram nele). `Vm::map_initramfs` o mapeia na
+**janela de módulos**, a terceira de 1 GiB da mesma entrada do nível mais alto (a que o
+mapa direto e a imagem não tocam): `memory::map_module` toma as páginas da janela e mapeia
+uma a uma com `PageFlags::RODATA` (leitura, NX), em páginas de 4 KiB. A faixa física vem do
+adaptador do Limine, já conferida ([SDD 04](04_boot.md#o-que-o-kernel-pede): alinhada, dentro do mapa de memória, fora de RAM do alocador, do framebuffer e de outro módulo), e o `Vm` recusa a que toca a imagem. O mapeamento é `rustos_mm::map_module` (`core/mm/src/window.rs`, testado no host: arredondamento a páginas, janela esgotada, estouro); o
+`WxChecker` a vê como qualquer folha: se ela fosse gravável e executável, ou se tocasse a
+memória física da imagem (`ImageAlias`), o `w^x:` reprovaria. No modo de teste,
+`Vm::initramfs_is_read_only` confere que nenhuma folha do módulo é gravável ou executável e
+que o número de páginas bate com o tamanho. A janela não tem região própria no `Addr`
+(SDD 09): o endereço dela sairia como `<kernel>`, e o kernel não o imprime.
+Custo para o cpio de 272 bytes (uma página), com `now_ns` depois da calibração e um laço de
+64 mapeamentos da mesma página em endereços novos da janela (instrumentação temporária, não
+mantida): no x86_64 em TCG a primeira chamada leva 132 a 141 µs (3 boots; domina a primeira
+execução do código no TCG, não a tabela) e 0,36 a 0,42 µs por página depois; no aarch64 com HVF, 0,17 µs
+a primeira e 33 ns por página. A chamada real do `kmain`, que ainda cria os frames de tabela, mediu 86 000 ciclos
+de TSC no x86_64 (o TSC não está calibrado ali; **estimado** em 80 µs pela razão com os 4,3 milhões de
+ciclos do `kmain` até esse ponto, cerca de 4 ms) e 157 ticks do `CNTVCT_EL0` (cerca de 7 µs) no aarch64.
+Ordem de grandeza: de 0,08 a 0,15 ms em TCG, que some no ruído do `boot time:` (24 a 32 ms).
+
+Os frames do módulo **seguem reservados**: nunca vão ao buddy ([DEBT-0080](../tech-debt/0080-initramfs-residente-sem-devolver-os-frames.md)).
 
 ## Flags e codificação
 
@@ -185,7 +210,8 @@ pilha). O que o Linux devolve não foi medido aqui.
   página gravável e executável em qualquer lugar; seção da imagem com permissão diferente
   da esperada ou sem mapeamento; mapeamento abaixo de `0xffff_0000_0000_0000`;
   qualquer outro mapeamento (o mapa direto) que aponte para a memória física da imagem.
-  Imprime `[rustos] w^x: ok (N pages)`, com N em páginas de 4 KiB, ou `FAILED`.
+  Imprime `[rustos] w^x: ok (N pages)`, com N em páginas de 4 KiB, ou `FAILED`. A janela
+  do initramfs entra na conta, com as folhas só de leitura.
   O `make smoke` exige a linha `ok`.
 - **RELRO.** Com PIE, vtables e tabelas de ponteiros (`interrupts::HANDLERS`, a tabela de
   comandos do shell) saem em `.data.rel.ro`, que o `*(.data .data.*)` engolia: ficavam
@@ -235,7 +261,7 @@ mapa direto também (`0xffff831f80000000`, `0xffff9c6cc0000000`...). A fonte da 
 não se aplica). O boot não imprime a base: só `kaslr: on` ([SDD 09](09_seguranca.md#endereços-do-kernel-no-log));
 `RUSTOS_FEATURES=debug-addrs` a mostra.
 
-**Por causa do sorteio do mapa direto, as janelas de dispositivos e de pilhas não têm
+**Por causa do sorteio do mapa direto, as janelas de dispositivos, de pilhas e de módulos não têm
 endereço fixo.** Com o endereço fixo da fase 1 (entradas 510 e 509), o mapa direto sorteado
 poderia cair sobre elas (inferência: 1 TiB de 128 TiB, cerca de 1 boot em 100; não medido). `free_top_level_slot` escolhe a entrada
 depois de conhecer o mapa direto e a imagem.

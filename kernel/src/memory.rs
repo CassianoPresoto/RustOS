@@ -19,11 +19,12 @@ use crate::heap;
 use crate::stack::Stack;
 use crate::sync::IrqLock;
 
-/// Janelas de dispositivos e de pilhas: 1 GiB cada, vazias até `place_windows`.
+/// Janelas de dispositivos, de pilhas e de módulos: 1 GiB cada, vazias até `place_windows`.
 const WINDOW_LEN: u64 = 1 << 30;
 
 static DEVICES: IrqLock<AddressWindow> = IrqLock::new(AddressWindow::new(VirtAddr::new(0), 0));
 static STACKS: IrqLock<AddressWindow> = IrqLock::new(AddressWindow::new(VirtAddr::new(0), 0));
+static MODULES: IrqLock<AddressWindow> = IrqLock::new(AddressWindow::new(VirtAddr::new(0), 0));
 
 #[derive(Debug)]
 pub enum MemoryError {
@@ -76,7 +77,7 @@ impl Memory {
         })
     }
 
-    /// Põe as janelas de dispositivos e de pilhas, uma depois da outra, na entrada do
+    /// Põe as janelas de dispositivos, de pilhas e de módulos, uma depois da outra, na entrada do
     /// nível mais alto que `occupied` (mapa direto e imagem, sorteados) não toca.
     pub fn place_windows(occupied: &[(u64, u64)]) -> Result<(), MemoryError> {
         let base = free_top_level_slot(occupied).ok_or(MemoryError::NoAddressSpace)?;
@@ -84,6 +85,8 @@ impl Memory {
         crate::addr::set_windows(base.as_u64(), WINDOW_LEN);
         *DEVICES.lock() = AddressWindow::new(base, WINDOW_LEN);
         *STACKS.lock() = AddressWindow::new(stacks, WINDOW_LEN);
+        *MODULES.lock() =
+            AddressWindow::new(VirtAddr::new(stacks.as_u64() + WINDOW_LEN), WINDOW_LEN);
         Ok(())
     }
 
@@ -215,6 +218,23 @@ pub fn map_device(
         mapper.map_page(page_virt, page_phys, PageFlags::DEVICE, frames)?;
     }
     Ok(VirtAddr::new(virt.as_u64() + offset))
+}
+
+/// Mapeia um módulo do bootloader na janela de módulos, só leitura e sem execução
+/// (`rustos_mm::map_module`). `phys` é alinhado a uma página.
+pub fn map_module(
+    mapper: &mut impl PageMapper,
+    frames: &mut impl FrameSource,
+    phys: PhysAddr,
+    len: u64,
+) -> Result<VirtAddr, MapError> {
+    rustos_mm::map_module(
+        |bytes| MODULES.lock().take(bytes),
+        mapper,
+        frames,
+        phys,
+        len,
+    )
 }
 
 /// # Safety
