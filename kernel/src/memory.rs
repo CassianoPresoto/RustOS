@@ -292,3 +292,14 @@ pub unsafe fn fill_frame(phys: PhysAddr, offset: usize, bytes: &[u8]) {
     // SAFETY: o contrato desta função; os dois não se sobrepõem.
     unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), target, bytes.len()) };
 }
+
+/// Lê `out.len()` bytes do frame a partir de `offset`, pelo mapa direto (só o modo de teste).
+///
+/// # Safety
+/// `offset + out.len() <= PAGE_SIZE` e o frame está em uso por quem chama.
+#[cfg(feature = "selftest")]
+pub unsafe fn read_frame(phys: PhysAddr, offset: usize, out: &mut [u8]) {
+    let source = frame_ptr(phys).wrapping_add(offset);
+    // SAFETY: o contrato desta função; os dois não se sobrepõem.
+    unsafe { ptr::copy_nonoverlapping(source, out.as_mut_ptr(), out.len()) };
+}

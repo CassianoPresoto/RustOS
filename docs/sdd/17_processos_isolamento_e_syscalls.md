@@ -245,7 +245,7 @@ prefixo `[user] `.
 | O `init` só roda no modo de teste | O boot normal não o lança; o `release-small` não carrega o carregador ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)) | Na 4b o `init` é um autoteste, e o guidelines 05 manda o que roda tarefa para o modo de teste. Experimento com ele no boot normal: +1 a 3 ms no aarch64 em HVF (2 ms para 4–7) e cerca de +10 ms no x86_64 em TCG, sem ganho para o usuário. O boot normal sem initramfs ou sem `init` segue como antes |
 | `-C code-model=small` com `-C lto=off` no x86_64 | O `core` pré-compilado do alvo vem em `code-model=kernel`; com o LTO fat dos perfis `release`/`release-small` o LLVM recusa o módulo (`linking module flags 'Code Model': IDs have conflicting values`, `failed to load bitcode`). O `xtask user` liga `-C lto=off` no x86_64 ([DEBT-0084](../tech-debt/0084-usuario-do-x86-sem-lto-por-causa-do-code-model.md)) | O `small` é a decisão aprovada; o `init` custa 17 600 bytes sem LTO contra 15 176 com o modelo `kernel` e LTO. **O item "Por ler" do `small` fecha**: o `big` (1,3 MiB de arquivo, 2,3 MiB mapeados, `.rodata`, `.data` com cauda de 400 bytes e `.bss` de 1 MiB) liga em `0x40_0000` e roda nas duas ISAs. O `small` e o `kernel` geram o mesmo código a 4 MiB (17 920 bytes nos dois, sem LTO), então o teste continua sem distingui-los |
 | Layout do linker | Cabeçalhos e `.rodata` no primeiro `PT_LOAD` (R), `.text` (RX) numa página a partir de `0x40_1000`, `.data` e `.bss` (RW) juntos num `PT_LOAD` com `-z norelro`; `AT_PHDR` aponta `0x40_0040` | O primeiro `PT_LOAD` com os cabeçalhos faz o `AT_PHDR` existir; sem `norelro` o `.bss` virava um `PT_LOAD` de `p_filesz` 0 |
-| Pilha | 16 páginas mapeadas na criação, com uma página de guarda abaixo e outra acima e o início sorteado com `aslr_base` na janela `[0x6000_0000_0000, 0x7000_0000_0000)` (28 bits de página, o intervalo cheio); a imagem fica em endereço fixo ([DEBT-0083](../tech-debt/0083-imagem-de-usuario-sem-aslr.md)). Mapeada inteira, porque não há falta resolvida ([DEBT-0085](../tech-debt/0085-pilha-de-usuario-mapeada-inteira.md)) | Decisão 5 e o desenho de pilha; o `mmap_base` fica para a 4c |
+| Pilha | 16 páginas mapeadas na criação, com uma página de guarda abaixo e outra acima e o início sorteado com `aslr_base` na janela `[0x6000_0000_0000, 0x6100_0000_0000)` (28 bits de página, o intervalo cheio); a imagem fica em endereço fixo ([DEBT-0083](../tech-debt/0083-imagem-de-usuario-sem-aslr.md)). Mapeada inteira, porque não há falta resolvida ([DEBT-0085](../tech-debt/0085-pilha-de-usuario-mapeada-inteira.md)) | Decisão 5 e o desenho de pilha; o `mmap_base` fica para a 4c |
 | Capacidade da árvore | 32 regiões por processo (`REGION_CAPACITY`, 1 KiB de heap) | No máximo 16 `PT_LOAD` mais a pilha, com folga para a 4c; [DEBT-0075](../tech-debt/0075-vmar-com-capacidade-fixa-de-regioes.md) |
 | Teto de `p_memsz` | `EXEC_MAX_LOADS_BYTES = 64 MiB` em `hal::abi` | O "ex.: 64 MiB" da tabela de validação |
 | Auxv e pilha inicial em `hal::abi` | O kernel (`InitialStack::build`) e o `user/rt` (`Env::from_stack`) partilham as tags, e o teste do `rt` lê o que o `build` monta | Um lado só não deriva do outro |
@@ -265,7 +265,14 @@ fora do Linux segue **NÃO VERIFICADO**).
 
 **O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs), além dos casos da 4a: o `init` carrega (`init loaded (N
 segments)`: 3 no x86_64, 2 no aarch64), roda, imprime `[user] init: ok (...)` e sai com 0 (`pid 1 exited (code 0`); o `big` sai com 0 e os
-frames voltam; o carregador recusa o arquivo cortado, o de outra máquina, o sem magic e o vazio sem deixar frame para trás.
+frames voltam **exatamente** como depois do `init` (a folga é medida uma vez, depois de uma rodada de aquecimento, com o processo preso à CPU de
+quem testa, para o frame devolvido cair no cache que `free_frames` conta); o carregador recusa o arquivo cortado na tabela de program
+headers, o de outra máquina, o sem magic e o vazio, e, com um gancho de teste que acaba com o frame na página 1, 3, 5 ou 18, devolve cada frame
+numa falha **tardia** (depois de segmentos e de parte da pilha mapeados); e um ELF sintético com `p_vaddr = 0x40_3010`, `p_offset = 0x2010`,
+`p_filesz = 0x20` e `p_memsz = 0x2020` num arquivo cheio de `0xAA` carrega com o começo da página e a cauda `.bss` zerados (lido pelos frames
+do espaço, sem rodar: um programa em `forbid(unsafe_code)` não lê antes do próprio `p_vaddr`). O teste exato achou um vazamento da 4a: o
+`Box<Process>` nunca era solto, porque `terminate` não volta; agora `terminate` solta a árvore de regiões antes de encerrar a tarefa. O
+`user/rt` não deixa o programa forjar ponteiro: `Env` tem campos privados e a contagem de `PT_LOAD` sai de `from_stack`, que é `unsafe`.
 
 ## Entrada de syscall por ISA
 
@@ -537,7 +544,7 @@ pelo `user/rt` mapeia a pilha como mais um mapeamento `ANY`, que cai na região 
 `mmap_base`; as guardas são páginas que ele deixa sem mapear.
 
 A janela da pilha ficou fixada na 4b: o início da pilha cai num intervalo de 1 TiB
-(`[0x6000_0000_0000, 0x7000_0000_0000)`, 28 bits de página) e a pilha ocupa as 16 páginas seguintes, com uma guarda de cada lado. O
+(`[0x6000_0000_0000, 0x6100_0000_0000)`: `2^28` páginas a partir de `0x6000_0000_0000`) e a pilha ocupa as 16 páginas seguintes, com uma guarda de cada lado. O
 valor do `mmap_base` (por exemplo, um intervalo de 1 TiB acima de 64 GiB) é constante a fixar no PR da 4c.
 
 ### ASLR: quantos bits

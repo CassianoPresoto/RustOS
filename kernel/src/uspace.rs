@@ -1,6 +1,8 @@
 //! O espaço de endereçamento de um processo de usuário: tabelas próprias para a metade baixa
 //! (`CR3` ou `TTBR0_EL1`), frames que ele mapeia e a devolução deles, zerados, na morte (SDD 17).
 
+#[cfg(feature = "selftest")]
+use rustos_hal::AddressSpace;
 use rustos_hal::abi::{USER_MIN, USER_TOP};
 use rustos_hal::{FrameSource, MapError, PAGE_SIZE, PageFlags, PageMapper, PhysAddr, VirtAddr};
 use rustos_mm::PhysFrame;
@@ -12,6 +14,35 @@ use crate::platform::{self, PlatformSpace};
 /// Entradas do nível mais alto que a metade de usuário ocupa: `USER_TOP` cabe nas 256 de baixo.
 const USER_TOP_ENTRIES: usize = 256;
 const _: () = assert!(USER_TOP >> 39 <= USER_TOP_ENTRIES as u64);
+
+/// Quantos frames de dados `map_at` ainda pode alocar antes de falhar com `OutOfFrames`; `u64::MAX`
+/// é sem limite. Só o modo de teste o baixa, para provar a devolução numa falha tardia.
+#[cfg(feature = "selftest")]
+static FRAME_BUDGET: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Limita os frames de dados que as próximas chamadas de `map_at` alocam (`None`: sem limite).
+#[cfg(feature = "selftest")]
+pub fn set_frame_budget(frames: Option<u64>) {
+    FRAME_BUDGET.store(
+        frames.unwrap_or(u64::MAX),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Gasta um frame do orçamento; `false` se acabou.
+#[cfg(feature = "selftest")]
+fn spend_budget() -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    let left = FRAME_BUDGET.load(Relaxed);
+    if left == u64::MAX {
+        return true;
+    }
+    if left == 0 {
+        return false;
+    }
+    FRAME_BUDGET.store(left - 1, Relaxed);
+    true
+}
 
 /// Frames de um espaço: os que guardam dados do programa e os que guardam tabelas.
 #[cfg_attr(
@@ -88,6 +119,10 @@ impl UserSpace {
         let chunk = usize::try_from(PAGE_SIZE).expect("página cabe em usize");
         let data = lead..lead + bytes.len();
         for page in 0..pages {
+            #[cfg(feature = "selftest")]
+            if !spend_budget() {
+                return Err(MapError::OutOfFrames);
+            }
             let frame = self.frames.allocate_frame().ok_or(MapError::OutOfFrames)?;
             self.data_frames += 1;
             memory::zero_frame(frame);
@@ -113,6 +148,27 @@ impl UserSpace {
             }
         }
         Ok(())
+    }
+
+    /// Lê `out.len()` bytes do usuário em `virt` (dentro de uma página) pelo frame que a mapeia; `false`
+    /// se a página não está mapeada. Só o modo de teste.
+    #[cfg(feature = "selftest")]
+    pub fn read(&self, virt: u64, out: &mut [u8]) -> bool {
+        let page = virt & !(PAGE_SIZE - 1);
+        let offset = usize::try_from(virt - page).unwrap_or(usize::MAX);
+        let mut frame = None;
+        self.tables.walk(&mut |mapping| {
+            // No aarch64 a caminhada devolve o endereço canônico da metade alta (`TTBR1`).
+            if mapping.virt.as_u64() & 0x0000_FFFF_FFFF_FFFF == page {
+                frame = Some(mapping.phys);
+            }
+        });
+        let Some(frame) = frame.filter(|_| offset.saturating_add(out.len()) <= 4096) else {
+            return false;
+        };
+        // SAFETY: o frame é de dados deste espaço, vivo, e o intervalo cabe na página.
+        unsafe { memory::read_frame(frame, offset, out) };
+        true
     }
 
     /// Frames de dados e de tabelas (a raiz inclusive) que o espaço tem.

@@ -32,10 +32,10 @@ pub const REGION_CAPACITY: usize = 32;
 
 /// A pilha inicial: 16 páginas, com uma página de guarda abaixo e outra acima.
 pub const STACK_PAGES: u64 = 16;
-/// Onde o início da pilha cai: `2^28` páginas (1 TiB) terminando em `0x7000_0000_0000`.
-const STACK_WINDOW: (u64, u64) = (0x6000_0000_0000, 0x7000_0000_0000);
+/// Onde o início da pilha cai: `2^28` páginas (1 TiB) a partir de `0x6000_0000_0000`.
+const STACK_WINDOW: (u64, u64) = (0x6000_0000_0000, 0x6100_0000_0000);
 
-const MACHINE: u16 = if cfg!(target_arch = "x86_64") {
+pub const MACHINE: u16 = if cfg!(target_arch = "x86_64") {
     elf::EM_X86_64
 } else {
     elf::EM_AARCH64
@@ -162,8 +162,18 @@ pub fn map_stack(
     tree: &mut RegionTree,
     loaded: &Loaded,
 ) -> Result<u64, LoadError> {
-    let mut rng = || random::next_u64().unwrap_or(0);
-    let start = aslr_base(STACK_WINDOW.0, STACK_WINDOW.1, &mut rng).ok_or(LoadError::NoEntropy)?;
+    let mut unseeded = false;
+    let mut rng = || {
+        random::next_u64().unwrap_or_else(|| {
+            unseeded = true;
+            0
+        })
+    };
+    let drawn = aslr_base(STACK_WINDOW.0, STACK_WINDOW.1, &mut rng);
+    if unseeded {
+        return Err(LoadError::NoEntropy);
+    }
+    let start = drawn.ok_or(LoadError::NoEntropy)?;
     let top = start + STACK_PAGES * PAGE_SIZE;
     let attrs = Attrs::new(Kind::Stack, Perms::READ.union(Perms::WRITE)).with_guards(true, true);
     tree.reserve(start, STACK_PAGES * PAGE_SIZE, attrs)?;
@@ -172,19 +182,33 @@ pub fn map_stack(
         let word = random::next_u64().ok_or(LoadError::NoEntropy)?;
         chunk.copy_from_slice(&word.to_le_bytes());
     }
-    let info = StartInfo {
+    let mut info = StartInfo {
         entry: loaded.entry,
         phdr: loaded.phdr,
         phent: elf::PHDR_LEN as u64,
         phnum: u64::from(loaded.phnum),
         random: random_bytes,
     };
-    let initial = InitialStack::build(top, &info).ok_or(LoadError::StackLayout)?;
-    let body = initial.bytes();
-    let lead = usize::try_from(PAGE_SIZE).unwrap_or(0) - body.len();
-    space.map_at(start, 0, &[], STACK_PAGES - 1, PageFlags::USER_DATA)?;
-    space.map_at(top - PAGE_SIZE, lead, body, 1, PageFlags::USER_DATA)?;
-    Ok(initial.sp())
+    rustos_crypto::wipe(&mut random_bytes);
+    let built = InitialStack::build(top, &info);
+    rustos_crypto::wipe(&mut info.random);
+    let mut initial = built.ok_or(LoadError::StackLayout)?;
+    let lead = usize::try_from(PAGE_SIZE).unwrap_or(0) - initial.bytes().len();
+    let mapped = space
+        .map_at(start, 0, &[], STACK_PAGES - 1, PageFlags::USER_DATA)
+        .and_then(|()| {
+            space.map_at(
+                top - PAGE_SIZE,
+                lead,
+                initial.bytes(),
+                1,
+                PageFlags::USER_DATA,
+            )
+        });
+    let sp = initial.sp();
+    rustos_crypto::wipe(initial.storage_mut());
+    mapped?;
+    Ok(sp)
 }
 
 /// Quantos bits de página o sorteio da pilha entrega neste espaço: o que o modo de teste relata.

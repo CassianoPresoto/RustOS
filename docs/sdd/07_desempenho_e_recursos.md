@@ -474,13 +474,13 @@ outro, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-lay
 
 | | x86_64 antes | x86_64 depois | aarch64 antes | aarch64 depois |
 | --- | --- | --- | --- | --- |
-| `text` | 127 991 | 128 007 | 115 820 | 115 844 |
+| `text` | 127 991 | 128 039 | 115 820 | 115 912 |
 | `rodata` | 33 101 | 33 149 | 28 669 | 28 781 |
 | `data` | 18 434 | 18 482 | 18 216 | 18 288 |
 | `bss` | 15 841 | 15 841 | 14 624 | 14 624 |
-| carregado | 195 367 | 195 479 | 177 329 | 177 537 |
+| carregado | 195 367 | 195 511 | 177 329 | 177 605 |
 
-(a diferença, de 0,06% e 0,12% do carregado, não foi investigada: o carregador, o `Vmar` e o código de usuário não entram na imagem). **Com o carregador alcançável do boot normal** (o experimento acima), o carregado foi para 205 447 bytes no x86_64 (+10 080) e 187 145 no aarch64 (+9 816); é o custo que a 4c paga quando o `init` entrar no boot normal.
+(+144 bytes no x86_64 e +276 no aarch64, 0,07% e 0,16% do carregado. **Causa**, de `llvm-nm -S` contra um build da `3acc35e`: o carregador, o `Vmar` e o código de usuário não entram na imagem; o que muda é o caminho de morte do processo, que a syscall `process_exit` da 4a mantém vivo: `process::terminate` agora solta a árvore de regiões do `Process`, `UserSpace` ganhou dois contadores de frames (`data_frames` e `table_frames`) e `map_at` e `destroy` os usam. O resto é reordenação de genéricos, com símbolos de até 300 bytes a mais e a menos, e preenchimento de alinhamento.)
 
 ### Escalonador (fase 3, medido no host; o alvo está acima)
 

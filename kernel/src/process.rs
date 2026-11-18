@@ -302,7 +302,9 @@ fn terminate(event: ProcessEvent) -> ! {
     let process = unsafe { Box::from_raw(ptr::with_exposed_provenance_mut::<Process>(raw)) };
     let pid = process.pid;
     let cpu = crate::percpu::pinned(crate::percpu::PerCpu::index);
-    process.space.destroy();
+    let Process { space, regions, .. } = *process;
+    space.destroy();
+    drop(regions);
     if event.kind == event_kind::EXIT {
         kprintln!(
             "[rustos] user: pid {pid} exited (code {}, cpu {cpu})",

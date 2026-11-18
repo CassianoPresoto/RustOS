@@ -186,7 +186,8 @@ pub fn after_tasks(summary: FpuSummary, frames: Frames, map_offset: u64, vm: &vm
         }
         None => kprintln!("[rustos] switch: not measured"),
     }
-    let user_ok = init_ok && process::self_test(frames, map_offset, vm.initramfs());
+    let user_cases = process::self_test(frames, map_offset, vm.initramfs());
+    let user_ok = init_ok && user_cases;
     let stacks_ok = task::log_stacks();
     preempted.is_some() && smp_ok && user_ok && stacks_ok
 }
