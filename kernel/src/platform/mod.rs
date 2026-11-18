@@ -43,11 +43,6 @@ pub use x86_64::{
 };
 
 #[cfg(all(feature = "selftest", target_arch = "aarch64"))]
-pub use aarch64::{HAS_FAST_RETURN, set_fast_return, set_stack_clean, user_blob};
-#[cfg(all(feature = "selftest", target_arch = "x86_64"))]
-pub use x86_64::{HAS_FAST_RETURN, set_fast_return, set_stack_clean, user_blob};
-
-#[cfg(all(feature = "selftest", target_arch = "aarch64"))]
 pub use aarch64::{clock_error_ppm, fpu_read_probe, fpu_write_probe, timer_mode};
 #[cfg(all(feature = "selftest", target_arch = "x86_64"))]
 pub use x86_64::{clock_error_ppm, fpu_read_probe, fpu_write_probe, timer_mode};
