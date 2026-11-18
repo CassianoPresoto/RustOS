@@ -49,7 +49,8 @@ no [roadmap](docs/sdd/08_roadmap.md).
                                    ▼                     ▼
    portas                    core/hal  ◄──────────  core/mm, core/sched,    centro do hexágono
                                                     core/crypto, core/gfx,
-                                                    core/term, core/shell
+                                                    core/term, core/shell,
+                                                    core/cpio, core/elf
                          (traits e tipos)          (política pura, sem unsafe, testada no host)
 ```
 

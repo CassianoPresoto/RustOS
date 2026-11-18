@@ -7,7 +7,7 @@ XTASK := cargo xtask
 
 .DEFAULT_GOAL := help
 .PHONY: help fmt fmt-check clippy layers-check comments-check docs-check check test \
-        build image run smoke smoke-fast smoke-panic screenshot font-preview size pr clean
+        build image run smoke smoke-fast smoke-panic screenshot font-preview initramfs size pr clean
 
 help: ## lista os alvos
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -66,6 +66,9 @@ screenshot: ## sobe sem janela, digita CMDS ("fetch;mem") no shell e grava a tel
 
 font-preview: ## desenha todos os glifos da fonte própria em target/font-preview.png
 	$(XTASK) font-preview
+
+initramfs: ## empacota FILES (`[nome=]arquivo ...`) em OUT ou target/initramfs/<isa>.cpio, sem o `cpio` do host
+	$(XTASK) initramfs --arch $(ARCH) $(if $(OUT),--out $(OUT)) $(FILES)
 
 size: ## tamanho das seções do kernel
 	$(XTASK) size --arch $(ARCH) --profile $(PROFILE)

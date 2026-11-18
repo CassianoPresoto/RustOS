@@ -45,6 +45,8 @@
 │   ├── sched/                  # rustos-sched: trait Scheduler, TaskId, RunQueue; RoundRobin, Eevdf (treap de prazos), Fifo e Composite (teto de 95% para o tempo real); sim, property e bench só em teste (SDD 14; o kernel usa o `Composite`)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16
 │   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células, tela alternativa, histórico, DEC Special Graphics, tabulação; SDD 16), Cell, Key, Keyboard (layouts)
+│   ├── cpio/                   # rustos-cpio: leitor de cpio `newc` sem alocação (iterador sobre `&[u8]`), para o initramfs; só arquivo regular sai
+│   ├── elf/                    # rustos-elf: validação de ELF64 estático (`ET_EXEC`) para uma `Image` sem alocação; o chamador passa os `Limits` (ISA e faixa do usuário)
 │   └── shell/                  # rustos-shell: Shell (edição de linha, histórico, comandos) e a porta Host; o comando `bench` (`bench.rs`) é da feature `bench`, que o `selftest` do kernel liga
 ├── lib/
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set, conta disputas, `force_unlock` para o pânico)
@@ -59,7 +61,7 @@
 │   ├── pl011/                  # serial da QEMU virt e de placas ARM (com a IRQ de recepção)
 │   ├── i8042/                  # teclado PS/2 do PC: controlador e decodificador do conjunto 1
 │   └── gicv3/                  # GICv3 da ARM: distribuidor, redistribuidor (achado por afinidade) e SGI, sobre hal::RegisterBus
-├── xtask/                      # ferramenta de host (só std): build, image, run, smoke, screenshot, size, font-preview, check-*
+├── xtask/                      # ferramenta de host (só std): build, image, run, smoke, screenshot, size, font-preview, initramfs, check-*
 ├── docs/                       # sdd/, guidelines/, tech-debt/
 ├── .github/workflows/ci.yml    # gates, testes e smoke nas duas ISAs
 ├── Makefile                    # atalhos para cargo e xtask
@@ -78,6 +80,8 @@
 | `rustos-gfx` | nada |
 | `rustos-term` | `rustos-hal` |
 | `rustos-shell` | `rustos-hal` |
+| `rustos-cpio` | nada |
+| `rustos-elf` | nada |
 | `rustos-sync` | nada |
 | `rustos-arch-x86_64` | `rustos-hal` (só no alvo bare-metal) |
 | `rustos-arch-aarch64` | `rustos-hal` |
@@ -106,6 +110,8 @@ EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_es
 | Cifra, hash ou gerador de números aleatórios | `core/crypto/`; a semente do hardware vem por porta do `hal` |
 | Desenho de pixel, glifo da fonte | `core/gfx/` |
 | Sequência de terminal, codificação de tecla, layout de teclado | `core/term/` |
+| Ler o initramfs (cpio `newc`) | `core/cpio/` |
+| Validar um executável ELF e dizer o que mapear | `core/elf/`; os limites da ISA e da faixa do usuário vêm do chamador (`elf::Limits`) |
 | Comando do shell embutido | `core/shell/`; o dado do sistema chega pela porta `Host` |
 | Tema, barra do topo, como a grade vira pixel | `kernel/src/screen.rs` |
 | Contrato que o núcleo precisa do hardware | trait em `core/hal` |
@@ -115,3 +121,66 @@ EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_es
 | Primitiva sem domínio que precisa de `unsafe` | `lib/` |
 | Qual adaptador atende qual porta numa plataforma | `kernel/src/platform/<isa>.rs` |
 | Ferramenta de desenvolvimento | `xtask/` |
+
+## Formatos de entrada: `core/cpio` e `core/elf`
+
+Os dois leem bytes que vêm de fora do kernel (o initramfs do bootloader e o executável
+dentro dele) e por isso são `forbid(unsafe_code)`, sem alocação e sem dependência: a
+entrada hostil vira `Error` (enum, uma variante por regra), nunca pânico. Todo cálculo
+de tamanho e de offset é `checked_*`. Os testes de host ([SDD 06](06_testes.md)) têm um
+caso por regra de recusa, as truncações em todos os comprimentos e os campos nos extremos.
+
+Nenhum dos dois está em `[workspace.dependencies]` ainda: o primeiro consumidor (o carregador da 4b, no `kernel/`) acrescenta a entrada junto com a dependência.
+
+**`core/cpio`** (`Reader`, `Entry`, `find`). Regras do `newc` como no
+[early-userspace buffer format](https://docs.kernel.org/driver-api/early-userspace/buffer-format.html):
+magic `070701`, 13 campos de 8 dígitos hexadecimais, cabeçalho de 110 bytes, registro e
+dados alinhados a 4, avanço por `c_namesize`, `TRAILER!!!` **exigido**. Decisões do agente:
+
+| Caso | Decisão |
+| --- | --- |
+| Diretório sem dado | **Pulado**: o `cpio -o` alimentado por `find` gera um por pasta, e recusar tornaria o initramfs comum inválido |
+| Diretório com dado, link simbólico, dispositivo, FIFO e socket | Recusados (`DirectoryWithData`, `Symlink`, `SpecialFile`) |
+| Arquivo regular com `c_nlink` diferente de 1 | Recusado (`LinkCount`): hard link e contagem zero |
+| `070702` (com soma) | Recusado (`ChecksumFormat`); o `070701` não tem soma e o RustOS não confere a dos outros |
+| Hexadecimal | Maiúscula e minúscula aceitas; qualquer outro caractere é `BadHex` |
+| `c_namesize` | De 1 a 4096 (`PATH_MAX`); o nome termina no primeiro NUL dentro dele; nome vazio é `BadName` |
+| Bytes depois do `TRAILER!!!` | Ignorados (o preenchimento até 512 do `cpio` está aí) |
+| `find(name)` | Compara byte a byte (sem tirar `./`: o escritor do xtask grava `init`), percorre o arquivo **inteiro** (o `TRAILER!!!` vale mesmo com o achado no começo) e, com nome repetido, fica com a **última** ocorrência (proposta; a extração em ordem do Linux sobrescreve, **não verificado no código** nesta fatia) |
+
+O teste de ouro é um `newc` real gerado no desenvolvimento por
+`printf 'init\nbin\nbin/tool\n' | cpio -o -H newc` (bsdcpio 3.5.3 do macOS) e colado como constante;
+o binário `cpio` não entra no build.
+
+**`core/elf`** (`parse(&[u8], &Limits) -> Result<Image, Error>`). `Image` tem a entrada, até
+16 `PT_LOAD` (`Segment`: `vaddr`, `memsz`, `offset`, `filesz`, `flags`), o endereço da
+tabela de program headers na memória (`phdr`, só se ela cabe no conteúdo de arquivo de um
+`PT_LOAD`) e `phnum`. **Só `ET_EXEC`**; `ET_DYN` volta `BadType` até a decisão 5 do
+capítulo 18 mudar. As regras são a tabela "Validação, regra por regra" do capítulo 17.
+**Mudança de dependência:** o crate **não** depende do `hal`. O chamador passa
+`Limits { machine, user_min, user_top, page_size, max_loads_bytes }`, e o `kernel/` os tira de
+`hal::abi`. Decisões do agente onde a tabela deixa margem:
+
+| Caso | Decisão |
+| --- | --- |
+| `p_align` | 0 e 1 (sem alinhamento, gABI) e potência de dois passam; o resto é `BadAlign`. A congruência é módulo a **página**, não módulo `p_align` |
+| `e_entry` | Dentro do **conteúdo de arquivo** (`p_filesz`) de um `PT_LOAD` executável; a cauda zerada (`.bss`) não vale |
+| `e_version` | Além de `EI_VERSION`, `e_version` também tem de ser 1 |
+| Ordem dos `PT_LOAD` | `p_vaddr` menor que o do anterior é `Unsorted`; mesma página ou invasão, `Overlap` |
+| Teto de memória | Soma dos `p_memsz` (sem arredondar) até `max_loads_bytes` |
+| `PT_LOAD` sem R | Recusado também quando só W, só X ou nenhum |
+| Tipos ignorados | `PT_NULL`, `PT_NOTE`, `PT_PHDR`, `PT_GNU_*` e os desconhecidos não são validados |
+| Sem nenhum `PT_LOAD` | `EntryNotExecutable` |
+| `Segment` | `flags` guarda só `PF_R`, `PF_W` e `PF_X` (os bits de SO e de processador de `p_flags` saem). `page_range(page)` dá o intervalo virtual arredondado à página e `page_offset(page)` o deslocamento de `vaddr` na página. `file_bytes` começa em `vaddr`, não no início da página: o chamador zera o começo da primeira página e a cauda até `memsz` |
+
+`EI_OSABI` tem de ser `ELFOSABI_NONE` (0). **Achado nos testes:** o `rust-lld` grava
+`ELFOSABI_GNU` (3) quando o programa tem um `#[used]` (seção com `SHF_GNU_RETAIN`); o mesmo
+programa sem ele sai com 0. O `user/rt` e os programas não podem usar `#[used]`, ou a regra
+muda (contrato de formato: caso 6 do [`AGENTS.md`](../../AGENTS.md); [DEBT-0074](../tech-debt/0074-elf-recusa-osabi-gnu-do-used.md)).
+
+O ELF real dos testes é um `#![no_std] #![no_main]` mínimo ligado com
+`rustc 1.100.0 --target {x86_64-unknown-none,aarch64-unknown-none-softfloat} -C opt-level=s
+-C panic=abort [-Ccode-model=small no x86_64] -C relocation-model=static -C link-arg=-Tuser.ld
+-C link-arg=-zmax-page-size=0x1000 -C link-arg=--no-rosegment`, com `.text` em `0x40_0000` e
+uma página por permissão. As constantes são só o cabeçalho e os três program headers; o resto do arquivo
+o teste preenche com zeros. O programa não entra no build.
