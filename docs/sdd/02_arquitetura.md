@@ -7,7 +7,7 @@
 
 | Anel | Pasta | O que tem | `unsafe` |
 | --- | --- | --- | --- |
-| **Portas** | `core/hal` | Traits e tipos de fronteira: `BootInfo`, `Console`, `ByteSource`, `Cpu`, `RegisterBus`, `PageMapper`, `FrameSource`, `PageFormat`, `TableMemory`, `MmuControl`, `HardwareEntropy`, `FramebufferInfo`, `PhysAddr`, `VirtAddr`, `MemoryRegion` | proibido |
+| **Portas** | `core/hal` | Traits e tipos de fronteira: `BootInfo` (com `cpus`), `Console`, `ByteSource`, `Cpu`, `CpuLocal`, `Ipi`, `RegisterBus`, `PageMapper`, `FrameSource`, `PageFormat`, `TableMemory`, `MmuControl`, `HardwareEntropy`, `FramebufferInfo`, `PhysAddr`, `VirtAddr`, `MemoryRegion` | proibido |
 | **Centro** | `core/mm`, `core/crypto`, `core/sched`, `core/gfx`, `core/term`, `core/shell` | Política pura: alocadores de frames (buddy, cache por CPU) e do heap, leitura do mapa de memória, janela de endereços, fila de execução, rodízio (o estado das tarefas e a troca moram no `kernel/` e no `arch/`); ChaCha20, BLAKE2b e o gerador de números aleatórios; desenho de pixels e a fonte própria; emulador de terminal VT/xterm; shell embutido | proibido |
 | **Suporte** | `lib/sync` | Primitivas sem domínio (`SpinLock`) que precisam de `unsafe` para existir | permitido |
 | **Adaptadores** | `arch/*`, `boot/*`, `drivers/*` | Implementam as portas para uma ISA, um bootloader ou um dispositivo | permitido em `arch/` e `boot/`; proibido em `drivers/` |
@@ -46,7 +46,8 @@ os métodos da porta são seguros. Exemplos:
 | `DirectMapTables` (as duas ISAs) | `DirectMapTables::new(offset)` | toda tabela e todo frame novo é acessível pelo mapa direto, e ninguém mais mexe nas tabelas |
 | `platform::active_space`, `platform::new_space` | `active_space(offset)`, `new_space(frames, offset)` | as tabelas ativas e os frames novos são acessíveis pelo mapa direto; só se ativa o espaço novo com código, pilha e mapa direto nele |
 | `LimineBoot` | `LimineBoot::from_bootloader()` | a memória das respostas do Limine ainda não foi reaproveitada |
-| `X86Cpu`, `Aarch64Cpu` | `::new()` | o código roda em ring 0 / EL1+ |
+| `X86Cpu`, `Aarch64Cpu`, `X86CpuLocal`, `Aarch64CpuLocal` | `::new()` | o código roda em ring 0 / EL1+ |
+| `X86Ipi`, `Aarch64Ipi` | `::new()` | o Local APIC publicado (x86_64) ou a interface do GIC desta CPU ligada (aarch64) |
 | `Context::new` (as duas ISAs) | `Context::new(top, entry, arg, on_return)` | `top` é o fim, alinhado a 16, de uma pilha mapeada só da thread; `switch` só roda com IRQ mascarada e nenhum lock preso |
 | `DirectMap` (`kernel/src/heap.rs`) | `DirectMap::new(offset)` | todo endereço físico que a porta `FrameMemory` recebe é de frame do kernel e está no mapa direto, em `físico + offset` |
 

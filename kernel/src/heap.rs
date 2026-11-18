@@ -78,6 +78,11 @@ pub unsafe fn install(frames: Frames, direct_map_offset: u64) {
     });
 }
 
+/// Disputas pelo lock do heap desde o boot.
+pub fn contentions() -> u32 {
+    HEAP.contentions()
+}
+
 /// Páginas seguradas do alocador de frames e bytes pedidos e ainda não devolvidos.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stats {

@@ -1,29 +1,46 @@
-//! Medidas e autoteste das tarefas: latência de troca de contexto (o equivalente
-//! do `lat_ctx` do lmbench), jitter de acordar e o estado de SIMD por tarefa.
+//! Medidas e autoteste das tarefas: latência de troca de contexto na mesma CPU e entre CPUs
+//! (o equivalente do `lat_ctx` do lmbench), IPI de ida e volta, escala com o número de
+//! núcleos, jitter de acordar e o estado de SIMD por tarefa.
 
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
+use rustos_hal::{Ipi, IpiKind};
 use rustos_sched::{Composite, SchedParams, Scheduler, TaskId};
-use rustos_shell::BenchReport;
+use rustos_shell::{BenchReport, ScaleSample, StormSample};
 
 use crate::task::{self, Spawn};
-use crate::{interrupts, platform};
+use crate::{interrupts, percpu, platform};
 
 /// Quanto cada medida repete.
 #[derive(Clone, Copy, Debug)]
 pub struct Effort {
     pub rounds: u32,
     pub samples: u32,
+    /// CPU que cada tarefa da escala gasta, em ms.
+    pub task_ms: u64,
+    /// Voltas de alocação de cada CPU na medida de contenção da memória.
+    pub storm: u32,
 }
+
+/// O acordar entre CPUs custa dezenas de vezes o da mesma CPU: menos voltas para a medida caber.
+const CROSS_DIVISOR: u32 = 20;
+
+/// Tarefas de CPU na medida de escala: o dobro das CPUs do maior caso (4).
+const SCALE_TASKS: usize = 8;
 
 /// O curto do boot e o completo do comando `bench`.
 pub const BOOT: Effort = Effort {
     rounds: 2_000,
     samples: 20,
+    task_ms: 2,
+    storm: 2_000,
 };
 pub const FULL: Effort = Effort {
     rounds: 20_000,
     samples: 200,
+    task_ms: 10,
+    storm: 20_000,
 };
 
 static PING: AtomicUsize = AtomicUsize::new(0);
@@ -86,33 +103,57 @@ fn pong(_: usize) {
     finish();
 }
 
+/// Onde as duas tarefas do ping-pong rodam.
+#[derive(Clone, Copy, Debug)]
+pub enum Placement {
+    /// As duas na CPU de quem mede.
+    SameCpu,
+    /// Uma na CPU de quem mede e a outra numa segunda CPU ativa.
+    CrossCpu,
+}
+
+/// A CPU de quem mede e, se houver, outra ativa.
+fn cpu_pair() -> (usize, Option<usize>) {
+    let here = percpu::current().index();
+    let other = (0..rustos_hal::MAX_CPUS)
+        .find(|&index| index != here && task::active_cpus() >> index & 1 != 0);
+    (here, other)
+}
+
 /// Nanossegundos por troca de contexto: um aquecimento e o melhor de três rodadas.
-pub fn context_switch_ns(rounds: u32, simd: bool) -> Option<u64> {
-    ping_pong(rounds, simd)?;
+/// `None` se a colocação pede uma segunda CPU que não existe.
+pub fn context_switch_ns(rounds: u32, simd: bool, placement: Placement) -> Option<u64> {
+    ping_pong(rounds, simd, placement)?;
     let mut best = u64::MAX;
     for _ in 0..3 {
-        best = best.min(ping_pong(rounds, simd)?);
+        best = best.min(ping_pong(rounds, simd, placement)?);
     }
     Some(best)
 }
 
 /// Duas tarefas passam a vez uma à outra por `unpark` e `park`; cada ida e volta
 /// são duas trocas.
-fn ping_pong(rounds: u32, simd: bool) -> Option<u64> {
+fn ping_pong(rounds: u32, simd: bool, placement: Placement) -> Option<u64> {
+    let (here, other) = cpu_pair();
+    let (first_on, second_on) = match placement {
+        Placement::SameCpu => (1 << here, 1 << here),
+        Placement::CrossCpu => (1 << here, 1 << other?),
+    };
     STOP.store(false, Ordering::Relaxed);
     FINISHED.store(0, Ordering::Relaxed);
     ROUNDS.store(rounds, Ordering::Relaxed);
     MAIN.store(task::current().as_u32() as usize, Ordering::Relaxed);
-    let spawn = |name, entry| Spawn {
+    let spawn = |name, entry, affinity| Spawn {
         name,
         entry,
         arg: 0,
         simd,
         params: SchedParams::fair(0),
+        affinity,
     };
-    let second = task::spawn(spawn("pong", pong)).ok()?;
+    let second = task::spawn(spawn("pong", pong, second_on)).ok()?;
     PONG.store(second.as_u32() as usize, Ordering::Relaxed);
-    let first = task::spawn(spawn("ping", ping)).ok()?;
+    let first = task::spawn(spawn("ping", ping, first_on)).ok()?;
     wait_finished(2);
     wait_exited(&[first, second]);
     Some(ELAPSED_NS.load(Ordering::Relaxed) / (2 * u64::from(rounds.max(1))))
@@ -138,6 +179,7 @@ pub fn wake_jitter_ns(samples: u32, loaded: bool) -> Option<(u64, u64)> {
                 arg: 0,
                 simd: false,
                 params: SchedParams::fair(0),
+                affinity: 1 << percpu::current().index(),
             })
             .ok()?,
         )
@@ -206,15 +248,259 @@ pub fn policy_ns(rounds: u32) -> (u64, u64) {
     (pick, tick)
 }
 
+/// Gancho do IPI de reescalonar: a medida de ida e volta o usa.
+pub fn on_ipi() {
+    if !ECHO_ON.load(Ordering::Acquire) {
+        return;
+    }
+    let me = percpu::current().index();
+    if me == ECHO_FAR.load(Ordering::Relaxed) {
+        let origin = percpu::get(ECHO_NEAR.load(Ordering::Relaxed)).hw_id();
+        // SAFETY: a medida só roda com outra CPU ativa, então a interface está ligada.
+        unsafe { platform::ipi() }.send(origin, IpiKind::Reschedule);
+    } else if me == ECHO_NEAR.load(Ordering::Relaxed) {
+        ECHO_BACK.fetch_add(1, Ordering::Release);
+    }
+}
+
+static ECHO_ON: AtomicBool = AtomicBool::new(false);
+static ECHO_NEAR: AtomicUsize = AtomicUsize::new(0);
+static ECHO_FAR: AtomicUsize = AtomicUsize::new(0);
+static ECHO_BACK: AtomicU32 = AtomicU32::new(0);
+
+static ECHO_ROUNDS: AtomicU32 = AtomicU32::new(0);
+
+/// Roda presa à CPU `near`: manda o IPI à `far`, que o devolve do próprio handler (`on_ipi`),
+/// e conta o tempo de `ECHO_ROUNDS` idas e voltas. Melhor de três.
+fn ipi_probe(_: usize) {
+    let rounds = ECHO_ROUNDS.load(Ordering::Relaxed);
+    let target = percpu::get(ECHO_FAR.load(Ordering::Relaxed)).hw_id();
+    // SAFETY: há outra CPU ativa, então a interface de interrupção está ligada.
+    let ipi = unsafe { platform::ipi() };
+    let mut best = u64::MAX;
+    for _ in 0..4 {
+        let first = ECHO_BACK.load(Ordering::Acquire);
+        let start = platform::cycles();
+        for round in 1..=rounds {
+            ipi.send(target, IpiKind::Reschedule);
+            while ECHO_BACK.load(Ordering::Acquire) < first + round {
+                core::hint::spin_loop();
+            }
+        }
+        let spent = platform::cycles_to_ns(platform::cycles().wrapping_sub(start));
+        best = best.min(spent / u64::from(rounds.max(1)));
+    }
+    ELAPSED_NS.store(best, Ordering::Relaxed);
+    finish();
+}
+
+/// IPI de ida e volta entre a CPU de quem mede e outra. `None` com uma CPU só.
+pub fn ipi_round_trip_ns(rounds: u32) -> Option<u64> {
+    let (near, far) = cpu_pair();
+    let far = far?;
+    ECHO_NEAR.store(near, Ordering::Relaxed);
+    ECHO_FAR.store(far, Ordering::Relaxed);
+    ECHO_BACK.store(0, Ordering::Relaxed);
+    ECHO_ROUNDS.store(rounds, Ordering::Relaxed);
+    FINISHED.store(0, Ordering::Relaxed);
+    MAIN.store(task::current().as_u32() as usize, Ordering::Relaxed);
+    ECHO_ON.store(true, Ordering::Release);
+    let probe = task::spawn(Spawn {
+        name: "ipi",
+        entry: ipi_probe,
+        arg: 0,
+        simd: false,
+        params: SchedParams::fair(0),
+        affinity: 1 << near,
+    })
+    .ok()?;
+    wait_finished(1);
+    ECHO_ON.store(false, Ordering::Release);
+    wait_exited(&[probe]);
+    Some(ELAPSED_NS.load(Ordering::Relaxed))
+}
+
+static WORK_ITERS: AtomicU64 = AtomicU64::new(0);
+
+/// Um trabalho só de CPU, sem memória nem sincronização: `iterations` voltas.
+fn burn(iterations: u64) -> u64 {
+    let mut acc = 0x9E37_79B9_7F4A_7C15_u64;
+    for index in 0..iterations {
+        acc = core::hint::black_box(acc.rotate_left(5) ^ index).wrapping_mul(0x2545_F491_4F6C_DD1D);
+    }
+    acc
+}
+
+fn worker(_: usize) {
+    core::hint::black_box(burn(WORK_ITERS.load(Ordering::Relaxed)));
+    finish();
+}
+
+/// Voltas de `burn` por milissegundo, medidas agora: o trabalho de cada tarefa da escala é
+/// escolhido em tempo, não em voltas, para valer no TCG e no HVF.
+fn burn_per_ms() -> u64 {
+    let probe = 50_000;
+    let start = platform::cycles();
+    core::hint::black_box(burn(probe));
+    let ns = platform::cycles_to_ns(platform::cycles().wrapping_sub(start)).max(1);
+    probe * 1_000_000 / ns
+}
+
+/// Tempo total, em ns, de `tasks` tarefas de CPU de `task_ms` ms cada, presas às `cpus`
+/// primeiras CPUs ativas: dá a escala do escalonador com o número de núcleos.
+pub fn scale_ns(cpus: usize, tasks: usize, task_ms: u64) -> Option<u64> {
+    let active: Vec<usize> = (0..rustos_hal::MAX_CPUS)
+        .filter(|&index| task::active_cpus() >> index & 1 != 0)
+        .collect();
+    if active.len() < cpus {
+        return None;
+    }
+    let mask = active
+        .iter()
+        .take(cpus)
+        .fold(0_u32, |mask, &index| mask | 1 << index);
+    WORK_ITERS.store(burn_per_ms() * task_ms, Ordering::Relaxed);
+    FINISHED.store(0, Ordering::Relaxed);
+    MAIN.store(task::current().as_u32() as usize, Ordering::Relaxed);
+    let start = platform::now_ns()?;
+    let mut ids = Vec::new();
+    for _ in 0..tasks {
+        ids.push(
+            task::spawn(Spawn {
+                name: "work",
+                entry: worker,
+                arg: 0,
+                simd: false,
+                params: SchedParams::fair(0),
+                affinity: mask,
+            })
+            .ok()?,
+        );
+    }
+    wait_finished(u32::try_from(tasks).ok()?);
+    let elapsed = platform::now_ns()?.saturating_sub(start);
+    wait_exited(&ids);
+    Some(elapsed)
+}
+
+static STORM_HEAP: AtomicBool = AtomicBool::new(false);
+static STORM_ITERS: AtomicU32 = AtomicU32::new(0);
+
+/// Cada CPU aloca e devolve sem parar: frames soltos (4 por volta) ou objetos do heap.
+fn storm_worker(_: usize) {
+    let iterations = STORM_ITERS.load(Ordering::Relaxed);
+    if STORM_HEAP.load(Ordering::Relaxed) {
+        for round in 0..iterations {
+            let object = alloc::boxed::Box::new([round.to_le_bytes()[0]; 64]);
+            core::hint::black_box(&object);
+        }
+    } else if let Some(mut frames) = crate::frames::handle() {
+        for _ in 0..iterations {
+            let mut held = [None; 4];
+            for slot in &mut held {
+                *slot = rustos_hal::FrameSource::allocate_frame(&mut frames);
+            }
+            for frame in held.into_iter().flatten() {
+                crate::frames::free_frame(frames, frame);
+            }
+        }
+    }
+    finish();
+}
+
+/// Tempo total e disputas de `cpus` tarefas, uma por CPU, alocando em paralelo. `heap` escolhe
+/// o heap (um lock global) em vez dos frames soltos.
+fn storm_ns(cpus: usize, iterations: u32, heap: bool) -> Option<(u64, u32)> {
+    let active: Vec<usize> = (0..rustos_hal::MAX_CPUS)
+        .filter(|&index| task::active_cpus() >> index & 1 != 0)
+        .collect();
+    if active.len() < cpus {
+        return None;
+    }
+    STORM_HEAP.store(heap, Ordering::Relaxed);
+    STORM_ITERS.store(iterations, Ordering::Relaxed);
+    FINISHED.store(0, Ordering::Relaxed);
+    MAIN.store(task::current().as_u32() as usize, Ordering::Relaxed);
+    let before = if heap {
+        crate::heap::contentions()
+    } else {
+        crate::frames::contentions()
+    };
+    let start = platform::now_ns()?;
+    let mut ids = Vec::new();
+    for &cpu in active.iter().take(cpus) {
+        ids.push(
+            task::spawn(Spawn {
+                name: "storm",
+                entry: storm_worker,
+                arg: 0,
+                simd: false,
+                params: SchedParams::fair(0),
+                affinity: 1 << cpu,
+            })
+            .ok()?,
+        );
+    }
+    wait_finished(u32::try_from(cpus).ok()?);
+    let elapsed = platform::now_ns()?.saturating_sub(start);
+    wait_exited(&ids);
+    let after = if heap {
+        crate::heap::contentions()
+    } else {
+        crate::frames::contentions()
+    };
+    Some((elapsed, after - before))
+}
+
+/// A mesma carga de frames com o cache por CPU desligado e ligado, e a do heap: o número
+/// que decide se o cache vale (SDD 12).
+pub fn memory_storm(iterations: u32) -> StormSample {
+    let cpus = task::active_cpus().count_ones() as usize;
+    crate::frames::set_cache(false);
+    let locked = storm_ns(cpus, iterations, false);
+    crate::frames::set_cache(true);
+    let cached = storm_ns(cpus, iterations, false);
+    let heap = storm_ns(cpus, iterations, true);
+    StormSample {
+        cpus: u8::try_from(cpus).unwrap_or(0),
+        iterations,
+        locked_ns: locked.map_or(0, |(ns, _)| ns),
+        locked_contention: locked.map_or(0, |(_, count)| count),
+        cached_ns: cached.map_or(0, |(ns, _)| ns),
+        cached_contention: cached.map_or(0, |(_, count)| count),
+        heap_ns: heap.map_or(0, |(ns, _)| ns),
+        heap_contention: heap.map_or(0, |(_, count)| count),
+    }
+}
+
 pub fn run(effort: Effort) -> Option<BenchReport> {
-    let plain = context_switch_ns(effort.rounds, false)?;
-    let simd = context_switch_ns(effort.rounds, true)?;
+    let plain = context_switch_ns(effort.rounds, false, Placement::SameCpu)?;
+    let simd = context_switch_ns(effort.rounds, true, Placement::SameCpu)?;
+    let cross =
+        context_switch_ns(effort.rounds / CROSS_DIVISOR, false, Placement::CrossCpu).unwrap_or(0);
+    let ipi_rtt_ns = ipi_round_trip_ns(effort.rounds / CROSS_DIVISOR).unwrap_or(0);
     let (idle_mean, idle_max) = wake_jitter_ns(effort.samples, false)?;
     let (load_mean, load_max) = wake_jitter_ns(effort.samples, true)?;
     let (pick_next_ns, tick_ns) = policy_ns(effort.rounds);
+    let mut scale = [ScaleSample::default(); 3];
+    for (sample, cpus) in scale.iter_mut().zip([1_usize, 2, 4]) {
+        if let Some(ns) = scale_ns(cpus, SCALE_TASKS, effort.task_ms) {
+            *sample = ScaleSample {
+                cpus: u8::try_from(cpus).unwrap_or(0),
+                tasks: u8::try_from(SCALE_TASKS).unwrap_or(0),
+                total_ns: ns,
+            };
+        }
+    }
+    let storm = memory_storm(effort.storm);
     Some(BenchReport {
+        storm,
         switch_ns: plain,
         switch_simd_ns: simd,
+        switch_cross_ns: cross,
+        ipi_rtt_ns,
+        scale,
+        cpus: u8::try_from(task::active_cpus().count_ones()).unwrap_or(0),
         wake_samples: effort.samples,
         wake_mean_ns: idle_mean,
         wake_max_ns: idle_max,
@@ -252,9 +538,9 @@ fn simd_worker(index: usize) {
     task::unpark(id(&MAIN));
 }
 
-/// Duas tarefas de SIMD alternam por preempção e por `yield`, cada uma com o seu
-/// valor nos registradores. Devolve quantas vezes a primeira foi escolhida para rodar.
-pub fn simd_self_test() -> Option<u64> {
+/// Dois trabalhadores de SIMD, cada um com o seu valor nos registradores. Devolve quantas
+/// vezes o primeiro foi escolhido para rodar, ou `None` se algum viu o valor trocar.
+fn simd_workers(affinity: u32) -> Option<u64> {
     const WORKERS: u32 = 2;
     SIMD_FAILURES.store(0, Ordering::Relaxed);
     SIMD_DONE.store(0, Ordering::Relaxed);
@@ -267,6 +553,7 @@ pub fn simd_self_test() -> Option<u64> {
             arg: index,
             simd: true,
             params: SchedParams::fair(0),
+            affinity,
         })
         .ok()?;
         first.get_or_insert(spawned);
@@ -274,6 +561,125 @@ pub fn simd_self_test() -> Option<u64> {
     while SIMD_DONE.load(Ordering::Acquire) < WORKERS {
         task::park();
     }
-    let preempted = task::switches(first?);
-    (SIMD_FAILURES.load(Ordering::Relaxed) == 0 && preempted >= 3).then_some(preempted)
+    let first = first?;
+    (SIMD_FAILURES.load(Ordering::Relaxed) == 0).then(|| task::switches(first))
+}
+
+/// O estado de SIMD de cada tarefa sobrevive à troca: dois trabalhadores na mesma CPU
+/// alternam por preempção e por `yield`, e depois dois soltos pelas CPUs (migram, se o
+/// balanceamento quiser). Devolve quantas vezes o primeiro rodou na CPU compartilhada.
+pub fn simd_self_test() -> Option<u64> {
+    let here = 1 << platform_cpu_index();
+    let preempted = simd_workers(here)?;
+    simd_workers(0)?;
+    (preempted >= 3).then_some(preempted)
+}
+
+fn platform_cpu_index() -> usize {
+    crate::percpu::current().index()
+}
+
+const CHURN_TASKS: usize = 8;
+static CHURN_RUNNING: [AtomicBool; CHURN_TASKS] = [const { AtomicBool::new(false) }; CHURN_TASKS];
+static CHURN_CPU: [AtomicUsize; CHURN_TASKS] =
+    [const { AtomicUsize::new(usize::MAX) }; CHURN_TASKS];
+static CHURN_DONE: AtomicU32 = AtomicU32::new(0);
+static CHURN_DOUBLE_RUNS: AtomicU32 = AtomicU32::new(0);
+static CHURN_MIGRATIONS: AtomicU64 = AtomicU64::new(0);
+static CHURN_TURNS: AtomicU64 = AtomicU64::new(0);
+
+/// Roda, cede, dorme e acorda por 40 ms. A bandeira de `CHURN_RUNNING` sobe ao começar cada
+/// volta e desce ao fim: se duas CPUs rodassem a mesma tarefa ao mesmo tempo, a segunda a veria subida.
+fn churn(index: usize) {
+    let end = platform::now_ns().unwrap_or(0) + 40_000_000;
+    let mut turn = 0_u32;
+    while platform::now_ns().unwrap_or(u64::MAX) < end {
+        if CHURN_RUNNING[index].swap(true, Ordering::AcqRel) {
+            CHURN_DOUBLE_RUNS.fetch_add(1, Ordering::Relaxed);
+        }
+        let here = percpu::current().index();
+        let before = CHURN_CPU[index].swap(here, Ordering::Relaxed);
+        if before != usize::MAX && before != here {
+            CHURN_MIGRATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+        core::hint::black_box(burn(2_000));
+        CHURN_RUNNING[index].store(false, Ordering::Release);
+        CHURN_TURNS.fetch_add(1, Ordering::Relaxed);
+        match turn % 3 {
+            0 => task::yield_now(),
+            1 => task::sleep_until(platform::now_ns().unwrap_or(0) + 100_000),
+            _ => {}
+        }
+        turn += 1;
+    }
+    CHURN_DONE.fetch_add(1, Ordering::Release);
+    task::unpark(id(&MAIN));
+}
+
+/// Tarefas que rodam, cedem e dormem nas CPUs todas, e migram quando o balanceamento ou o
+/// acordar quer: nenhuma roda em duas CPUs ao mesmo tempo e nenhuma se perde. Devolve as
+/// migrações e as voltas, ou `None` se algo falhou.
+pub fn smp_self_test() -> Option<(u64, u64)> {
+    CHURN_DONE.store(0, Ordering::Relaxed);
+    CHURN_DOUBLE_RUNS.store(0, Ordering::Relaxed);
+    CHURN_MIGRATIONS.store(0, Ordering::Relaxed);
+    CHURN_TURNS.store(0, Ordering::Relaxed);
+    MAIN.store(task::current().as_u32() as usize, Ordering::Relaxed);
+    let mut ids = Vec::new();
+    for index in 0..CHURN_TASKS {
+        CHURN_RUNNING[index].store(false, Ordering::Relaxed);
+        CHURN_CPU[index].store(usize::MAX, Ordering::Relaxed);
+        ids.push(
+            task::spawn(Spawn {
+                name: "churn",
+                entry: churn,
+                arg: index,
+                simd: false,
+                params: SchedParams::fair(0),
+                affinity: 0,
+            })
+            .ok()?,
+        );
+    }
+    let deadline = platform::now_ns()? + 2_000_000_000;
+    while CHURN_DONE.load(Ordering::Acquire) < u32::try_from(CHURN_TASKS).ok()? {
+        if platform::now_ns()? > deadline {
+            return None;
+        }
+        task::sleep_until(platform::now_ns()? + 1_000_000);
+    }
+    wait_exited(&ids);
+    (CHURN_DOUBLE_RUNS.load(Ordering::Relaxed) == 0).then(|| {
+        (
+            CHURN_MIGRATIONS.load(Ordering::Relaxed),
+            CHURN_TURNS.load(Ordering::Relaxed),
+        )
+    })
+}
+
+fn panicker(_: usize) {
+    panic!("teste de pânico na CPU {}", percpu::current().index());
+}
+
+/// Cria uma tarefa presa a outra CPU que entra em pânico. Só volta (`false`) se não há outra
+/// CPU ativa; depois do pânico o sistema inteiro para.
+pub fn panic_on_other_cpu() -> bool {
+    let (_, other) = cpu_pair();
+    let Some(other) = other else {
+        return false;
+    };
+    let spawned = task::spawn(Spawn {
+        name: "panicker",
+        entry: panicker,
+        arg: 0,
+        simd: false,
+        params: SchedParams::fair(0),
+        affinity: 1 << other,
+    });
+    if spawned.is_err() {
+        return false;
+    }
+    loop {
+        task::sleep_until(platform::now_ns().unwrap_or(0) + 10_000_000);
+    }
 }

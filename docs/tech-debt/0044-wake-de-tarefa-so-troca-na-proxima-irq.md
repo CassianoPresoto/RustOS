@@ -15,6 +15,9 @@ O `PREEMPT_SHORT` (a preempção por acordar de fatia curta) vale só para o wak
 IRQ, onde `preempt` roda no fim. `unpark` e `spawn` chamados de uma tarefa deixam a
 acordada pronta e a corrente segue até ceder a CPU ou até a próxima IRQ do timer.
 
+Com vários núcleos, o acordar que cai numa **outra** CPU já preempta na hora: o IPI de reescalonar
+faz a CPU destino trocar ao fim da IRQ. Só o acordar na CPU de quem chama segue esperando.
+
 ## Por que foi aceito
 
 O `bench` e o shell não medem acordar entre tarefas, e o ponto de preempção fora da IRQ
