@@ -112,6 +112,77 @@ impl<Fmt: PageFormat, Mem: TableMemory, Ctl: MmuControl> PageTables<Fmt, Mem, Ct
         free(table);
     }
 
+    /// A tabela do último nível que cobre `virt`, se todos os níveis acima existem e nenhum é folha.
+    fn last_table(&self, virt: VirtAddr) -> Option<PhysAddr> {
+        let mut table = self.root;
+        for level in 0..LEVELS - 1 {
+            let entry = self.memory.read(table, table_index(virt, level));
+            if !Fmt::is_valid(entry) || !Fmt::is_table(entry, level) {
+                return None;
+            }
+            table = Fmt::table_address(entry);
+        }
+        Some(table)
+    }
+
+    /// A folha de 4 KiB que mapeia `virt`: o frame e a permissão dela. `None` se a página não está
+    /// mapeada ou uma página grande a cobre.
+    pub fn leaf(&self, virt: VirtAddr) -> Option<(PhysAddr, PageFlags)> {
+        let table = self.last_table(virt)?;
+        let entry = self.memory.read(table, table_index(virt, LEVELS - 1));
+        Fmt::is_valid(entry).then(|| Fmt::decode_leaf(entry, false))
+    }
+
+    /// Troca o frame e a permissão da folha de 4 KiB já mapeada em `virt` e devolve o frame velho.
+    /// A entrada some, a CPU esquece a tradução (`entry_removed`) e só então a nova é gravada. As
+    /// outras CPUs que usam o espaço são do chamador.
+    pub fn remap_page(
+        &mut self,
+        virt: VirtAddr,
+        phys: PhysAddr,
+        flags: PageFlags,
+    ) -> Result<PhysAddr, MapError> {
+        if flags.violates_wx() {
+            return Err(MapError::WriteExecute(virt));
+        }
+        if !virt.is_aligned(PAGE_SIZE) || !phys.is_aligned(PAGE_SIZE) {
+            return Err(MapError::Misaligned);
+        }
+        check_user_range(virt, PAGE_SIZE, flags)?;
+        let (table, index) = self.mapped_slot(virt)?;
+        let (old, _) = Fmt::decode_leaf(self.memory.read(table, index), false);
+        self.memory.write(table, index, 0);
+        self.control.entry_removed(virt);
+        self.memory.write(table, index, Fmt::page_entry(phys, flags));
+        self.control.entry_changed(virt);
+        Ok(old)
+    }
+
+    /// Remove a folha de 4 KiB de `virt` e devolve o frame que ela mapeava; `None` se não havia.
+    /// A CPU esquece a tradução (`entry_removed`); as outras CPUs do espaço são do chamador.
+    pub fn unmap_page(&mut self, virt: VirtAddr) -> Option<PhysAddr> {
+        let (table, index) = self.mapped_slot(virt).ok()?;
+        let (old, _) = Fmt::decode_leaf(self.memory.read(table, index), false);
+        self.memory.write(table, index, 0);
+        self.control.entry_removed(virt);
+        Some(old)
+    }
+
+    /// A CPU esquece a tradução de `virt` sem mudar a tabela: falta que outra CPU já resolveu.
+    pub fn forget(&self, virt: VirtAddr) {
+        self.control.entry_removed(virt);
+    }
+
+    fn mapped_slot(&self, virt: VirtAddr) -> Result<(PhysAddr, usize), MapError> {
+        let table = self.last_table(virt).ok_or(MapError::NotMapped(virt))?;
+        let index = table_index(virt, LEVELS - 1);
+        if Fmt::is_valid(self.memory.read(table, index)) {
+            Ok((table, index))
+        } else {
+            Err(MapError::NotMapped(virt))
+        }
+    }
+
     /// Desce criando tabelas até `leaf_level` e grava `entry` lá. `user` pede a hierarquia de
     /// uma folha de usuário.
     fn map_leaf<F: FrameSource>(
@@ -363,12 +434,17 @@ mod tests {
     #[derive(Default)]
     struct Cpu {
         changed: RefCell<Vec<u64>>,
+        removed: RefCell<Vec<u64>>,
         activated: RefCell<Option<u64>>,
     }
 
     impl MmuControl for &Cpu {
         fn entry_changed(&self, virt: VirtAddr) {
             self.changed.borrow_mut().push(virt.as_u64());
+        }
+
+        fn entry_removed(&self, virt: VirtAddr) {
+            self.removed.borrow_mut().push(virt.as_u64());
         }
 
         fn activate(&self, root: PhysAddr) {
@@ -776,5 +852,95 @@ mod tests {
         space.release_user_half(256, |frame| freed.push(frame.as_u64()));
         assert_eq!(freed, [0x1000]);
         assert_eq!(space.memory.read(ROOT, 510), upper);
+    }
+
+    fn user_space<'a>(cpu: &'a Cpu, frames: &mut Frames) -> Space<'a> {
+        let mut space = space(cpu);
+        space
+            .map_page(USER_VIRT, PhysAddr::new(0xA000), PageFlags::USER_RODATA, frames)
+            .unwrap();
+        space
+    }
+
+    #[test]
+    fn leaf_reads_the_frame_and_permission_of_a_mapped_page() {
+        let (cpu, mut frames) = (Cpu::default(), Frames(vec![0x5000, 0x4000, 0x3000, 0x2000]));
+        let space = user_space(&cpu, &mut frames);
+        assert_eq!(
+            space.leaf(USER_VIRT),
+            Some((PhysAddr::new(0xA000), PageFlags::USER_RODATA))
+        );
+        let next = VirtAddr::new(USER_VIRT.as_u64() + PAGE_SIZE);
+        assert_eq!(space.leaf(next), None);
+        assert_eq!(space.leaf(VirtAddr::new(0x7F00_0000_0000)), None);
+    }
+
+    #[test]
+    fn remap_clears_forgets_and_then_publishes_the_new_leaf() {
+        let (cpu, mut frames) = (Cpu::default(), Frames(vec![0x5000, 0x4000, 0x3000, 0x2000]));
+        let mut space = user_space(&cpu, &mut frames);
+        let old = space
+            .remap_page(USER_VIRT, PhysAddr::new(0xC000), PageFlags::USER_DATA)
+            .unwrap();
+        assert_eq!(old, PhysAddr::new(0xA000));
+        assert_eq!(
+            space.leaf(USER_VIRT),
+            Some((PhysAddr::new(0xC000), PageFlags::USER_DATA))
+        );
+        assert_eq!(*cpu.removed.borrow(), [USER_VIRT.as_u64()]);
+        assert_eq!(cpu.changed.borrow().len(), 2);
+    }
+
+    #[test]
+    fn remap_refuses_an_unmapped_page_write_execute_and_a_bad_address() {
+        let (cpu, mut frames) = (Cpu::default(), Frames(vec![0x5000, 0x4000, 0x3000, 0x2000]));
+        let mut space = user_space(&cpu, &mut frames);
+        let next = VirtAddr::new(USER_VIRT.as_u64() + PAGE_SIZE);
+        let to = PhysAddr::new(0xC000);
+        assert_eq!(
+            space.remap_page(next, to, PageFlags::USER_DATA),
+            Err(MapError::NotMapped(next))
+        );
+        let both = PageFlags {
+            writable: true,
+            ..PageFlags::USER_CODE
+        };
+        assert_eq!(
+            space.remap_page(USER_VIRT, to, both),
+            Err(MapError::WriteExecute(USER_VIRT))
+        );
+        assert_eq!(
+            space.remap_page(USER_VIRT, PhysAddr::new(0xC010), PageFlags::USER_DATA),
+            Err(MapError::Misaligned)
+        );
+        assert_eq!(
+            space.remap_page(VIRT, to, PageFlags::DATA),
+            Err(MapError::NotMapped(VIRT))
+        );
+        assert!(cpu.removed.borrow().is_empty());
+        assert_eq!(space.leaf(USER_VIRT).unwrap().0, PhysAddr::new(0xA000));
+    }
+
+    #[test]
+    fn unmap_returns_the_frame_once_and_forgets_the_translation() {
+        let (cpu, mut frames) = (Cpu::default(), Frames(vec![0x5000, 0x4000, 0x3000, 0x2000]));
+        let mut space = user_space(&cpu, &mut frames);
+        assert_eq!(space.unmap_page(USER_VIRT), Some(PhysAddr::new(0xA000)));
+        assert_eq!(space.leaf(USER_VIRT), None);
+        assert_eq!(space.unmap_page(USER_VIRT), None);
+        assert_eq!(*cpu.removed.borrow(), [USER_VIRT.as_u64()]);
+        space.forget(USER_VIRT);
+        assert_eq!(cpu.removed.borrow().len(), 2);
+    }
+
+    #[test]
+    fn a_large_page_in_the_way_is_not_a_four_kib_leaf() {
+        let (cpu, mut frames) = (Cpu::default(), Frames(vec![0x6000, 0x5000, 0x4000, 0x3000]));
+        let mut space = space(&cpu);
+        space
+            .map_large_page(LARGE_VIRT, PhysAddr::new(0x4020_0000), PageFlags::DATA, &mut frames)
+            .unwrap();
+        assert_eq!(space.leaf(LARGE_VIRT), None);
+        assert_eq!(space.unmap_page(LARGE_VIRT), None);
     }
 }
