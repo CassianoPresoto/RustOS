@@ -31,6 +31,7 @@ Os pedidos ficam em `boot/limine/src/requests.rs`, nas seções `.requests_start
 | Bootloader performance | Marcos de reset, início do Limine e entrega ao kernel, em µs | linha omitida |
 | Executable address | Base física e virtual da imagem (com o sorteio do KASLR), para o kernel mapear cada seção | `BootError::MissingKernelAddress`, pânico |
 | Framebuffer | O primeiro framebuffer linear: endereço no HHDM, tamanho, pitch e máscaras de cor. Só 32 bpp RGB com canais de 8 bits é aceito | sem tela; a serial continua |
+| Executable cmdline | A linha de comando da entrada do `limine.conf`. Só o build com a feature `panic-tests` a lê (`rustos.panic_early=N`, SDD 06); `BootParams::parse` ignora chave e valor que não entende | sem linha, o kernel sobe normal |
 | MP | Os núcleos: identificador de hardware (LAPIC ID ou `MPIDR`) e o `goto_address` de cada um. No x86_64 o pedido liga o bit de x2APIC. A presença do pedido faz o Limine acordar os núcleos secundários e estacioná-los | sem resposta o kernel roda numa CPU |
 
 O Limine mapeia o framebuffer no HHDM com o cache certo para vídeo:
@@ -53,12 +54,13 @@ Do `PROTOCOL.md`, revisão 6:
 | FP/SIMD | o alvo `x86_64-unknown-none` não os usa; `task::init` liga x87, SSE e XSAVE | `CPACR_EL1 = 0`; o alvo `-softfloat` não os usa; `task::init` põe `FPEN` em `0b11` ([SDD 15](15_tarefas_e_preempcao.md)) |
 | Pilha de execução | `rsp` na pilha do Limine, trocado pelo `call_on_stack` | EL1t com `SP_EL0`; `call_on_stack` passa para EL1h (`SP_EL1`) |
 
-Sem IDT/VBAR, qualquer exceção reinicia (x86) ou trava (aarch64) a máquina. A
-fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
-[Exceções e interrupções (aarch64)](#exceções-e-interrupções-aarch64).
+Sem IDT/VBAR, qualquer exceção reinicia (x86) ou trava (aarch64) a máquina. Por isso
+a primeira linha do `kmain` instala vetores mínimos ([abaixo](#pânico-e-exceção-antes-do-console));
+os definitivos entram em `interrupts::init` ([SDD 10](10_interrupcoes.md)).
 
 ## Sequência do `kmain`
 
+0. `early::init()`: vetores de exceção mínimos e a serial sem lock ([abaixo](#pânico-e-exceção-antes-do-console)).
 1. `LimineBoot::from_bootloader()` confere a revisão e lê memory map, HHDM e endereço
    da imagem.
 2. `Memory::init` resume o mapa (`core/mm::summarize`), calcula o metadado do buddy
@@ -85,7 +87,7 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
    ([SDD 15](15_tarefas_e_preempcao.md)).
 7. `Memory::reclaim_bootloader` devolve ao buddy as regiões `BootloaderReclaimable`.
 8. `random::init` semeia o gerador ([SDD 09](09_seguranca.md)).
-9. Relatório (com `kernel base:`, `reclaimed:`, `vm:`, `protections:`, `random:` e
+9. Relatório (com `kaslr:`, `reclaimed:`, `vm:`, `protections:`, `random:` e
    `random bench:` e `key residue:`, o autoteste de resíduo de chave na pilha), autoteste
    de um frame (escreve e relê pelo mapa direto), autoteste do heap, `zero bench:` (a
    medida de zerar), `w^x:` (percorre as tabelas), autoteste de exceção e de timer.
@@ -96,7 +98,48 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
    da serial (e, no x86_64, a do teclado) enche e bloqueia (`park`) quando ela está
    vazia; a ociosa dorme em `hlt`/`wfi` quando ninguém está pronto.
 
-Pânico antes do passo 4 não aparece em lugar nenhum (DEBT-0005).
+Pânico e exceção, em qualquer passo, saem na serial.
+
+## Pânico e exceção antes do console
+
+Até o passo 4 não há console, e no aarch64 a PL011 só se alcança depois das tabelas próprias.
+O pânico e o relatório de exceção usam, até lá (e quando o lock do console está preso), `early::print`:
+escreve direto na serial, sem lock, sem memória e sem tela, e passa pelo mesmo filtro de endereço do
+`kprintln!` ([SDD 09](09_seguranca.md#endereços-do-kernel-no-log)).
+
+| | x86_64 | aarch64 |
+| --- | --- | --- |
+| Vetores (primeira linha do `kmain`) | `install_early`: a IDT estática, com os mesmos stubs de `install`, sobre o seletor de `CS` do Limine; sem IST nem TSS | `install_early`: o `VBAR_EL1` da tabela de sempre, e a pilha que a exceção usa (`SP_EL1` em EL1t, `SP_EL0` em EL1h) 8 KiB abaixo da viva, para o quadro caber; ninguém volta dali |
+| Serial | COM1 por `in`/`out`, que funciona desde a entrada; sem programar a UART | PL011 em `TTBR0_EL1` (abaixo) até `Vm::activate`, depois na janela de dispositivos |
+| Troca para a definitiva | `install_traps` refaz a IDT sobre a GDT própria | `early_serial_map` mapeia a PL011 no espaço novo **antes** de ativá-lo; `early_serial_switch` aponta a serial precoce para lá e devolve o `TTBR0_EL1` |
+
+**Por que o `TTBR0_EL1` no aarch64.** O HHDM não alcança a PL011: do PROTOCOL.md, para a revisão base 3 em
+diante, só `Usable`, `Bootloader reclaimable`, `Executable and modules` e `Framebuffer` entram no HHDM, e a
+PL011 (`0x0900_0000`) não está no mapa de memória. Medido na QEMU `virt`: uma escrita em
+`HHDM + 0x0900_0000` na entrada do `kmain` trava sem saída.
+O mesmo PROTOCOL.md deixa o `TTBR0_EL1` livre para o kernel (revisão 1 em diante), então
+`arch/aarch64/src/early.rs` monta nele (níveis 0, 1 e 2) um bloco de 2 MiB de dispositivo, com endereço virtual igual
+ao físico, em `0x0900_0000` (múltiplo de 2 MiB); o endereço 0 volta a dar page fault. As três páginas (12 KiB) são um local do `kmain`, na pilha do Limine, que vive até o `early_serial_switch`; o endereço físico delas vem do `AT S1E1R`, e a escrita é volátil porque a MMU as lê fora do compilador e confere que o `TCR_EL1` é
+o de 4 níveis do Limine (`T0SZ` 16, `EPD0` 0); sem isso, a serial precoce fica desligada. O `Vm::activate`
+liga `EPD0` e o `TTBR0_EL1` volta ao valor do Limine. Alternativas descartadas: semihosting (só a QEMU
+com `-semihosting`, e a saída não vai para a serial que o `smoke` lê) e o framebuffer (exige o renderizador
+de texto antes de haver memória).
+
+**Pânico dentro do pânico.** `panic::begin` chamado de novo pela CPU dona do pânico toma de volta os
+locks do console, e `print_panic` cai para `early::print` quando a serial não está instalada ou está presa.
+Só a dona conta (`DEPTH`, depois de `begin`): do terceiro relatório dela em diante, pânico ou falta
+(`on_fault` também passa por `begin`), só sai uma linha fixa em `early::print_str` e a CPU para. As outras CPUs
+param em silêncio e contam em `STOPPED`, como sempre. O relatório precoce de falta (`early::on_fault`) tem o
+mesmo limite: a segunda falta escreve uma linha fixa e a terceira só para.
+
+**Margem de pilha no aarch64** (medida em `dev`, pintando a pilha do Limine de `0xAA` e varrendo: 6 KiB abaixo do quadro do
+`kmain` até antes de `Vm::activate`, que já inclui `Memory::init` e `Vm::build`; o quadro tem as 12 KiB das tabelas e
+até 4 KiB de alinhamento): cerca de 24 KiB de 64 KiB em uso, margem de uns 40 KiB. No relatório precoce de
+falta, 0,5 KiB até o handler mais 1,6 KiB da impressão, de 8 KiB: margem de 6 KiB.
+
+**O que ficou de fora.** Núcleo secundário, até `secondary_init`, ainda usa os vetores e as tabelas do
+Limine ([DEBT-0063](../tech-debt/0063-nucleo-secundario-sem-vetores-nem-serial-precoce.md)); a serial precoce
+não programa a UART e, no aarch64, é a da QEMU `virt` ([DEBT-0064](../tech-debt/0064-serial-precoce-so-confia-no-firmware.md)).
 
 ## Núcleos secundários
 
@@ -136,19 +179,19 @@ timer e fontes, está no [SDD 10](10_interrupcoes.md).
 
 ## Saída de referência
 
-QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB, `-smp 4`, perfil `dev`, x86_64 em TCG (a base e o mapa direto mudam a cada boot):
+QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB, `-smp 4`, perfil `dev`, x86_64 em TCG (a base e o mapa direto mudam a cada boot e não saem no log, [SDD 09](09_seguranca.md#endereços-do-kernel-no-log)):
 
 ```text
 [rustos] RustOS 0.1.0 (x86_64)
 [rustos] bootloader: Limine 12.10.0
 [rustos] boot timeline: firmware 1295365 us, bootloader 242971 us
-[rustos] kernel base: 0xffffffff9b7a5000 (physical 0xe092000)
+[rustos] kaslr: on, image slid by up to 18 bits (4 KiB steps in 2 GiB)
 [rustos] memory: 255532 KiB usable, 12855284 KiB other, 35 regions
 [rustos] reclaimed: 46432 KiB from the bootloader
 [rustos] frames: 63811 free of 65268 tracked, metadata 16728 bytes
 [rustos] screen: 1280x800, grid 158x47
 [rustos] protections: +wp +nx +smep +smap +umip
-[rustos] vm: direct map at 0xffff846840000000 in 122 2M and 2475 4K pages, 64 KiB of tables, stack 64 KiB
+[rustos] vm: direct map in 122 2M and 2475 4K pages, 64 KiB of tables, stack 64 KiB
 [rustos] cpus: 4 online (found 4, limit 8)
 [rustos] random: rdseed
 [rustos] random bench: chacha20 39 MB/s, reseed 288 us, next_u64 1034.1 ns

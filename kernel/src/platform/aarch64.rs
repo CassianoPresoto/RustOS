@@ -1,7 +1,7 @@
 //! QEMU `virt` aarch64: PL011 e GICv3 por MMIO, mapeados como dispositivo pelo
 //! kernel; exceções e timer pelos registradores de sistema.
 
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use rustos_arch_aarch64::descriptor::Aarch64Format;
 pub use rustos_arch_aarch64::fpu::{
@@ -13,15 +13,15 @@ use rustos_arch_aarch64::sgi::{SGI_RESCHEDULE, SGI_STOP};
 pub use rustos_arch_aarch64::zero::zero_aligned;
 use rustos_arch_aarch64::{
     Aarch64Cpu, Aarch64CpuLocal, Aarch64Entropy, Aarch64Ipi, Aarch64Mmu, DirectMapTables, MmioBus,
-    QEMU_VIRT_GICD, QEMU_VIRT_GICR, QEMU_VIRT_PL011, active_root, exception, gic_cpu, intid,
+    QEMU_VIRT_GICD, QEMU_VIRT_GICR, QEMU_VIRT_PL011, active_root, early, exception, gic_cpu, intid,
     prepare_space, protection, timer,
 };
 pub use rustos_arch_aarch64::{Context, call_on_stack, switch};
 use rustos_driver_gicv3::{GicError, GicV3, affinity_from_mpidr, find_redistributor, router_for};
 use rustos_driver_pl011::Pl011;
 use rustos_hal::{
-    BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, MmuControl, PAGE_SIZE, PhysAddr,
-    VirtAddr,
+    BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, MmuControl, PAGE_SIZE, PageMapper,
+    PhysAddr, VirtAddr,
 };
 use rustos_mm::PageTables;
 
@@ -32,6 +32,8 @@ use crate::memory::{Memory, map_device};
 pub const ARCH: &str = "aarch64";
 
 pub type PlatformConsole = Pl011<MmioBus>;
+/// As tabelas do mapa da serial precoce: duas páginas que o `kmain` mantém vivas até `early_serial_switch`.
+pub type EarlyScratch = early::EarlyTables;
 pub type PlatformEntropy = Aarch64Entropy;
 /// Espaço de endereçamento: as tabelas da metade alta atrás do `TTBR1_EL1`.
 pub type PlatformSpace = PageTables<Aarch64Format, DirectMapTables, Aarch64Mmu>;
@@ -78,6 +80,9 @@ const TIMER_PRIORITY: u8 = 0x40;
 const SERIAL_PRIORITY: u8 = 0x80;
 
 static UART_BASE: AtomicU64 = AtomicU64::new(0);
+/// Base da PL011 que o pânico usa antes do console; zero até haver mapa para ela.
+static EARLY_BASE: AtomicU64 = AtomicU64::new(0);
+static IDENTITY_MAP: AtomicBool = AtomicBool::new(false);
 /// A janela do distribuidor e a da região dos redistribuidores, para cada CPU achar o seu.
 static GICD_VIRT: AtomicU64 = AtomicU64::new(0);
 static GICR_VIRT: AtomicU64 = AtomicU64::new(0);
@@ -101,16 +106,60 @@ pub fn cpu() -> Aarch64Cpu {
     unsafe { Aarch64Cpu::new() }
 }
 
+/// Vetores mínimos e a PL011 por `TTBR0_EL1`, na entrada do `kmain` (SDD 04, DEBT-0002).
+pub fn early_init(handlers: &'static Handlers, scratch: &mut EarlyScratch) {
+    // SAFETY: EL1 com IRQ mascarada, na entrada do `kmain`.
+    unsafe { exception::install_early(handlers) };
+    // SAFETY: entrada do `kmain`, antes de `Vm::activate`; o Limine deixa o `TTBR0_EL1` livre.
+    if unsafe { early::identity_map_device(scratch, QEMU_VIRT_PL011) } {
+        EARLY_BASE.store(QEMU_VIRT_PL011, Ordering::Relaxed);
+        IDENTITY_MAP.store(true, Ordering::Relaxed);
+    }
+}
+
+/// A PL011 como o firmware a deixou: sem programar, sem lock. `None` se não há mapa para ela.
+pub fn early_console() -> Option<PlatformConsole> {
+    let base = EARLY_BASE.load(Ordering::Relaxed);
+    if base == 0 {
+        return None;
+    }
+    // SAFETY: a base é o mapa de 1:1 do `TTBR0_EL1` ou a janela de dispositivos, os dois
+    // como dispositivo e com a página inteira da PL011.
+    Some(Pl011::new(unsafe { MmioBus::new(VirtAddr::new(base)) }))
+}
+
+/// Mapeia a PL011 no espaço novo, antes de ativá-lo: o `TTBR0_EL1` morre com `Vm::activate`.
+pub fn early_serial_map(
+    space: &mut impl PageMapper,
+    frames: &mut impl FrameSource,
+) -> Result<(), MapError> {
+    let virt = map_device(space, frames, PhysAddr::new(QEMU_VIRT_PL011), PAGE_SIZE)?;
+    UART_BASE.store(virt.as_u64(), Ordering::Relaxed);
+    Ok(())
+}
+
+/// Depois de `Vm::activate`: a serial precoce passa para a janela e o `TTBR0_EL1` volta ao do Limine.
+pub fn early_serial_switch(scratch: &mut EarlyScratch) {
+    EARLY_BASE.store(UART_BASE.load(Ordering::Relaxed), Ordering::Relaxed);
+    if IDENTITY_MAP.swap(false, Ordering::Relaxed) {
+        // SAFETY: o mapa de 1:1 foi montado em `early_init` e a serial já usa a janela.
+        unsafe { early::release_identity_map(scratch) };
+    }
+}
+
 pub fn console(
     boot: &impl BootInfo,
     frames: &mut impl FrameSource,
 ) -> Result<PlatformConsole, MapError> {
-    // SAFETY: MMU ligada; as tabelas do Limine e os frames novos estão no mapa direto.
-    let mut mapper = unsafe { active_space(boot.direct_map_offset()) };
-    let registers = PhysAddr::new(QEMU_VIRT_PL011);
-    let virt = map_device(&mut mapper, frames, registers, PAGE_SIZE)?;
-    UART_BASE.store(virt.as_u64(), Ordering::Relaxed);
-    // SAFETY: a página acabou de ser mapeada como dispositivo e cobre todo o bloco da PL011.
+    let mut virt = VirtAddr::new(UART_BASE.load(Ordering::Relaxed));
+    if virt.as_u64() == 0 {
+        // SAFETY: MMU ligada; as tabelas do Limine e os frames novos estão no mapa direto.
+        let mut mapper = unsafe { active_space(boot.direct_map_offset()) };
+        let registers = PhysAddr::new(QEMU_VIRT_PL011);
+        virt = map_device(&mut mapper, frames, registers, PAGE_SIZE)?;
+        UART_BASE.store(virt.as_u64(), Ordering::Relaxed);
+    }
+    // SAFETY: a página foi mapeada como dispositivo e cobre todo o bloco da PL011.
     let bus = unsafe { MmioBus::new(virt) };
     let mut uart = Pl011::new(bus);
     uart.init();

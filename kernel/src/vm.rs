@@ -24,6 +24,14 @@ unsafe extern "C" {
     static __relro_end: u8;
 }
 
+/// A faixa virtual da imagem, `[__image_start, __data_end)`.
+pub fn image_range() -> (u64, u64) {
+    (
+        symbol(&raw const __image_start),
+        symbol(&raw const __data_end),
+    )
+}
+
 static RELRO_MARK: u8 = 0;
 /// Tabela de ponteiros relocados: o linker tem de pô-la em `.data.rel.ro`.
 static RELRO_CANARY: [&u8; 1] = [&RELRO_MARK];

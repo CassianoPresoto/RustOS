@@ -10,8 +10,9 @@ mod x86_64;
 
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::{
-    ARCH, Context, FPU_AREA_ALIGN, PlatformConsole, PlatformSpace, SecondaryResources, TIMER_HZ,
-    active_space, arm_timer, call_on_stack, console, cpu, cpu_local, cycles, cycles_to_ns,
+    ARCH, Context, EarlyScratch, FPU_AREA_ALIGN, PlatformConsole, PlatformSpace,
+    SecondaryResources, TIMER_HZ, active_space, arm_timer, call_on_stack, console, cpu, cpu_local,
+    cycles, cycles_to_ns, early_console, early_init, early_serial_map, early_serial_switch,
     fpu_area_bytes, fpu_init, fpu_init_area, fpu_read_probe, fpu_restore, fpu_save,
     fpu_write_probe, harden, hardware_entropy, has_keyboard, init_interrupts, ipi, ipi_target,
     irq_source, kernel_root, keyboard_event, local_hw_id, new_space, now_ns, prepare_secondary,
@@ -20,8 +21,9 @@ pub use aarch64::{
 };
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::{
-    ARCH, Context, FPU_AREA_ALIGN, PlatformConsole, PlatformSpace, SecondaryResources, TIMER_HZ,
-    active_space, arm_timer, call_on_stack, console, cpu, cpu_local, cycles, cycles_to_ns,
+    ARCH, Context, EarlyScratch, FPU_AREA_ALIGN, PlatformConsole, PlatformSpace,
+    SecondaryResources, TIMER_HZ, active_space, arm_timer, call_on_stack, console, cpu, cpu_local,
+    cycles, cycles_to_ns, early_console, early_init, early_serial_map, early_serial_switch,
     fpu_area_bytes, fpu_init, fpu_init_area, fpu_read_probe, fpu_restore, fpu_save,
     fpu_write_probe, harden, hardware_entropy, has_keyboard, init_interrupts, ipi, ipi_target,
     irq_source, kernel_root, keyboard_event, local_hw_id, new_space, now_ns, prepare_secondary,

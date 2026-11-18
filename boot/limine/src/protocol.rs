@@ -20,6 +20,7 @@ pub const REQUESTS_END_MARKER: [u64; 2] = [0xadc0_e053_1bb1_0d03, 0x9572_709f_31
 
 pub const BOOTLOADER_INFO_ID: [u64; 4] = id(0xf550_38d8_e2a1_202f, 0x2794_26fc_f5f5_9740);
 pub const HHDM_ID: [u64; 4] = id(0x48dc_f1cb_8ad2_b852, 0x6398_4e95_9a98_244b);
+pub const EXECUTABLE_CMDLINE_ID: [u64; 4] = id(0x4b16_1536_e598_651e, 0xb390_ad4a_2f1f_303a);
 pub const MEMMAP_ID: [u64; 4] = id(0x67cf_3d9d_378a_806f, 0xe304_acdf_c50c_3c62);
 pub const PERFORMANCE_ID: [u64; 4] = id(0x6b50_ad9b_f36d_13ad, 0xdc4c_7e88_fc75_9e17);
 pub const FRAMEBUFFER_ID: [u64; 4] = id(0x9d58_27dc_d881_dd75, 0xa314_8604_f6fa_b11b);
@@ -232,6 +233,12 @@ pub struct BootloaderInfoResponse {
     pub revision: u64,
     pub name: *const c_char,
     pub version: *const c_char,
+}
+
+#[repr(C)]
+pub struct ExecutableCmdlineResponse {
+    pub revision: u64,
+    pub cmdline: *const c_char,
 }
 
 #[repr(C)]

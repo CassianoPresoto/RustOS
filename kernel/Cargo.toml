@@ -13,6 +13,12 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[features]
+# Endereços crus no log, no fault e no pânico (SDD 09). Fora do padrão: entrega o KASLR.
+debug-addrs = []
+# Pontos de falha na linha de comando do Limine (`rustos.panic_early=N`), para o `make smoke-panic`.
+panic-tests = []
+
 [dependencies]
 rustos-hal.workspace = true
 rustos-mm.workspace = true

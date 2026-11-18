@@ -178,7 +178,7 @@ O primeiro núcleo a entrar em `panic::begin` ganha a posse (`OWNER`, um `compar
 que elas confirmem (`STOPPED`), por um número limitado de voltas: o relógio pode ser o que travou. As que estão com a interrupção mascarada **girando num `IrqLock`** não ouviriam o IPI:
 o giro do lock confere `panic::elsewhere()` e para ali mesmo. Depois disso, o dono toma os locks de serial e tela que um núcleo parado segurava (`break_lock`)
 e escreve. `console::print`, `flush`, `key_event` e o `Sink` retornam sem escrever em núcleo que não é o dono do pânico: nenhuma CPU escreve na tela depois do pânico de outra.
-A falha de CPU (`on_fault`) usa o mesmo caminho. `fault cpu` no shell cria uma tarefa presa a outra CPU que entra em pânico, para conferir.
+A falha de CPU (`on_fault`) usa o mesmo caminho. Se a própria dona entra em pânico de novo (a mensagem, ou o `Display` dela, panica), `begin` toma os locks de volta e `print_panic` cai para a serial direta (`early::print`) quando a instalada está presa; do terceiro relatório da dona em diante (pânico ou falta) só sai uma linha fixa; as outras CPUs que panicam juntas param em silêncio, e sai um relatório só ([SDD 04](04_boot.md#pânico-e-exceção-antes-do-console)). `fault cpu` no shell cria uma tarefa presa a outra CPU que entra em pânico, para conferir.
 
 ## Troca de contexto
 
