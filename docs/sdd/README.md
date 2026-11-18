@@ -35,3 +35,4 @@ mesmo PR.
 | [`14_escalonador.md`](14_escalonador.md) | A porta `Scheduler` e as políticas `RoundRobin`, `Eevdf`, `Fifo` e `Composite` (o kernel usa o `Composite`): fórmulas, fontes, medidas e o que o kernel precisa saber |
 | [`15_tarefas_e_preempcao.md`](15_tarefas_e_preempcao.md) | Tarefas, troca de contexto e preempção: o escalonador, o desenho por ISA, a regra de lock, o estado de FPU/SIMD e as medidas |
 | [`16_terminal.md`](16_terminal.md) | O que o emulador entende, a memória que o kernel entrega (grade, tela alternativa, histórico), as teclas de rolagem e a conferência contra o xterm |
+| [`17_processos_isolamento_e_syscalls.md`](17_processos_isolamento_e_syscalls.md) | Processos, isolamento e syscalls: o desenho da fase 4 (aprovado, ainda não implementado): entrada de syscall por ISA, espaço de usuário, handles, ABI nativa, ELF, init, falhas, SIMD de usuário, mitigações, medidas, as nove decisões do dono, as do agente e as fontes |
