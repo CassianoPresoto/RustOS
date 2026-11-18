@@ -40,6 +40,11 @@ pub fn runs(virt: u64, phys: u64, len: u64) -> impl Iterator<Item = Run> {
     })
 }
 
+/// Duas faixas `[início, fim)` têm algum byte em comum; faixa vazia não toca nada.
+pub const fn overlaps(a: (u64, u64), b: (u64, u64)) -> bool {
+    a.0 < a.1 && b.0 < b.1 && a.0 < b.1 && b.0 < a.1
+}
+
 /// Junta faixas `[início, fim)` em ordem crescente de início que se tocam ou se
 /// sobrepõem: o mapa de memória do bootloader dá regiões vizinhas de tipos que o
 /// kernel trata igual. Faixa vazia some.
@@ -72,6 +77,22 @@ mod tests {
         runs(virt, phys, len).fold((0, 0), |(large, small), run| {
             (large + u64::from(run.large), small + u64::from(!run.large))
         })
+    }
+
+    #[test]
+    fn a_module_over_the_kernel_image_overlaps_it() {
+        let image = (0x20_0000, 0x30_0000);
+        assert!(overlaps((0x2f_f000, 0x30_1000), image));
+        assert!(overlaps((0x1f_f000, 0x20_1000), image));
+        assert!(overlaps((0x10_0000, 0x40_0000), image));
+        assert!(overlaps(image, image));
+    }
+
+    #[test]
+    fn touching_or_empty_ranges_do_not_overlap() {
+        assert!(!overlaps((0x10_0000, 0x20_0000), (0x20_0000, 0x30_0000)));
+        assert!(!overlaps((0x30_0000, 0x40_0000), (0x20_0000, 0x30_0000)));
+        assert!(!overlaps((0x25_0000, 0x25_0000), (0x20_0000, 0x30_0000)));
     }
 
     #[test]

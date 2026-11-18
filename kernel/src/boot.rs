@@ -5,9 +5,17 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use rustos_hal::{
-    BootInfo, BootTimeline, BootloaderId, CpuDescriptor, FramebufferInfo, KernelImage,
-    MemoryRegion, RegionKind,
+    BootInfo, BootModule, BootTimeline, BootloaderId, CpuDescriptor, FramebufferInfo, KernelImage,
+    MemoryRegion, PhysAddr, RegionKind,
 };
+
+/// Um módulo do bootloader, com a `string` copiada para o heap.
+#[derive(Clone, Debug)]
+struct ModuleRecord {
+    start: PhysAddr,
+    len: u64,
+    string: String,
+}
 
 #[derive(Clone, Debug)]
 pub struct BootRecord {
@@ -18,6 +26,7 @@ pub struct BootRecord {
     framebuffer: Option<FramebufferInfo>,
     kernel_image: Option<KernelImage>,
     cpus: Vec<CpuDescriptor>,
+    modules: Vec<ModuleRecord>,
 }
 
 impl BootRecord {
@@ -33,6 +42,14 @@ impl BootRecord {
             framebuffer: source.framebuffer(),
             kernel_image: source.kernel_image(),
             cpus: source.cpus().collect(),
+            modules: source
+                .modules()
+                .map(|module| ModuleRecord {
+                    start: module.start,
+                    len: module.len,
+                    string: String::from(module.string),
+                })
+                .collect(),
         }
     }
 
@@ -79,5 +96,13 @@ impl BootInfo for BootRecord {
 
     fn cpus(&self) -> impl Iterator<Item = CpuDescriptor> + '_ {
         self.cpus.iter().copied()
+    }
+
+    fn modules(&self) -> impl Iterator<Item = BootModule<'_>> + '_ {
+        self.modules.iter().map(|module| BootModule {
+            start: module.start,
+            len: module.len,
+            string: &module.string,
+        })
     }
 }

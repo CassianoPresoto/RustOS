@@ -1127,7 +1127,9 @@ O `init` é o arquivo de nome `init`, sem `./`. Decisões e testes: [SDD 03](03_
 **Limine.** O protocolo **saiu do repositório do bootloader**: em `v12.10.0` do
 [Limine](https://github.com/Limine-Bootloader/Limine) só há `CONFIG.md`; o `PROTOCOL.md` está em
 [`limine-protocol`](https://github.com/Limine-Bootloader/limine-protocol), ramo `trunk`, **sem
-etiqueta que o prenda à 12.10.0** (que o `trunk` corresponda à 12.10.0: **NÃO VERIFICADO**).
+etiqueta**. Mas o `bootstrap` da `v12.10.0` fixa o `limine-protocol` no commit
+`877c2d4c50e170575f8b8e7fbf7b8fa89b1dc157`, que é o topo do `trunk` (conferido em 2026-11-18): o
+`PROTOCOL.md` e o `include/limine.h` nesse commit são os do binário em uso.
 O que mudou desde a v8.x, lido nos dois:
 
 | Item | v8.x | `limine-protocol` (`trunk`) |
@@ -1138,6 +1140,17 @@ O que mudou desde a v8.x, lido nos dois:
 | `INTERNAL_MODULE_COMPRESSED` | "Deprecated … may panic" | honrado se a revisão da resposta for 2 ou maior |
 | Resposta | `module_count` e `modules` (ponteiros para `limine_file`) | idem; o módulo carregado é marcado `Executable/Modules`, não `Usable` |
 
+**Conferido contra o 12.10.0 na peça do módulo (4b)**, no `common/protos/limine.c` da `v12.10.0` (o que roda de
+verdade) e no `include/limine.h` e `PROTOCOL.md` do commit acima:
+
+| O quê | Verificado |
+| --- | --- |
+| Pedido | Id `{ COMMON_MAGIC, 0x3e7e279702be32af, 0xca1c4f3bd1280cee }`. Revisão 0 é `id[4]`, `revision`, `response` (48 bytes); a revisão 1 acrescenta `internal_module_count` e `internal_modules`. O `limine.c` valida só o prefixo até `internal_module_count` (`get_request_rev0`), então o kernel pede **revisão 0, com 48 bytes**, sem módulo interno (só os do `limine.conf`) |
+| Resposta | `limine.c` responde com **revisão 2**; `module_count` e `modules` (ponteiro para um vetor de ponteiros para `limine_file`). Sem módulo carregado **não há resposta** (o `limine.c` desfaz a alocação e não grava `response`). O kernel lê só os campos da revisão 0 |
+| `limine_file` | 112 bytes: `revision`, `address` (8), `size` (16), `path` (24), `string` (32), `media_type`, `unused`, `tftp_ipv4[4]`, `tftp_port`, `partition_index`, `mbr_disk_id` e três UUIDs de 16 bytes a partir do 64. `address` é **endereço virtual no HHDM** (`reported_addr` soma `direct_map_offset`), logo `físico = address − HHDM`; o PROTOCOL.md garante 4 KiB de alinhamento e que cada módulo tem para si todos os pedaços de 4 KiB que cobre. `string` é a do `module_string` (vazia se não há) |
+| Memória | O módulo é alocado como `MEMMAP_KERNEL_AND_MODULES`. O PROTOCOL.md diz que essas entradas são "ilustrativas", sem garantia de alinhamento nem de não sobreposição entre si; as `Usable` e `BootloaderReclaimable` nunca sobrepõem outra entrada, e é nisso que o adaptador se apoia para recusar um módulo que toque RAM do alocador |
+| Testes | `boot/limine/src/protocol.rs` confere id e `size_of`/`offset_of` contra esses valores; `lib.rs` recusa endereço nulo, abaixo do HHDM, desalinhado, tamanho zero ou acima de 1 GiB, transbordo, fim acima do mapa de memória, e sobreposição a RAM, ao framebuffer e a outro módulo; `string` sem NUL em 257 bytes ou que não é UTF-8 vira vazia; `core/mm` testa `overlaps` (imagem) e `map_module` |
+
 **`limine.conf`** (**verificado**, `CONFIG.md` da `v12.10.0`): `module_path` ("the path to a module
 (such as initramfs)", repetível) e `module_cmdline` (**alias** de `module_string`, o nome canônico).
 
@@ -1145,10 +1158,11 @@ Como o módulo cai em `KernelAndModules`, ele **fica fora do mapa direto** ([SDD
 
 | Passo | O quê |
 | --- | --- |
-| `boot/limine` | Novo pedido de módulo; `hal::BootInfo` ganha `modules()` (porta nova no `hal`, decisão do agente); o `BootRecord` copia `(físico, tamanho)` |
-| `kernel/src/vm.rs` | Mapeia a faixa do módulo só leitura e NX, numa janela (como a imagem tem as dela); o W^X confere |
+| `boot/limine` | **Feito (4b, peça do módulo).** Novo pedido de módulo; `hal::BootInfo` ganha `modules()` (porta nova no `hal`, decisão do agente) e devolve `BootModule { start, len, string }`; o `BootRecord` copia os três |
+| `kernel/src/vm.rs` | **Feito.** `Vm::map_initramfs` mapeia a faixa do módulo de `string` `initramfs` só leitura e NX, numa janela própria (a terceira, de 1 GiB, depois das de dispositivos e de pilhas; [SDD 13](13_memoria_virtual.md#o-módulo-initramfs)); o W^X confere. Sem módulo, o boot segue |
+| Initramfs provisório | **Provisório**: até o `init` existir, o `xtask image` põe no cpio só o arquivo de teste `hello.txt` (`hello from the initramfs`), que o autoteste do kernel lê com o `core/cpio` e confere (`initramfs: 1 files, N bytes`, [SDD 04](04_boot.md)). Na 4b o `init` toma o lugar dele |
 | Initramfs como VMO | **A partir da 4c** (na 4b o kernel só mapeia a faixa e lê o `init` dela): o arquivo vira um **VMO físico** (frames que já existem, sem zerar) com `READ`, `MAP`, `DUPLICATE`, `TRANSFER`, e vai ao `init` pelo canal de boot |
-| Devolver ao buddy | Quando o último handle do VMO fechar, devolver os frames do módulo. Que o protocolo permita reusar a memória `Executable/Modules` que não é da imagem **NÃO VERIFICADO**; se não permitir, o initramfs fica residente |
+| Devolver ao buddy | Quando o último handle do VMO fechar, devolver os frames do módulo. Que o protocolo permita reusar a memória `Executable/Modules` que não é da imagem **NÃO VERIFICADO** (o PROTOCOL.md não diz); enquanto isso o initramfs **fica residente**: [DEBT-0080](../tech-debt/0080-initramfs-residente-sem-devolver-os-frames.md) |
 
 ### O canal de boot
 
@@ -1284,7 +1298,7 @@ Sem crate novo (decisão do agente, [`AGENTS.md`](../../AGENTS.md)):
 | --- | --- | --- |
 | 1 | `cargo xtask user --arch A` (proposta) | Compila cada crate de `user/` com a lista inteira de flags de usuário em `CARGO_ENCODED_RUSTFLAGS` (as do `config.toml` **não** somam: [linker e alvo](#o-que-muda-no-linker-e-no-alvo)) e `--target-dir target/user/<isa>` |
 | 2 | `cargo xtask initramfs --arch A [--out caminho] [nome=]arquivo...` | Escreve `target/initramfs/<isa>.cpio` em `newc`, com um escritor em Rust puro em `xtask/src/initramfs.rs` (o `xtask` não depende de crate do workspace, regra 6, então não reaproveita o `core/cpio`), sem o binário `cpio` do host. Recebe `(nome, bytes, modo)`; a linha de comando põe o modo `0755`. Grava `070701`, os 13 campos em 8 dígitos hexadecimais, o nome com NUL, os dados e o `TRAILER!!!`; nome e dados alinham a 4 bytes a partir do início do arquivo, que não é preenchido até 512. Campos fixos: `c_ino` sequencial a partir de 1, `c_mtime`, `uid`, `gid`, `dev`, `rdev` e `c_chksum` em 0, `c_nlink` 1; a mesma entrada dá o mesmo arquivo, byte a byte. Recusa nome vazio, com NUL, repetido ou com componente vazio, `.` ou `..` (isso pega `/` inicial, `./` e `/` final), o nome `TRAILER!!!` inteiro (o leitor o toma como o fim; `a/TRAILER!!!` vale), nome de 4096 bytes ou mais, dado de 4 GiB ou mais, 2^32 arquivos ou mais e modo com bit fora de `0o7777`. **Não gera diretórios**: o leitor compara o nome inteiro (`bin/sh` é um nome) e o `init` é plano. Testado contra bytes de ouro escritos à mão, todos os restos de nome módulo 4, arquivo vazio e grande, e, só em desenvolvimento, contra o `bsdcpio` (`cpio -it` e `cpio -idv` listam e extraem os mesmos bytes) |
-| 3 | `cargo xtask image` (proposta) | Copia o cpio para `boot/initramfs.cpio` na ESP e acrescenta o módulo ao `limine.conf` |
+| 3 | `cargo xtask image` | **Feito para o cpio provisório.** Gera `target/initramfs/<isa>.provisional.cpio` (`initramfs::write_provisional`, só o `hello.txt`), o copia para `boot/initramfs.cpio` na ESP e acrescenta ao `limine.conf` `module_path: boot():/boot/initramfs.cpio` e `module_string: initramfs`. Na 4b o conteúdo passa a vir do `cargo xtask user` |
 | 4 | `make smoke` | Exige as linhas novas ([abaixo](#linhas-que-o-smoke-passa-a-exigir)) |
 
 A ordem de build é usuário, initramfs, imagem; o kernel **não** depende dos programas de
@@ -1540,7 +1554,7 @@ O relatório de conferência (URL e trecho literal de cada item) está na pesqui
 | [syscall(2)](https://man7.org/linux/man-pages/man2/syscall.2.html), [`auxvec.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/auxvec.h), [`elf-em.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/elf-em.h), `elf.h` das duas ISAs, [inode(7)](https://man7.org/linux/man-pages/man7/inode.7.html) | Convenção; `AT_*`, `e_machine`, `R_*_RELATIVE`; `S_IFMT` | Lidos |
 | [gABI](https://www.sco.com/developers/gabi/latest/ch5.pheader.html) (`ch4`, `ch5`) | `EI_*`, congruência de `p_vaddr` e `p_offset` **módulo o tamanho da página** | Lida nesta rodada |
 | [x86-64 psABI](https://github.com/hjl-tools/x86-psABI), [AAPCS64](https://github.com/ARM-software/abi-aa) | `rsp` alinhado a 16 na entrada, layout de `argc`/`argv`/`envp`/auxv; `sp mod 16 = 0` | Lidos |
-| Limine: `CONFIG.md` da `v12.10.0` e [`limine-protocol`](https://github.com/Limine-Bootloader/limine-protocol) (`trunk`) | `module_path`, `module_cmdline`; `LIMINE_MODULE_REQUEST_ID`, `string`, `tftp_ipv4` | Lidos; o `trunk` **não é preso** à 12.10.0 |
+| Limine: `CONFIG.md` da `v12.10.0` e [`limine-protocol`](https://github.com/Limine-Bootloader/limine-protocol) (`trunk`) | `module_path`, `module_cmdline`; `LIMINE_MODULE_REQUEST_ID`, `string`, `tftp_ipv4` | Lidos; o `bootstrap` da `v12.10.0` fixa o `limine-protocol` em `877c2d4`, o topo do `trunk` em 2026-11-18, e o `limine.c` da etiqueta confere pedido e resposta (acima) |
 | Cargo `config.md`, fonte do `rustc` (`targets/`, `spec/mod.rs`) | Quatro fontes exclusivas de `rustflags`; `code_model` e `relocation_model` dos alvos | Lidos **e testados** com `rustc 1.100.0` e `cargo build -v` |
 | [Linux PTI](https://docs.kernel.org/arch/x86/pti.html), [entry_64](https://docs.kernel.org/arch/x86/entry_64.html), [x86_64 mm](https://docs.kernel.org/arch/x86/x86_64/mm.html), [arm64 memory](https://docs.kernel.org/arch/arm64/memory.html) | Trampolim, `swapgs`, layout | Lidos |
 | Zircon: [rights](https://fuchsia.dev/fuchsia-src/concepts/kernel/rights), [handle_replace](https://fuchsia.dev/fuchsia-src/reference/syscalls/handle_replace), [channel_write](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_write), [channel_read](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_read), [process_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/process_create), [process_start](https://fuchsia.dev/fuchsia-src/reference/syscalls/process_start), [channel_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_create), [conceitos](https://fuchsia.dev/fuchsia-src/concepts/kernel/concepts) | Direitos, atomicidade, descarte na ponta fechada, `arg1` fechado em erro, limites do canal | Lidas |
@@ -1557,7 +1571,6 @@ Só o que sobrou; cada item é pré-requisito da fatia que o usa.
 | **ARM ARM** (as páginas do developer.arm.com não renderizam sem JavaScript; os campos de registrador acima vêm do Linux): o `imm16` do SVC em `ISS[15:0]`; a tabela de `AP[2:1]` por nível de exceção; um `ERET` com estado ilegal; a versão e o efeito do `UAO`; o nome `EL0VCTEN`. **Feitos na 4a, medidos na QEMU, não na ARM ARM:** a regra do PAN com `LDTR`/`STTR` e o efeito do `WXN` sobre EL0 ([A fatia 4a](#a-fatia-4a-como-entrou)) | 4a, 4e |
 | **Intel SDM** em PDF (só o espelho foi lido): o texto sobre *CPUID faulting* (`MSR` `0x140`); se a entrada de exceção limpa `NT` (o `IRETQ` do kernel com `NT = 1` dá `#GP`) | 4a |
 | Layout inicial da pilha do processo no aarch64, em fonte que não seja o `binfmt_elf.c` do Linux | 4b |
-| Limine: se o `trunk` de `limine-protocol` é o da 12.10.0 (conferir a revisão do pedido de módulo e da resposta no binário em uso) | 4b |
 | `-C code-model=small` com um programa de usuário **maior** que o mínimo (o teste não distingue `small` de `kernel`) | 4b |
 | Custo de `array_index_nospec`, IBPB, eIBRS, limpeza de buffers e KPTI: medir; STIBP e SSBD: ler as páginas | 4e |
 

@@ -52,6 +52,39 @@ pub fn details(
     }
 }
 
+/// O texto do arquivo de teste que o `xtask image` põe no initramfs provisório.
+const PROBE_NAME: &[u8] = b"hello.txt";
+const PROBE_TEXT: &[u8] = b"hello from the initramfs\n";
+
+/// Lê o initramfs pelo `core/cpio` e confere o arquivo de teste e o mapeamento só de leitura.
+/// Sem módulo, diz `none` e segue (o `smoke` é quem exige a linha do arquivo).
+pub fn initramfs(vm: &vm::Vm) -> bool {
+    let Some(archive) = vm.initramfs() else {
+        let failed = vm.initramfs_failed();
+        kprintln!(
+            "[rustos] initramfs: {}",
+            if failed { "FAILED" } else { "none" }
+        );
+        return !failed;
+    };
+    let (mut files, mut probe_ok) = (0_usize, false);
+    for entry in rustos_cpio::Reader::new(archive) {
+        let Ok(entry) = entry else {
+            kprintln!("[rustos] initramfs: FAILED (unreadable archive)");
+            return false;
+        };
+        files += 1;
+        probe_ok |= entry.name == PROBE_NAME && entry.data == PROBE_TEXT;
+    }
+    let read_only = vm.initramfs_is_read_only();
+    if !probe_ok || !read_only {
+        kprintln!("[rustos] initramfs: FAILED (probe {probe_ok}, read-only {read_only})");
+        return false;
+    }
+    kprintln!("[rustos] initramfs: {files} files, {} bytes", archive.len());
+    true
+}
+
 fn report_frames_and_screen(memory: &Memory, display: Option<DisplayInfo>) {
     kprintln!(
         "[rustos] frames: {} free of {} tracked, metadata {} bytes",
