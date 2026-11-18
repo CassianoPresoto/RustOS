@@ -208,6 +208,28 @@ mod tests {
     }
 
     #[test]
+    fn the_real_user_crates_are_classified_and_the_kernel_links_none_of_them() {
+        let root = workspace::root();
+        let members = manifest::workspace_members(&read(&root.join("Cargo.toml")).unwrap());
+        let users: Vec<&String> = members.iter().filter(|m| m.starts_with("user/")).collect();
+        assert!(users.len() >= 3, "{users:?}");
+        assert!(users.iter().all(|m| Layer::of(m) == Some(Layer::User)));
+        let adapters: Vec<&String> = members.iter().filter(|m| m.ends_with("-user")).collect();
+        assert_eq!(adapters.len(), 2, "{adapters:?}");
+        assert!(
+            adapters
+                .iter()
+                .all(|m| Layer::of(m) == Some(Layer::UserAdapter))
+        );
+        let kernel = manifest::dependencies(&read(&root.join("kernel/Cargo.toml")).unwrap());
+        assert!(
+            !kernel.iter().any(|name| name.contains("-user")),
+            "{kernel:?}"
+        );
+        assert!(layers(&root).is_ok());
+    }
+
+    #[test]
     fn nothing_depends_on_user() {
         for layer in [
             Layer::Ports,

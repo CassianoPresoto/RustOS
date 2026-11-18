@@ -16,6 +16,7 @@ mod panic_smoke;
 mod png;
 mod qemu;
 mod size;
+mod user;
 mod workspace;
 
 use std::process::ExitCode;
@@ -39,6 +40,7 @@ comandos:
   screenshot      sobe sem janela, digita os comandos depois de `--` (um por argumento
                   ou separados por `;`) e grava a tela em target/screenshots/<arch>.png
   size            tamanho das seções do kernel (o que ocupa memória)
+  user            compila os programas de `user/` (init e os de teste) em target/user/<arch>
   check-layers    dependências entre camadas e onde `unsafe`/`asm!` podem morar
   check-comments  política de comentários e referências a DEBT-NNNN
   check-docs      índices, frontmatter das dívidas e links de docs/
@@ -103,6 +105,7 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }),
         "size" => each_arch(&options, |arch| size::report(&root, arch, options.profile)),
+        "user" => each_arch(&options, |arch| user::run(&root, arch, options.profile)),
         "check-layers" => checks::layers(&root),
         "check-comments" => checks::comments(&root),
         "check-docs" => checks::docs(&root),

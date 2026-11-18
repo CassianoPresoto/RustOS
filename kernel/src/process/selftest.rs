@@ -1,6 +1,7 @@
 //! O autoteste de usuário (só na imagem com a feature `selftest`): o programa embutido no kernel
 //! roda em anel 3 ou EL0 nos casos `hello`, falha contida e laço de syscall nula, e a limpeza da
-//! pilha do kernel na volta ao usuário se confere por um resíduo plantado (SDD 17, fatia 4a).
+//! pilha do kernel na volta ao usuário se confere por um resíduo plantado (4a); o programa `big` do
+//! initramfs passa o carregador por segmentos grandes e o carregador recusa o que é inválido (4b).
 
 use core::hint::black_box;
 use core::ptr;
@@ -8,10 +9,11 @@ use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use rustos_hal::abi::{ProcessEvent, event_kind, fault_kind};
 
-use super::{Program, fault_peak, last_event, spawn};
+use super::{Program, Source, fault_peak, last_event, spawn};
 use crate::frames::Frames;
 use crate::platform::user_blob::{Case, image, offset};
-use crate::{platform, scrub, task};
+use crate::uspace::{UserSpace, set_frame_budget};
+use crate::{loader, platform, scrub, task};
 
 /// Quanto o autoteste espera um processo acabar, e o passo da espera.
 const WAIT_NS: u64 = 15_000_000_000;
@@ -111,16 +113,186 @@ fn run_case(
         entry_offset: offset(case),
         arg0,
     };
-    let (id, pid) = spawn(frames, offset_of_map, program, affinity).ok()?;
+    run_source(frames, offset_of_map, Source::Flat(program), affinity)
+}
+
+/// Roda `source` até o processo acabar e devolve o evento dele.
+fn run_source(
+    frames: Frames,
+    map_offset: u64,
+    source: Source<'_>,
+    affinity: u32,
+) -> Option<(u32, ProcessEvent)> {
+    let spawned = spawn(frames, map_offset, source, affinity).ok()?;
     let deadline = platform::now_ns()? + WAIT_NS;
-    while !task::has_exited(id) {
+    while !task::has_exited(spawned.task) {
         let now = platform::now_ns()?;
         if now > deadline {
             return None;
         }
         task::sleep_until(now + POLL_NS);
     }
-    last_event().filter(|(last, _)| *last == pid)
+    last_event().filter(|(last, _)| *last == spawned.pid)
+}
+
+/// A afinidade que prende o processo à CPU de quem testa: o frame que ele devolve cai no cache de
+/// frames desta CPU, que `free_frames` conta, e a conta fica exata.
+fn here() -> u32 {
+    1 << crate::percpu::pinned(crate::percpu::PerCpu::index)
+}
+
+/// Os frames que um processo bom que acabou ainda segura: a pilha de kernel do slot da tarefa, por
+/// exemplo. Mede-se uma vez, com o `init`, depois de uma rodada de aquecimento (o heap já cresceu).
+fn settled_slack(frames: Frames, map_offset: u64, init: &[u8]) -> Option<usize> {
+    run_source(frames, map_offset, Source::Elf(init), here())?;
+    let before = frames.free_frames();
+    run_source(frames, map_offset, Source::Elf(init), here())?;
+    Some(before.saturating_sub(frames.free_frames()))
+}
+
+/// O `big` do initramfs (mais de 2 MiB, com `.rodata`, `.data` e `.bss` de muitas páginas) roda e sai
+/// com 0, e os frames voltam exatamente como depois do `init`: o carregador copia, zera e mapeia
+/// segmentos grandes, o `-C code-model=small` aguenta, e nada vaza.
+fn big_program_runs(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
+    let find = |name: &[u8]| archive.and_then(|archive| loader::find(archive, name).ok());
+    let (Some(init), Some(big)) = (find(b"init"), find(b"big")) else {
+        return false;
+    };
+    let Some(slack) = settled_slack(frames, map_offset, init) else {
+        return false;
+    };
+    let before = frames.free_frames();
+    let result = run_source(frames, map_offset, Source::Elf(big), here());
+    let kept = before.saturating_sub(frames.free_frames());
+    kprintln!(
+        "[rustos] user: big ran ({} KiB of file), {kept} frames kept after the exit, {slack} after the init",
+        big.len() >> 10
+    );
+    exited_with(result, 0) && kept == slack
+}
+
+/// Escreve `value` em `bytes` bytes little-endian a partir de `at`.
+fn put(file: &mut [u8], at: usize, value: u64, bytes: usize) {
+    file[at..at + bytes].copy_from_slice(&value.to_le_bytes()[..bytes]);
+}
+
+/// Um ELF de dois `PT_LOAD` com o segundo desalinhado da página (`p_vaddr = 0x40_3010`, `p_offset =
+/// 0x2010`, `p_filesz = 0x20`, `p_memsz = 0x2020`), em arquivo cheio de `0xAA`: o que o carregador
+/// copiar além dos 32 bytes aparece na memória do processo.
+fn unaligned_elf() -> alloc::vec::Vec<u8> {
+    let mut file = alloc::vec![0xAA_u8; 0x2030];
+    file[..64 + 2 * 56].fill(0);
+    file[..4].copy_from_slice(b"\x7fELF");
+    file[4..7].copy_from_slice(&[2, 1, 1]);
+    put(&mut file, 16, 2, 2);
+    put(&mut file, 18, u64::from(loader::MACHINE), 2);
+    put(&mut file, 20, 1, 4);
+    put(&mut file, 24, 0x40_0100, 8);
+    put(&mut file, 32, 64, 8);
+    put(&mut file, 52, 64, 2);
+    put(&mut file, 54, 56, 2);
+    put(&mut file, 56, 2, 2);
+    for (index, (flags, offset, vaddr, filesz, memsz)) in [
+        (5, 0, 0x40_0000, 0x1000, 0x1000),
+        (6, 0x2010, 0x40_3010, 0x20, 0x2020),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let at = 64 + index * 56;
+        put(&mut file, at, 1, 4);
+        put(&mut file, at + 4, flags, 4);
+        for (field, value) in [
+            (8, offset),
+            (16, vaddr),
+            (24, vaddr),
+            (32, filesz),
+            (40, memsz),
+            (48, 0x1000),
+        ] {
+            put(&mut file, at + field, value, 8);
+        }
+    }
+    file
+}
+
+/// Todo byte de `[virt, virt + len)` do espaço vale `expected(posição)`.
+fn user_bytes_are(
+    space: &UserSpace,
+    virt: u64,
+    len: usize,
+    expected: impl Fn(usize) -> u8,
+) -> bool {
+    let mut chunk = [0_u8; 256];
+    (0..len).step_by(256).all(|start| {
+        let take = 256.min(len - start);
+        let part = &mut chunk[..take];
+        space.read(virt + start as u64, part)
+            && part
+                .iter()
+                .enumerate()
+                .all(|(index, &byte)| byte == expected(start + index))
+    })
+}
+
+/// O caminho `lead > 0` do carregador: o segmento começa a `0x10` bytes da página, e o começo dela e a
+/// cauda `.bss` até `p_memsz` vêm zerados; só os 32 bytes do arquivo aparecem. Lê pelos frames do
+/// espaço, sem rodar o programa.
+fn unaligned_segment_loads_zeroed(frames: Frames, map_offset: u64) -> bool {
+    let file = unaligned_elf();
+    // SAFETY: o mapa direto cobre todo frame do alocador e esta tarefa roda nas tabelas do kernel.
+    let Ok(mut space) = (unsafe { UserSpace::new(frames, map_offset) }) else {
+        return false;
+    };
+    let Ok(mut tree) = loader::new_tree() else {
+        space.destroy();
+        return false;
+    };
+    let loaded = loader::load_image(&mut space, &mut tree, &file);
+    let ok = loaded.is_ok_and(|loaded| loaded.segments == 2)
+        && user_bytes_are(&space, 0x40_0000, 4, |index| b"\x7fELF"[index])
+        && user_bytes_are(&space, 0x40_3000, 0x1000, |index| {
+            if (0x10..0x30).contains(&index) {
+                0xAA
+            } else {
+                0
+            }
+        })
+        && user_bytes_are(&space, 0x40_4000, 0x1000, |_| 0)
+        && user_bytes_are(&space, 0x40_5000, 0x1000, |_| 0);
+    space.destroy();
+    ok
+}
+
+/// O carregador recusa o que o `core/elf` recusa (arquivo cortado na tabela de program headers,
+/// máquina de outra ISA, sem magic, vazio) e, quando a falta de frame vem tarde, depois de segmentos
+/// e de parte da pilha mapeados, devolve cada frame. Depois de uma rodada de aquecimento a conta é
+/// exata.
+fn loader_leaves_no_frame_behind(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
+    let Some(good) = archive.and_then(|archive| loader::find(archive, b"init").ok()) else {
+        return false;
+    };
+    let mut other_machine = good.to_vec();
+    other_machine[18] ^= 0xFF;
+    let mut bad_magic = good.to_vec();
+    bad_magic[0] = 0;
+    let try_spawn = |file: &[u8]| spawn(frames, map_offset, Source::Elf(file), 0).is_err();
+    let early: [&[u8]; 4] = [&good[..100], &other_machine, &bad_magic, &[]];
+    let _ = early.map(try_spawn);
+    let before = frames.free_frames();
+    let refused = early.into_iter().all(try_spawn);
+    let early_ok = refused && frames.free_frames() == before;
+    // A falta de frame na página `n` de dados: 1 (primeiro segmento), 3 e 5 (imagem e pilha) e 18 (a
+    // última página da pilha, na segunda chamada de `map_at`).
+    let mut late_ok = true;
+    for budget in [1, 3, 5, 18] {
+        let before = frames.free_frames();
+        set_frame_budget(Some(budget));
+        let refused = try_spawn(good);
+        set_frame_budget(None);
+        late_ok &= refused && frames.free_frames() == before;
+    }
+    early_ok && late_ok
 }
 
 fn exited_with(result: Option<(u32, ProcessEvent)>, code: i64) -> bool {
@@ -208,7 +380,7 @@ fn hello_on_every_cpu(frames: Frames, map_offset: u64) -> bool {
 }
 
 /// Os casos do programa embutido. `false` se algum falhou.
-pub fn self_test(frames: Frames, map_offset: u64) -> bool {
+pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
     let hello = hello_on_every_cpu(frames, map_offset) && copy_fixup_ran_with_ac_clear();
     let probe = ptr::addr_of!(KERNEL_PROBE).expose_provenance() as u64;
     let kernel = faulted(run_case(frames, map_offset, Case::FaultMemory, probe, 0));
@@ -219,6 +391,9 @@ pub fn self_test(frames: Frames, map_offset: u64) -> bool {
     let trap = faulted(run_case(frames, map_offset, Case::FaultTrap, 0, 0)).is_some();
     let stack = faulted(run_case(frames, map_offset, Case::FaultBadStack, 0, 0)).is_some();
     let flags = flags_survive(frames, map_offset);
+    let big = big_program_runs(frames, map_offset, archive);
+    let refused = loader_leaves_no_frame_behind(frames, map_offset, archive);
+    let unaligned = unaligned_segment_loads_zeroed(frames, map_offset);
     let (syscall_depth, fault_depth) = (scrub::deepest(), fault_peak());
     scrub::set_measuring(false);
     let clean_found = residue(frames, map_offset);
@@ -251,10 +426,19 @@ pub fn self_test(frames: Frames, map_offset: u64) -> bool {
         syscall_depth,
         fault_depth
     );
-    let ok =
-        hello && kernel_ok && privileged && trap && stack && flags && scrub_ok && medians.is_some();
+    let ok = hello
+        && kernel_ok
+        && privileged
+        && trap
+        && stack
+        && flags
+        && scrub_ok
+        && big
+        && refused
+        && unaligned
+        && medians.is_some();
     kprintln!(
-        "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, flags {flags}, stack clean {scrub_ok})",
+        "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, flags {flags}, stack clean {scrub_ok}, big {big}, bad executables {refused}, unaligned segment {unaligned})",
         if ok { "ok" } else { "FAILED" }
     );
     ok

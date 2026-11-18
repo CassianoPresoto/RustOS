@@ -11,7 +11,7 @@ use crate::frames::Frames;
 use crate::memory::Memory;
 use crate::platform::FpuSummary;
 use crate::{
-    KERNEL_STACK_PAGES, bench, boot_time, console, fmt, heap, interrupts, platform, process,
+    KERNEL_STACK_PAGES, bench, boot_time, console, fmt, heap, init, interrupts, platform, process,
     random, task, vm,
 };
 
@@ -52,12 +52,12 @@ pub fn details(
     }
 }
 
-/// O texto do arquivo de teste que o `xtask image` põe no initramfs provisório.
-const PROBE_NAME: &[u8] = b"hello.txt";
-const PROBE_TEXT: &[u8] = b"hello from the initramfs\n";
+/// O `init` e o programa de teste que o `xtask image` põe no initramfs da imagem com `selftest`.
+const PROBE_NAMES: [&[u8]; 2] = [b"init", b"big"];
+const ELF_MAGIC: &[u8] = b"\x7fELF";
 
-/// Lê o initramfs pelo `core/cpio` e confere o arquivo de teste e o mapeamento só de leitura.
-/// Sem módulo, diz `none` e segue (o `smoke` é quem exige a linha do arquivo).
+/// Lê o initramfs pelo `core/cpio`, confere que cada programa esperado está nele e é um ELF, e que
+/// o mapeamento é só de leitura. Sem módulo, diz `none` e segue (o `smoke` é quem exige a linha).
 pub fn initramfs(vm: &vm::Vm) -> bool {
     let Some(archive) = vm.initramfs() else {
         let failed = vm.initramfs_failed();
@@ -67,18 +67,21 @@ pub fn initramfs(vm: &vm::Vm) -> bool {
         );
         return !failed;
     };
-    let (mut files, mut probe_ok) = (0_usize, false);
+    let (mut files, mut found) = (0_usize, [false; PROBE_NAMES.len()]);
     for entry in rustos_cpio::Reader::new(archive) {
         let Ok(entry) = entry else {
             kprintln!("[rustos] initramfs: FAILED (unreadable archive)");
             return false;
         };
         files += 1;
-        probe_ok |= entry.name == PROBE_NAME && entry.data == PROBE_TEXT;
+        for (name, seen) in PROBE_NAMES.iter().zip(&mut found) {
+            *seen |= entry.name == *name && entry.data.starts_with(ELF_MAGIC);
+        }
     }
     let read_only = vm.initramfs_is_read_only();
-    if !probe_ok || !read_only {
-        kprintln!("[rustos] initramfs: FAILED (probe {probe_ok}, read-only {read_only})");
+    let programs = found.iter().all(|&seen| seen);
+    if !programs || !read_only {
+        kprintln!("[rustos] initramfs: FAILED (programs {programs}, read-only {read_only})");
         return false;
     }
     kprintln!("[rustos] initramfs: {files} files, {} bytes", archive.len());
@@ -128,7 +131,9 @@ pub fn before_tasks() -> bool {
 
 /// Com as tarefas ligadas: a preempção e o estado de SIMD de cada uma, a migração entre núcleos,
 /// a troca de contexto, o jitter de acordar e as pilhas. Devolve `false` se algum falhou.
-pub fn after_tasks(summary: FpuSummary, frames: Frames, map_offset: u64) -> bool {
+pub fn after_tasks(summary: FpuSummary, frames: Frames, map_offset: u64, vm: &vm::Vm) -> bool {
+    boot_time::enter(boot_time::Phase::Init);
+    let init_ok = init::run(vm, frames, map_offset);
     boot_time::enter(boot_time::Phase::SelfTests);
     kprintln!(
         "[rustos] fpu: {}, {} bytes per task, {}",
@@ -181,7 +186,8 @@ pub fn after_tasks(summary: FpuSummary, frames: Frames, map_offset: u64) -> bool
         }
         None => kprintln!("[rustos] switch: not measured"),
     }
-    let user_ok = process::self_test(frames, map_offset);
+    let user_cases = process::self_test(frames, map_offset, vm.initramfs());
+    let user_ok = init_ok && user_cases;
     let stacks_ok = task::log_stacks();
     preempted.is_some() && smp_ok && user_ok && stacks_ok
 }
@@ -191,11 +197,12 @@ pub fn boot_phases(time: &boot_time::Summary) {
     let tsc = platform::clock_error_ppm()
         .map_or_else(String::new, |ppm| format!(", tsc error at most {ppm} ppm"));
     kprintln!(
-        "[rustos] boot phases: console {} us, interrupts {} us, reclaim {} us, setup {} us{tsc}",
+        "[rustos] boot phases: console {} us, interrupts {} us, reclaim {} us, setup {} us, init {} us{tsc}",
         time.console,
         time.interrupts,
         time.reclaim,
-        time.setup
+        time.setup,
+        time.init
     );
 }
 

@@ -19,7 +19,7 @@ O PROTOCOL.md (`limine-protocol`, commit `877c2d4`, o que o `bootstrap` do Limin
 
 ## Gatilho
 
-A 4c criar o VMO físico do initramfs (devolver os frames ao fechar o último handle é parte do desenho do SDD 17), ou o initramfs passar de 1 MiB, o que torna a residência visível em `mem`.
+A 4c criar o VMO físico do initramfs (devolver os frames ao fechar o último handle é parte do desenho do SDD 17), ou o initramfs passar de 1 MiB, o que torna a residência visível em `mem`. A imagem de **teste** da 4b tem 1,3 MiB por causa do programa `big`; isso não dispara o gatilho, que fala da imagem de produção (o `init` tem cerca de 17 KiB).
 
 ## Como pagar
 

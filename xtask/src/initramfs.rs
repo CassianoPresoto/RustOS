@@ -207,15 +207,25 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Arquivo de teste do initramfs provisório da imagem; o kernel (`selftest.rs`) o confere.
-/// Dá lugar ao `init` na fase 4b.
-const PROBE: File<'static> = ("hello.txt", b"hello from the initramfs\n", DEFAULT_MODE);
-
-/// Grava o initramfs provisório, só com o arquivo de teste, em `<isa>.provisional.cpio` (o
-/// `<isa>.cpio` é do comando `initramfs`, que o `image` não pode sobrescrever) e devolve o caminho.
-pub fn write_provisional(root: &Path, arch: Arch) -> Result<PathBuf, String> {
-    let archive = build(&[PROBE]).map_err(|error| error.to_string())?;
-    let path = provisional_path(root, arch);
+/// Grava o initramfs da imagem com os programas de usuário `programs` (nome no arquivo e caminho do
+/// binário), em `<isa>.image.cpio` (o `<isa>.cpio` é do comando `initramfs`, que o `image` não pode
+/// sobrescrever), e devolve o caminho. Mesma entrada, mesmos bytes.
+pub fn write_image(
+    root: &Path,
+    arch: Arch,
+    programs: &[(&str, PathBuf)],
+) -> Result<PathBuf, String> {
+    let mut loaded = Vec::new();
+    for (name, path) in programs {
+        let data = fs::read(path).map_err(|error| format!("ler {}: {error}", path.display()))?;
+        loaded.push((*name, data));
+    }
+    let files: Vec<File<'_>> = loaded
+        .iter()
+        .map(|(name, data)| (*name, data.as_slice(), DEFAULT_MODE))
+        .collect();
+    let archive = build(&files).map_err(|error| error.to_string())?;
+    let path = image_path(root, arch);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|error| format!("criar {}: {error}", dir.display()))?;
     }
@@ -223,10 +233,10 @@ pub fn write_provisional(root: &Path, arch: Arch) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub fn provisional_path(root: &Path, arch: Arch) -> PathBuf {
+pub fn image_path(root: &Path, arch: Arch) -> PathBuf {
     root.join("target")
         .join("initramfs")
-        .join(format!("{}.provisional.cpio", arch.name()))
+        .join(format!("{}.image.cpio", arch.name()))
 }
 
 pub fn default_path(root: &Path, arch: Arch) -> PathBuf {
@@ -487,22 +497,40 @@ mod tests {
     }
 
     #[test]
-    fn the_provisional_archive_never_shares_the_path_of_the_initramfs_command() {
+    fn the_image_archive_never_shares_the_path_of_the_initramfs_command() {
         let root = Path::new("/r");
-        let (provisional, command) = (
-            provisional_path(root, Arch::X86_64),
+        let (image, command) = (
+            image_path(root, Arch::X86_64),
             default_path(root, Arch::X86_64),
         );
-        assert_ne!(provisional, command);
-        assert!(provisional.ends_with("target/initramfs/x86_64.provisional.cpio"));
+        assert_ne!(image, command);
+        assert!(image.ends_with("target/initramfs/x86_64.image.cpio"));
     }
 
     #[test]
-    fn the_provisional_archive_has_only_the_probe_file() {
-        let archive = build(&[PROBE]).unwrap();
-        let (name, data, _) = &parse_back(&archive)[0];
-        assert_eq!(name, "hello.txt");
-        assert_eq!(data, b"hello from the initramfs\n");
-        assert_eq!(parse_back(&archive).len(), 1);
+    fn the_image_archive_carries_the_programs_by_name_and_is_reproducible() {
+        let dir = std::env::temp_dir().join(format!("rustos-image-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (init, big) = (dir.join("a"), dir.join("b"));
+        fs::write(&init, b"\x7fELF-init").unwrap();
+        fs::write(&big, vec![7_u8; 5000]).unwrap();
+        let programs = [("init", init), ("big", big)];
+        let first = write_image(&dir, Arch::Aarch64, &programs).unwrap();
+        let bytes = fs::read(&first).unwrap();
+        let again = write_image(&dir, Arch::Aarch64, &programs).unwrap();
+        assert_eq!(bytes, fs::read(again).unwrap());
+        let parsed = parse_back(&bytes);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!((parsed[0].0.as_str(), parsed[0].2), ("init", 0o100_755));
+        assert_eq!(parsed[0].1, b"\x7fELF-init");
+        assert_eq!((parsed[1].0.as_str(), parsed[1].1.len()), ("big", 5000));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_program_is_an_error_naming_the_path() {
+        let programs = [("init", PathBuf::from("/nonexistent/init"))];
+        let error = write_image(Path::new("/r"), Arch::X86_64, &programs).unwrap_err();
+        assert!(error.contains("/nonexistent/init"), "{error}");
     }
 }

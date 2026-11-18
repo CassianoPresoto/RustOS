@@ -45,6 +45,9 @@ const REQUIRED: [(&str, &str); 6] = [
         "o autoteste de acordar uma tarefa de fatia curta na mesma CPU",
     ),
 ];
+/// A saída do `init` pelo `debug_write` (só o modo de teste o lança): o kernel a prefixa com
+/// `[user] `, e é a última linha dele.
+const INIT_OUTPUT: (&str, &str) = ("[user] init: ok", "a saída do `init` (prefixo `[user] `)");
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Como o `smoke` sobe o kernel: com os autotestes e os benchmarks, ou só o essencial (SDD 06).
@@ -82,7 +85,19 @@ const BENCH_REFUSED: &str = "bench: not in this build";
 
 /// O que só o modo de teste imprime: se uma destas faltar, a linha de comando se perdeu e o
 /// boot que passou foi o normal.
-const SELFTEST_LINES: [(&str, &str); 16] = [
+const SELFTEST_LINES: [(&str, &str); 18] = [
+    (
+        "[rustos] user: entered ring3/el0",
+        "a entrada do primeiro programa em anel 3 ou EL0",
+    ),
+    (
+        "[rustos] user: init loaded (",
+        "o `init` carregado do initramfs",
+    ),
+    (
+        "[rustos] user: pid 1 exited (code 0,",
+        "o `init` (pid 1) saindo com 0",
+    ),
     ("[rustos] frame self-test: ok", "o autoteste de frame"),
     ("[rustos] heap self-test: ok", "o autoteste do heap"),
     ("[rustos] exception self-test: ok", "o autoteste de exceção"),
@@ -96,10 +111,6 @@ const SELFTEST_LINES: [(&str, &str); 16] = [
     ("[rustos] alloc storm: ", "a medida de contenção da memória"),
     ("[rustos] stacks: ", "a medida e a prova de pilha"),
     (
-        "[rustos] user: entered ring3/el0",
-        "a entrada do primeiro programa em anel 3 ou EL0",
-    ),
-    (
         "[rustos] user: fault contained (pid ",
         "a falha de usuário que mata só o processo",
     ),
@@ -108,8 +119,8 @@ const SELFTEST_LINES: [(&str, &str); 16] = [
         "o autoteste dos casos de usuário",
     ),
     (
-        "[rustos] initramfs: 1 files, ",
-        "a leitura do initramfs (um arquivo de teste)",
+        "[rustos] initramfs: 2 files, ",
+        "a leitura do initramfs (o `init` e o `big`)",
     ),
 ];
 /// O que o boot normal confere, além do que o `REQUIRED` tem de comum aos dois modos.
@@ -464,6 +475,13 @@ fn has_fatal(log: &str) -> bool {
     })
 }
 
+/// Alguma linha de usuário (`debug_write`: prefixo `[user] `, sem `\r`) começa com `mark`.
+fn has_user_line(log: &str, mark: &str) -> bool {
+    log.split('\n')
+        .map(|line| line.trim_end_matches('\r'))
+        .any(|line| line.starts_with(mark))
+}
+
 /// A primeira linha do kernel que começa com `mark`.
 fn kernel_line<'a>(log: &'a str, mark: &str) -> Option<&'a str> {
     kernel_lines(log).find(|line| line.starts_with(mark))
@@ -535,6 +553,10 @@ fn report(arch: Arch, mode: BootMode, outcome: Outcome, log: &str) -> Result<(),
                 .find(|(line, _)| !has_mark(log, line))
             {
                 let reason = format!("boot sem {what} (guidelines 09)");
+                return Err(failure(arch, &reason, log));
+            }
+            if mode == BootMode::SelfTest && !has_user_line(log, INIT_OUTPUT.0) {
+                let reason = format!("boot sem {}", INIT_OUTPUT.1);
                 return Err(failure(arch, &reason, log));
             }
             if mode != BootMode::SelfTest {
@@ -720,6 +742,13 @@ mod tests {
         }
         assert!(!forbidden.contains(&"[rustos] frame self-test: ok"));
         assert!(!forbidden.contains(&"[rustos] exception self-test: ok"));
+        for line in [
+            "[rustos] user: entered ring3/el0",
+            "[rustos] user: init loaded (",
+            "[rustos] user: pid 1 exited (code 0,",
+        ] {
+            assert!(forbidden.contains(&line), "{line}");
+        }
         assert!(
             report(
                 Arch::X86_64,
@@ -733,7 +762,9 @@ mod tests {
             "[rustos] heap self-test: ok",
             "[rustos] timer: 100 Hz",
             "[rustos] initramfs: not mapped, the boot goes on without it",
-            "[rustos] initramfs: 1 files, 272 bytes",
+            "[rustos] initramfs: 2 files, 272 bytes",
+            "[rustos] user: fault contained (pid 3)",
+            "[rustos] user self-test: ok",
         ] {
             let log = normal_log(5, line);
             let outcome = Outcome::Booted(Duration::ZERO);
@@ -770,6 +801,40 @@ mod tests {
         log.push_str("[rustos] heap self-test: ok\n");
         let ran = report(Arch::X86_64, BootMode::Refused, outcome, &log);
         assert!(ran.unwrap_err().contains("do modo de teste"));
+    }
+
+    #[test]
+    fn only_the_self_test_mode_wants_the_init_and_its_output() {
+        let wants = |mode, text: &str| mode_lines(mode).iter().any(|(line, _)| line.contains(text));
+        assert!(wants(BootMode::SelfTest, "init loaded"));
+        assert!(wants(BootMode::SelfTest, "pid 1 exited (code 0,"));
+        assert!(!wants(BootMode::Normal, "init loaded"));
+        assert!(!wants(BootMode::Refused, "init loaded"));
+        let outcome = Outcome::Booted(Duration::ZERO);
+        let mut log = String::new();
+        for (line, _) in mode_lines(BootMode::SelfTest) {
+            log.push_str(line);
+            log.push('\n');
+        }
+        let result = report(Arch::X86_64, BootMode::SelfTest, outcome, &log);
+        assert!(result.unwrap_err().contains("saída do `init`"));
+    }
+
+    #[test]
+    fn the_init_output_counts_only_as_a_user_line() {
+        assert!(has_user_line("[user] init: ok\r\n", INIT_OUTPUT.0));
+        assert!(!has_user_line("[rustos] [user] init: ok\n", INIT_OUTPUT.0));
+        assert!(!has_user_line("[user] init: FAILED clock\n", INIT_OUTPUT.0));
+    }
+
+    #[test]
+    fn the_self_test_image_expects_one_file_per_program() {
+        let files = crate::user::programs_for(true).len();
+        let (line, _) = SELFTEST_LINES
+            .iter()
+            .find(|(line, _)| line.starts_with("[rustos] initramfs:"))
+            .unwrap();
+        assert!(line.contains(&format!("{files} files")), "{line}");
     }
 
     #[test]

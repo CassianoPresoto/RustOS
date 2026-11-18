@@ -22,7 +22,6 @@ panic-tests = []
 # Fora da `release-small`: sem ela o kernel os recusa e a imagem não os carrega.
 selftest = [
     "rustos-shell/bench",
-    "dep:rustos-cpio",
     "rustos-arch-x86_64/selftest",
     "rustos-arch-aarch64/selftest",
 ]
@@ -35,7 +34,8 @@ rustos-sched.workspace = true
 rustos-gfx.workspace = true
 rustos-term.workspace = true
 rustos-shell.workspace = true
-rustos-cpio = { workspace = true, optional = true }
+rustos-cpio.workspace = true
+rustos-elf.workspace = true
 rustos-sync.workspace = true
 rustos-boot-limine.workspace = true
 

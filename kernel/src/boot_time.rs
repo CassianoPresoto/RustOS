@@ -24,9 +24,11 @@ pub enum Phase {
     Benches,
     /// Semente do gerador, linhas de estado e o escalonador.
     Setup,
+    /// Carregar o `init` e esperar ele sair (só o modo de teste).
+    Init,
 }
 
-const PHASES: usize = 8;
+const PHASES: usize = 9;
 
 static SPENT: [AtomicU64; PHASES] = [const { AtomicU64::new(0) }; PHASES];
 static SINCE: AtomicU64 = AtomicU64::new(0);
@@ -48,6 +50,11 @@ pub struct Summary {
     pub self_tests: u64,
     pub benches: u64,
     pub setup: u64,
+    #[cfg_attr(
+        not(feature = "selftest"),
+        allow(dead_code, reason = "lido só pelo modo de teste")
+    )]
+    pub init: u64,
 }
 
 /// Começa a contar em `entry_cycles`, o contador lido na entrada do `kmain`.
@@ -80,5 +87,6 @@ pub fn finish() -> Summary {
         self_tests: us(Phase::SelfTests),
         benches: us(Phase::Benches),
         setup: us(Phase::Setup),
+        init: us(Phase::Init),
     }
 }

@@ -1,0 +1,23 @@
+[package]
+name = "rustos-user-rt"
+description = "Runtime dos programas de usuário: entrada em Rust, pânico, alocador, auxv e syscalls seguras."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-hal.workspace = true
+
+[target.'cfg(all(target_os = "none", target_arch = "x86_64"))'.dependencies]
+rustos-arch-x86_64-user.workspace = true
+
+[target.'cfg(all(target_os = "none", target_arch = "aarch64"))'.dependencies]
+rustos-arch-aarch64-user.workspace = true

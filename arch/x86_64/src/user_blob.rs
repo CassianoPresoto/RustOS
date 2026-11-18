@@ -30,6 +30,8 @@ rustos_user_blob_start:
 
     .balign 16
 rustos_user_hello:
+    test rdx, rdx
+    jnz .Lfail6
     lea rdi, [rip + .Lhello_msg]
     mov esi, {hello_len}
     mov eax, {debug_write}
@@ -80,6 +82,9 @@ rustos_user_hello:
     jmp .Lexit
 .Lfail5:
     mov edi, 5
+    jmp .Lexit
+.Lfail6:
+    mov edi, 6
 .Lexit:
     mov eax, {process_exit}
     syscall

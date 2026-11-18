@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::arch::Arch;
 use crate::cargo::{self, Profile};
-use crate::{initramfs, limine};
+use crate::{initramfs, limine, user};
 
 /// Onde o initramfs fica na ESP e o `module_string` que o kernel procura (`vm.rs`).
 const INITRAMFS_PATH: &str = "boot/initramfs.cpio";
@@ -36,6 +36,8 @@ pub fn assemble_with(
     features: &[String],
     cmdline: Option<&str>,
 ) -> Result<PathBuf, String> {
+    let selftest = cargo::has_feature(features, cargo::SELFTEST);
+    let programs = user::build(root, arch, profile, &user::programs_for(selftest))?;
     let kernel = cargo::build_kernel_with(root, arch, profile, features)?;
     let limine = limine::ensure(root)?;
     let esp = esp_dir(root, arch);
@@ -50,7 +52,7 @@ pub fn assemble_with(
     )?;
     copy(&kernel, &kernel_dir.join("rustos"))?;
     copy(
-        &initramfs::write_provisional(root, arch)?,
+        &initramfs::write_image(root, arch, &programs)?,
         &esp.join(INITRAMFS_PATH),
     )?;
     fs::write(boot_dir.join("limine.conf"), limine_conf(arch, cmdline))
