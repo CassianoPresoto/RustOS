@@ -29,8 +29,8 @@ pub struct DirectMap {
 
 impl DirectMap {
     /// # Safety
-    /// Todo endereço que os métodos recebem está num frame do kernel, alinhado ao
-    /// acesso e visível em `físico + offset`, sem outro acesso concorrente.
+    /// Todo endereço que os métodos recebem está num frame do kernel, alinhado ao acesso,
+    /// visível em `físico + offset` como memória Normal e sem outro acesso concorrente.
     pub const unsafe fn new(offset: u64) -> Self {
         Self { offset }
     }

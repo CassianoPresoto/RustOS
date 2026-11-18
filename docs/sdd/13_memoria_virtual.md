@@ -96,8 +96,9 @@ múltiplos de 64 (`platform::zero_aligned`); o resto vai ao `write_bytes`. Núme
 
 - **aarch64** (`arch/aarch64/src/zero.rs`, divisão pura em `zero_plan.rs`). `DC ZVA` zera um
   bloco alinhado de `4 << DCZID_EL0.BS` bytes, e `DZP` (bit 4) ligado o proíbe. O
-  `harden` lê o `DCZID_EL0` uma vez e guarda o bloco; com `DZP` ligado, ou bloco menor que 64,
-  o laço é de `STP` de pares (64 bytes por volta). O começo antes do primeiro bloco alinhado e
+  `zero_aligned` lê o `DCZID_EL0` a cada chamada, como o Linux em cada `clear_page`: o
+  registrador é por CPU, e um bloco lido na CPU 0 corromperia os vizinhos numa CPU de bloco
+  maior; com `DZP` ligado, ou bloco menor que 64, o laço é de `STP` de pares (64 bytes por volta). O começo antes do primeiro bloco alinhado e
   a sobra depois do último vão por `STP`, o miolo por `DC ZVA`. No HVF o bloco é de 64 bytes e
   `DZP` está limpo.
 - **Só vale em memória Normal.** O mapa direto é `DATA` com `AttrIndx` 0, e o `MAIR_EL1` lido
@@ -112,11 +113,17 @@ múltiplos de 64 (`platform::zero_aligned`); o resto vai ao `write_bytes`. Núme
   (`stosq`) e `_erms` (`stosb`). **Não verificado no Arm ARM** (a página da Arm não é
   legível por busca automática): que `DC ZVA` em memória Device ou não cacheável dá falta de
   alinhamento, e os campos `DZP` e `BS` além do que o código do Linux usa.
+- **`STP`, não `STNP`, no recuo.** O Linux usa `STNP` (não temporal). Aqui o recuo zera
+  memória que o heap reutiliza logo, então o dado deve ficar no cache. Medido no HVF
+  com `DZP` forçado, `release`: `STP` 4 KiB em 39 a 41 ns e 1 KiB em 11 a 12; `STNP`, 38 a 82
+  e 15 a 18. `STNP` não ganhou, e varia mais.
 - **Teste.** Host: `zero_plan` (bloco por `DCZID`, `DZP`, divisão em cabeça, corpo e cauda para
   vários blocos e alinhamentos). No alvo: o autoteste do heap confere que os vizinhos de
-  cada faixa ficam intactos (`heap::self_test`). O laço de `STP` foi rodado à mão no HVF
-  forçando `DZP`, com o mesmo autoteste verde; o `make smoke` não o cobre (o HVF não liga
-  `DZP`).
+  cada faixa ficam intactos (`heap::self_test`). `RUSTOS_CPU=a64fx` (TCG, bloco de
+  256 bytes) cobre blocos maiores que 64, e com isso as pontas `head` e `tail`. O laço de
+  `STP` de `DZP` ligado foi rodado à mão no HVF forçando o recuo, com o mesmo autoteste
+  verde; nenhum modelo da QEMU liga `DZP`, e o `make smoke` não o cobre
+  ([DEBT-0060](../tech-debt/0060-recuo-do-zerar-sem-cobertura-no-smoke.md)).
 
 ## Página grande
 

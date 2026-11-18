@@ -1,32 +1,25 @@
 //! Zerar memória Normal por faixas de 64 bytes: `DC ZVA` quando o `DCZID_EL0` deixa, e
 //! laço de `STP` quando não. O mapa direto é Normal write-back (SDD 13, SDD 07).
 
-use core::arch::asm;
-use core::sync::atomic::{AtomicUsize, Ordering};
-
 use crate::zero_plan::{LINE, split, zva_block_bytes};
+use core::arch::asm;
 
-/// Bloco do `DC ZVA` em bytes; 0 antes de `init` ou com `DZP` ligado: só `STP`.
-static BLOCK: AtomicUsize = AtomicUsize::new(0);
-
-/// Lê `DCZID_EL0` e guarda o tamanho do bloco. Uma vez, no boot.
-pub fn init() {
+/// Bloco do `DC ZVA` desta CPU, ou `None` se o `DZP` o proíbe. O `DCZID_EL0` é por CPU e
+/// o Linux o lê a cada `clear_page`: ler aqui evita usar o bloco de outro núcleo.
+pub fn block_bytes() -> Option<usize> {
     let dczid: u64;
     // SAFETY: `DCZID_EL0` é de leitura e legal em EL1.
     unsafe { asm!("mrs {}, dczid_el0", out(reg) dczid, options(nomem, nostack, preserves_flags)) };
-    BLOCK.store(zva_block_bytes(dczid).unwrap_or(0), Ordering::Relaxed);
+    zva_block_bytes(dczid)
 }
 
-/// O bloco do `DC ZVA` em uso, ou `None` se o laço de `STP` é o caminho.
-pub fn block_bytes() -> Option<usize> {
-    Some(BLOCK.load(Ordering::Relaxed)).filter(|&block| block != 0)
-}
-
-/// Zera `[ptr, ptr + len)`.
+/// Zera `[ptr, ptr + len)`; pânico se `ptr` ou `len` não for múltiplo de 64.
 ///
 /// # Safety
 /// `ptr` e `len` múltiplos de 64; a faixa é memória Normal gravável, sem outro acesso.
+#[allow(clippy::missing_panics_doc, reason = "o pânico está na primeira linha")]
 pub unsafe fn zero_aligned(ptr: *mut u8, len: usize) {
+    assert!((ptr.expose_provenance() | len).is_multiple_of(LINE));
     let Some(block) = block_bytes() else {
         // SAFETY: o contrato da função.
         return unsafe { store_pairs(ptr, len) };
@@ -45,7 +38,7 @@ pub unsafe fn zero_aligned(ptr: *mut u8, len: usize) {
 /// # Safety
 /// `ptr` e `len` múltiplos de `LINE`, faixa gravável.
 unsafe fn store_pairs(ptr: *mut u8, len: usize) {
-    debug_assert!(len.is_multiple_of(LINE));
+    assert!(len.is_multiple_of(LINE));
     if len == 0 {
         return;
     }

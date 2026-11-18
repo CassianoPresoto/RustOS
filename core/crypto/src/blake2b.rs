@@ -149,6 +149,7 @@ impl Blake2b {
             self.h[i] ^= v[i] ^ v[i + 8];
         }
         wipe(&mut m);
+        wipe(&mut v);
     }
 }
 

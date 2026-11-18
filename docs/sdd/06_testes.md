@@ -58,6 +58,12 @@ passarem; o `smoke` exige a linha `task self-test: ok`. O de
 W^X percorre as tabelas novas ([SDD 13](13_memoria_virtual.md)); `fault text` no shell
 confere que a CPU recusa a escrita em `.text`.
 
+Duas linhas do boot são medida e heurística, não gate: `key residue:` (varredura da pilha
+atrás de cópias da chave, com uma sonda que planta 4 estados e exige achá-los; [SDD 09](09_seguranca.md))
+e `zero bench:` ([SDD 07](07_desempenho_e_recursos.md)). O kernel as imprime e segue;
+o `smoke` reprova o `FAILED` de qualquer linha. O autoteste do heap confere que o zerar
+rápido mexe só na faixa pedida ([SDD 13](13_memoria_virtual.md), "Zerar").
+
 ## Andar 3b — tela
 
 `cargo xtask screenshot` sobe a QEMU sem janela, espera o `boot ok`, digita cada

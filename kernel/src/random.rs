@@ -22,8 +22,10 @@ const MARKS_MAX: usize = 16;
 const BENCH_BLOCK: usize = 4096;
 const BENCH_BLOCKS: usize = 32;
 const BENCH_REQUESTS: u64 = 20_000;
-/// Bytes da pilha, abaixo do chamador, que o autoteste de resíduo varre.
+/// Bytes da pilha, abaixo de um local do quadro de `stack_residue`, que o autoteste varre.
 const SCAN_BYTES: usize = 2048;
+/// Cópias que o autoteste planta para provar que a varredura enxerga.
+pub const PLANTED: usize = 4;
 /// As quatro primeiras palavras do estado do ChaCha20, que vêm antes da chave.
 const CHACHA_CONSTANTS: [u8; 16] = *b"expand 32-byte k";
 
@@ -138,11 +140,26 @@ fn poison_stack() {
     core::hint::black_box(&mut pad);
 }
 
+/// Planta `PLANTED` estados falsos no quadro do primeiro callee, para o varredor provar
+/// que enxerga a zona logo abaixo do chamador.
+#[inline(never)]
+fn plant_state_copies() {
+    let copies = [CHACHA_CONSTANTS; PLANTED];
+    core::hint::black_box(&copies);
+}
+
+/// Inline de propósito: um quadro próprio cairia sobre os primeiros bytes abaixo do `sp`,
+/// onde fica o quadro do primeiro callee, e o resíduo ali não seria visto.
+#[inline(always)]
+#[allow(
+    clippy::inline_always,
+    reason = "sem quadro próprio a varredura não pisa no resíduo"
+)]
 fn count_windows(window: &[u8; 16], low: usize, high: usize) -> usize {
     let mut found = 0;
     for start in low..high.saturating_sub(window.len() - 1) {
         let matches = window.iter().enumerate().all(|(i, &byte)| {
-            // SAFETY: `[low, high)` está na pilha própria do kernel, mapeada e abaixo do `sp`.
+            // SAFETY: `[low, high)` está na pilha própria do kernel, mapeada, abaixo do quadro.
             byte == unsafe { ptr::with_exposed_provenance::<u8>(start + i).read_volatile() }
         });
         found += usize::from(matches);
@@ -152,9 +169,9 @@ fn count_windows(window: &[u8; 16], low: usize, high: usize) -> usize {
 
 /// Semeia um gerador com a chave conhecida de `Rng::new(&[])`, atende um pedido e varre a
 /// pilha abaixo daqui atrás de cópias do estado do ChaCha20 e da chave antiga (SDD 09).
-/// Nada do gerador fica na pilha deste quadro: ele mora no heap.
+/// Com `plant`, em vez do pedido planta `PLANTED` estados: a contagem tem de ser a deles.
 #[inline(never)]
-pub fn stack_residue() -> Residue {
+pub fn stack_residue(plant: bool) -> Residue {
     let mut known = Box::new([0_u8; 32]);
     let zero_key = [0_u8; 32];
     if blake2b::hash(&mut *known, &zero_key, &[]).is_err() {
@@ -164,7 +181,11 @@ pub fn stack_residue() -> Residue {
     let mut slot: Box<Option<Rng>> = Box::new(None);
     poison_stack();
     let mut out = Box::new([0_u8; 64]);
-    start(&mut slot).fill_bytes(&mut *out);
+    if plant {
+        plant_state_copies();
+    } else {
+        start(&mut slot).fill_bytes(&mut *out);
+    }
     let probe = 0_u8;
     let top = ptr::from_ref(&probe).expose_provenance();
     let (low, high) = (top - SCAN_BYTES, top);

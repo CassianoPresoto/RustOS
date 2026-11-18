@@ -84,8 +84,9 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
 7. `Memory::reclaim_bootloader` devolve ao buddy as regiões `BootloaderReclaimable`.
 8. `random::init` semeia o gerador ([SDD 09](09_seguranca.md)).
 9. Relatório (com `kernel base:`, `reclaimed:`, `vm:`, `protections:`, `random:` e
-   `random bench:`), autoteste de um frame (escreve e relê pelo mapa direto), autoteste
-   do heap, `w^x:` (percorre as tabelas), autoteste de exceção e de timer.
+   `random bench:` e `key residue:`, o autoteste de resíduo de chave na pilha), autoteste
+   de um frame (escreve e relê pelo mapa direto), autoteste do heap, `zero bench:` (a
+   medida de zerar), `w^x:` (percorre as tabelas), autoteste de exceção e de timer.
    `task::init` adota a execução atual como a tarefa `init`, cria a ociosa e liga
    FPU/SIMD (`fpu:`, `sched:`); o autoteste de preempção e de estado de SIMD
    (`task self-test:`) e as medidas curtas (`switch:`) rodam, e vem `[rustos] boot ok`.
@@ -131,9 +132,11 @@ QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB, perfil `dev` (a base e o mapa dir
 [rustos] protections: +wp +nx +smep +smap +umip
 [rustos] vm: direct map at 0xffff846840000000 in 122 2M and 2475 4K pages, 64 KiB of tables, stack 64 KiB
 [rustos] random: rdseed
-[rustos] random bench: chacha20 39 MB/s, reseed 288 us
+[rustos] random bench: chacha20 39 MB/s, reseed 288 us, next_u64 1034.1 ns
+[rustos] key residue: 0 chacha states, 0 key copies on the stack, probe 4 of 4: ok
 [rustos] frame self-test: ok
 [rustos] heap self-test: ok
+[rustos] zero bench: 1 KiB 307.9 ns, 4 KiB 1087.3 ns, 4 KiB over 1 MiB 1191.9 ns, 4 KiB alloc+free 2996.5 ns
 [rustos] w^x: ok (64968 pages)
 [rustos] exception self-test: ok
 [rustos] timer: 100 Hz, 5 ticks in 37 ms ok

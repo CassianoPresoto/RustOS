@@ -23,8 +23,8 @@ pub struct Rng {
 }
 
 impl Rng {
-    /// Chave de zeros, previsível: só serve para ser semeada no lugar, com `reseed`, de modo
-    /// que a chave nunca passe por uma cópia na pilha (`random::init` do kernel).
+    /// Chave de zeros: a saída é previsível até o primeiro `reseed`. Só serve para semear no
+    /// lugar (`random::init` do kernel), sem a chave passar por uma cópia na pilha.
     pub const fn unseeded() -> Self {
         Self {
             key: [0; chacha20::KEY_LEN],
@@ -34,6 +34,7 @@ impl Rng {
 
     /// Cria o gerador a partir de `seed`, de qualquer tamanho. Com menos de 256
     /// bits de entropia na semente, o gerador é tão fraco quanto a semente.
+    /// Devolve por valor: a chave pode deixar uma cópia no quadro de quem chama.
     pub fn new(seed: &[u8]) -> Self {
         let mut rng = Self::unseeded();
         rng.reseed(seed);

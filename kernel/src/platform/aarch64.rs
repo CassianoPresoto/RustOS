@@ -84,7 +84,6 @@ const PAN_OFF: u8 = 2;
 
 /// Liga as proteções de hardware da CPU, antes das tabelas novas.
 pub fn harden() {
-    rustos_arch_aarch64::zero::init();
     if protection::pan_available() {
         // SAFETY: EL1, e a CPU anuncia `PAN`.
         let on = unsafe { protection::enable_pan() };

@@ -135,7 +135,7 @@ fn boot_kernel(handoff: Handoff) -> ! {
     report(&boot, &memory, display, reclaimed);
     report_vm(&vm, boot.direct_map_offset());
     report_random(source);
-    let residue_ok = report_key_residue();
+    report_key_residue();
     // SAFETY: o mapa direto cobre todo frame utilizável, de onde vem o frame do teste.
     let frames_ok = unsafe { memory.self_test(boot.direct_map_offset()) };
     kprintln!(
@@ -151,7 +151,7 @@ fn boot_kernel(handoff: Handoff) -> ! {
     let wx_ok = report_wx(&vm);
     let irq_ok = interrupts_on && system::interrupt_self_test();
     let tasks_ok = irq_ok && report_tasks(&boot, &memory);
-    if !frames_ok || !heap_ok || !residue_ok || !wx_ok || !irq_ok || !tasks_ok {
+    if !frames_ok || !heap_ok || !wx_ok || !irq_ok || !tasks_ok {
         rustos_hal::Cpu::halt_forever(&platform::cpu());
     }
     kprintln!("{BOOT_OK_MARKER}");
@@ -262,17 +262,21 @@ fn report_random(source: random::Source) {
     }
 }
 
-/// Procura cópias da chave na pilha depois de semear e de um pedido (SDD 09).
-fn report_key_residue() -> bool {
-    let residue = random::stack_residue();
+/// Procura cópias da chave na pilha depois de semear e de um pedido (SDD 09). Heurística
+/// que depende do código gerado: só imprime, o `make smoke` reprova pelo `FAILED`.
+fn report_key_residue() {
+    let residue = random::stack_residue(false);
+    let probe = random::stack_residue(true);
+    let sees = probe.states == random::PLANTED;
     let clean = residue == random::Residue::default();
     kprintln!(
-        "[rustos] key residue: {} chacha states, {} key copies on the stack: {}",
+        "[rustos] key residue: {} chacha states, {} key copies on the stack, probe {} of {}: {}",
         residue.states,
         residue.keys,
-        if clean { "ok" } else { "FAILED" }
+        probe.states,
+        random::PLANTED,
+        if clean && sees { "ok" } else { "FAILED" }
     );
-    clean
 }
 
 fn report_zero_bench() {

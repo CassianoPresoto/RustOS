@@ -125,7 +125,7 @@ Duas propriedades que o desenho dá e os testes conferem:
 | **Sem `Clone`, `Copy` nem `Debug` derivado.** `Debug` escreve `<redacted>` ([guidelines 09](../guidelines/09_seguranca.md)); `Drop` zera a chave | Duas cópias do estado entregariam a mesma saída duas vezes |
 | **O estado do ChaCha20 também não é `Copy`**: `chacha20::Words` (16 palavras, privado) tem `Drop` que o zera. O `[u32; 16]` de antes era `Copy`, e cada passagem por valor deixava uma cópia | Tipo `Copy` multiplica as cópias sem o código dizer; sem `Copy`, o compilador move em vez de copiar e o `Drop` roda uma vez por valor |
 | **O estado é montado e consumido no lugar**: `Words::load` escreve num `Words` de quem chama, `permute(&state, &mut out)` trabalha em `out`, e `keyed_256` e `block_into` escrevem no buffer de quem chama | Devolver `[T; N]` por valor, em `opt-level` baixo, deixa o original no quadro de quem montou: no `release-small` o autoteste de resíduo achava uma cópia a mais |
-| **Zerar usa `core::hint::black_box` e `compiler_fence`**, sem `unsafe` | Melhor esforço: o Rust não garante que escrita sem leitura sobreviva à otimização, e `write_volatile` exige `unsafe`, proibido em `core/` (AGENTS, caso 5). A prova está no kernel, abaixo |
+| **Zerar usa `core::hint::black_box` e `compiler_fence`**, sem `unsafe` | Melhor esforço: a documentação do `std` não garante o `black_box`, e ele não desfaz cópias feitas antes do `wipe` (o `memcpy` de um move deixa a chave para trás). O `zeroize` usa `write_volatile`, que exige `unsafe`, proibido em `core/` (AGENTS, caso 5). Sem `unsafe`, é o melhor possível; o autoteste de pilha no alvo compensa |
 | **ARX puro, sem tabela indexada por segredo**: o ChaCha20 e o BLAKE2b só somam, rodam e fazem XOR. O índice da `SIGMA` do BLAKE2b é público | Sem acesso à memória nem desvio que dependam da chave |
 
 ### O que o kernel faz
@@ -166,13 +166,27 @@ precisa estar de pé para a linha `random bench:`).
    `rustos_crypto::wipe` ao sair de `replenish`. O gerador é semeado no lugar, no `static`
    (`Rng::unseeded` e `reseed`), sem passar por uma cópia do `Rng` na pilha.
 7. **Resíduo na pilha, medido** (`random::stack_residue`, a linha `[rustos] key residue:`
-   do boot, que derruba o boot se achar algo). Enche com `0x5A` os 2 560 bytes abaixo do
-   quadro, semeia um gerador do heap com a chave conhecida de `Rng::new(&[])`, atende um
-   pedido e conta, nos 2 KiB abaixo, os trechos de 16 bytes iguais às constantes do ChaCha20
-   (`expand 32-byte k`, que antecedem a chave no estado) e à chave antiga. Antes e depois, por ISA e perfil: SDD 07. Depois: 0 e 0 nos seis. **O que não se vê:** o estado
-   de trabalho no meio das rodadas, que não tem padrão reconhecível. No aarch64 o `permute`
-   não o derrama na pilha (só salva registradores do chamador); no x86_64 `release` ele
-   guarda poucas palavras num quadro de 40 bytes ([DEBT-0059](../tech-debt/0059-estado-do-chacha20-derramado-na-pilha-no-x86.md)).
+   do boot). Enche com `0x5A` os 2 560 bytes abaixo do quadro, semeia um gerador do heap com
+   a chave conhecida de `Rng::new(&[])`, atende um pedido e conta, nos 2 KiB abaixo de um
+   local do quadro, os trechos de 16 bytes iguais às constantes do ChaCha20 (`expand
+   32-byte k`, que antecedem a chave no estado) e à chave antiga. Números por ISA e perfil:
+   SDD 07; depois, 0 e 0 nos seis.
+   - **É heurística que depende do código gerado**: imprime `FAILED` e o boot segue; o
+     `make smoke` reprova pelo `FAILED`.
+   - **Sonda de sensibilidade.** Uma segunda passada planta 4 estados falsos no quadro do
+     primeiro callee e exige achá-los (`probe 4 of 4`). Sem ela, a varredura tinha uma zona
+     cega nos cerca de 64 bytes logo abaixo do `sp` (o quadro da própria varredura caía
+     ali): com `count_windows` fora de linha a sonda dá `0 of 4` no x86_64 `release`.
+   - **O que cobre:** `Words` e o `Rng` semeado com zero (a chave de `Rng::new(&[])`),
+     não a chave real de `replenish` nem o `gather_jitter`.
+   - **O que não vê:** o estado de trabalho no meio das rodadas, sem padrão reconhecível.
+     No aarch64 o `permute` não o derrama (só salva registradores do chamador); no x86_64
+     `release` guarda poucas palavras num quadro de 40 bytes, e `Rng::new` e
+     `gather_jitter` devolvem por valor ([DEBT-0059](../tech-debt/0059-estado-do-chacha20-derramado-na-pilha-no-x86.md)).
+   - **O `v` do BLAKE2b** (`compress`) passou a ser zerado como o `m`: dava para reconstruir
+     o `h` anterior a partir dele. Custo no host: 4 MiB de 1 595–1 606 para 1 554–1 578 MB/s
+     (-2%), BLAKE2b-256 com chave de 191 para 200–202 ns (+5%), `reseed` de 164–167 para
+     172–173 ns.
 
 O que se observou rodando, com `-cpu max` salvo nota: x86_64 em TCG, `rdseed`; x86_64
 com `-cpu Haswell` (sem `RDSEED`), `rdrand`; x86_64 com `-cpu qemu64` (sem os dois),
