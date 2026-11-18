@@ -86,7 +86,7 @@ aparece na serial e que nenhum endereço do kernel vem junto (o log inteiro depo
 
 A linha de comando vem do `cmdline:` da entrada do `limine.conf` (`xtask/src/image.rs`); `core/hal`
 `BootParams::parse` a traduz e tem teste de entrada inválida. Custa nove boots por ISA (cerca de
-25 s no x86_64 e 49 s no aarch64 neste host); `fault lock`, `fault nested`, `fault all` e `fault held` só existem no build com `panic-tests`, por isso é alvo à parte; entra no `make pr` e no CI,
+27 s no x86_64 e 54 s no aarch64 neste host); `fault lock`, `fault nested`, `fault all` e `fault held` só existem no build com `panic-tests`, por isso é alvo à parte; entra no `make pr` e no CI,
 não no `make smoke`. Com `debug-addrs` ele recusa rodar: os cenários conferem o endereço relativo.
 
 ## Andar 3b — tela

@@ -111,6 +111,8 @@ estão no pico; bytes, o máximo de cada tipo; `dev` e `release`):
 | Falha na pilha de falhas do aarch64 (`fault page`, relatório de falha, 16 KiB) | 2 352 | 1 888 | n/a | n/a |
 | Shell (`init`, na pilha de 64 KiB do boot), em KiB: boot, depois `ps`, depois `bench` | 13,7; 17,1; 23,3 | 16,8; 38,2; 42,6 | 13,5; 17,0; 23,1 | 16,6; 38,1; 42,3 |
 
+`release-small` (`opt-level = "z"`, `make smoke`): tarefa 2,2 (aarch64) e 2,1 KiB (x86_64), ociosa da CPU de boot 0,8, núcleo secundário **8,8 KiB** (o maior de todos os perfis), shell 15,5 no boot e 33,8 depois do `bench`.
+
 `dev` (`opt-level = 1`) usa **mais** pilha que `release` nas tarefas e nas ociosas (2,5 contra 2,3 KiB; 6,7 contra 3,9 KiB), e **bem menos** no shell:
 no `release` o `ps` já leva a pilha do shell a 38 KiB e o `bench` a 42,6 de 64 ([DEBT-0067](../tech-debt/0067-shell-usa-dois-tercos-da-pilha-no-release.md)). O
 `fault page` no x86_64 roda na pilha do shell e não separa o relatório do resto; o `#BP`, o `#PF` e o pânico do x86_64 não usam as pilhas IST (pico zero
@@ -120,7 +122,7 @@ nas três de cada CPU, [DEBT-0068](../tech-debt/0068-pilhas-de-excecao-sem-medid
 **Decisão: 4 páginas (16 KiB) para toda thread do kernel que não é o boot**, tarefas, ociosa de cada CPU e pilha de cada núcleo secundário (eram 8, 4 e 8).
 Regra: o tamanho é a menor quantidade de páginas com pelo menos 2x o pior pico de `dev` mais o pior relatório de falha. Isso é 2 x (2,5 + 2,4) = 9,8 KiB, 3
 páginas, e a janela de pilhas pede potência de dois no teste de estouro do aarch64 que o desenho da fase 4 prevê (pilha alinhada ao dobro do tamanho), então 4. A margem é 6,4x o pico de tarefa
-e 2,4x o pico mais fundo (o init do núcleo secundário, em `dev`). 2 páginas (8 KiB) ficariam em 1,6x da soma pessimista e em 1,2x no secundário: não. O Linux usa 16 KiB nos dois
+e 1,8x o pico mais fundo (o init do núcleo secundário em `release-small`, 8,8 KiB; é um caminho fixo, medido nos três perfis). 2 páginas (8 KiB) ficariam em 1,6x da soma pessimista e nem caberiam no secundário: não. O Linux usa 16 KiB nos dois
 alvos (`THREAD_SIZE` é `PAGE_SIZE << 2` no x86_64 e `1 << 14` no arm64), e o estouro aqui vira relatório pela guarda sem mapeamento, não corrompe.
 
 Ganho, medido pelo `mem` (`used`, aarch64 `release`, depois do boot e do `bench`): **720,0 para 544,0 KiB**, 176 KiB a menos. Por tarefa, 16 KiB (50% da pilha);
