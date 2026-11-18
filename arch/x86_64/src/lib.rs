@@ -8,6 +8,7 @@ pub mod fault;
 pub mod features;
 pub mod ioapic;
 pub mod lapic;
+pub mod mitigation;
 pub mod pic;
 pub mod pit;
 pub mod prefix;
@@ -75,7 +76,7 @@ pub use protect::{Protections, enable as enable_protections};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use stack::{Continuation, call_on_stack};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub use sysreg::{features as cpu_features, rdtsc};
+pub use sysreg::{features as cpu_features, mitigation_features, rdtsc};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use traps::{
     CpuTables, IstStacks, breakpoint, install as install_traps,

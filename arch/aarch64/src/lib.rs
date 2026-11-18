@@ -8,6 +8,7 @@ pub mod descriptor;
 pub mod esr;
 pub mod features;
 pub mod intid;
+pub mod mitigation;
 pub mod prefix;
 pub mod sgi;
 pub mod time;
@@ -31,6 +32,8 @@ pub mod gic_cpu;
 mod mmio;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod mmu;
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+mod nospec;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod percpu;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -60,6 +63,8 @@ pub use gic_cpu::Aarch64Ipi;
 pub use mmio::MmioBus;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use mmu::{Aarch64Mmu, DirectMapTables, active_root, prepare_space, wxn_active};
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub use nospec::csdb;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use percpu::Aarch64CpuLocal;
 pub use prefix::CpuPrefix;
