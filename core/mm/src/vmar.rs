@@ -216,6 +216,7 @@ pub struct Fit {
 
 /// A árvore: um vetor ordenado em armazenamento dado de fora (`[Region; N]` ou um
 /// `Box<[Region]>`). Busca em O(log N); inserir e remover movem até N regiões de 32 bytes.
+/// Capacidade fixa e `memmove` O(N): DEBT-0075.
 #[derive(Debug)]
 pub struct Vmar<S> {
     storage: S,

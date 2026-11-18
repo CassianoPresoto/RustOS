@@ -36,6 +36,7 @@ pub struct Switch {
 
 /// O gerador global, com `WORDS * 64` índices no máximo e `CPUS` CPUs. Nenhum índice volta
 /// ao uso antes de a geração subir: quem sai do sistema só devolve o índice no esgotamento.
+/// Toda troca passa por `&mut self`, logo pelo lock do chamador: DEBT-0076.
 #[derive(Debug)]
 pub struct AsidAllocator<const WORDS: usize, const CPUS: usize> {
     bits: u32,
@@ -88,7 +89,7 @@ impl<const WORDS: usize, const CPUS: usize> AsidAllocator<WORDS, CPUS> {
         asid.raw() >> self.bits
     }
 
-    /// `asid` é da geração em curso: dá para usá-lo sem tomar o lock do gerador.
+    /// `asid` é da geração em curso.
     pub const fn is_current(&self, asid: Asid) -> bool {
         self.generation_of(asid) == self.generation
     }
