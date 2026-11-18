@@ -217,7 +217,7 @@ Equivalente do `preemptible()` do Linux (`preempt_count() == 0 && !irqs_disabled
 interrupção mascarada, se está dentro de uma IRQ (o `preempt` do fim dela cuida) ou se segura um `IrqLock`
 (`locks_held() != 0`, a regra de lock abaixo). Nesses casos o pedido fica na política e vale na próxima IRQ ou no próximo
 `schedule`, como antes. O Linux difere só em adiar para o ponto em que o contador zera; aqui a espera é a da IRQ seguinte, e hoje
-nenhum chamador do kernel segura `IrqLock` ao acordar (`notify_input` roda em IRQ): [DEBT-0063](../tech-debt/0063-acordar-com-lock-preso-troca-so-na-proxima-irq.md). Quem acorda numa fila **de outra** CPU já
+nenhum chamador do kernel segura `IrqLock` ao acordar (`notify_input` roda em IRQ): [DEBT-0065](../tech-debt/0063-acordar-com-lock-preso-troca-so-na-proxima-irq.md). Quem acorda numa fila **de outra** CPU já
 preemptava, pelo IPI.
 
 ### x86_64

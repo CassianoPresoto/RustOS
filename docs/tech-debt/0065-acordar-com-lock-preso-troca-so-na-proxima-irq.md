@@ -1,5 +1,5 @@
 ---
-id: DEBT-0063
+id: DEBT-0065
 title: Acordar com IrqLock preso, ou com a IRQ mascarada pelo chamador, só troca na próxima IRQ
 status: Open
 date: 2026-11-17
@@ -7,7 +7,7 @@ trigger: O primeiro chamador de `unpark` ou `spawn` que segure um `IrqLock` ou m
 paid_date:
 ---
 
-# DEBT 0063 — Acordar com `IrqLock` preso, ou com a IRQ mascarada pelo chamador, só troca na próxima IRQ
+# DEBT 0065 — Acordar com `IrqLock` preso, ou com a IRQ mascarada pelo chamador, só troca na próxima IRQ
 
 ## O que falta
 
