@@ -9,7 +9,7 @@ use rustos_hal::{Ipi, IpiKind, PhysAddr, RegisterBus, VirtAddr};
 use crate::features::Features;
 use crate::lapic::{
     APIC_BASE_ADDRESS, APIC_BASE_ENABLE, APIC_BASE_X2APIC, ApicRegisters, ICR_HIGH, ICR_LOW,
-    LocalApic, MSR_APIC_BASE, VECTOR_RESCHEDULE, VECTOR_STOP, x2apic_msr,
+    LocalApic, MSR_APIC_BASE, VECTOR_RESCHEDULE, VECTOR_SHOOTDOWN, VECTOR_STOP, x2apic_msr,
 };
 use crate::mmio::MmioBus;
 use crate::sysreg::{MSR_TSC_DEADLINE, rdmsr, wrmsr};
@@ -259,6 +259,17 @@ impl X86Ipi {
     /// `publish` já rodou: antes dele não há APIC para escrever o ICR.
     pub const unsafe fn new() -> Self {
         Self { _published: () }
+    }
+}
+
+impl X86Ipi {
+    /// Pede à CPU `hw_id` que invalide entradas do TLB (`VECTOR_SHOOTDOWN`). A caixa com o que
+    /// invalidar é do núcleo; esta só entrega o vetor.
+    pub fn send_shootdown(&self, hw_id: u64) {
+        ipi_fence();
+        if let Some(local) = published() {
+            local.send_ipi(u32::try_from(hw_id).unwrap_or(u32::MAX), VECTOR_SHOOTDOWN);
+        }
     }
 }
 

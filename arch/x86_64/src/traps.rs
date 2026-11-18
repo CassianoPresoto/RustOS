@@ -11,6 +11,7 @@ use rustos_hal::{Fault, FaultKind, Handlers, Irq, STACK_PAINT, VirtAddr};
 
 use crate::fault::{
     self, DEBUG, DOUBLE_FAULT, ERROR_CODE_VECTORS, FIRST_IRQ_VECTOR, MACHINE_CHECK, NMI, PAGE_FAULT,
+    PF_WRITE,
 };
 use crate::lapic::VECTOR_SPURIOUS;
 use crate::percpu::prefix;
@@ -425,6 +426,10 @@ extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
             && usercopy::is_usercopy_fault(frame.rip)
             && cr2 < USER_TOP
         {
+            let write = frame.error & PF_WRITE != 0;
+            if (handlers.copy_fault)(cr2, write) {
+                return;
+            }
             usercopy::note_fixup(user::ac_flag_set());
             frame.rip = usercopy::recovery_address();
             return;
@@ -433,7 +438,7 @@ extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
         report.from_user = from_user && fault::user_fault_kills_only_the_process(vector);
         report.user_sp = if report.from_user { frame.rsp } else { 0 };
         (handlers.fault)(&report);
-        if !report.kind.is_recoverable() {
+        if !report.kind.is_recoverable() && !report.from_user {
             halt();
         }
         return;

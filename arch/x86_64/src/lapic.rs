@@ -6,7 +6,9 @@ pub const VECTOR_TIMER: u8 = 0x20;
 pub const VECTOR_KEYBOARD: u8 = 0x21;
 pub const VECTOR_SERIAL: u8 = 0x24;
 pub const VECTOR_SPURIOUS: u8 = 0xFF;
-/// IPIs: refazer a decisão de escalonamento e parar a CPU (pânico em outro núcleo).
+/// IPIs: invalidar entradas do TLB, refazer a decisão de escalonamento e parar a CPU (pânico em
+/// outro núcleo).
+pub const VECTOR_SHOOTDOWN: u8 = 0xFC;
 pub const VECTOR_RESCHEDULE: u8 = 0xFD;
 pub const VECTOR_STOP: u8 = 0xFE;
 
@@ -265,6 +267,13 @@ mod tests {
     }
 
     #[test]
+    fn shootdown_ipi_goes_out_on_its_own_vector() {
+        let regs = FakeRegs::default();
+        LocalApic::new(&regs).send_ipi(1, VECTOR_SHOOTDOWN);
+        assert_eq!(regs.writes.borrow()[1], (ICR_LOW, 0x4000 | 0xFC));
+    }
+
+    #[test]
     fn broadcast_ipi_uses_the_all_but_self_shorthand() {
         let regs = FakeRegs::default();
         LocalApic::new(&regs).send_ipi_all_but_self(VECTOR_STOP);
@@ -282,6 +291,7 @@ mod tests {
             VECTOR_TIMER,
             VECTOR_KEYBOARD,
             VECTOR_SERIAL,
+            VECTOR_SHOOTDOWN,
             VECTOR_RESCHEDULE,
             VECTOR_STOP,
             VECTOR_SPURIOUS,

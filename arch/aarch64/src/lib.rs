@@ -60,6 +60,8 @@ pub use gic_cpu::Aarch64Ipi;
 pub use mmio::MmioBus;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use mmu::{Aarch64Mmu, DirectMapTables, active_root, prepare_space, wxn_active};
+#[cfg(feature = "selftest")]
+pub use mmu::set_local_only;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use percpu::Aarch64CpuLocal;
 pub use prefix::CpuPrefix;
