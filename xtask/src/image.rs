@@ -21,7 +21,7 @@ pub fn esp_dir(root: &Path, arch: Arch) -> PathBuf {
 
 /// `EFI/BOOT/<loader>` e `limine.conf` ao lado dele, onde o Limine procura primeiro.
 pub fn assemble(root: &Path, arch: Arch, profile: Profile) -> Result<PathBuf, String> {
-    assemble_with(root, arch, profile, &cargo::features(), None)
+    assemble_with(root, arch, profile, &cargo::features(profile), None)
 }
 
 /// Como `assemble`, com as features do kernel e a linha de comando da entrada do Limine.

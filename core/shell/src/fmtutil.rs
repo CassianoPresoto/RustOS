@@ -96,9 +96,11 @@ impl fmt::Display for Millis {
 }
 
 /// Nanossegundos em microssegundos com uma casa truncada: `12.3 us`.
+#[cfg(feature = "bench")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Micros(pub u64);
 
+#[cfg(feature = "bench")]
 impl fmt::Display for Micros {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut text = StackStr::<24>::new();
@@ -290,6 +292,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bench")]
     fn micros_keep_one_truncated_decimal() {
         assert_eq!(Micros(0).to_string(), "0.0 us");
         assert_eq!(Micros(999).to_string(), "0.9 us");

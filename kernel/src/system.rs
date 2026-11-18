@@ -1,20 +1,19 @@
 //! O kernel visto pelo shell: implementa a porta `Host` com os números reais
 //! de memória, boot e tela, e roda o laço de entrada.
 
-use rustos_hal::{BootInfo, Cpu, PAGE_SIZE, RegionKind};
+use rustos_hal::{BootInfo, PAGE_SIZE, RegionKind};
+#[cfg(feature = "selftest")]
+use rustos_shell::{BenchReport, MicroBench};
 use rustos_shell::{
-    BenchReport, CpuInfo, DisplayInfo, FaultTest, Host, MemoryInfo, MicroBench, Shell, SystemInfo,
-    TaskInfo, TaskState,
+    CpuInfo, DisplayInfo, FaultTest, Host, MemoryInfo, Shell, SystemInfo, TaskInfo, TaskState,
 };
 use rustos_sync::SpinLock;
 use rustos_term::Layout;
 
-use crate::bench;
 use crate::console::{self, Sink};
 use crate::heap;
 use crate::interrupts;
 use crate::memory::Memory;
-#[cfg(feature = "panic-tests")]
 use crate::panic;
 use crate::platform;
 use crate::random;
@@ -37,12 +36,6 @@ impl KeymapCell {
         self.0.set(value);
     }
 }
-
-/// Tiques que o autoteste espera: 50 ms a 100 Hz. Fora de 25–200 ms, a calibração
-/// errou; sem tique em 1 s, o timer não chega.
-const SELF_TEST_MS: core::ops::RangeInclusive<u64> = 25..=200;
-const SELF_TEST_GIVE_UP_NS: u64 = 1_000_000_000;
-const SELF_TEST_TICKS: u64 = 5;
 
 /// Tamanho que a serial assume quando não há tela.
 const SERIAL_SIZE: (u16, u16) = (80, 24);
@@ -136,7 +129,7 @@ impl<B: BootInfo> Host for System<'_, B> {
             FaultTest::Breakpoint => interrupts::FaultTest::Breakpoint,
             FaultTest::PageFault => interrupts::FaultTest::PageFault,
             FaultTest::WriteText => interrupts::FaultTest::WriteText,
-            FaultTest::CpuPanic => return bench::panic_on_other_cpu(),
+            FaultTest::CpuPanic => return panic::panic_on_other_cpu(),
             #[cfg(feature = "panic-tests")]
             FaultTest::ConsoleLock => return console::fault_while_locked(),
             #[cfg(feature = "panic-tests")]
@@ -206,10 +199,12 @@ impl<B: BootInfo> Host for System<'_, B> {
         visit("run queues", u64::from(task::queue_contentions()));
     }
 
+    #[cfg(feature = "selftest")]
     fn bench(&self) -> Option<BenchReport> {
-        bench::run(bench::FULL)
+        crate::bench::run(crate::bench::FULL)
     }
 
+    #[cfg(feature = "selftest")]
     fn micro_bench(&self) -> Option<MicroBench> {
         let zero = heap::zero_benchmark()?;
         let random = random::benchmark()?;
@@ -234,28 +229,6 @@ pub fn exception_self_test() -> bool {
         if breakpoint_ok { "ok" } else { "FAILED" }
     );
     breakpoint_ok
-}
-
-/// Tiques do timer contados contra o relógio: 50 ms de espera, antes de o escalonador ligar.
-pub fn timer_self_test() -> bool {
-    let cpu = platform::cpu();
-    let elapsed = || platform::now_ns().unwrap_or(0);
-    let (start_ticks, start_ns) = (interrupts::ticks(), elapsed());
-    while interrupts::ticks() < start_ticks + SELF_TEST_TICKS
-        && elapsed().saturating_sub(start_ns) < SELF_TEST_GIVE_UP_NS
-    {
-        cpu.save_and_disable_interrupts();
-        cpu.enable_interrupts_and_wait();
-    }
-    let elapsed_ms = elapsed().saturating_sub(start_ns) / 1_000_000;
-    let ticked = interrupts::ticks() >= start_ticks + SELF_TEST_TICKS;
-    let timer_ok = ticked && SELF_TEST_MS.contains(&elapsed_ms);
-    kprintln!(
-        "[rustos] timer: {} Hz, {SELF_TEST_TICKS} ticks in {elapsed_ms} ms {}",
-        platform::TIMER_HZ,
-        if timer_ok { "ok" } else { "FAILED" }
-    );
-    timer_ok
 }
 
 /// Laço do shell, a tarefa principal: tira bytes da fila que as IRQs de serial e

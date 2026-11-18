@@ -11,25 +11,28 @@ mod x86_64;
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::{
     ARCH, Context, EarlyScratch, FPU_AREA_ALIGN, PlatformConsole, PlatformSpace,
-    SecondaryResources, TIMER_HZ, active_space, arm_timer, call_on_stack, clock_error_ppm, console,
-    cpu, cpu_local, cycles, cycles_to_ns, early_console, early_init, early_serial_map,
-    early_serial_switch, fpu_area_bytes, fpu_init, fpu_init_area, fpu_read_probe, fpu_restore,
-    fpu_save, fpu_write_probe, harden, hardware_entropy, has_keyboard, init_interrupts, ipi,
-    ipi_target, irq_source, kernel_root, keyboard_event, local_hw_id, new_space, now_ns,
-    prepare_secondary, protections, sched_clock_ns, secondary_early, secondary_init,
-    serial_irq_done, switch, timer_mode, trigger,
+    SecondaryResources, TIMER_HZ, active_space, arm_timer, call_on_stack, console, cpu, cpu_local,
+    cycles, cycles_to_ns, early_console, early_init, early_serial_map, early_serial_switch,
+    fpu_area_bytes, fpu_init, fpu_init_area, fpu_restore, fpu_save, harden, hardware_entropy,
+    has_keyboard, init_interrupts, ipi, ipi_target, irq_source, kernel_root, keyboard_event,
+    local_hw_id, new_space, now_ns, prepare_secondary, protections, sched_clock_ns,
+    secondary_early, secondary_init, serial_irq_done, switch, trigger,
 };
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::{
     ARCH, Context, EarlyScratch, FPU_AREA_ALIGN, PlatformConsole, PlatformSpace,
-    SecondaryResources, TIMER_HZ, active_space, arm_timer, call_on_stack, clock_error_ppm, console,
-    cpu, cpu_local, cycles, cycles_to_ns, early_console, early_init, early_serial_map,
-    early_serial_switch, fpu_area_bytes, fpu_init, fpu_init_area, fpu_read_probe, fpu_restore,
-    fpu_save, fpu_write_probe, harden, hardware_entropy, has_keyboard, init_interrupts, ipi,
-    ipi_target, irq_source, kernel_root, keyboard_event, local_hw_id, new_space, now_ns,
-    prepare_secondary, protections, sched_clock_ns, secondary_early, secondary_init,
-    serial_irq_done, switch, timer_mode, trigger,
+    SecondaryResources, TIMER_HZ, active_space, arm_timer, call_on_stack, console, cpu, cpu_local,
+    cycles, cycles_to_ns, early_console, early_init, early_serial_map, early_serial_switch,
+    fpu_area_bytes, fpu_init, fpu_init_area, fpu_restore, fpu_save, harden, hardware_entropy,
+    has_keyboard, init_interrupts, ipi, ipi_target, irq_source, kernel_root, keyboard_event,
+    local_hw_id, new_space, now_ns, prepare_secondary, protections, sched_clock_ns,
+    secondary_early, secondary_init, serial_irq_done, switch, trigger,
 };
+
+#[cfg(all(feature = "selftest", target_arch = "aarch64"))]
+pub use aarch64::{clock_error_ppm, fpu_read_probe, fpu_write_probe, timer_mode};
+#[cfg(all(feature = "selftest", target_arch = "x86_64"))]
+pub use x86_64::{clock_error_ppm, fpu_read_probe, fpu_write_probe, timer_mode};
 
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::zero_aligned;
@@ -52,6 +55,10 @@ pub struct Protection {
 }
 
 /// O que `fpu_init` ligou, para o relatório do boot.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "lido só pelo modo de teste")
+)]
 #[derive(Clone, Copy, Debug)]
 pub struct FpuSummary {
     pub mode: &'static str,

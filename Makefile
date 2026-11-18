@@ -19,11 +19,13 @@ fmt: ## formata o código
 fmt-check: ## confere a formatação
 	cargo fmt --all --check
 
-clippy: ## lint no host e nos dois alvos bare-metal, com e sem as features de depuração; aviso é erro
+clippy: ## lint no host e nos dois alvos bare-metal, com e sem `selftest` e as features de depuração; aviso é erro
 	cargo clippy --all-targets -- -D warnings
+	cargo clippy --package rustos-shell --no-default-features --all-targets -- -D warnings
 	@for target in $(TARGETS); do \
-		cargo clippy --package rustos-kernel --target $$target -- -D warnings || exit 1; \
-		cargo clippy --package rustos-kernel --target $$target --features debug-addrs,panic-tests -- -D warnings || exit 1; \
+		for features in "" selftest debug-addrs,panic-tests selftest,debug-addrs,panic-tests; do \
+			cargo clippy --package rustos-kernel --target $$target $${features:+--features $$features} -- -D warnings || exit 1; \
+		done; \
 	done
 
 layers-check: ## dependências entre camadas, crates externos, unsafe e asm no lugar certo
@@ -37,8 +39,9 @@ docs-check: ## índices, frontmatter das dívidas e links de docs/
 
 check: fmt-check clippy layers-check comments-check docs-check ## todos os gates (não sobe a QEMU)
 
-test: ## testes de unidade no host (todos os crates menos o kernel)
+test: ## testes de unidade no host (todos os crates menos o kernel), e o shell sem o `bench`
 	cargo test
+	cargo test --package rustos-shell --no-default-features
 
 build: ## compila o kernel
 	$(XTASK) build --arch $(ARCH) --profile $(PROFILE)
@@ -67,10 +70,12 @@ font-preview: ## desenha todos os glifos da fonte própria em target/font-previe
 size: ## tamanho das seções do kernel
 	$(XTASK) size --arch $(ARCH) --profile $(PROFILE)
 
-pr: check test ## checklist antes do PR: gates, testes, smoke, smoke-fast e smoke-panic nas duas ISAs
+pr: check test ## checklist antes do PR: gates, testes, smoke, smoke-fast e smoke-panic nas duas ISAs, mais a imagem enxuta
 	$(XTASK) smoke --arch all --profile $(PROFILE)
 	$(XTASK) smoke-fast --arch all --profile $(PROFILE)
+	$(XTASK) smoke-fast --arch all --profile release-small
 	$(XTASK) smoke-panic --arch all --profile $(PROFILE)
+	$(XTASK) smoke-panic --arch all --profile release-small
 	RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx $(XTASK) smoke --arch aarch64 --profile $(PROFILE)
 
 clean: ## apaga target/ (inclusive o Limine baixado)

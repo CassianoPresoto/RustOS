@@ -5,6 +5,8 @@
 #![forbid(unsafe_code)]
 
 mod ansi;
+#[cfg(feature = "bench")]
+mod bench;
 mod commands;
 mod decoder;
 mod fmtutil;

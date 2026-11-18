@@ -5,9 +5,10 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use rustos_arch_aarch64::descriptor::Aarch64Format;
 pub use rustos_arch_aarch64::fpu::{
-    AREA_ALIGN as FPU_AREA_ALIGN, read_probe as fpu_read_probe, restore as fpu_restore,
-    save as fpu_save, write_probe as fpu_write_probe,
+    AREA_ALIGN as FPU_AREA_ALIGN, restore as fpu_restore, save as fpu_save,
 };
+#[cfg(feature = "selftest")]
+pub use rustos_arch_aarch64::fpu::{read_probe as fpu_read_probe, write_probe as fpu_write_probe};
 use rustos_arch_aarch64::intid::{QEMU_VIRT_PL011_INTID, VIRTUAL_TIMER_INTID};
 use rustos_arch_aarch64::sgi::{SGI_RESCHEDULE, SGI_STOP};
 pub use rustos_arch_aarch64::zero::zero_aligned;
@@ -234,6 +235,7 @@ fn enable_local_interrupts(gic: &mut GicV3<MmioBus, MmioBus>) -> Result<(), Plat
 }
 
 /// Como o timer dispara: o comparador absoluto do `CNTV`, de um tiro.
+#[cfg(feature = "selftest")]
 pub fn timer_mode() -> &'static str {
     "cntv-cval"
 }
@@ -332,6 +334,7 @@ pub fn keyboard_event() -> Option<KeyEvent> {
 }
 
 /// O relógio do aarch64 não se calibra: a frequência vem do `CNTFRQ_EL0`.
+#[cfg(feature = "selftest")]
 pub fn clock_error_ppm() -> Option<u64> {
     None
 }

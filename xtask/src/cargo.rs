@@ -33,6 +33,11 @@ impl Profile {
         }
     }
 
+    /// Se o perfil leva o modo de teste (feature `selftest`): todos, menos a imagem enxuta.
+    pub const fn has_selftest(self) -> bool {
+        !matches!(self, Self::ReleaseSmall)
+    }
+
     /// O cargo grava o perfil `dev` em `debug/`; os outros, no próprio nome.
     const fn output_dir(self) -> &'static str {
         match self {
@@ -49,9 +54,51 @@ pub fn kernel_path(root: &Path, arch: Arch, profile: Profile) -> PathBuf {
         .join("rustos")
 }
 
-/// `RUSTOS_FEATURES`: features do kernel separadas por vírgula (`debug-addrs`, `panic-tests`).
-pub fn features() -> Vec<String> {
+/// A feature do kernel que traz os autotestes, as medidas e o `bench` (SDD 05).
+pub const SELFTEST: &str = "selftest";
+
+/// Features do kernel para o perfil: `RUSTOS_FEATURES` (separadas por vírgula: `debug-addrs`,
+/// `panic-tests`, `selftest`) mais `selftest` quando o perfil a leva. `RUSTOS_SELFTEST=1|0` troca
+/// o padrão do perfil: `1` liga na `release-small`, `0` desliga nos outros.
+pub fn features(profile: Profile) -> Vec<String> {
+    let listed = listed_features();
+    let wanted = selftest_wanted(profile, std::env::var("RUSTOS_SELFTEST").ok().as_deref());
+    with_selftest(listed, wanted)
+}
+
+/// O que `RUSTOS_FEATURES` lista, sem o que o perfil acrescenta.
+pub fn listed_features() -> Vec<String> {
     parse_features(std::env::var("RUSTOS_FEATURES").ok().as_deref())
+}
+
+/// O `smoke` (modo de teste) só passa numa imagem com a feature: liga-a em qualquer perfil.
+pub fn features_with_selftest(profile: Profile) -> Vec<String> {
+    with_selftest(features(profile), true)
+}
+
+pub fn has_feature(features: &[String], name: &str) -> bool {
+    features.iter().any(|feature| feature == name)
+}
+
+fn selftest_wanted(profile: Profile, choice: Option<&str>) -> bool {
+    match choice.map(str::trim) {
+        Some("1") => true,
+        Some("0") => false,
+        Some("") | None => profile.has_selftest(),
+        Some(other) => {
+            eprintln!(
+                "xtask: RUSTOS_SELFTEST=`{other}` inválida (1 ou 0); usando o padrão do perfil"
+            );
+            profile.has_selftest()
+        }
+    }
+}
+
+fn with_selftest(mut features: Vec<String>, wanted: bool) -> Vec<String> {
+    if wanted && !has_feature(&features, SELFTEST) {
+        features.push(SELFTEST.to_owned());
+    }
+    features
 }
 
 fn parse_features(value: Option<&str>) -> Vec<String> {
@@ -65,7 +112,7 @@ fn parse_features(value: Option<&str>) -> Vec<String> {
 }
 
 pub fn build_kernel(root: &Path, arch: Arch, profile: Profile) -> Result<PathBuf, String> {
-    build_kernel_with(root, arch, profile, &features())
+    build_kernel_with(root, arch, profile, &features(profile))
 }
 
 pub fn build_kernel_with(
@@ -112,6 +159,27 @@ mod tests {
             ["--features", "a,b"]
         );
         assert_eq!(feature_args(&[]).len(), 0);
+    }
+
+    #[test]
+    fn only_the_small_release_leaves_out_the_self_test_mode() {
+        for profile in [Profile::Dev, Profile::Release] {
+            assert!(selftest_wanted(profile, None), "{profile:?}");
+            assert!(!selftest_wanted(profile, Some("0")), "{profile:?}");
+        }
+        assert!(!selftest_wanted(Profile::ReleaseSmall, None));
+        assert!(!selftest_wanted(Profile::ReleaseSmall, Some("")));
+        assert!(selftest_wanted(Profile::ReleaseSmall, Some("1")));
+        assert!(!selftest_wanted(Profile::ReleaseSmall, Some("sim")));
+    }
+
+    #[test]
+    fn the_self_test_feature_is_added_once() {
+        let listed = vec!["panic-tests".to_owned()];
+        assert_eq!(with_selftest(listed.clone(), false), ["panic-tests"]);
+        assert_eq!(with_selftest(listed, true), ["panic-tests", SELFTEST]);
+        let twice = with_selftest(vec![SELFTEST.to_owned()], true);
+        assert_eq!(twice, [SELFTEST]);
     }
 
     #[test]

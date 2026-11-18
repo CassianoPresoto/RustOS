@@ -888,30 +888,3 @@ pub fn smp_self_test() -> Option<(u64, u64)> {
         )
     })
 }
-
-fn panicker(_: usize) {
-    panic!("teste de pânico na CPU {}", percpu::current().index());
-}
-
-/// Cria uma tarefa presa a outra CPU que entra em pânico. Só volta (`false`) se não há outra
-/// CPU ativa; depois do pânico o sistema inteiro para.
-pub fn panic_on_other_cpu() -> bool {
-    let (_, other) = cpu_pair();
-    let Some(other) = other else {
-        return false;
-    };
-    let spawned = task::spawn(Spawn {
-        name: "panicker",
-        entry: panicker,
-        arg: 0,
-        simd: false,
-        params: SchedParams::fair(0),
-        affinity: 1 << other,
-    });
-    if spawned.is_err() {
-        return false;
-    }
-    loop {
-        task::sleep_until(platform::now_ns().unwrap_or(0) + 10_000_000);
-    }
-}

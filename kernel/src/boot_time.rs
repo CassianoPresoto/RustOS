@@ -33,6 +33,10 @@ static SINCE: AtomicU64 = AtomicU64::new(0);
 static CURRENT: AtomicUsize = AtomicUsize::new(Phase::Memory as usize);
 
 /// Tempo por fase, em microssegundos.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "lido só pelo modo de teste")
+)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Summary {
     pub total: u64,

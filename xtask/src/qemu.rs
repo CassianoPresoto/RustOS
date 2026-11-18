@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::arch::Arch;
 use crate::cargo::{self, Profile};
-use crate::{image, leak, png, workspace};
+use crate::{image, leak, panic_smoke, png, workspace};
 
 /// Igual ao `BOOT_OK_MARKER` do kernel; os dois mudam juntos.
 pub const BOOT_OK: &str = "[rustos] boot ok";
@@ -54,12 +54,15 @@ pub enum BootMode {
     SelfTest,
     /// Sem linha de comando: o boot que o usuário vê, o do `make smoke-fast`.
     Normal,
+    /// `rustos.selftest=1` numa imagem sem a feature `selftest`: o kernel recusa em uma linha e
+    /// sobe normal, e o `bench` do shell diz que não está no build (SDD 06).
+    Refused,
 }
 
 impl BootMode {
     const fn cmdline(self) -> Option<&'static str> {
         match self {
-            Self::SelfTest => Some("rustos.selftest=1"),
+            Self::SelfTest | Self::Refused => Some("rustos.selftest=1"),
             Self::Normal => None,
         }
     }
@@ -68,9 +71,14 @@ impl BootMode {
         match self {
             Self::SelfTest => "smoke",
             Self::Normal => "smoke-fast",
+            Self::Refused => "smoke-fast (selftest recusado)",
         }
     }
 }
+
+/// O que o kernel enxuto imprime ao recusar o modo de teste, e o que o `bench` do shell responde.
+const SELFTEST_REFUSED: &str = "[rustos] selftest: not in this build";
+const BENCH_REFUSED: &str = "bench: not in this build";
 
 /// O que só o modo de teste imprime: se uma destas faltar, a linha de comando se perdeu e o
 /// boot que passou foi o normal.
@@ -92,6 +100,13 @@ const SELFTEST_LINES: [(&str, &str); 12] = [
 const NORMAL_LINES: [(&str, &str); 2] = [
     ("[rustos] frame self-test: ok", "o autoteste de frame"),
     ("[rustos] exception self-test: ok", "o autoteste de exceção"),
+];
+/// O boot normal de uma imagem enxuta que recebeu `rustos.selftest=1`.
+const REFUSED_LINES: [(&str, &str); 4] = [
+    NORMAL_LINES[0],
+    NORMAL_LINES[1],
+    (SELFTEST_REFUSED, "a recusa do modo de teste"),
+    (BENCH_REFUSED, "a recusa do `bench` no shell"),
 ];
 /// A linha de tempo do boot, nos dois modos (SDD 04).
 const BOOT_TIME: &str = "[rustos] boot time: kernel ";
@@ -142,7 +157,7 @@ fn cpus_line(requested: usize) -> String {
 const MAX_KERNEL_CPUS: usize = 8;
 
 fn command(root: &Path, arch: Arch, profile: Profile) -> Result<Command, String> {
-    command_with(root, arch, profile, &cargo::features(), None)
+    command_with(root, arch, profile, &cargo::features(profile), None)
 }
 
 pub fn command_with(
@@ -169,22 +184,82 @@ pub fn run(root: &Path, arch: Arch, profile: Profile) -> Result<(), String> {
     workspace::run(qemu.args(["-serial", "mon:stdio"]))
 }
 
+/// O `smoke-fast`: o boot normal e, na imagem sem a feature `selftest`, o que ela promete no lugar
+/// do modo de teste (a recusa do `rustos.selftest=1` e a do `bench`). Assim a imagem enxuta, que
+/// o `make smoke` não cobre, não apodrece.
+pub fn smoke_fast(root: &Path, arch: Arch, profile: Profile) -> Result<(), String> {
+    smoke(root, arch, profile, BootMode::Normal)?;
+    if cargo::has_feature(&cargo::features(profile), cargo::SELFTEST) {
+        return Ok(());
+    }
+    smoke(root, arch, profile, BootMode::Refused)
+}
+
 pub fn smoke(root: &Path, arch: Arch, profile: Profile, mode: BootMode) -> Result<(), String> {
-    let mut qemu = command_with(root, arch, profile, &cargo::features(), mode.cmdline())?;
+    let features = match mode {
+        BootMode::SelfTest => cargo::features_with_selftest(profile),
+        BootMode::Normal | BootMode::Refused => cargo::features(profile),
+    };
+    let mut qemu = command_with(root, arch, profile, &features, mode.cmdline())?;
     qemu.args(["-display", "none", "-serial", "stdio", "-monitor", "none"])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    if mode == BootMode::Refused {
+        qemu.stdin(Stdio::piped());
+    }
     let started = Instant::now();
     let mut child = qemu
         .spawn()
         .map_err(|error| format!("não consegui rodar {}: {error}", arch.qemu()))?;
     let receiver = stream_stdout(&mut child)?;
-    let (outcome, log) = wait_for_boot(&receiver, started);
+    let (outcome, mut log) = wait_for_boot(&receiver, started);
+    if mode == BootMode::Refused && matches!(outcome, Outcome::Booted(_)) {
+        type_lean_commands(&mut child, &receiver, &mut log);
+    }
     child.kill().ok();
     child.wait().ok();
 
     print_kernel_lines(&log);
     report(arch, mode, outcome, &log)
+}
+
+/// Lê para o `log` até o prompt do shell voltar depois de `from`, ou o prazo acabar.
+fn read_to_prompt(
+    receiver: &mpsc::Receiver<String>,
+    log: &mut String,
+    from: usize,
+    deadline: Instant,
+) {
+    while !ends_with_prompt(&log[from..]) {
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            return;
+        };
+        match receiver.recv_timeout(left) {
+            Ok(chunk) => log.push_str(&chunk),
+            Err(_) => return,
+        }
+    }
+}
+
+/// Digita `bench` e depois `ps` no shell da imagem enxuta, cada um quando o prompt volta, e lê as
+/// respostas para o `log`: a recusa do `bench` e a coluna de pilha que o gate confere.
+fn type_lean_commands(
+    child: &mut std::process::Child,
+    receiver: &mpsc::Receiver<String>,
+    log: &mut String,
+) {
+    let deadline = Instant::now() + COMMAND_TIMEOUT;
+    read_to_prompt(receiver, log, 0, deadline);
+    for command in ["bench", "ps"] {
+        let from = log.len();
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(format!("{command}\r").as_bytes())
+                .and_then(|()| stdin.flush())
+                .ok();
+        }
+        read_to_prompt(receiver, log, from, deadline);
+    }
 }
 
 /// Sobe sem janela, espera o boot, digita cada comando na serial e grava a tela
@@ -243,18 +318,33 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Espera o prompt voltar depois de um comando digitado; o `bench` leva mais que `SETTLE`.
 /// Quem chama descarta antes o que já chegou: o prompt anterior não conta.
-fn wait_for_prompt(receiver: &mpsc::Receiver<String>) {
+fn wait_for_prompt(receiver: &mpsc::Receiver<String>) -> String {
     let deadline = Instant::now() + COMMAND_TIMEOUT;
     let mut seen = String::new();
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {
         match receiver.recv_timeout(left) {
             Ok(chunk) => seen.push_str(&chunk),
-            Err(_) => return,
+            Err(_) => break,
         }
         if ends_with_prompt(&seen) {
-            return;
+            break;
         }
     }
+    seen
+}
+
+/// O texto sem as sequências de escape do terminal (`ESC [ … letra`), para imprimir no log.
+fn strip_escapes(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            plain.push(ch);
+        } else if chars.next() == Some('[') {
+            chars.by_ref().find(char::is_ascii_alphabetic);
+        }
+    }
+    plain.replace('\r', "")
 }
 
 pub fn ends_with_prompt(log: &str) -> bool {
@@ -286,7 +376,8 @@ fn capture(
                 .write_all(format!("{command}\r").as_bytes())
                 .and_then(|()| stdin.flush())
                 .map_err(|error| format!("digitar na serial: {error}"))?;
-            wait_for_prompt(receiver);
+            let output = wait_for_prompt(receiver);
+            println!("xtask: `{command}` respondeu:\n{}", strip_escapes(&output));
         }
         thread::sleep(SETTLE);
     }
@@ -366,6 +457,7 @@ fn mode_lines(mode: BootMode) -> Vec<(&'static str, &'static str)> {
     let own: &[(&str, &str)] = match mode {
         BootMode::SelfTest => &SELFTEST_LINES,
         BootMode::Normal => &NORMAL_LINES,
+        BootMode::Refused => &REFUSED_LINES,
     };
     common
         .chain(own)
@@ -390,7 +482,7 @@ fn report(arch: Arch, mode: BootMode, outcome: Outcome, log: &str) -> Result<(),
                 let reason = format!("boot sem {what} (guidelines 09)");
                 return Err(failure(arch, &reason, log));
             }
-            if mode == BootMode::Normal {
+            if mode != BootMode::SelfTest {
                 if let Some(line) = normal_forbidden().iter().find(|line| log.contains(*line)) {
                     let reason = format!("o boot normal rodou `{line}`, que é do modo de teste");
                     return Err(failure(arch, &reason, log));
@@ -406,7 +498,13 @@ fn report(arch: Arch, mode: BootMode, outcome: Outcome, log: &str) -> Result<(),
                     return Err(failure(arch, &reason, log));
                 }
             }
-            if mode == BootMode::Normal && arch == Arch::Aarch64 {
+            if mode == BootMode::Refused
+                && let Some(problem) = panic_smoke::stack_over_limit(log)
+            {
+                let reason = format!("pilha da imagem enxuta: {problem} (SDD 15)");
+                return Err(failure(arch, &reason, log));
+            }
+            if mode != BootMode::SelfTest && arch == Arch::Aarch64 {
                 let Some(us) = firmware_boot_us(log) else {
                     return Err(failure(arch, "boot sem a linha `boot timeline:`", log));
                 };
@@ -427,7 +525,7 @@ fn report(arch: Arch, mode: BootMode, outcome: Outcome, log: &str) -> Result<(),
             if !log.contains(KASLR_ON) || log.contains(LINK_BASE) {
                 return Err(failure(arch, "KASLR desligado: sem `kaslr: on`", log));
             }
-            if !cargo::features().iter().any(|name| name == "debug-addrs")
+            if !cargo::has_feature(&cargo::listed_features(), "debug-addrs")
                 && let Some(address) = leak::find_kernel_address(log)
             {
                 let reason = format!("endereço do kernel no log: `{address}` (SDD 09)");
@@ -496,6 +594,15 @@ pub fn failure(arch: Arch, reason: &str, log: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escapes_are_stripped_from_the_command_output() {
+        let raw = "mem\r\n\x1b[2mTotal\x1b[0m 1\r\n";
+        assert_eq!(
+            strip_escapes(raw),
+            "mem\n\x1b[2mTotal".replace("\x1b[2m", "") + " 1\n"
+        );
+    }
 
     #[test]
     fn the_prompt_tail_marks_the_end_of_a_command() {
@@ -575,6 +682,36 @@ mod tests {
             let result = report(Arch::X86_64, BootMode::Normal, outcome, &log);
             assert!(result.unwrap_err().contains("do modo de teste"), "{line}");
         }
+    }
+
+    #[test]
+    fn the_refused_boot_wants_both_refusals_and_none_of_the_self_test_lines() {
+        let wants = |text: &str| {
+            mode_lines(BootMode::Refused)
+                .iter()
+                .any(|(line, _)| line.contains(text))
+        };
+        assert!(wants("selftest: not in this build") && wants("bench: not in this build"));
+        assert!(!wants("task self-test") && !wants("alloc storm"));
+        assert_eq!(BootMode::Refused.cmdline(), Some("rustos.selftest=1"));
+        let outcome = Outcome::Booted(Duration::ZERO);
+        let mut log = normal_log(5, "");
+        let missing = report(Arch::X86_64, BootMode::Refused, outcome, &log);
+        assert!(missing.unwrap_err().contains("recusa"));
+        log.push_str(SELFTEST_REFUSED);
+        log.push('\n');
+        log.push_str(BENCH_REFUSED);
+        log.push('\n');
+        let no_ps = report(Arch::X86_64, BootMode::Refused, outcome, &log);
+        assert!(no_ps.unwrap_err().contains("coluna de pilha"));
+        log.push_str("  0  idle  0 run  1.7  479  1.1/16K  -\n");
+        assert!(report(Arch::X86_64, BootMode::Refused, outcome, &log).is_ok());
+        let deep = log.replace("1.1/16K", "13.0/16K");
+        let result = report(Arch::X86_64, BootMode::Refused, outcome, &deep);
+        assert!(result.unwrap_err().contains("75%"));
+        log.push_str("[rustos] heap self-test: ok\n");
+        let ran = report(Arch::X86_64, BootMode::Refused, outcome, &log);
+        assert!(ran.unwrap_err().contains("do modo de teste"));
     }
 
     #[test]
