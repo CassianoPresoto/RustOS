@@ -150,8 +150,9 @@ fn big_program_runs(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> 
     exited_with(result, 0) && returned
 }
 
-/// O carregador recusa o que o `core/elf` recusa e não deixa frame para trás: arquivo cortado,
-/// máquina de outra ISA e arquivo que não é ELF. `frames` volta ao que era.
+/// O carregador recusa o que o `core/elf` recusa e não deixa frame para trás: arquivo cortado na
+/// tabela de program headers,
+/// máquina de outra ISA, sem magic e vazio. `frames` volta ao que era.
 fn loader_refuses_bad_executables(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
     let Some(good) = archive.and_then(|archive| loader::find(archive, b"init").ok()) else {
         return false;
@@ -161,7 +162,7 @@ fn loader_refuses_bad_executables(frames: Frames, map_offset: u64, archive: Opti
     let mut bad_magic = good.to_vec();
     bad_magic[0] = 0;
     let free_before = frames.free_frames();
-    let refused = [&good[..good.len() / 2], &other_machine, &bad_magic, &[]]
+    let refused = [&good[..100], &other_machine, &bad_magic, &[]]
         .into_iter()
         .all(|file| spawn(frames, map_offset, Source::Elf(file), 0).is_err());
     refused && frames.free_frames() + SLACK_FRAMES >= free_before
