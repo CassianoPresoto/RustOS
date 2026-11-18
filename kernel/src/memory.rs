@@ -16,6 +16,7 @@ use rustos_mm::{
 use crate::boot::BootRecord;
 use crate::frames::{self, Frames};
 use crate::heap;
+use crate::stack::Stack;
 use crate::sync::IrqLock;
 
 /// Janelas de dispositivos e de pilhas: 1 GiB cada, vazias até `place_windows`.
@@ -111,6 +112,15 @@ impl Memory {
         map_stack(&mut self.frames, mapper, pages)
     }
 
+    /// `map_stack` com a pilha pintada para medir o pico ([`Stack`]).
+    pub fn map_stack_painted(
+        &mut self,
+        mapper: &mut impl PageMapper,
+        pages: u64,
+    ) -> Result<Stack, MapError> {
+        map_stack_painted(&mut self.frames, mapper, pages)
+    }
+
     /// Fatia de `len` valores `fill` em frames contíguos, para sempre do chamador.
     pub fn alloc_slice<T: Copy>(&mut self, len: usize, fill: T) -> Option<&'static mut [T]> {
         const { assert!(align_of::<T>() as u64 <= PAGE_SIZE) };
@@ -168,6 +178,20 @@ pub fn map_stack(
         mapper.map_page(virt, frame.start(), PageFlags::DATA, frames)?;
     }
     Ok(VirtAddr::new(base.as_u64() + span))
+}
+
+/// `map_stack` com a pilha pintada para medir o pico ([`Stack`]).
+pub fn map_stack_painted(
+    frames: &mut Frames,
+    mapper: &mut impl PageMapper,
+    pages: u64,
+) -> Result<Stack, MapError> {
+    let top = map_stack(frames, mapper, pages)?;
+    // SAFETY: `map_stack` mapeou as `pages` páginas abaixo de `top`, alinhadas, para sempre.
+    let stack = unsafe { Stack::new(top, pages) };
+    // SAFETY: a pilha só vai a quem a recebe daqui.
+    unsafe { stack.paint() };
+    Ok(stack)
 }
 
 /// Mapeia registradores de um dispositivo na janela de dispositivos.

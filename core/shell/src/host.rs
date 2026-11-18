@@ -109,6 +109,9 @@ pub struct TaskInfo<'a> {
     pub switches: u64,
     /// Marcada como usuária de FPU/SIMD: paga o salvamento do estado na troca.
     pub simd: bool,
+    /// Pico de uso da pilha do kernel da tarefa e o tamanho dela, em bytes; zero sem medida.
+    pub stack_peak: u32,
+    pub stack_bytes: u32,
 }
 
 /// Uma linha da medida de escala: o tempo total de `tasks` tarefas de CPU em `cpus` núcleos.
@@ -188,6 +191,8 @@ pub enum FaultTest {
     NestedPanic,
     /// Pânico em todas as CPUs ao mesmo tempo.
     Simultaneous,
+    /// Ceder a CPU com um lock preso: o escalonador tem de recusar com um pânico.
+    HeldLock,
 }
 
 /// Retrato do sistema no momento da consulta.

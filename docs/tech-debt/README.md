@@ -43,11 +43,9 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0032](0032-virtio-input-sem-a-leitura-da-spec.md) | virtio-input sem a leitura da especificação | Open | Antes de escrever o driver de virtio-input, na fase 6 |
 | [0034](0034-tsc-deadline-sem-teste-no-x86.md) | TSC-deadline sem teste no x86_64 | Open | O primeiro boot do x86_64 com KVM ou em metal |
 | [0035](0035-sve-sme-e-amx-sem-estado-por-tarefa.md) | SVE, SME e AMX sem estado por tarefa | Open | O primeiro código de usuário (fase 4), ou a primeira CPU de teste com SVE, SME ou AMX |
-| [0037](0037-pilha-de-tarefa-sem-medida-de-pico.md) | Pilha de tarefa de 32 KiB sem medida de pico | Open | O primeiro estouro de pilha de uma tarefa, ou o primeiro código de usuário (fase 4) |
 | [0041](0041-escalonador-do-x86-sem-medida-fora-do-tcg.md) | Escalonador do x86_64 sem medida fora do TCG | Open | O primeiro boot do x86_64 com KVM ou em metal |
 | [0042](0042-troca-de-contexto-lenta-com-eevdf-e-relogio.md) | Troca de contexto com o EEVDF gasta metade do tempo na política | Open | O primeiro benchmark da troca de contexto contra o Linux (lat_ctx) no mesmo hardware |
 | [0043](0043-simd-sem-trap-de-uso-indevido.md) | Tarefa sem SIMD que usa SIMD não é pega | Open | O primeiro código de usuário (fase 4), quando todo processo usa SSE |
-| [0045](0045-trava-presa-ao-ceder-a-cpu-some-em-release.md) | `debug_assert` de lock preso ao ceder a CPU some em `release` | Open | O primeiro travamento em `release` que não reproduza em `dev` |
 | [0046](0046-teste-de-simd-sem-os-caminhos-de-xsave.md) | Autoteste de SIMD sem os caminhos de XSAVE e sem a metade alta | Open | A primeira CPU sem `XSAVEOPT`, ou o primeiro boot em metal |
 | [0047](0047-timer-e-pilha-de-falha-sem-teste.md) | `arm_timer`, `next_timer_ns` e a pilha de falha sem teste | Open | O primeiro boot em metal, ou o primeiro defeito de timer ou de pilha de falha |
 | [0048](0048-dec-sem-simbolos-de-controle-nem-nrcs.md) | DEC Special Graphics sem os símbolos de controle, e sem NRCS, G2 nem G3 | Open | O primeiro programa curses da fase 5 que desenhe ACS fora das caixas e dos blocos |
@@ -72,3 +70,5 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0067](0067-log-do-boot-normal-sem-medida-em-uart-real.md) | Log do boot normal sem medida em UART física | Open | O primeiro boot em metal, ou em qualquer máquina com UART física lenta |
 | [0068](0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md) | Tempo do boot de teste do x86_64 em TCG varia até 10x com o tamanho e o alinhamento do código | Open | O `make smoke` do x86_64 passar de 10 s, ou o CI do x86_64 estourar o tempo do smoke |
 | [0069](0069-firmware-do-aarch64-leva-5-s-ao-bootar-de-disco.md) | O EDK2 do aarch64 leva 5,1 s antes do Limine ao bootar do disco | Open | O `make smoke` do aarch64 estourar o tempo no CI, ou o primeiro boot do aarch64 fora da QEMU |
+| [0070](0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) | Pilha de 16 KiB medida só com tarefas do kernel, sem syscall nem falta de usuário | Open | A primeira syscall ou falta de página de usuário rodando na pilha do kernel de uma thread (fase 4a) |
+| [0072](0072-pilhas-de-excecao-sem-medida-permanente.md) | Pilhas de exceção (IST e de falhas) sem medida permanente de pico | Open | A 4a acrescentar a IST do `#DB` ou fazer o aarch64 usar a pilha de falhas só no estouro |

@@ -6,6 +6,7 @@ use rustos_shell::{
     BenchReport, CpuInfo, DisplayInfo, FaultTest, Host, MemoryInfo, MicroBench, Shell, SystemInfo,
     TaskInfo, TaskState,
 };
+use rustos_sync::SpinLock;
 use rustos_term::Layout;
 
 use crate::bench;
@@ -47,6 +48,9 @@ const SELF_TEST_TICKS: u64 = 5;
 const SERIAL_SIZE: (u16, u16) = (80, 24);
 const LINE_BYTES: usize = 256;
 const HISTORY_LINES: usize = 32;
+
+/// Num `static`: construído por valor na pilha, o shell custava 19 KiB dela em `release`.
+static SHELL: SpinLock<Shell<LINE_BYTES, HISTORY_LINES>> = SpinLock::new(Shell::new());
 
 #[derive(Debug)]
 pub struct System<'a, B> {
@@ -139,10 +143,13 @@ impl<B: BootInfo> Host for System<'_, B> {
             FaultTest::NestedPanic => panic::nested_test(),
             #[cfg(feature = "panic-tests")]
             FaultTest::Simultaneous => return panic::simultaneous_test(),
+            #[cfg(feature = "panic-tests")]
+            FaultTest::HeldLock => return panic::held_lock_test(),
             #[cfg(not(feature = "panic-tests"))]
-            FaultTest::ConsoleLock | FaultTest::NestedPanic | FaultTest::Simultaneous => {
-                return false;
-            }
+            FaultTest::ConsoleLock
+            | FaultTest::NestedPanic
+            | FaultTest::Simultaneous
+            | FaultTest::HeldLock => return false,
         };
         platform::trigger(kind)
     }
@@ -157,12 +164,12 @@ impl<B: BootInfo> Host for System<'_, B> {
     }
 
     fn tasks(&self, visit: &mut dyn FnMut(&TaskInfo<'_>)) {
-        for snapshot in task::snapshot().into_iter().flatten() {
+        task::for_each_snapshot(&mut |snapshot| {
             let state = match snapshot.state {
                 State::Running => TaskState::Running,
                 State::Sleeping => TaskState::Sleeping,
                 State::Blocked => TaskState::Blocked,
-                State::Free | State::New | State::Ready | State::Exited => TaskState::Ready,
+                State::Free | State::Ready | State::New | State::Exited => TaskState::Ready,
             };
             visit(&TaskInfo {
                 id: snapshot.id,
@@ -172,8 +179,10 @@ impl<B: BootInfo> Host for System<'_, B> {
                 cpu_ns: snapshot.cpu_ns,
                 switches: snapshot.switches,
                 simd: snapshot.simd,
+                stack_peak: u32::try_from(snapshot.stack_peak).unwrap_or(u32::MAX),
+                stack_bytes: u32::try_from(snapshot.stack_bytes).unwrap_or(u32::MAX),
             });
-        }
+        });
     }
 
     fn cpus(&self, visit: &mut dyn FnMut(&CpuInfo)) {
@@ -253,7 +262,7 @@ pub fn timer_self_test() -> bool {
 /// teclado enchem, e bloqueia (a tarefa, não a CPU) quando ela está vazia.
 pub fn run_shell(host: &mut impl Host) -> ! {
     task::set_current_name("shell");
-    let mut shell = Shell::<LINE_BYTES, HISTORY_LINES>::new();
+    let mut shell = SHELL.lock();
     shell.start(host, &mut Sink).ok();
     console::flush();
     loop {
