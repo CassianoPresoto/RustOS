@@ -28,10 +28,13 @@ colocações, `unmap`, `find`) em cinco configurações de capacidade e tamanho,
 fixa, contra um modelo ingênuo (lista ordenada, candidatos achados página a página); a cada
 passo as duas árvores são iguais, sem sobreposição e sem W+X. Mais as bordas: faixa no topo
 do espaço (`base + len` estoura), alinhamento de `2^63`, espaço cheio, fragmentação, partir
-sem vaga, uniformidade do sorteio (16 000 sorteios em 8 posições) e o viés da rejeição.
+sem vaga, uniformidade do sorteio (16 000 sorteios em 8 posições), o viés da rejeição e
+`aslr_base` com intervalo menor que uma página.
 `core/mm/src/asid.rs`: 100 000 trocas aleatórias em 4 CPUs e 40 espaços, com uma
 **simulação de TLB por CPU** que falha se uma CPU carrega um índice com entrada de outro
-espaço; o mesmo roteiro sem esvaziar tem de falhar.
+espaço, e que o índice carregado numa CPU que ainda roda o espaço seja o do valor atual dele
+(a CPU 0 quase não troca); o mesmo roteiro sem esvaziar tem de falhar. O roteiro
+`double_rollover_idle_cpu_keeps_index` fixa o caso de dois esgotamentos com uma CPU ociosa.
 
 Medição de `core/mm` no host, fora do `make test` (testes `#[ignore]`):
 

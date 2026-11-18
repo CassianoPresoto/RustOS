@@ -10,7 +10,7 @@ use crate::FRAME_SIZE;
 const PAGE: u64 = FRAME_SIZE;
 /// Bits de página do sorteio da base (SDD 17): 2^28 páginas de 4 KiB, 1 TiB.
 pub const ASLR_BITS: u32 = 28;
-/// Quantas vezes o sorteio rejeita uma palavra antes de aceitar o viés de 2^-64 por posição.
+/// Rejeições de palavra viciada antes de usar a próxima sem conferir (9 palavras no máximo).
 const REJECTION_TRIES: u32 = 8;
 
 /// Permissões de uma região. W+X nunca existe: nenhuma construção a aceita.
@@ -18,24 +18,29 @@ const REJECTION_TRIES: u32 = 8;
 pub struct Perms(u8);
 
 impl Perms {
+    /// Nenhuma permissão: a região reserva o endereço e toda falta nela é negada.
     pub const NONE: Self = Self(0);
     pub const READ: Self = Self(1);
     pub const WRITE: Self = Self(2);
     pub const EXECUTE: Self = Self(4);
 
+    /// As permissões de `self` mais as de `other`. Pode formar W+X, que o VMAR recusa.
     #[must_use]
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
+    /// `self` tem todas as permissões de `other`.
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
+    /// Escrita e execução juntas: o que o `reserve` e o `allocate` recusam.
     pub const fn is_write_execute(self) -> bool {
         self.contains(Self(Self::WRITE.0 | Self::EXECUTE.0))
     }
 
+    /// O acesso `access` é permitido.
     pub const fn permits(self, access: Access) -> bool {
         match access {
             Access::Read => self.contains(Self::READ),
@@ -53,6 +58,7 @@ pub enum Access {
     Execute,
 }
 
+/// De onde a região veio; a falta de página e o relatório de morte usam.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// Segmento da imagem do executável.
@@ -67,7 +73,9 @@ pub enum Kind {
 /// anônima: a falta resolve com a página zero ou com um frame novo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Backing {
+    /// Identificador do objeto; o significado é de quem guarda a tabela de objetos.
     pub object: NonZeroU32,
+    /// Página do objeto em que o início da região cai.
     pub page_offset: u32,
 }
 
@@ -77,12 +85,16 @@ pub struct Backing {
 pub struct Attrs {
     pub perms: Perms,
     pub kind: Kind,
+    /// Reserva a página logo abaixo do início, sem mapa.
     pub guard_below: bool,
+    /// Reserva a página logo acima do fim, sem mapa.
     pub guard_above: bool,
+    /// `None`: região anônima.
     pub backing: Option<Backing>,
 }
 
 impl Attrs {
+    /// Região anônima, sem guardas.
     pub const fn new(kind: Kind, perms: Perms) -> Self {
         Self {
             perms,
@@ -93,6 +105,7 @@ impl Attrs {
         }
     }
 
+    /// `self` com as guardas de baixo e de cima ligadas ou desligadas.
     #[must_use]
     pub const fn with_guards(self, below: bool, above: bool) -> Self {
         Self {
@@ -102,6 +115,7 @@ impl Attrs {
         }
     }
 
+    /// `self` sustentada pelo objeto de `backing`.
     #[must_use]
     pub const fn with_backing(self, backing: Backing) -> Self {
         Self {
@@ -122,7 +136,9 @@ impl Attrs {
 /// Uma região mapeável `[start, end)`; as guardas ficam fora dela, em `lo()` e `hi()`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Region {
+    /// Primeiro endereço mapeável, alinhado à página.
     pub start: u64,
+    /// Fim exclusivo da parte mapeável.
     pub end: u64,
     pub attrs: Attrs,
 }
@@ -147,6 +163,7 @@ impl Region {
         self.end + self.attrs.above()
     }
 
+    /// Páginas da parte mapeável.
     pub const fn pages(&self) -> u64 {
         (self.end - self.start) / PAGE
     }
@@ -164,16 +181,20 @@ impl Region {
 /// O que há num endereço.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit<'a> {
+    /// Endereço na parte mapeável.
     Region(&'a Region),
     /// Página de guarda da região.
     Guard(&'a Region),
+    /// Livre: fora de qualquer região e de qualquer guarda.
     Hole,
 }
 
+/// Por que a falta de página não resolve: o processo morre.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FaultError {
     /// Fora de qualquer região.
     NoRegion,
+    /// Na página de guarda (estouro de pilha, no caso da pilha).
     Guard,
     /// A região existe e não permite este acesso.
     Permission,
@@ -183,19 +204,23 @@ pub enum FaultError {
 pub enum VmarError {
     /// Endereço ou tamanho que não é múltiplo de página.
     Misaligned,
+    /// Tamanho zero, ou faixa do VMAR vazia.
     Empty,
     /// Fora da faixa do VMAR, ou `base + len` estoura.
     OutOfRange,
+    /// A faixa, com as guardas, toca outra região.
     Overlap,
     /// O armazenamento não tem mais lugar para uma região.
     Full,
     /// Nenhuma faixa livre serve ao pedido.
     NoSpace,
+    /// Permissões W+X.
     WriteExecute,
     /// Alinhamento que não é potência de dois, ou menor que uma página.
     BadAlignment,
 }
 
+/// Qual das posições que servem `allocate` escolhe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {
     /// A faixa mais baixa que serve: determinística, sem entropia.
@@ -208,8 +233,11 @@ pub enum Placement {
 /// reservada (guardas incluídas) tem de caber.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fit {
+    /// Tamanho da parte mapeável, múltiplo de página.
     pub len: u64,
+    /// Potência de dois, no mínimo uma página.
     pub align: u64,
+    /// `[início, fim)` onde a faixa reservada tem de caber; o VMAR a corta nos seus limites.
     pub window: (u64, u64),
     pub placement: Placement,
 }
@@ -500,16 +528,17 @@ fn cut_front(region: Region, from: u64) -> Region {
     tail.start = from;
     tail.attrs.guard_below = false;
     if let Some(backing) = &mut tail.attrs.backing {
-        let skipped = (from - region.start) / PAGE;
-        backing.page_offset += u32::try_from(skipped).unwrap_or(0);
+        let skipped = u32::try_from((from - region.start) / PAGE).unwrap_or(u32::MAX);
+        debug_assert!(backing.page_offset.checked_add(skipped).is_some());
+        backing.page_offset = backing.page_offset.saturating_add(skipped);
     }
     tail
 }
 
-/// Valor uniforme em `[0, bound)`, `bound > 0`: multiplicação de Lemire com rejeição,
-/// no máximo `REJECTION_TRIES` palavras.
+/// Valor uniforme em `[0, bound)`: multiplicação de Lemire com rejeição, no máximo
+/// `REJECTION_TRIES + 1` palavras. `bound` 0 ou 1 devolve 0, sem consumir palavra.
 fn uniform_below(bound: u64, rng: &mut impl FnMut() -> u64) -> u64 {
-    if bound == 1 {
+    if bound <= 1 {
         return 0;
     }
     let threshold = bound.wrapping_neg() % bound;
@@ -537,14 +566,35 @@ const fn high_half(wide: u128) -> u64 {
     (wide >> 64) as u64
 }
 
+/// Quantas posições de página o sorteio de `aslr_base` tem: `2^ASLR_BITS`, ou menos se
+/// `[floor, limit)` for mais curto; 0 se o intervalo não tem uma página inteira.
+fn aslr_pages(floor: u64, limit: u64) -> u64 {
+    if limit <= floor {
+        return 0;
+    }
+    ((limit - floor) / PAGE).min(1 << ASLR_BITS)
+}
+
 /// Base sorteada para uma região do espaço (o `mmap_base`, o topo da pilha): uniforme
 /// entre as `2^ASLR_BITS` páginas a partir de `floor`, cortada em `limit` (exclusivo).
+/// `None` se `floor` não é de página ou o intervalo não tem uma página inteira.
 pub fn aslr_base(floor: u64, limit: u64, rng: &mut impl FnMut() -> u64) -> Option<u64> {
-    if !floor.is_multiple_of(PAGE) || limit <= floor {
+    let pages = aslr_pages(floor, limit);
+    if !floor.is_multiple_of(PAGE) || pages == 0 {
         return None;
     }
-    let pages = ((limit - floor) / PAGE).min(1 << ASLR_BITS);
     Some(floor + uniform_below(pages, rng) * PAGE)
+}
+
+/// Bits de entropia que `aslr_base(floor, limit, ..)` entrega (`log2` das posições,
+/// arredondado para baixo): `ASLR_BITS` com o intervalo cheio, menos com `limit` perto
+/// de `floor`. O boot relata este valor; 0 se `aslr_base` devolve `None`.
+pub fn aslr_bits(floor: u64, limit: u64) -> u32 {
+    let pages = aslr_pages(floor, limit);
+    if !floor.is_multiple_of(PAGE) || pages == 0 {
+        return 0;
+    }
+    pages.ilog2()
 }
 
 #[cfg(test)]
@@ -1098,6 +1148,33 @@ mod tests {
         assert_eq!(seen_bits >> ASLR_BITS, 0);
         assert_eq!(seen_bits.count_ones(), ASLR_BITS);
         assert!((9_500..=10_500).contains(&high), "{high}");
+    }
+
+    #[test]
+    fn aslr_base_refuses_an_interval_without_a_whole_page() {
+        let mut rng = || panic!("sem posição, sem sorteio");
+        assert_eq!(aslr_base(LO, LO + 1, &mut rng), None);
+        assert_eq!(aslr_base(LO, LO + PAGE - 1, &mut rng), None);
+        assert_eq!(aslr_bits(LO, LO + 1), 0);
+        let mut rng = || u64::MAX;
+        assert_eq!(aslr_base(LO, LO + PAGE + 1, &mut rng), Some(LO));
+    }
+
+    #[test]
+    fn aslr_bits_reports_the_effective_entropy() {
+        assert_eq!(aslr_bits(LO, HI), ASLR_BITS);
+        assert_eq!(aslr_bits(LO, LO + (1 << ASLR_BITS) * PAGE), ASLR_BITS);
+        assert_eq!(aslr_bits(LO, LO + 1024 * PAGE), 10);
+        assert_eq!(aslr_bits(LO, LO + 1023 * PAGE), 9);
+        assert_eq!(aslr_bits(LO, LO + PAGE), 0);
+        assert_eq!(aslr_bits(LO, LO), 0);
+        assert_eq!(aslr_bits(LO + 1, HI), 0);
+    }
+
+    #[test]
+    fn uniform_below_zero_does_not_divide_by_zero() {
+        let mut never = || panic!("bound 0 não consome palavra");
+        assert_eq!(uniform_below(0, &mut never), 0);
     }
 
     #[test]

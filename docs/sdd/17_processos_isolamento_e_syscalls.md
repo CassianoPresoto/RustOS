@@ -291,7 +291,7 @@ supunha o SMP "por vir".
 | Quando | Regra |
 | --- | --- |
 | 4a a 4d (sem PCID/ASID) | Toda troca de processo esvazia o TLB local (x86_64: `mov cr3` sem `NOFLUSH`; aarch64: um ASID reservado só e `tlbi vmalle1`). Uma CPU que o processo deixou **não guarda entrada dele**: correto e mais lento |
-| 4e (com PCID/ASID) | Gerador global com **geração**; cada CPU guarda a `generation_seen`. Um valor de PCID/ASID só é **reusado** (geração nova) depois que **toda CPU** esvaziou o TLB desde que ele foi liberado: subir a geração marca `flush_pending` em todas as CPUs, e cada uma esvazia na próxima troca de processo, **antes** de carregar um valor da geração nova (x86_64: `INVPCID` tipo 2 ou 3, ou `mov cr3` sem `NOFLUSH`; aarch64: `tlbi vmalle1`) e atualiza a `generation_seen`. É o esquema do `asid.c` do Linux arm64: **NÃO VERIFICADO**, não foi lido |
+| 4e (com PCID/ASID) | Gerador global com **geração**; cada CPU guarda a `generation_seen`. Um valor de PCID/ASID só é **reusado** (geração nova) depois que **toda CPU** esvaziou o TLB desde que ele foi liberado: subir a geração marca `flush_pending` em todas as CPUs, e cada uma esvazia na próxima troca de processo, **antes** de carregar um valor da geração nova (x86_64: `INVPCID` tipo 2 ou 3, ou `mov cr3` sem `NOFLUSH`; aarch64: `tlbi vmalle1`) e atualiza a `generation_seen`. É o esquema do `arch/arm64/mm/context.c` do Linux, conferido pelo revisor do PR do gerador ([abaixo](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)) |
 | 4e, processo que migra | Com PCID/ASID o TLB da CPU antiga **guarda** o valor. Cada Process tem um `tlb_gen` que sobe a cada `unmap`; a CPU que volta a rodá-lo compara com o que ela viu e esvazia só aquele PCID/ASID (`INVPCID` tipo 1; `tlbi aside1`). A ideia é a do `tlb_gen` do Linux x86: **NÃO VERIFICADO** |
 
 #### *Shootdown* de TLB ([DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md))
@@ -362,8 +362,9 @@ O sorteio é **por região, não por mapeamento**: o `ANY` aloca em sequência a
 (**inferência**, não medida). A semente vem de `random::next_u64`
 ([SDD 09](09_seguranca.md)): **em CPU sem RDSEED/RDRAND/RNDR o ASLR herda o jitter
 fraco** ([DEBT-0019](../tech-debt/0019-aleatorio-sem-fonte-de-hardware-fraco.md); no
-Mac com HVF a CPU não anuncia `RNDR`). O boot relata a fonte e o PR de código mede a entropia efetiva
-de 5 000 processos (teste de propriedade com o gerador próprio, como em `core/sched`).
+Mac com HVF a CPU não anuncia `RNDR`). O boot relata a fonte e os bits efetivos (`aslr_bits`,
+abaixo); o PR do kernel que liga o `random::next_u64` ainda mede a entropia de 5 000 processos
+com a fonte real (teste de propriedade com o gerador próprio, como em `core/sched`).
 
 **Como `vmar.rs` entrega isso** (implementado, testado no host): `aslr_base(floor, limit, rng)`
 sorteia a base de uma região, uniforme entre `2^28` páginas (`ASLR_BITS = 28`) a partir de
@@ -372,9 +373,19 @@ sorteia a base de uma região, uniforme entre `2^28` páginas (`ASLR_BITS = 28`)
 `Placement::Random` também existe: escolhe **uniformemente entre todas as posições alinhadas
 que servem** (conta as posições de cada buraco, sorteia um índice e o localiza), mas o
 kernel **não o usa na 4b nem na 4c**, pelo custo de tabelas de página acima. O sorteio do índice
-é a multiplicação de Lemire com rejeição, no máximo 8 palavras (depois disso aceita o viés de
-2^-64 por posição, para uma fonte travada não prender o laço). A fonte é um `FnMut() -> u64`:
-o kernel passa `random::next_u64`, o teste passa um xorshift ou palavras escolhidas à mão.
+é a multiplicação de Lemire com rejeição, no máximo **9 palavras** (1 e mais 8 rejeições):
+esgotadas as rejeições, a nona palavra é usada sem conferir, para uma fonte travada não prender o
+laço. A chance de chegar lá é `(limiar / 2^64)^8`, no máximo 2^-96 para até 2^52 posições. A
+fonte é um `FnMut() -> u64`: o kernel passa `random::next_u64`, o teste passa um xorshift ou
+palavras escolhidas à mão.
+
+**A entropia cai sem aviso se o intervalo é curto.** Com `limit - floor` menor que `2^28` páginas,
+`aslr_base` sorteia entre as páginas que cabem; `aslr_bits(floor, limit)` devolve o `log2` delas
+(arredondado para baixo; 28 com o intervalo cheio; 0 se `aslr_base` daria `None`, o que inclui
+intervalo sem uma página inteira) e **o boot relata esse valor** ao fixar o `mmap_base` e a janela
+da pilha. O teste do host (`aslr_base_has_28_bits_of_page_entropy`) faz 20 000 sorteios com um
+xorshift de semente fixa e confere: base de página, dentro do intervalo, os 28 bits baixos
+todos vistos e metade dos sorteios acima do meio.
 
 ### A árvore de regiões (`core/mm/src/vmar.rs`)
 
@@ -481,8 +492,15 @@ kernel não executa, com SMAP não acessa sem `AC`. aarch64: código de usuário
 `AsidAllocator<WORDS, CPUS>` é o gerador global da regra de geração
 ([PCID e ASID com várias CPUs](#pcid-e-asid-com-várias-cpus)). Implementado e testado no host;
 a ligação (o lock, o `CR3`, o `INVPCID`, o `tlbi`) é da 4e. A regra foi escrita a partir da
-descrição do SDD, **sem ler o `asid.c` do Linux** (continua **NÃO VERIFICADO** contra ele); a
-evidência é a simulação de TLB abaixo.
+descrição do SDD; o revisor independente a conferiu contra o
+[`arch/arm64/mm/context.c`](https://raw.githubusercontent.com/torvalds/linux/master/arch/arm64/mm/context.c)
+do Linux, e a conferência pegou um caso: o `flush_context` do Linux diz que, no esgotamento,
+"we must preserve its reserved ASID, as this is the only trace we have of the process it is
+still running", então a CPU ociosa mantém o `reserved` por **vários** esgotamentos
+(`double_rollover_idle_cpu_keeps_index`). A outra evidência é a simulação de TLB abaixo.
+
+**Fora do `AsidAllocator`:** a migração entre CPUs (o `tlb_gen` por processo, que esvazia só o
+PCID/ASID de quem volta a uma CPU que o guardou) **não é do gerador**; fica para a 4e.
 
 | Ponto | Decisão |
 | --- | --- |
@@ -493,17 +511,21 @@ evidência é a simulação de TLB abaixo.
 | Esgotamento | Sem índice livre: sobe a geração, esvazia o bitmap, **reserva o que cada CPU roda agora** e marca `flush_pending` em todas. Exige-se mais índices utilizáveis que CPUs (`TooFewIds`), então o esgotamento sempre acha lugar |
 | **Sem liberação individual** | Não há `release`. O espaço que morre apenas larga o valor; o índice só volta no esgotamento seguinte. Reusar um índice na mesma geração deixaria entrada velha no TLB de outra CPU, sem esvaziamento que a cobrisse. É o que o Linux faz com o ASID |
 | Geração | `u64`, soma 1 por esgotamento. Se `geração << bits` estoura: `GenerationOverflow`, **sem mudar o estado** (inalcançável na prática: 2^48 esgotamentos com 16 bits) |
-| Memória | `AsidAllocator<64, 8>` (PCID de 12 bits, 8 CPUs, `hal::MAX_CPUS`) ocupa **672 bytes**; `<1024, 8>` (ASID de 16 bits) cerca de 8,7 KiB. `const fn new`: vive num `static`, sem pilha |
+| Memória | `AsidAllocator<64, 8>` (PCID de 12 bits, 8 CPUs, `hal::MAX_CPUS`) ocupa **672 bytes**; `<1024, 8>` (ASID de 16 bits) ocupa **8 352 bytes** (cerca de 8,2 KiB). `const fn new`: vive num `static`, sem pilha |
 | Fast path | O gerador é `&mut self`: o kernel o põe atrás de um lock e **toda troca o toma**. O desvio sem lock (como o do Linux: `active` atômico por CPU) não existe; é a [DEBT-0076](../tech-debt/0076-asid-sem-caminho-rapido-sem-lock.md) |
 
 **Evidência.** `fuzz` roda 20 000 trocas aleatórias em 4 CPUs e 40 espaços (nascem e morrem),
-com 4 a 6 bits de índice (muitas gerações), em cinco sementes, e confere: o valor devolvido é da
+com 4 a 6 bits de índice (muitas gerações), em cinco sementes (a CPU 0 quase não troca, para deixar um espaço rodando por vários
+esgotamentos), e confere: o valor devolvido é da
 geração em curso; **dois espaços vivos da mesma geração nunca dividem um índice**; quem estava
 em geração velha recebe valor diferente; a geração sobe de 1 em 1 e, ao subir, o bitmap tem no
 máximo `CPUS + 1` índices (esvaziou) e a CPU da virada esvazia. A prova central é uma
 **simulação de TLB**: cada CPU guarda, por índice, o espaço que o carregou, esvazia quando
 `flush` manda, e o teste exige que **nenhuma CPU carregue um índice que guarda entrada de outro
-espaço**. O mesmo roteiro com o `flush` ignorado **falha** (o teste prova que a simulação pega o erro).
+espaço**. Mais uma invariante: o índice carregado numa CPU que ainda roda o espaço é igual ao
+do valor atual dele. O mesmo roteiro com o `flush` ignorado **falha** (o teste prova que a
+simulação pega o erro), e a invariante também falha se o `reserved` de uma CPU ociosa se perde
+(mutação testada à mão).
 
 ## Mitigações de CPU
 

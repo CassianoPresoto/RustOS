@@ -9,11 +9,13 @@ use core::num::NonZeroU64;
 pub struct Asid(NonZeroU64);
 
 impl Asid {
+    /// O valor inteiro (geração e índice), para guardar no espaço de endereços.
     pub const fn raw(self) -> u64 {
         self.0.get()
     }
 }
 
+/// Por que o gerador recusou o pedido.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AsidError {
     /// Largura zero, acima de 32 bits ou maior que o bitmap comporta.
@@ -29,6 +31,7 @@ pub enum AsidError {
 /// O que `switch` manda a CPU fazer ao trocar de espaço.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Switch {
+    /// O valor que o espaço passa a ter; a CPU o carrega no `CR3` ou no `TTBR0`.
     pub asid: Asid,
     /// Esvaziar o TLB desta CPU **antes** de carregar `asid` (a regra de geração).
     pub flush: bool,
@@ -72,10 +75,12 @@ impl<const WORDS: usize, const CPUS: usize> AsidAllocator<WORDS, CPUS> {
         })
     }
 
+    /// A geração em curso (começa em 1).
     pub const fn generation(&self) -> u64 {
         self.generation
     }
 
+    /// A largura do índice, em bits.
     pub const fn bits(&self) -> u32 {
         self.bits
     }
@@ -85,6 +90,7 @@ impl<const WORDS: usize, const CPUS: usize> AsidAllocator<WORDS, CPUS> {
         u32_of(asid.raw() & ((1_u64 << self.bits) - 1))
     }
 
+    /// A geração em que `asid` foi dado.
     pub const fn generation_of(&self, asid: Asid) -> u64 {
         asid.raw() >> self.bits
     }
@@ -237,6 +243,7 @@ mod tests {
             AsidError::BadWidth
         );
         assert_eq!(size_of::<AsidAllocator<64, 8>>(), 672);
+        assert_eq!(size_of::<AsidAllocator<1024, 8>>(), 8352);
     }
 
     #[test]
@@ -340,6 +347,24 @@ mod tests {
     }
 
     #[test]
+    fn double_rollover_idle_cpu_keeps_index() {
+        let mut alloc = AsidAllocator::<1, 3>::new(3, 1).unwrap();
+        let idle = alloc.switch(0, None).unwrap().asid;
+        for _ in 0..40 {
+            if alloc.generation() == 3 {
+                break;
+            }
+            alloc.switch(2, None).unwrap();
+        }
+        assert_eq!(alloc.generation(), 3);
+        assert_eq!(alloc.reserved[0], Some(idle));
+        let renewed = alloc.switch(1, Some(idle)).unwrap().asid;
+        assert!(alloc.is_current(renewed));
+        assert_eq!(alloc.index(renewed), alloc.index(idle));
+        assert_ne!(renewed, idle);
+    }
+
+    #[test]
     fn a_dead_space_gives_nothing_back_before_the_rollover() {
         let mut alloc = AsidAllocator::<1, 2>::new(3, 1).unwrap();
         for _ in 0..7 {
@@ -422,15 +447,27 @@ mod tests {
         let mut identity: [usize; SPACES] = core::array::from_fn(|i| i);
         let mut next_identity = SPACES;
         let mut last_generation = alloc.generation();
+        let mut running: [Option<usize>; CPU_COUNT] = [None; CPU_COUNT];
+        let mut loaded = [0_u32; CPU_COUNT];
         for step in 0..steps {
             let space = rng.below(SPACES);
             if rng.below(12) == 0 {
+                for slot in &mut running {
+                    if *slot == Some(space) {
+                        *slot = None;
+                    }
+                }
                 asids[space] = None;
                 identity[space] = next_identity;
                 next_identity += 1;
                 continue;
             }
-            let cpu = rng.below(CPU_COUNT);
+            // A CPU 0 quase não troca: fica rodando o mesmo espaço por vários esgotamentos.
+            let cpu = if rng.below(64) == 0 {
+                0
+            } else {
+                1 + rng.below(CPU_COUNT - 1)
+            };
             let before = asids[space];
             let got = alloc.switch(cpu, before).unwrap();
             asids[space] = Some(got.asid);
@@ -459,6 +496,17 @@ mod tests {
                 assert!(got.flush, "{ctx}: a CPU da virada tem de esvaziar");
             }
             last_generation = generation;
+            running[cpu] = Some(space);
+            loaded[cpu] = alloc.index(got.asid);
+            for (other, slot) in running.iter().enumerate() {
+                let Some(owner) = *slot else { continue };
+                let current = asids[owner].expect("espaço rodando sem valor");
+                assert_eq!(
+                    alloc.index(current),
+                    loaded[other],
+                    "{ctx}: a CPU {other} roda o espaço {owner} com outro índice"
+                );
+            }
             let mut taken = [false; 1 << 6];
             for asid in asids.iter().flatten().filter(|&&a| alloc.is_current(a)) {
                 let index = alloc.index(*asid) as usize;
