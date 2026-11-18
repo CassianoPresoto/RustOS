@@ -203,7 +203,11 @@ impl<const N: usize> Eevdf<N> {
         let ent = *self.ent(slot);
         let mut lag = i128::from(ent.vlag);
         if self.runnable > 0 && self.sum_weight > 0 && lag != 0 {
-            lag += lag * i128::from(ent.weight) / i128::from(self.sum_weight);
+            let product = lag * i128::from(ent.weight);
+            lag += match i64::try_from(product) {
+                Ok(narrow) => i128::from(narrow / self.sum_weight),
+                Err(_) => product / i128::from(self.sum_weight),
+            };
         }
         let vruntime = average.wrapping_sub(saturate_i64(lag).cast_unsigned());
         let mut vslice = real_to_virtual(ent.slice_ns, ent.weight);
