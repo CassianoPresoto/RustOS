@@ -6,9 +6,11 @@ use core::fmt::{self, Write};
 use rustos_hal::{ByteSource, Console, KeyEvent};
 
 use crate::addr;
+use crate::early;
+use crate::interrupts::FaultTest;
 use crate::memory::Memory;
 use crate::panic;
-use crate::platform::PlatformConsole;
+use crate::platform::{self, PlatformConsole};
 use crate::screen::Screen;
 use crate::sync::IrqLock;
 
@@ -114,13 +116,19 @@ pub unsafe fn break_locks() {
 }
 
 /// Caminho do pânico: não espera nenhum lock, que pode estar com quem entrou em pânico.
+/// Sem console instalado, ou com a serial ainda presa, escreve direto na serial (`early`).
 pub fn print_panic(args: fmt::Arguments<'_>) {
+    let mut serial_done = false;
     if let Some(mut guard) = SERIAL.try_lock()
         && let Some(serial) = guard.as_mut()
     {
         addr::scrubbed(Writer(serial), |out| {
             out.write_fmt(args).ok();
         });
+        serial_done = true;
+    }
+    if !serial_done {
+        early::print(args);
     }
     if let Some(mut guard) = SCREEN.try_lock()
         && let Some(screen) = guard.as_mut()
@@ -130,6 +138,13 @@ pub fn print_panic(args: fmt::Arguments<'_>) {
         });
         screen.render();
     }
+}
+
+/// Teste do pânico: segura a serial e a tela, como um `print` no meio, e provoca um page fault.
+pub fn fault_while_locked() -> bool {
+    let _serial = SERIAL.lock();
+    let _screen = SCREEN.lock();
+    platform::trigger(FaultTest::PageFault)
 }
 
 /// Escreve na serial e na grade da tela, cada uma com o próprio lock, nessa
@@ -170,7 +185,7 @@ impl Write for Both<'_> {
     }
 }
 
-struct Writer<'a, C>(&'a mut C);
+pub struct Writer<'a, C>(pub &'a mut C);
 
 impl<C: Console> Write for Writer<'_, C> {
     fn write_str(&mut self, text: &str) -> fmt::Result {

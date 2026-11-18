@@ -14,6 +14,7 @@ mod bench;
 mod boot;
 #[macro_use]
 mod console;
+mod early;
 mod fmt;
 mod frames;
 mod heap;
@@ -56,15 +57,28 @@ struct Handoff {
 
 #[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
+    // Fica nesta pilha até `early_serial_switch`: a MMU lê as tabelas dele (aarch64).
+    let mut early_scratch = platform::EarlyScratch::new();
+    early::init(&mut early_scratch);
     let entry_cycles = platform::cycles();
     percpu::install(0);
     percpu::mark_boot_online();
-    // Até o console existir, pânico não aparece em lugar nenhum (DEBT-0005).
     // SAFETY: primeira coisa na entrada; nada reaproveitou a memória do bootloader.
     let limine = match unsafe { LimineBoot::from_bootloader() } {
         Ok(boot) => boot,
         Err(error) => panic!("boot protocol: {error:?}"),
     };
+    #[cfg(feature = "panic-tests")]
+    let params = {
+        // SAFETY: a memória das respostas ainda não foi reaproveitada.
+        let line = unsafe { limine.command_line() };
+        rustos_hal::BootParams::parse(line.unwrap_or(""))
+    };
+    #[cfg(feature = "panic-tests")]
+    {
+        early::test_point(params, rustos_hal::EarlyPanic::Entry);
+        early::test_point(params, rustos_hal::EarlyPanic::Fault);
+    }
     // SAFETY: chamada única; as regiões utilizáveis estão livres e no mapa direto.
     let mut memory = match unsafe { memory::Memory::init(&limine) } {
         Ok(memory) => memory,
@@ -82,7 +96,13 @@ extern "C" fn kmain() -> ! {
         panic!("address windows: {error:?}");
     }
     addr::set_direct(vm.occupied()[0]);
+    if let Err(error) = platform::early_serial_map(vm.space_mut(), &mut memory.frames) {
+        panic!("early serial: {error:?}");
+    }
     vm.activate();
+    platform::early_serial_switch(&mut early_scratch);
+    #[cfg(feature = "panic-tests")]
+    early::test_point(params, rustos_hal::EarlyPanic::Activated);
     let top = match memory.map_stack(vm.space_mut(), KERNEL_STACK_PAGES) {
         Ok(top) => top,
         Err(error) => panic!("kernel stack: {error:?}"),

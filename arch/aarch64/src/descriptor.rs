@@ -58,6 +58,14 @@ pub const fn block_descriptor(phys: PhysAddr, flags: PageFlags) -> u64 {
     (phys.as_u64() & BLOCK_ADDRESS) | leaf_bits(flags)
 }
 
+/// Endereço de um bloco de 1 GiB (nível 1): os bits 12 a 29 são reservados.
+pub const GIB_BLOCK_ADDRESS: u64 = 0x0000_FFFF_C000_0000;
+
+/// Descritor de bloco de 1 GiB do nível 1 (o bit 1 zerado o distingue de tabela).
+pub const fn gib_block_descriptor(phys: PhysAddr, flags: PageFlags) -> u64 {
+    (phys.as_u64() & GIB_BLOCK_ADDRESS) | leaf_bits(flags)
+}
+
 /// Lê permissão e cache de uma folha. `block` diz onde termina o endereço.
 pub const fn decode_leaf(entry: u64, block: bool) -> (PhysAddr, PageFlags) {
     let index = entry >> ATTR_INDEX_SHIFT & 0b111;
@@ -148,6 +156,16 @@ mod tests {
         assert_ne!(entry & USER_EXECUTE_NEVER, 0);
         assert_ne!(entry & ACCESS_FLAG, 0);
         assert_eq!(entry & READ_ONLY, 0);
+    }
+
+    #[test]
+    fn a_gib_block_is_a_device_leaf_that_is_not_a_table() {
+        let entry = gib_block_descriptor(PhysAddr::new(0x4000_0000 + 0x1234), PageFlags::DEVICE);
+        assert_eq!(entry & GIB_BLOCK_ADDRESS, 0x4000_0000);
+        assert_eq!(entry & TABLE_OR_PAGE, 0);
+        assert!(!is_table(entry));
+        assert_eq!((entry >> ATTR_INDEX_SHIFT) & 0b111, MAIR_DEVICE_INDEX);
+        assert_ne!(entry & PRIVILEGED_EXECUTE_NEVER, 0);
     }
 
     #[test]

@@ -67,6 +67,26 @@ e `zero bench:` ([SDD 07](07_desempenho_e_recursos.md)). O kernel as imprime e s
 o `smoke` reprova o `FAILED` de qualquer linha. O autoteste do heap confere que o zerar
 rápido mexe só na faixa pedida ([SDD 13](13_memoria_virtual.md), "Zerar").
 
+## Andar 3a — pânico (`make smoke-panic`)
+
+`cargo xtask smoke-panic` derruba o kernel de propósito em seis pontos e confere que a mensagem
+aparece na serial e que nenhum endereço do kernel vem junto. Constrói com a feature `panic-tests`
+(além das de `RUSTOS_FEATURES`) e sobe um boot por cenário:
+
+| Cenário | Como provoca | Mensagem esperada |
+| --- | --- | --- |
+| Pânico na entrada, antes da memória | linha de comando `rustos.panic_early=1` | `[rustos] panic:` e `panic_early: Entry` |
+| Falha na entrada, antes dos vetores do kernel | `rustos.panic_early=2` (leitura de um endereço sem mapa) | `[rustos] fault: page fault at 0x700000000000` e `at pc kernel+0x…` |
+| Pânico com as tabelas novas ativas, antes do console | `rustos.panic_early=3` | `[rustos] panic:` e `panic_early: Activated` |
+| Falha com a serial e a tela presas | `fault lock` no shell | `[rustos] fault: page fault at …` |
+| Pânico dentro da mensagem do pânico | `fault nested` | a mensagem do segundo pânico |
+| Escrita em `.text` | `fault text` | `page fault at kernel+0x…` (deslocamento, não endereço) |
+
+A linha de comando vem do `cmdline:` da entrada do `limine.conf` (`xtask/src/image.rs`); `core/hal`
+`BootParams::parse` a traduz e tem teste de entrada inválida. Custa seis boots por ISA (cerca de
+20 s no x86_64 e 36 s no aarch64 neste host), por isso é alvo à parte; entra no `make pr` e no CI,
+não no `make smoke`. Com `debug-addrs` ele recusa rodar: os cenários conferem o endereço relativo.
+
 ## Andar 3b — tela
 
 `cargo xtask screenshot` sobe a QEMU sem janela, espera o `boot ok`, digita cada

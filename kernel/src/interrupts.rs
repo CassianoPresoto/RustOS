@@ -162,13 +162,23 @@ fn on_fault(fault: &Fault) {
         return;
     }
     panic::begin();
-    console::print_panic(format_args!(
-        "[rustos] fault: {} at pc {} (code {:#x})\n",
-        Described(fault.kind),
-        Addr(fault.pc.as_u64()),
-        fault.code
-    ));
+    console::print_panic(format_args!("{}", FaultLine(fault)));
     platform::cpu().halt_forever();
+}
+
+/// A linha de relatório de uma exceção que para o kernel.
+pub struct FaultLine<'a>(pub &'a Fault);
+
+impl core::fmt::Display for FaultLine<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        writeln!(
+            f,
+            "[rustos] fault: {} at pc {} (code {:#x})",
+            Described(self.0.kind),
+            Addr(self.0.pc.as_u64()),
+            self.0.code
+        )
+    }
 }
 
 fn on_irq(irq: Irq) {

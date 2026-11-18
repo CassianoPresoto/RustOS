@@ -24,7 +24,7 @@ a memória física e o heap, no [SDD 12](12_memoria_fisica_e_heap.md).
    `Memory::reclaim_bootloader`, que devolve ao buddy as regiões `BootloaderReclaimable`.
 7. Relatório, autotestes, `w^x: ok` e o shell.
 
-Pânico antes do console continua mudo (DEBT-0005): falha em `Vm::build` não aparece.
+Pânico e exceção antes do console saem direto na serial ([SDD 04](04_boot.md#pânico-e-exceção-antes-do-console)); no aarch64 a PL011 é mapeada no espaço novo antes de `activate`.
 
 ## Layout virtual
 

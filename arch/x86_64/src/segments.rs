@@ -129,14 +129,19 @@ impl IdtEntry {
     };
 
     /// `ist` é o número da IST (1 a 7), ou 0 para ficar na pilha atual.
+    pub const fn interrupt(handler: u64, ist: u8) -> Self {
+        Self::interrupt_in(handler, ist, KERNEL_CODE)
+    }
+
+    /// Como `interrupt`, com o seletor de código de uma GDT que não é a do kernel.
     #[allow(
         clippy::cast_possible_truncation,
         reason = "o endereço é fatiado de propósito"
     )]
-    pub const fn interrupt(handler: u64, ist: u8) -> Self {
+    pub const fn interrupt_in(handler: u64, ist: u8, selector: u16) -> Self {
         Self {
             offset_low: handler as u16,
-            selector: KERNEL_CODE,
+            selector,
             ist,
             attributes: GATE_INTERRUPT,
             offset_mid: (handler >> 16) as u16,

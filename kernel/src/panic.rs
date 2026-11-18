@@ -2,12 +2,12 @@
 //! os outros nunca mais escrevem na tela (SDD 15).
 
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use rustos_hal::{Cpu, Ipi, IpiKind};
 
 use crate::percpu::PerCpu;
-use crate::{console, percpu, platform};
+use crate::{console, early, percpu, platform};
 
 /// Índice da CPU que entrou em pânico primeiro, mais um; zero enquanto ninguém entrou.
 static OWNER: AtomicUsize = AtomicUsize::new(0);
@@ -45,6 +45,8 @@ pub fn begin() {
         .is_err()
     {
         if OWNER.load(Ordering::Acquire) == me {
+            // SAFETY: esta CPU é a dona do pânico: quem segurava o console era ela mesma.
+            unsafe { console::break_locks() };
             return;
         }
         stop_this_cpu();
@@ -67,7 +69,32 @@ pub fn begin() {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
+    if DEPTH.fetch_add(1, Ordering::Relaxed) >= MAX_DEPTH {
+        early::print_str("[rustos] panic: panicked again while reporting a panic\n");
+        platform::cpu().halt_forever()
+    }
     begin();
     console::print_panic(format_args!("[rustos] panic: {info}\n"));
     platform::cpu().halt_forever()
+}
+
+/// Pânicos dentro do relatório de pânico que ainda se tentam imprimir; o seguinte só avisa.
+const MAX_DEPTH: u32 = 2;
+static DEPTH: AtomicU32 = AtomicU32::new(0);
+
+/// Teste do pânico: a mensagem do primeiro pânico entra em pânico ao ser impressa.
+pub fn nested_test() -> ! {
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    struct Message;
+    impl core::fmt::Display for Message {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            assert!(
+                !ARMED.swap(false, Ordering::Relaxed),
+                "nested: the message of the first panic panicked"
+            );
+            f.write_str("first")
+        }
+    }
+    ARMED.store(true, Ordering::Relaxed);
+    panic!("{}", Message)
 }

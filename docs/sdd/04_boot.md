@@ -31,6 +31,7 @@ Os pedidos ficam em `boot/limine/src/requests.rs`, nas seções `.requests_start
 | Bootloader performance | Marcos de reset, início do Limine e entrega ao kernel, em µs | linha omitida |
 | Executable address | Base física e virtual da imagem (com o sorteio do KASLR), para o kernel mapear cada seção | `BootError::MissingKernelAddress`, pânico |
 | Framebuffer | O primeiro framebuffer linear: endereço no HHDM, tamanho, pitch e máscaras de cor. Só 32 bpp RGB com canais de 8 bits é aceito | sem tela; a serial continua |
+| Executable cmdline | A linha de comando da entrada do `limine.conf`. Só o build com a feature `panic-tests` a lê (`rustos.panic_early=N`, SDD 06); `BootParams::parse` ignora chave e valor que não entende | sem linha, o kernel sobe normal |
 | MP | Os núcleos: identificador de hardware (LAPIC ID ou `MPIDR`) e o `goto_address` de cada um. No x86_64 o pedido liga o bit de x2APIC. A presença do pedido faz o Limine acordar os núcleos secundários e estacioná-los | sem resposta o kernel roda numa CPU |
 
 O Limine mapeia o framebuffer no HHDM com o cache certo para vídeo:
@@ -53,12 +54,13 @@ Do `PROTOCOL.md`, revisão 6:
 | FP/SIMD | o alvo `x86_64-unknown-none` não os usa; `task::init` liga x87, SSE e XSAVE | `CPACR_EL1 = 0`; o alvo `-softfloat` não os usa; `task::init` põe `FPEN` em `0b11` ([SDD 15](15_tarefas_e_preempcao.md)) |
 | Pilha de execução | `rsp` na pilha do Limine, trocado pelo `call_on_stack` | EL1t com `SP_EL0`; `call_on_stack` passa para EL1h (`SP_EL1`) |
 
-Sem IDT/VBAR, qualquer exceção reinicia (x86) ou trava (aarch64) a máquina. A
-fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
-[Exceções e interrupções (aarch64)](#exceções-e-interrupções-aarch64).
+Sem IDT/VBAR, qualquer exceção reinicia (x86) ou trava (aarch64) a máquina. Por isso
+a primeira linha do `kmain` instala vetores mínimos ([abaixo](#pânico-e-exceção-antes-do-console));
+os definitivos entram em `interrupts::init` ([SDD 10](10_interrupcoes.md)).
 
 ## Sequência do `kmain`
 
+0. `early::init()`: vetores de exceção mínimos e a serial sem lock ([abaixo](#pânico-e-exceção-antes-do-console)).
 1. `LimineBoot::from_bootloader()` confere a revisão e lê memory map, HHDM e endereço
    da imagem.
 2. `Memory::init` resume o mapa (`core/mm::summarize`), calcula o metadado do buddy
@@ -96,7 +98,41 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
    da serial (e, no x86_64, a do teclado) enche e bloqueia (`park`) quando ela está
    vazia; a ociosa dorme em `hlt`/`wfi` quando ninguém está pronto.
 
-Pânico antes do passo 4 não aparece em lugar nenhum (DEBT-0005).
+Pânico e exceção, em qualquer passo, saem na serial.
+
+## Pânico e exceção antes do console
+
+Até o passo 4 não há console, e no aarch64 a PL011 só se alcança depois das tabelas próprias.
+O pânico e o relatório de exceção usam, até lá (e quando o lock do console está preso), `early::print`:
+escreve direto na serial, sem lock, sem memória e sem tela, e passa pelo mesmo filtro de endereço do
+`kprintln!` ([SDD 09](09_seguranca.md#endereços-do-kernel-no-log)).
+
+| | x86_64 | aarch64 |
+| --- | --- | --- |
+| Vetores (primeira linha do `kmain`) | `install_early`: a IDT estática, com os mesmos stubs de `install`, sobre o seletor de `CS` do Limine; sem IST nem TSS | `install_early`: o `VBAR_EL1` da tabela de sempre, e `SP_EL1` 8 KiB abaixo da pilha viva (EL1t) para o quadro caber; ninguém volta dali |
+| Serial | COM1 por `in`/`out`, que funciona desde a entrada; sem programar a UART | PL011 em `TTBR0_EL1` (abaixo) até `Vm::activate`, depois na janela de dispositivos |
+| Troca para a definitiva | `install_traps` refaz a IDT sobre a GDT própria | `early_serial_map` mapeia a PL011 no espaço novo **antes** de ativá-lo; `early_serial_switch` aponta a serial precoce para lá e devolve o `TTBR0_EL1` |
+
+**Por que o `TTBR0_EL1` no aarch64.** O HHDM não alcança a PL011: do PROTOCOL.md, para a revisão base 3 em
+diante, só `Usable`, `Bootloader reclaimable`, `Executable and modules` e `Framebuffer` entram no HHDM, e a
+PL011 (`0x0900_0000`) não está no mapa de memória. Medido na QEMU `virt`: uma escrita em
+`HHDM + 0x0900_0000` na entrada do `kmain` trava sem saída.
+O mesmo PROTOCOL.md deixa o `TTBR0_EL1` livre para o kernel (revisão 1 em diante), então
+`arch/aarch64/src/early.rs` monta nele um bloco de 1 GiB de dispositivo com endereço virtual igual
+ao físico (duas páginas, 8 KiB, num local do `kmain` na pilha do Limine, que vive até o `early_serial_switch`; o endereço físico delas vem do `AT S1E1R`) e confere que o `TCR_EL1` é
+o de 4 níveis do Limine (`T0SZ` 16, `EPD0` 0); sem isso, a serial precoce fica desligada. O `Vm::activate`
+liga `EPD0` e o `TTBR0_EL1` volta ao valor do Limine. Alternativas descartadas: semihosting (só a QEMU
+com `-semihosting`, e a saída não vai para a serial que o `smoke` lê) e o framebuffer (exige o renderizador
+de texto antes de haver memória).
+
+**Pânico dentro do pânico.** `panic::begin` chamado de novo pela CPU dona do pânico toma de volta os
+locks do console, e `print_panic` cai para `early::print` quando a serial não está instalada ou está presa.
+Do terceiro pânico em diante o handler só escreve uma linha fixa em `early::print_str` e para.
+
+**O que ficou de fora.** Núcleo secundário, até `secondary_init`, ainda usa os vetores e as tabelas do
+Limine ([DEBT-0063](../tech-debt/0063-nucleo-secundario-sem-vetores-nem-serial-precoce.md)); a serial precoce
+não programa a UART e, no aarch64, é a da QEMU `virt` ([DEBT-0064](../tech-debt/0064-serial-precoce-so-confia-no-firmware.md)).
+Enquanto o `TTBR0_EL1` está ligado, os endereços de 0 a 1 GiB leem dispositivo em vez de dar page fault.
 
 ## Núcleos secundários
 

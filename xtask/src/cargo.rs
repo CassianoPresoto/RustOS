@@ -65,6 +65,15 @@ fn parse_features(value: Option<&str>) -> Vec<String> {
 }
 
 pub fn build_kernel(root: &Path, arch: Arch, profile: Profile) -> Result<PathBuf, String> {
+    build_kernel_with(root, arch, profile, &features())
+}
+
+pub fn build_kernel_with(
+    root: &Path,
+    arch: Arch,
+    profile: Profile,
+    features: &[String],
+) -> Result<PathBuf, String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     workspace::run(
         Command::new(cargo)
@@ -77,7 +86,7 @@ pub fn build_kernel(root: &Path, arch: Arch, profile: Profile) -> Result<PathBuf
                 arch.target(),
             ])
             .args(["--profile", profile.name()])
-            .args(feature_args(&features())),
+            .args(feature_args(features)),
     )?;
     Ok(kernel_path(root, arch, profile))
 }

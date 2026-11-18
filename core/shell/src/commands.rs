@@ -53,7 +53,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
     Command {
         name: "fault",
-        summary: "raise an exception to test the fault path (break | page | text)",
+        summary: "raise an exception to test the fault path (break | page | text | cpu | lock | nested)",
         run: fault,
     },
     Command {
@@ -184,7 +184,13 @@ fn fault(ctx: &mut Ctx<'_>) -> fmt::Result {
         Some("page") => FaultTest::PageFault,
         Some("text") => FaultTest::WriteText,
         Some("cpu") => FaultTest::CpuPanic,
-        _ => return ctx.out.write_str("usage: fault break|page|text|cpu\r\n"),
+        Some("lock") => FaultTest::ConsoleLock,
+        Some("nested") => FaultTest::NestedPanic,
+        _ => {
+            return ctx
+                .out
+                .write_str("usage: fault break|page|text|cpu|lock|nested\r\n");
+        }
     };
     match kind {
         FaultTest::PageFault => ctx.out.write_str("reading an unmapped page...\r\n")?,
@@ -192,6 +198,12 @@ fn fault(ctx: &mut Ctx<'_>) -> fmt::Result {
         FaultTest::CpuPanic => ctx
             .out
             .write_str("panicking a task on another core...\r\n")?,
+        FaultTest::ConsoleLock => ctx
+            .out
+            .write_str("faulting with the console locks held...\r\n")?,
+        FaultTest::NestedPanic => ctx
+            .out
+            .write_str("panicking inside the panic message...\r\n")?,
         FaultTest::Breakpoint => {}
     }
     if !ctx.host.fault_test(kind) {
@@ -201,7 +213,10 @@ fn fault(ctx: &mut Ctx<'_>) -> fmt::Result {
         FaultTest::Breakpoint => ctx
             .out
             .write_str("breakpoint handled, back in the shell\r\n"),
-        FaultTest::PageFault | FaultTest::WriteText => ctx
+        FaultTest::PageFault
+        | FaultTest::WriteText
+        | FaultTest::ConsoleLock
+        | FaultTest::NestedPanic => ctx
             .out
             .write_str("no fault was raised: the protection is missing\r\n"),
         FaultTest::CpuPanic => ctx.out.write_str("the panic did not stop the system\r\n"),
@@ -913,6 +928,17 @@ mod tests {
         let output = run("fault", &["cpu"], &host);
         assert!(output.contains("another core"));
         assert!(output.contains("did not stop"));
+    }
+
+    #[test]
+    fn fault_lock_and_nested_announce_what_they_do_and_report_a_missing_panic() {
+        let mut host = FakeHost::new();
+        host.faults = true;
+        let lock = run("fault", &["lock"], &host);
+        assert!(lock.contains("console locks held") && lock.contains("no fault was raised"));
+        let nested = run("fault", &["nested"], &host);
+        assert!(nested.contains("inside the panic message") && nested.contains("no fault"));
+        assert!(run("fault", &["lock"], &FakeHost::new()).contains("not available yet"));
     }
 
     #[test]

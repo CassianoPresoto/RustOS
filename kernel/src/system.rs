@@ -13,6 +13,7 @@ use crate::console::{self, Sink};
 use crate::heap;
 use crate::interrupts;
 use crate::memory::Memory;
+use crate::panic;
 use crate::platform;
 use crate::random;
 use crate::task::{self, State};
@@ -131,6 +132,8 @@ impl<B: BootInfo> Host for System<'_, B> {
             FaultTest::PageFault => interrupts::FaultTest::PageFault,
             FaultTest::WriteText => interrupts::FaultTest::WriteText,
             FaultTest::CpuPanic => return bench::panic_on_other_cpu(),
+            FaultTest::ConsoleLock => return console::fault_while_locked(),
+            FaultTest::NestedPanic => panic::nested_test(),
         };
         platform::trigger(kind)
     }

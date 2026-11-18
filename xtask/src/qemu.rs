@@ -14,7 +14,7 @@ use crate::cargo::{self, Profile};
 use crate::{image, leak, png, workspace};
 
 /// Igual ao `BOOT_OK_MARKER` do kernel; os dois mudam juntos.
-const BOOT_OK: &str = "[rustos] boot ok";
+pub const BOOT_OK: &str = "[rustos] boot ok";
 const PANIC: &str = "[rustos] panic";
 /// Linhas que o kernel imprime quando um autoteste ou o boot falha.
 const FATAL: [&str; 3] = ["[rustos] fault:", "[rustos] interrupts:", "FAILED"];
@@ -52,7 +52,17 @@ fn cpus_line(requested: usize) -> String {
 const MAX_KERNEL_CPUS: usize = 8;
 
 fn command(root: &Path, arch: Arch, profile: Profile) -> Result<Command, String> {
-    let esp = image::assemble(root, arch, profile)?;
+    command_with(root, arch, profile, &cargo::features(), None)
+}
+
+pub fn command_with(
+    root: &Path,
+    arch: Arch,
+    profile: Profile,
+    features: &[String],
+    cmdline: Option<&str>,
+) -> Result<Command, String> {
+    let esp = image::assemble_with(root, arch, profile, features, cmdline)?;
     let firmware = arch.firmware()?;
     let mut qemu = Command::new(arch.qemu());
     qemu.args(arch.qemu_machine_args(&firmware.to_string_lossy(), &esp.to_string_lossy()));
@@ -135,7 +145,7 @@ pub fn screenshot(
 const SETTLE: Duration = Duration::from_millis(1500);
 
 /// O fim do prompt do shell (`rustos ~ % `): quando ele volta, o comando terminou.
-const PROMPT_TAIL: &str = "\x1b[34m~\x1b[0m % ";
+pub const PROMPT_TAIL: &str = "\x1b[34m~\x1b[0m % ";
 /// Tempo máximo que um comando do shell leva para devolver o prompt.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -155,7 +165,7 @@ fn wait_for_prompt(receiver: &mpsc::Receiver<String>) {
     }
 }
 
-fn ends_with_prompt(log: &str) -> bool {
+pub fn ends_with_prompt(log: &str) -> bool {
     log.contains(PROMPT_TAIL)
 }
 
@@ -214,7 +224,7 @@ fn press_keys(monitor: &mut UnixStream, keys: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn stream_stdout(child: &mut std::process::Child) -> Result<mpsc::Receiver<String>, String> {
+pub fn stream_stdout(child: &mut std::process::Child) -> Result<mpsc::Receiver<String>, String> {
     let stdout = child.stdout.take().ok_or("QEMU sem stdout")?;
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || stream_chunks(stdout, &sender));
@@ -308,7 +318,7 @@ fn print_kernel_lines(log: &str) {
     }
 }
 
-fn failure(arch: Arch, reason: &str, log: &str) -> String {
+pub fn failure(arch: Arch, reason: &str, log: &str) -> String {
     let tail: Vec<&str> = log.lines().rev().take(30).collect();
     let tail: Vec<&str> = tail.into_iter().rev().collect();
     format!(

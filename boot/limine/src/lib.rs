@@ -89,6 +89,19 @@ impl LimineBoot {
     }
 }
 
+impl LimineBoot {
+    /// A linha de comando da entrada do `limine.conf`, se ela tem uma e é ASCII válido.
+    ///
+    /// # Safety
+    /// A memória das respostas (`BootloaderReclaimable`) ainda não foi reaproveitada.
+    pub unsafe fn command_line(&self) -> Option<&str> {
+        // SAFETY: repassada a quem chama.
+        let response = unsafe { requests::executable_cmdline() }?;
+        // SAFETY: o Limine entrega string C terminada em zero, na memória das respostas.
+        unsafe { c_str(response.cmdline) }
+    }
+}
+
 /// `is_boot` de um núcleo: o que tem o identificador do BSP que a resposta informou.
 fn cpu_descriptor(info: &MpInfo, bsp_hw_id: u64) -> CpuDescriptor {
     CpuDescriptor {

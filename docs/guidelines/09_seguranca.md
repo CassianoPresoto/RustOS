@@ -12,6 +12,9 @@
 - **Segredo não vai para `kprintln!`, log, serial nem `Debug`.** Isso cobre senha,
   chave e semente do aleatório. Tipo que guarda segredo implementa `Debug` à mão
   e escreve `<redacted>`.
+- **Endereço do kernel não vai para `kprintln!`, log, serial nem pânico.** Imprima com
+  `Addr` (`kernel+0x1234`); `{:p}` e `{:#x}` de endereço do kernel só atrás da feature
+  `debug-addrs`. O `Debug` de tipo com endereço escreve hexadecimal, que o filtro do log reconhece.
 - **Proteção de hardware que a CPU tem e o kernel não liga vira dívida** com
   gatilho. O relatório de boot diz o que ficou ligado.
 - **Mecanismo de segurança desligado por desempenho exige o número** no SDD 07,
@@ -33,6 +36,8 @@
     | grep -iE '(struct|enum) \w*(secret|password|seed|token)'
   ```
 
+- **Endereço no log:** o `make smoke` reprova `0x…` na metade alta em linha `[rustos]`, e o
+  `make smoke-panic` faz o mesmo nas mensagens de pânico e de falha ([SDD 09](../sdd/09_seguranca.md#endereços-do-kernel-no-log)).
 - **Proteção ligada:** a partir da fase 1, o `make smoke` passa a exigir a linha
   `[rustos] protections:` (SDD 08, fase 1).
 - **Segurança desligada por desempenho:** em review. O PR que desliga um mecanismo

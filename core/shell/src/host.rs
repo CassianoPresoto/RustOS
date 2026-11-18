@@ -157,6 +157,10 @@ pub enum FaultTest {
     WriteText,
     /// Pânico numa tarefa de outro núcleo: o sistema todo para e o pânico aparece uma vez.
     CpuPanic,
+    /// Page fault com a serial e a tela presas por esta CPU: o relatório não pode ficar mudo.
+    ConsoleLock,
+    /// Pânico dentro da mensagem do pânico.
+    NestedPanic,
 }
 
 /// Retrato do sistema no momento da consulta.

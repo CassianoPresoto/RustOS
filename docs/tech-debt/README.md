@@ -24,7 +24,6 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | --- | --- | --- | --- |
 | [0001](0001-boot-pelo-limine.md) | Boot depende do Limine, binário de terceiros | Open | O tempo do bootloader passar a ser a maior parcela do boot medido em metal, ou o primeiro alvo sem UEFI |
 | [0002](0002-dispositivos-no-endereco-da-qemu-virt.md) | Endereços da PL011 e do GICv3 fixos nos da QEMU `virt` | Open | A primeira placa aarch64 que não seja a QEMU `virt` |
-| [0005](0005-panico-antes-do-console-e-mudo.md) | Pânico antes do console, ou com o console preso, não aparece | Open | O primeiro boot que trave sem saída na serial, ou o primeiro boot em metal |
 | [0008](0008-terminal-sem-caractere-largo.md) | Terminal sem caractere largo nem combinante | Open | O primeiro programa da fase 5 (vi, less) mostrando CJK, emoji ou acento decomposto no terminal, ou a fonte ganhar glifo de largura dupla |
 | [0009](0009-ioapic-no-endereco-fixo-da-qemu.md) | I/O APIC no endereço fixo e IRQs ISA sem redirecionamento do MADT | Open | A primeira máquina x86_64 que não seja a QEMU q35, ou o parser de ACPI da fase 6 |
 | [0010](0010-teclado-sem-comandos-ao-dispositivo.md) | Teclado sem comandos ao dispositivo, LEDs nem Num Lock | Open | O primeiro boot em metal com um teclado PS/2 real |
@@ -67,3 +66,5 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0060](0060-recuo-do-zerar-sem-cobertura-no-smoke.md) | Recuo de STP do zerar página sem cobertura automática | Open | A primeira CPU aarch64 com DCZID_EL0.DZP ligado, ou o primeiro modelo da QEMU que o ligue |
 | [0061](0061-percpu-sem-separar-linhas-de-cache.md) | PerCpu sem separar as linhas de cache por quem escreve | Open | O primeiro boot em metal, ou em VM com mais de 8 núcleos, em que a troca entre CPUs ou a fila por CPU meça pior que no HVF |
 | [0062](0062-panico-conta-cpus-paradas-por-numero.md) | O pânico conta as CPUs paradas por número, não por máscara | Open | O primeiro pânico durante a subida dos núcleos que saia com texto de outra CPU intercalado, ou o primeiro boot em metal com mais de 4 núcleos |
+| [0063](0063-nucleo-secundario-sem-vetores-nem-serial-precoce.md) | Núcleo secundário sem vetores nem serial precoce até o init próprio | Open | O primeiro boot que trave com `cpus: N online` abaixo do pedido e nenhuma linha de falha do núcleo que não subiu, ou o primeiro boot em metal com mais de um núcleo |
+| [0064](0064-serial-precoce-so-confia-no-firmware.md) | Serial precoce confia no que o firmware deixou, só serial e só a da QEMU virt no aarch64 | Open | O primeiro boot em metal, ou o primeiro boot sem serial (só tela) |

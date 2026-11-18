@@ -11,6 +11,7 @@ mod image;
 mod leak;
 mod limine;
 mod manifest;
+mod panic_smoke;
 mod png;
 mod qemu;
 mod size;
@@ -29,6 +30,8 @@ comandos:
   image           monta a partição EFI (Limine + kernel) em target/esp/<arch>
   run             sobe no QEMU com a serial no terminal (Ctrl-A X sai)
   smoke           sobe no QEMU, espera o marcador de boot e sai com o resultado
+  smoke-panic     derruba o kernel de propósito (pânico cedo, com o console preso, aninhado)
+                  e confere a mensagem na serial; RUSTOS_FEATURES leva `panic-tests` sozinho
   screenshot      sobe sem janela, digita os comandos depois de `--` (um por argumento
                   ou separados por `;`) e grava a tela em target/screenshots/<arch>.png
   size            tamanho das seções do kernel (o que ocupa memória)
@@ -77,6 +80,9 @@ fn run(args: &[String]) -> Result<(), String> {
         }),
         "run" => each_arch(&options, |arch| qemu::run(&root, arch, options.profile)),
         "smoke" => each_arch(&options, |arch| qemu::smoke(&root, arch, options.profile)),
+        "smoke-panic" => each_arch(&options, |arch| {
+            panic_smoke::run(&root, arch, options.profile)
+        }),
         "screenshot" => each_arch(&options, |arch| {
             let path = qemu::screenshot(&root, arch, options.profile, &options.typed)?;
             println!("xtask: tela de {} em {}", arch.name(), path.display());
