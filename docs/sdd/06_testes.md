@@ -64,7 +64,7 @@ confere que a CPU recusa a escrita em `.text`.
 
 Como o modo de teste imprime o que o normal não imprime, o `smoke` exige também a linha de cada autoteste e medida (`frame`, `heap` e `exception self-test: ok`, `timer:`, `idle:`, `key residue:`, `zero bench:`, `random bench:`, `switch:`, `scale:`, `alloc storm:`, `stacks:`) e a `boot time:`: se a linha de comando se perder, o boot normal não passa por boot de teste.
 
-Três linhas do boot são medida e heurística, não gate: `stacks:` (pico de pilha por tipo de thread e uma prova da marca d'água; vira `FAILED` se um pico passa de 75% da pilha, [SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)), `key residue:` (varredura da pilha
+A linha `stacks:` (pico de pilha por tipo de thread e uma prova da marca d'água) é gate: vira `FAILED` se um pico passa de 75% da pilha ou se a prova falha ([SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)). Duas linhas são medida e heurística, não gate: `key residue:` (varredura da pilha
 atrás de cópias da chave, com uma sonda que planta 4 estados e exige achá-los; [SDD 09](09_seguranca.md))
 e `zero bench:` ([SDD 07](07_desempenho_e_recursos.md)). O kernel as imprime e segue;
 o `smoke` reprova o `FAILED` de qualquer linha. O autoteste do heap confere que o zerar

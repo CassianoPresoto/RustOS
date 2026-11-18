@@ -219,14 +219,16 @@ fn verdict(log: &str, scenario: &Scenario) -> Option<String> {
             return Some(format!("`{text}` apareceu {count} vezes, não uma"));
         }
     }
-    if scenario.max_shell_stack_kib > 0
-        && let Some(peak) = shell_stack_peak_kib(log)
-        && peak > f64::from(scenario.max_shell_stack_kib)
-    {
-        return Some(format!(
-            "o shell usou {peak} KiB de pilha, mais que {}",
-            scenario.max_shell_stack_kib
-        ));
+    if scenario.max_shell_stack_kib > 0 {
+        let Some(peak) = shell_stack_peak_kib(log) else {
+            return Some("o `ps` não mostrou a pilha do shell".to_owned());
+        };
+        if peak > f64::from(scenario.max_shell_stack_kib) {
+            return Some(format!(
+                "o shell usou {peak} KiB de pilha, mais que {}",
+                scenario.max_shell_stack_kib
+            ));
+        }
     }
     scenario
         .forbid
@@ -326,6 +328,8 @@ mod tests {
             ..NONE
         };
         assert!(verdict(ps, &scenario).unwrap().contains("17"));
+        let without_row = verdict("shell sem a coluna", &scenario).unwrap();
+        assert!(without_row.contains("não mostrou"));
         assert_eq!(
             verdict(
                 ps,
