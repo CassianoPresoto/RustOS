@@ -72,7 +72,7 @@ terminal, o desenho e o shell são deste repositório.
 | 1 | `kernel/src/console.rs` (`Sink`) | Manda cada texto para a serial e para a tela, cada uma com o próprio lock |
 | 2 | `kernel/src/screen.rs` (`Screen::write`) | Traduz `\n` em `\r\n` (o `onlcr` de um tty) e entrega os bytes ao terminal |
 | 3 | `core/term` (`Terminal::write`) | Interpreta UTF-8 e as sequências VT/xterm sobre a grade de células, e marca as linhas sujas |
-| 4 | `kernel/src/screen.rs` (`render`) | Para cada célula das linhas sujas: cor pelo tema, estilo (`gfx::Style`) e glifo (`gfx::font`) |
+| 4 | `kernel/src/screen.rs` (`render`) | Para cada célula das linhas sujas: cor pelo tema, estilo (`gfx::Style`) e glifo (`gfx::font`); células sem tinta e da mesma cor viram um retângulo só (`fill_rect`). `Screen::new` pinta o fundo e descarta as linhas sujas iniciais: o primeiro `render` não repinta uma grade vazia |
 | 5 | `core/gfx` (`Surface::draw_glyph`) | Escreve os pixels em ordem, linha a linha, sem nunca ler o framebuffer |
 
 Com a tela alternativa e o histórico, a grade que `render` lê é a da visão: a
