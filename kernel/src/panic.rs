@@ -89,6 +89,35 @@ fn panic(info: &PanicInfo<'_>) -> ! {
 const MAX_DEPTH: u32 = 2;
 static DEPTH: AtomicU32 = AtomicU32::new(0);
 
+fn panicker(_: usize) {
+    panic!("teste de pânico na CPU {}", percpu::current().index());
+}
+
+/// Cria uma tarefa presa a outra CPU que entra em pânico (`fault cpu`). Só volta (`false`) se
+/// não há outra CPU ativa; depois do pânico o sistema inteiro para.
+pub fn panic_on_other_cpu() -> bool {
+    let here = percpu::pinned(PerCpu::index);
+    let active = crate::task::active_cpus();
+    let Some(other) = (0..rustos_hal::MAX_CPUS).find(|&cpu| cpu != here && active >> cpu & 1 != 0)
+    else {
+        return false;
+    };
+    let spawned = crate::task::spawn(crate::task::Spawn {
+        name: "panicker",
+        entry: panicker,
+        arg: 0,
+        simd: false,
+        params: rustos_sched::SchedParams::fair(0),
+        affinity: 1 << other,
+    });
+    if spawned.is_err() {
+        return false;
+    }
+    loop {
+        crate::task::sleep_until(platform::now_ns().unwrap_or(0) + 10_000_000);
+    }
+}
+
 /// Teste do pânico: a mensagem do primeiro pânico entra em pânico ao ser impressa.
 #[cfg(feature = "panic-tests")]
 pub fn nested_test() -> ! {

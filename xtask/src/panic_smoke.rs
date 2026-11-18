@@ -127,11 +127,11 @@ const SCENARIOS: [Scenario; 9] = [
 ];
 
 pub fn run(root: &Path, arch: Arch, profile: Profile) -> Result<(), String> {
-    let mut features = cargo::features();
-    if !features.iter().any(|name| name == FEATURE) {
+    let mut features = cargo::features(profile);
+    if !cargo::has_feature(&features, FEATURE) {
         features.push(FEATURE.to_owned());
     }
-    if features.iter().any(|name| name == "debug-addrs") {
+    if cargo::has_feature(&features, "debug-addrs") {
         return Err(
             "smoke-panic confere o endereço relativo (`kernel+0x…`): tire `debug-addrs`".to_owned(),
         );

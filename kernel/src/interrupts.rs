@@ -3,7 +3,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use rustos_hal::{BootInfo, Cpu, Fault, FaultKind, Handlers, Irq, MAX_CPUS};
+use rustos_hal::{BootInfo, Cpu, Fault, FaultKind, Handlers, Irq};
 use rustos_sync::ByteRing;
 
 use crate::addr::Addr;
@@ -111,8 +111,9 @@ const fn next_tick(previous: u64, now: u64) -> u64 {
 }
 
 /// Interrupções do timer desde o boot, de todas as CPUs.
+#[cfg(feature = "selftest")]
 pub fn ticks() -> u64 {
-    (0..MAX_CPUS)
+    (0..rustos_hal::MAX_CPUS)
         .map(|index| percpu::get(index).stats.timer_irqs.load(Ordering::Relaxed))
         .sum()
 }

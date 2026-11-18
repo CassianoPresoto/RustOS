@@ -15,13 +15,15 @@ use core::sync::atomic::{
 use rustos_hal::{Cpu, Ipi, IpiKind, MAX_CPUS, MapError};
 use rustos_sched::{Composite, SchedError, SchedParams, Scheduler, TaskId};
 
+#[cfg(feature = "selftest")]
+use crate::bench;
 use crate::frames::Frames;
+use crate::interrupts;
 use crate::memory::map_stack_painted;
 use crate::percpu::{self, NO_TASK, PerCpu};
 use crate::platform::{self, FpuSummary, PlatformSpace};
 use crate::stack::Stack;
 use crate::sync::{IrqGuard, IrqLock, bump, locks_held};
-use crate::{bench, interrupts};
 
 /// Os slots `0..MAX_CPUS` são as ociosas, uma por CPU; os 24 seguintes, das tarefas.
 pub const MAX_TASKS: usize = MAX_CPUS + 24;
@@ -549,6 +551,7 @@ pub fn on_reschedule_ipi() {
     let cpu = percpu::current();
     cpu.kick_pending.store(false, Ordering::Release);
     bump(&cpu.stats.ipis_received, 1);
+    #[cfg(feature = "selftest")]
     bench::on_ipi();
     if is_ready() {
         cpu.queue.lock().rearm(now());
@@ -780,6 +783,7 @@ pub fn sleep_until(deadline_ns: u64) {
 }
 
 /// Espera um `unpark`; volta já se ele chegou antes.
+#[cfg(feature = "selftest")]
 pub fn park() {
     let cpu = platform::cpu();
     let were_enabled = cpu.save_and_disable_interrupts();
@@ -940,16 +944,19 @@ pub fn set_current_name(name: &'static str) {
 }
 
 /// A tarefa espera em `park`, sem aviso pendente.
+#[cfg(feature = "selftest")]
 pub fn is_blocked(id: TaskId) -> bool {
     slot(id.as_u32() as usize).state() == State::Blocked
 }
 
 /// A tarefa terminou e o slot está livre para a próxima.
+#[cfg(feature = "selftest")]
 pub fn has_exited(id: TaskId) -> bool {
     slot(id.as_u32() as usize).state() == State::Exited
 }
 
 /// Quantas vezes a tarefa foi escolhida para rodar.
+#[cfg(feature = "selftest")]
 pub fn switches(id: TaskId) -> u64 {
     slot(id.as_u32() as usize).switches.load(Ordering::Relaxed)
 }
@@ -1095,8 +1102,10 @@ pub fn for_each_snapshot(visit: &mut dyn FnMut(Snapshot)) {
 }
 
 /// Bytes que a tarefa de prova escreve na pilha; o pico medido tem de cobri-los.
+#[cfg(feature = "selftest")]
 const PROBE_BYTES: usize = 3000;
 
+#[cfg(feature = "selftest")]
 fn probe_main(_: usize) {
     let mut buffer = [1u8; PROBE_BYTES];
     core::hint::black_box(&mut buffer);
@@ -1104,6 +1113,7 @@ fn probe_main(_: usize) {
 
 /// Autoteste da marca d'água: a tarefa escreve `PROBE_BYTES` e o pico lido depois do `exit`
 /// tem de ser pelo menos isso. Devolve o pico, se passou.
+#[cfg(feature = "selftest")]
 fn stack_probe() -> Option<usize> {
     let id = spawn(Spawn {
         name: "probe",
@@ -1127,6 +1137,7 @@ fn stack_probe() -> Option<usize> {
 
 /// A linha `stacks:` do boot, que o SDD 15 pede para remedir quando o uso de pilha mudar. Reprova
 /// (`FAILED`, que o smoke recusa) se a prova falha ou se algum pico passa de 75% da pilha.
+#[cfg(feature = "selftest")]
 pub fn log_stacks() -> bool {
     let report = stack_report();
     let probe = stack_probe();
@@ -1159,6 +1170,7 @@ pub fn log_stacks() -> bool {
 }
 
 /// Pico e tamanho das pilhas por tipo de tarefa, em bytes.
+#[cfg(feature = "selftest")]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StackReport {
     pub idle_peak: usize,
@@ -1171,6 +1183,7 @@ pub struct StackReport {
 
 /// O maior pico de cada tipo desde o boot: as ociosas, o shell (a pilha do boot) e as tarefas,
 /// as já encerradas incluídas (o slot guarda a marca até ser reusado).
+#[cfg(feature = "selftest")]
 pub fn stack_report() -> StackReport {
     let mut report = StackReport {
         task_peak: TASK_PEAK.load(Ordering::Relaxed),

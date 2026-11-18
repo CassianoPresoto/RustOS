@@ -45,11 +45,14 @@ jobs:
         run: rustup toolchain install
       - run: make smoke ARCH=${{ matrix.arch }} PROFILE=release
       - run: make smoke-fast ARCH=${{ matrix.arch }} PROFILE=release
+      - name: Smoke da imagem enxuta (sem a feature selftest)
+        run: make smoke-fast ARCH=${{ matrix.arch }} PROFILE=release-small
       - run: make smoke-panic ARCH=${{ matrix.arch }} PROFILE=release
       - name: Smoke com bloco de DC ZVA de 256 bytes (pontas do zerar página)
         if: matrix.arch == 'aarch64'
         run: RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx make smoke ARCH=aarch64 PROFILE=release
       - run: make size ARCH=${{ matrix.arch }} PROFILE=release
+      - run: make size ARCH=${{ matrix.arch }} PROFILE=release-small
       - run: make screenshot ARCH=${{ matrix.arch }} PROFILE=release CMDS="fetch;colors"
       - name: Tela do kernel
         uses: actions/upload-artifact@v4
