@@ -1,5 +1,5 @@
 ---
-id: DEBT-0070
+id: DEBT-0073
 title: A NVRAM do EDK2 do aarch64 é montada à mão no xtask, com o layout do EDK2 de 2024
 status: Open
 date: 2026-11-18
@@ -7,7 +7,7 @@ trigger: O `boot timeline:` do aarch64 mostrar `firmware` acima de 1 s, ou a tro
 paid_date:
 ---
 
-# DEBT 0070 — A NVRAM do EDK2 do aarch64 é montada à mão no xtask
+# DEBT 0073 — A NVRAM do EDK2 do aarch64 é montada à mão no xtask
 
 ## O que falta
 

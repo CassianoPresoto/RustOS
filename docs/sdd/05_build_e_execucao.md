@@ -87,7 +87,7 @@ um armazém de variáveis com `Timeout` (UINT16, NV+BS+RT) igual a 0 e o passa e
 `Boot0001`), a QEMU descarta ao sair, e todo boot parte do mesmo estado. O boot continua UEFI, com o Limine achado pelo caminho
 `EFI/BOOT/BOOTAA64.EFI` do disco, como numa máquina real com o `Timeout` ajustado. O código do EDK2 também vai em pflash, que exige 64 MiB: um
 `QEMU_EFI.fd` de 2 MiB (Debian/Ubuntu) é completado com zeros em `target/firmware/aarch64-code.fd`. O formato foi conferido contra o
-`edk2-arm-vars.fd` da QEMU ([DEBT-0070](../tech-debt/0070-nvram-do-edk2-do-aarch64-montada-no-xtask.md)).
+`edk2-arm-vars.fd` da QEMU ([DEBT-0073](../tech-debt/0073-nvram-do-edk2-do-aarch64-montada-no-xtask.md)).
 
 O firmware é procurado nos
 caminhos do Homebrew, Debian/Ubuntu e Fedora/Arch (`xtask/src/arch.rs`), ou nas
