@@ -5,7 +5,7 @@ use core::fmt;
 
 use rustos_hal::abi::{CHANNEL_MAX_BYTES, CHANNEL_MAX_HANDLES, CHANNEL_QUEUE_LEN, Status, signals};
 
-use crate::object::{EndId, Object, Side, Transits, Worklist};
+use crate::object::{EndId, Object, Side, Transits};
 
 /// Uma mensagem: bytes já copiados para o kernel e os handles em trânsito.
 pub struct Message<T: Object> {
@@ -209,17 +209,12 @@ impl<T: Object> Channel<T> {
     /// O *commit* da escrita: reconfere a ponta oposta **sob o lock do canal** (lacuna L1). Se
     /// ela morreu no meio, devolve a mensagem para o chamador fechar os handles. Se a mensagem
     /// leva um handle da ponta de destino e só restam esses, a ponta morre na própria escrita
-    /// (`Ok(true)`).
+    /// (`Ok(true)`), e quem chamou esvazia a fila dela depois de soltar os locks (`drain_dead`).
     #[allow(
         clippy::needless_pass_by_value,
         reason = "o ticket vale uma vez: é consumido"
     )]
-    pub fn commit<W: Worklist<T>>(
-        &mut self,
-        ticket: SendTicket,
-        message: Message<T>,
-        work: &mut W,
-    ) -> Result<bool, Message<T>> {
+    pub fn commit(&mut self, ticket: SendTicket, message: Message<T>) -> Result<bool, Message<T>> {
         let dest = ticket.dest;
         let id = self.end_id(dest);
         let end = &mut self.ends[dest.index()];
@@ -235,7 +230,7 @@ impl<T: Object> Channel<T> {
             }
         }
         end.push(message);
-        Ok(own_count.is_some_and(|count| self.on_handles_changed(dest, count, work)))
+        Ok(own_count.is_some_and(|count| self.on_handles_changed(dest, count)))
     }
 
     /// Passo 1 do `channel_read`: a mensagem da frente, sem retirá-la. Fila vazia: `PeerClosed`
@@ -271,12 +266,9 @@ impl<T: Object> Channel<T> {
 
     /// Roda quando a contagem de handles da ponta muda (um fechamento, uma escrita): se só
     /// restam handles dentro da fila dela, a ponta é inalcançável e morre. `true` se morreu.
-    pub fn on_handles_changed<W: Worklist<T>>(
-        &mut self,
-        side: Side,
-        handle_count: u32,
-        work: &mut W,
-    ) -> bool {
+    /// A fila **não** é esvaziada aqui, sob o lock do par: quem vê `true` chama `drain_dead` com
+    /// o lock solto, que retira as mensagens com `pop_dead` e fecha os handles delas.
+    pub fn on_handles_changed(&mut self, side: Side, handle_count: u32) -> bool {
         let end = &mut self.ends[side.index()];
         debug_assert!(handle_count >= end.own_in_queue);
         if end.dead || handle_count != end.own_in_queue {
@@ -284,9 +276,14 @@ impl<T: Object> Channel<T> {
         }
         end.dead = true;
         end.own_in_queue = 0;
-        while let Some(message) = end.pop() {
-            message.handles.push_all(work);
-        }
         true
+    }
+
+    /// Retira a mensagem da frente de uma ponta **morta** (a limpeza da morte). Ninguém mais a lê:
+    /// só restam nela handles da própria fila, que não a mantêm alcançável.
+    pub fn pop_dead(&mut self, side: Side) -> Option<Message<T>> {
+        let end = &mut self.ends[side.index()];
+        debug_assert!(end.dead, "pop_dead numa ponta viva");
+        if end.dead { end.pop() } else { None }
     }
 }

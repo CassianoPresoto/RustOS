@@ -4,7 +4,9 @@
 use rustos_hal::abi::{CHANNEL_MAX_BYTES, CHANNEL_MAX_HANDLES, Handle, Rights, Status};
 
 use crate::channel::{Message, Peek};
-use crate::object::{Lock, Object, ObjectKind, Transits, Worklist, close_pending};
+use crate::object::{
+    Lock, Object, ObjectKind, Side, Transits, Worklist, close_pending, drain_dead,
+};
 use crate::rights::required;
 use crate::table::{HandleTable, Reservation, SlotStorage};
 
@@ -12,6 +14,8 @@ use crate::table::{HandleTable, Reservation, SlotStorage};
 struct Outcome<T> {
     result: Result<(), Status>,
     discard: Transits<T>,
+    /// A ponta que morreu na própria escrita: a fila dela se esvazia fora do lock.
+    dead: Option<(T, Side)>,
 }
 
 impl<T> Outcome<T> {
@@ -19,6 +23,7 @@ impl<T> Outcome<T> {
         Self {
             result: Ok(()),
             discard: Transits::new(),
+            dead: None,
         }
     }
 
@@ -26,6 +31,7 @@ impl<T> Outcome<T> {
         Self {
             result: Err(status),
             discard: Transits::new(),
+            dead: None,
         }
     }
 
@@ -33,8 +39,25 @@ impl<T> Outcome<T> {
         Self {
             result: Err(status),
             discard,
+            dead: None,
         }
     }
+}
+
+/// O erro que consome o array sem olhar o canal (`InvalidArgs` por excesso de bytes ou de
+/// handles, ou a falha ao copiar os bytes): os handles que existem saem da tabela e são fechados.
+pub fn discard_handles<T, S, L, W>(table: &L, handles: &[Handle], work: &mut W)
+where
+    T: Object,
+    S: SlotStorage<T>,
+    L: Lock<HandleTable<T, S>>,
+    W: Worklist<T>,
+{
+    for chunk in handles.chunks(CHANNEL_MAX_HANDLES) {
+        let taken = table.with(|table| table.remove_existing(chunk));
+        taken.close_all(work);
+    }
+    close_pending(work);
 }
 
 /// `channel_write(ch, bytes, handles)`. Os `handles` e os `bytes` já foram copiados do usuário
@@ -49,21 +72,20 @@ pub fn channel_write<T, S, L, W>(
     work: &mut W,
 ) -> Result<(), Status>
 where
-    T: Object,
+    T: Object + Clone,
     S: SlotStorage<T>,
     L: Lock<HandleTable<T, S>>,
     W: Worklist<T>,
 {
     if handles.len() > CHANNEL_MAX_HANDLES || bytes.as_ref().len() > CHANNEL_MAX_BYTES {
-        for chunk in handles.chunks(CHANNEL_MAX_HANDLES) {
-            let taken = table.with(|table| table.remove_existing(chunk));
-            taken.close_all(work);
-        }
-        close_pending(work);
+        discard_handles(table, handles, work);
         return Err(Status::InvalidArgs);
     }
-    let outcome = table.with(|table| write_locked(table, channel, bytes, handles, work));
+    let outcome = table.with(|table| write_locked(table, channel, bytes, handles));
     outcome.discard.close_all(work);
+    if let Some((object, side)) = &outcome.dead {
+        drain_dead(object, *side, work);
+    }
     close_pending(work);
     outcome.result
 }
@@ -79,17 +101,15 @@ fn cancel_ticket<T: Object, S: SlotStorage<T>>(
     granted.object.with_channel(|chan| chan.cancel(ticket));
 }
 
-fn write_locked<T, S, W>(
+fn write_locked<T, S>(
     table: &mut HandleTable<T, S>,
     channel: Handle,
     bytes: T::Bytes,
     handles: &[Handle],
-    work: &mut W,
 ) -> Outcome<T>
 where
-    T: Object,
+    T: Object + Clone,
     S: SlotStorage<T>,
-    W: Worklist<T>,
 {
     let (end, reserved) = match table.get_of(channel, ObjectKind::Channel, required::CHANNEL_WRITE)
     {
@@ -129,12 +149,15 @@ where
         .expect("o canal segue na tabela até o commit");
     match granted
         .object
-        .with_channel(|chan| chan.commit(ticket, message, work))
+        .with_channel(|chan| chan.commit(ticket, message))
     {
         Some(Ok(false)) => Outcome::ok(),
         Some(Ok(true)) => {
             granted.object.on_end_died(end.side.other());
-            Outcome::ok()
+            Outcome {
+                dead: Some((granted.object.clone(), end.side.other())),
+                ..Outcome::ok()
+            }
         }
         Some(Err(message)) => {
             let (_, discard) = message.into_parts();

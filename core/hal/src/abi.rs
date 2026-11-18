@@ -2,6 +2,8 @@
 //! layout do espaço de usuário, `ProcessEvent` e a mensagem de boot (SDD 17, "ABI nativa mínima").
 //! É a primeira porta de entrada do hexágono: mudar um valor aqui muda o contrato com o mundo.
 
+use core::mem::size_of;
+
 pub use crate::paging::PAGE_SIZE;
 
 /// Primeiro endereço mapeável: abaixo dele fica a faixa nula, que nada mapeia.
@@ -23,6 +25,10 @@ pub const MAX_HANDLES: usize = 4096;
 pub const CHANNEL_MAX_BYTES: usize = 1024;
 pub const CHANNEL_MAX_HANDLES: usize = 8;
 pub const CHANNEL_QUEUE_LEN: usize = 16;
+/// Pontas de canal que um processo pode ter cobradas a ele (`channel_create` passa disto: `NoMemory`).
+pub const MAX_CHANNEL_ENDS: usize = 256;
+/// Handles que o kernel aceita copiar de um array de usuário; acima disso é `InvalidArgs`.
+pub const USER_HANDLE_ARRAY_MAX: usize = 64;
 
 /// As chamadas da ABI nativa, com o número que cada uma ocupa em `rax` (x86_64) ou `x8` (aarch64).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -400,6 +406,53 @@ impl BootMessageHeader {
     }
 }
 
+/// Onde o `channel_read` grava os tamanhos da mensagem (`actual*`): dois `u64` seguidos, como o
+/// `out` de `channel_create`. Em `BufferTooSmall` leva o que a mensagem pede.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct ReadActual {
+    pub bytes: u64,
+    pub handles: u64,
+}
+
+/// Escreve a mensagem de boot em `out`: o cabeçalho e um `u32` de `boot_kind` por item, o i-ésimo
+/// valor para o i-ésimo handle da mensagem. Devolve o tamanho, ou `None` se não cabe em `out`
+/// ou passa de `CHANNEL_MAX_HANDLES` itens.
+pub fn encode_boot_message(kinds: &[u32], out: &mut [u8]) -> Option<usize> {
+    let len = size_of::<BootMessageHeader>() + kinds.len() * 4;
+    if kinds.len() > CHANNEL_MAX_HANDLES || out.len() < len {
+        return None;
+    }
+    let header = BootMessageHeader::new(u32::try_from(kinds.len()).ok()?);
+    let words = [header.magic, header.version, header.count, header.reserved];
+    for (chunk, word) in out.chunks_exact_mut(4).zip(words.iter().chain(kinds)) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    Some(len)
+}
+
+/// Lê a mensagem de boot: confere magic, versão, `reserved` zero, tamanho exato e o teto de
+/// itens, e copia os `boot_kind` para `kinds`. Devolve quantos são, ou `None` se a mensagem não é válida.
+pub fn parse_boot_message(bytes: &[u8], kinds: &mut [u32; CHANNEL_MAX_HANDLES]) -> Option<usize> {
+    let word = |at: usize| -> Option<u32> {
+        let raw: [u8; 4] = bytes.get(at..at + 4)?.try_into().ok()?;
+        Some(u32::from_le_bytes(raw))
+    };
+    let count = usize::try_from(word(8)?).ok()?;
+    let valid = word(0)? == BootMessageHeader::MAGIC
+        && word(4)? == BootMessageHeader::VERSION
+        && word(12)? == 0
+        && count <= CHANNEL_MAX_HANDLES
+        && bytes.len() == size_of::<BootMessageHeader>() + count * 4;
+    if !valid {
+        return None;
+    }
+    for (index, kind) in kinds.iter_mut().take(count).enumerate() {
+        *kind = word(16 + index * 4)?;
+    }
+    Some(count)
+}
+
 /// O que cada handle da mensagem de boot é, na ordem do array de handles.
 pub mod boot_kind {
     pub const PROCESS: u32 = 1;
@@ -745,7 +798,50 @@ mod tests {
         assert_eq!(BootMessageHeader::MAGIC.to_le_bytes(), *b"BOOT");
     }
 
-    const _: () = assert!(16 + 4 * 4 <= CHANNEL_MAX_BYTES);
+    const _: () = assert!(16 + CHANNEL_MAX_HANDLES * 4 <= CHANNEL_MAX_BYTES);
+    const _: () = assert!(USER_HANDLE_ARRAY_MAX >= CHANNEL_MAX_HANDLES);
+    #[test]
+    fn read_actual_is_two_u64_in_a_row() {
+        assert_eq!(size_of::<ReadActual>(), 16);
+        assert_eq!(offset_of!(ReadActual, bytes), 0);
+        assert_eq!(offset_of!(ReadActual, handles), 8);
+    }
+
+    #[test]
+    fn the_boot_message_round_trips_and_the_kinds_follow_the_header() {
+        let mut out = [0_u8; 64];
+        let len = encode_boot_message(&[boot_kind::PROCESS, boot_kind::CONSOLE], &mut out).unwrap();
+        assert_eq!(len, 24);
+        assert_eq!(&out[..4], b"BOOT");
+        assert_eq!(&out[16..20], &1_u32.to_le_bytes());
+        assert_eq!(&out[20..24], &3_u32.to_le_bytes());
+        let mut kinds = [0; CHANNEL_MAX_HANDLES];
+        assert_eq!(parse_boot_message(&out[..len], &mut kinds), Some(2));
+        assert_eq!(&kinds[..2], &[boot_kind::PROCESS, boot_kind::CONSOLE]);
+    }
+
+    #[test]
+    fn the_boot_message_refuses_what_is_not_the_contract() {
+        let mut out = [0_u8; 64];
+        let len = encode_boot_message(&[1, 2, 3, 4], &mut out).unwrap();
+        let mut kinds = [0; CHANNEL_MAX_HANDLES];
+        assert_eq!(parse_boot_message(&out[..len], &mut kinds), Some(4));
+        assert_eq!(parse_boot_message(&out[..len - 1], &mut kinds), None);
+        assert_eq!(parse_boot_message(&out[..len + 4], &mut kinds), None);
+        assert_eq!(parse_boot_message(&out[..15], &mut kinds), None);
+        assert_eq!(parse_boot_message(&[], &mut kinds), None);
+        for (at, byte) in [(0, 0x00), (4, 2), (12, 1), (8, 9)] {
+            let mut bad = out;
+            bad[at] = byte;
+            assert_eq!(parse_boot_message(&bad[..len], &mut kinds), None, "{at}");
+        }
+        assert!(encode_boot_message(&[0; CHANNEL_MAX_HANDLES + 1], &mut [0; 128]).is_none());
+        assert!(encode_boot_message(&[1, 2], &mut [0; 23]).is_none());
+        let mut full = [0_u8; 16 + 4 * CHANNEL_MAX_HANDLES];
+        let eight = [boot_kind::PROCESS; CHANNEL_MAX_HANDLES];
+        assert_eq!(encode_boot_message(&eight, &mut full), Some(full.len()));
+    }
+
     const _: () = assert!(USER_MIN < USER_IMAGE_BASE && USER_IMAGE_BASE < USER_TOP);
     const _: () = assert!(USER_TOP < 1 << 47);
 

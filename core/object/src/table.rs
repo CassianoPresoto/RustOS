@@ -208,6 +208,14 @@ pub const fn handle_from_raw(raw: u64) -> Result<Handle, Status> {
     }
 }
 
+/// `index` se está abaixo de `len`, senão 0, sem desvio que a CPU possa prever (Spectre v1): o
+/// único ponto de clamp do índice do handle (DEBT-0110).
+pub(crate) fn clamp_index(index: usize, len: usize) -> usize {
+    let gap = len.wrapping_sub(1).wrapping_sub(index);
+    let mask = !((index | gap).cast_signed() >> (usize::BITS - 1)).cast_unsigned();
+    index & core::hint::black_box(mask)
+}
+
 fn link(index: usize) -> u32 {
     u32::try_from(index).expect("o índice cabe em 16 bits")
 }
@@ -265,14 +273,16 @@ impl<T: Object, S: SlotStorage<T>> HandleTable<T, S> {
         if handle.raw().trailing_zeros() >= 16 {
             return Err(Status::BadHandle);
         }
-        let index = handle.index();
-        match self.slots.slots().get(index) {
-            Some(slot)
-                if slot.state() == State::Used && slot.generation() == handle.generation() =>
-            {
-                Ok(index)
-            }
-            _ => Err(Status::BadHandle),
+        let slots = self.slots.slots();
+        if handle.index() >= slots.len() {
+            return Err(Status::BadHandle);
+        }
+        let index = clamp_index(handle.index(), slots.len());
+        let slot = &slots[index];
+        if slot.state() == State::Used && slot.generation() == handle.generation() {
+            Ok(index)
+        } else {
+            Err(Status::BadHandle)
         }
     }
 

@@ -285,3 +285,20 @@ pub fn read(
     })?;
     Ok(got)
 }
+
+/// Como `Stack`, e confere que `push` nunca roda com o lock da tabela ou o do par preso nesta
+/// thread: é o que deixa o kernel alocar nela.
+#[derive(Default)]
+pub struct Unlocked(pub Vec<Transit<TestObj>>);
+
+impl Worklist<TestObj> for Unlocked {
+    fn push(&mut self, transit: Transit<TestObj>) {
+        assert_eq!(lock_depth(), 0, "push com a tabela trancada");
+        assert_eq!(peer_lock_depth(), 0, "push com o lock do par preso");
+        self.0.push(transit);
+    }
+
+    fn pop(&mut self) -> Option<Transit<TestObj>> {
+        self.0.pop()
+    }
+}

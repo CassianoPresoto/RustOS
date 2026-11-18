@@ -16,10 +16,10 @@ mod tests;
 pub use channel::{Channel, Message, Peek, SendTicket};
 pub use object::{
     EndId, HandleCount, Lock, Object, ObjectKind, Side, Transit, Transits, Worklist, close,
-    close_pending,
+    close_pending, drain_dead,
 };
 pub use table::{
     FixedSlots, HandleTable, Limits, ReplaceFailed, Reservation, Slot, SlotStorage, TakeFailed,
     handle_from_raw,
 };
-pub use transfer::{ReadFailed, ReadSizes, channel_read, channel_write};
+pub use transfer::{ReadFailed, ReadSizes, channel_read, channel_write, discard_handles};

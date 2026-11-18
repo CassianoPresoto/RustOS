@@ -546,3 +546,34 @@ fn drain_hands_every_live_handle_to_the_worklist() {
     assert!(objects.iter().all(|object| count(object) == 0));
     table.cancel(reservation);
 }
+
+#[test]
+fn the_index_clamp_keeps_what_is_below_the_length_and_zeroes_the_rest() {
+    use crate::table::clamp_index;
+    for len in [0_usize, 1, 2, 7, 4096, 65_534] {
+        for index in [
+            0,
+            1,
+            len.saturating_sub(1),
+            len,
+            len + 1,
+            65_535,
+            usize::MAX,
+        ] {
+            let expected = if index < len { index } else { 0 };
+            assert_eq!(clamp_index(index, len), expected, "index {index} len {len}");
+        }
+    }
+}
+
+#[test]
+fn a_handle_past_the_last_slot_is_bad_even_when_slot_zero_has_the_same_generation() {
+    let mut table = table();
+    let first = insert(&mut table, 1, Rights::READ);
+    let outside = Handle::new(first.generation(), 40).unwrap();
+    assert_eq!(
+        table.get(outside, Rights::NONE).err(),
+        Some(Status::BadHandle)
+    );
+    assert!(table.get(first, Rights::NONE).is_ok());
+}
