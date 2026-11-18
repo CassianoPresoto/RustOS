@@ -86,8 +86,9 @@ pub const TIMER_HZ: u32 = 100;
 
 /// Páginas de cada pilha de exceção (#DF, NMI, #MC); a de guarda fica abaixo.
 const IST_STACK_PAGES: u64 = 4;
-/// Janela de calibração: 20 ms de PIT (1 193 182 Hz × 0,02 s).
-const PIT_WINDOW_TICKS: u16 = 23_864;
+/// Janela de calibração: 5 ms de PIT (1 193 182 Hz × 0,005 s). Erro de 0,3% no TSC
+/// contra 15 ms de boot (SDD 10, DEBT-0066).
+const PIT_WINDOW_TICKS: u16 = 5_966;
 /// Consultas à porta B antes de desistir do PIT.
 const PIT_MAX_POLLS: u32 = 50_000_000;
 /// Pinos do I/O APIC da QEMU `q35`: as ISA 1 (teclado) e 4 (COM1) vão direto,

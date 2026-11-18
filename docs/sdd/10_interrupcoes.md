@@ -20,7 +20,7 @@ entre elas está numa seção por ISA, abaixo.
 | 5 | 8259 mascarado (0xFF em 0x21 e 0xA1) | `pic.rs` |
 | 6 | Local APIC: x2APIC por MSR se `CPUID.1:ECX[21]`, senão xAPIC por MMIO na janela de dispositivos | `apic.rs`, `lapic.rs` |
 | 7 | I/O APIC em `0xFEC0_0000` (DEBT-0009): pino 4 (COM1) → vetor `0x24`; pino 1 (teclado) → `0x21`, mascarado | `ioapic.rs` |
-| 8 | Calibração: um intervalo de 20 ms do PIT (canal 2) mede o TSC e o contador do timer do APIC; o timer fica em modo de um tiro (TSC-deadline se o CPUID anuncia), desarmado: `interrupts::init` arma o primeiro tique | `pit.rs`, `clock.rs`, `lapic.rs` |
+| 8 | Calibração: um intervalo de 5 ms do PIT (canal 2, [medida abaixo](#calibração-pelo-pit-janela-de-5-ms)) mede o TSC e o contador do timer do APIC; o timer fica em modo de um tiro (TSC-deadline se o CPUID anuncia), desarmado: `interrupts::init` arma o primeiro tique | `pit.rs`, `clock.rs`, `lapic.rs` |
 | 9 | `Uart16550::enable_receive_interrupt` (`IER` bit 0 e `OUT2` do `MCR`), por último | `drivers/uart16550` |
 
 O chamador (`interrupts::init`) liga o `IF` depois. Os núcleos secundários repetem só o que é
@@ -95,6 +95,18 @@ inutiliza o CPUID 0x15 do Linux: por isso a referência é o PIT.
 | Contador do timer do APIC, divisor 16 | ~62,5 MHz |
 | `timer: 100 Hz, 5 ticks in …` | 40 a 45 ms (a fase do primeiro tique é aleatória) |
 | `sched: … timer one-shot` | o contador do APIC (62,5 MHz); o TSC-deadline nunca rodou ([DEBT-0034](../tech-debt/0034-tsc-deadline-sem-teste-no-x86.md)) |
+
+### Calibração pelo PIT: janela de 5 ms
+
+A janela era de 20 ms e é a maior fatia do `interrupts::init` (em TCG o PIT corre em tempo real). Medida a frequência do TSC da QEMU em TCG (1 GHz exatos, o TCG conta nanossegundos) em quatro boots por janela, `release`:
+
+| Janela | TSC medido (Hz), quatro boots | Erro máximo visto |
+| --- | --- | --- |
+| 20 ms (23 864 ticks) | 1 000 134 912 · 1 000 384 908 · 1 000 434 907 · 1 000 684 903 | 0,07% |
+| 5 ms (5 966 ticks) | 1 000 784 902 · 1 000 784 902 · 1 002 784 872 · 1 000 384 908 | 0,28% |
+| 2,5 ms (2 983 ticks) | 1 007 584 799 · 999 984 914 · 1 003 984 854 · 1 008 384 787 | 0,84% |
+
+O erro vem das duas leituras de porta que fecham a janela (cada uma, em TCG, de uns µs a dezenas de µs). A janela de 5 ms troca até 0,3% de erro no relógio (`now_ns`, `uptime`, as medidas) por 15 ms a menos de boot no x86_64 em TCG: é o relógio de uma plataforma que o SDD 07 já diz não comparar com outro sistema. O aarch64 não calibra (o `CNTFRQ_EL0` dá a frequência). Em metal ou KVM, onde o relógio é preciso, a janela vale o que o hardware pedir ([DEBT-0066](../tech-debt/0066-calibracao-do-pit-com-janela-curta-sem-medida-em-kvm.md)).
 
 ### Custo
 
