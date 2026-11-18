@@ -620,46 +620,50 @@ fn schedule() {
     schedule_at(now());
 }
 
-/// `schedule` com o relógio que o chamador já leu: a leitura custa de 15 a 25 ns no HVF.
+/// `schedule` com o relógio que o chamador já leu.
 fn schedule_at(now_ns: u64) {
     let cpu = percpu::current();
     debug_assert_eq!(locks_held(), 0, "troca de contexto com IrqLock preso");
-    let (from, to, save, load) = {
-        let mut queue = cpu.queue.lock();
-        let from = cpu.current.load(Ordering::Relaxed) as usize;
-        let outgoing = slot(from);
-        let since = outgoing.since_ns.load(Ordering::Relaxed);
-        bump(&outgoing.cpu_ns, now_ns.saturating_sub(since));
-        if outgoing.state() == State::Running {
-            outgoing.set_state(State::Ready);
-        }
-        let idle = queue.idle;
-        let to = queue
-            .policy()
-            .pick_next(now_ns)
-            .map_or(idle, |id| id.as_u32() as usize);
-        let incoming = slot(to);
-        incoming.set_state(State::Running);
-        incoming.since_ns.store(now_ns, Ordering::Relaxed);
-        if to != from {
-            incoming.on_cpu.store(true, Ordering::Release);
-            bump(&incoming.switches, 1);
-            bump(&cpu.stats.switches, 1);
-        }
-        queue.rearm(now_ns);
-        publish(cpu, &queue);
-        if to == from {
-            return;
-        }
-        cpu.current.store(slot_u32(to), Ordering::Relaxed);
-        cpu.prev.store(slot_u32(from), Ordering::Relaxed);
-        (from, to, fpu_pointer(outgoing), fpu_pointer(incoming))
-    };
-    if let Some(area) = save {
+    switch_from(cpu, cpu.queue.lock(), now_ns);
+}
+
+/// `schedule_at` para quem já tem o lock da fila preso e mais nenhum: o lock vale da decisão
+/// de bloquear até a escolha, sem soltar e pegar de novo, e é solto antes da troca.
+fn switch_from(cpu: &PerCpu, mut queue: IrqGuard<'static, Queue>, now_ns: u64) {
+    debug_assert_eq!(locks_held(), 1, "troca de contexto com IrqLock preso");
+    let from = cpu.current.load(Ordering::Relaxed) as usize;
+    let outgoing = slot(from);
+    let since = outgoing.since_ns.load(Ordering::Relaxed);
+    bump(&outgoing.cpu_ns, now_ns.saturating_sub(since));
+    if outgoing.state() == State::Running {
+        outgoing.set_state(State::Ready);
+    }
+    let idle = queue.idle;
+    let to = queue
+        .policy()
+        .pick_next(now_ns)
+        .map_or(idle, |id| id.as_u32() as usize);
+    let incoming = slot(to);
+    incoming.set_state(State::Running);
+    incoming.since_ns.store(now_ns, Ordering::Relaxed);
+    if to != from {
+        incoming.on_cpu.store(true, Ordering::Release);
+        bump(&incoming.switches, 1);
+        bump(&cpu.stats.switches, 1);
+    }
+    queue.rearm(now_ns);
+    publish(cpu, &queue);
+    if to == from {
+        return;
+    }
+    cpu.current.store(slot_u32(to), Ordering::Relaxed);
+    cpu.prev.store(slot_u32(from), Ordering::Relaxed);
+    drop(queue);
+    if let Some(area) = fpu_pointer(outgoing) {
         // SAFETY: a área é da tarefa que sai, viva, e tem o tamanho que `fpu_init` mediu.
         unsafe { platform::fpu_save(area.as_ptr()) };
     }
-    if let Some(area) = load {
+    if let Some(area) = fpu_pointer(incoming) {
         // SAFETY: a área é da tarefa que entra, viva, e foi preparada ou salva antes.
         unsafe { platform::fpu_restore(area.as_ptr()) };
     }
@@ -696,14 +700,12 @@ pub fn yield_now() {
     let cpu = platform::cpu();
     let were_enabled = cpu.save_and_disable_interrupts();
     let now = now();
-    {
-        let here = percpu::current();
-        let mut queue = here.queue.lock();
-        if here.current.load(Ordering::Relaxed) as usize != queue.idle {
-            queue.policy().yield_current(now);
-        }
+    let here = percpu::current();
+    let mut queue = here.queue.lock();
+    if here.current.load(Ordering::Relaxed) as usize != queue.idle {
+        queue.policy().yield_current(now);
     }
-    schedule_at(now);
+    switch_from(here, queue, now);
     cpu.restore_interrupts(were_enabled);
 }
 
@@ -714,18 +716,15 @@ pub fn sleep_until(deadline_ns: u64) {
     let were_enabled = cpu.save_and_disable_interrupts();
     let now = now();
     if now < deadline_ns {
-        {
-            let here = percpu::current();
-            let mut queue = here.queue.lock();
-            let current = here.current.load(Ordering::Relaxed) as usize;
-            let task = slot(current);
-            task.wake_at_ns.store(deadline_ns, Ordering::Relaxed);
-            task.set_state(State::Sleeping);
-            queue.next_wake_ns = queue.next_wake_ns.min(deadline_ns);
-            queue.policy().sleep(id_of(current), now);
-            publish(here, &queue);
-        }
-        schedule_at(now);
+        let here = percpu::current();
+        let mut queue = here.queue.lock();
+        let current = here.current.load(Ordering::Relaxed) as usize;
+        let task = slot(current);
+        task.wake_at_ns.store(deadline_ns, Ordering::Relaxed);
+        task.set_state(State::Sleeping);
+        queue.next_wake_ns = queue.next_wake_ns.min(deadline_ns);
+        queue.policy().sleep(id_of(current), now);
+        switch_from(here, queue, now);
     }
     cpu.restore_interrupts(were_enabled);
 }
@@ -742,20 +741,17 @@ pub fn park() {
 /// `park` para quem já decidiu com a interrupção mascarada, sem janela para perder o acordar.
 pub fn park_masked() {
     let now = now();
-    {
-        let here = percpu::current();
-        let mut queue = here.queue.lock();
-        let current = here.current.load(Ordering::Relaxed) as usize;
-        let task = slot(current);
-        if task.permit.load(Ordering::Acquire) {
-            task.permit.store(false, Ordering::Release);
-            return;
-        }
-        task.set_state(State::Blocked);
-        queue.policy().sleep(id_of(current), now);
-        publish(here, &queue);
+    let here = percpu::current();
+    let mut queue = here.queue.lock();
+    let current = here.current.load(Ordering::Relaxed) as usize;
+    let task = slot(current);
+    if task.permit.load(Ordering::Acquire) {
+        task.permit.store(false, Ordering::Release);
+        return;
     }
-    schedule_at(now);
+    task.set_state(State::Blocked);
+    queue.policy().sleep(id_of(current), now);
+    switch_from(here, queue, now);
 }
 
 /// Por que `wake_task` roda.
@@ -814,7 +810,8 @@ fn wake_task(id: usize, why: Wake, now: u64) {
 /// A CPU onde a tarefa acordada deve ficar: a dela mesma enquanto a troca que a tirou da CPU não
 /// terminou (`on_cpu`), ou se está ociosa e a afinidade deixa; senão a menos carregada.
 fn wake_target(task: &Slot, home: usize) -> usize {
-    if task.on_cpu.load(Ordering::Acquire) {
+    let mask = task.affinity.load(Ordering::Relaxed);
+    if task.on_cpu.load(Ordering::Acquire) || mask != 0 && mask.is_power_of_two() {
         return home;
     }
     let home_idle = percpu::get(home).load.load(Ordering::Relaxed) == 0;
@@ -851,15 +848,12 @@ pub fn unpark(id: TaskId) {
 pub fn exit() -> ! {
     assert_task_context();
     platform::cpu().save_and_disable_interrupts();
-    {
-        let here = percpu::current();
-        let mut queue = here.queue.lock();
-        let current = here.current.load(Ordering::Relaxed) as usize;
-        slot(current).set_state(State::Exited);
-        queue.policy().remove(id_of(current));
-        publish(here, &queue);
-    }
-    schedule();
+    let here = percpu::current();
+    let mut queue = here.queue.lock();
+    let current = here.current.load(Ordering::Relaxed) as usize;
+    slot(current).set_state(State::Exited);
+    queue.policy().remove(id_of(current));
+    switch_from(here, queue, now());
     unreachable!("tarefa encerrada voltou a rodar");
 }
 
