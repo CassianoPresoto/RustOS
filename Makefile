@@ -7,7 +7,7 @@ XTASK := cargo xtask
 
 .DEFAULT_GOAL := help
 .PHONY: help fmt fmt-check clippy layers-check comments-check docs-check check test \
-        build image run smoke smoke-fast smoke-panic screenshot font-preview initramfs size pr clean
+        build user image run smoke smoke-fast smoke-panic screenshot font-preview initramfs size pr clean
 
 help: ## lista os alvos
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -19,13 +19,15 @@ fmt: ## formata o código
 fmt-check: ## confere a formatação
 	cargo fmt --all --check
 
-clippy: ## lint no host e nos dois alvos bare-metal, com e sem `selftest` e as features de depuração; aviso é erro
+clippy: ## lint no host e nos dois alvos bare-metal (kernel com e sem `selftest` e as features de depuração; `user/` e `arch/*-user`); aviso é erro
 	cargo clippy --all-targets -- -D warnings
 	cargo clippy --package rustos-shell --no-default-features --all-targets -- -D warnings
 	@for target in $(TARGETS); do \
 		for features in "" selftest debug-addrs,panic-tests selftest,debug-addrs,panic-tests; do \
 			cargo clippy --package rustos-kernel --target $$target $${features:+--features $$features} -- -D warnings || exit 1; \
 		done; \
+		cargo clippy --package rustos-user-rt --package rustos-user-init --package rustos-user-test-big \
+			--package rustos-arch-$${target%%-*}-user --target $$target -- -D warnings || exit 1; \
 	done
 
 layers-check: ## dependências entre camadas, crates externos, unsafe e asm no lugar certo
@@ -39,12 +41,16 @@ docs-check: ## índices, frontmatter das dívidas e links de docs/
 
 check: fmt-check clippy layers-check comments-check docs-check ## todos os gates (não sobe a QEMU)
 
-test: ## testes de unidade no host (todos os crates menos o kernel), e o shell sem o `bench`
+test: ## testes de unidade no host (todos os crates menos o kernel), o shell sem o `bench` e o `user/rt`
 	cargo test
 	cargo test --package rustos-shell --no-default-features
+	cargo test --package rustos-user-rt
 
 build: ## compila o kernel
 	$(XTASK) build --arch $(ARCH) --profile $(PROFILE)
+
+user: ## compila os programas de `user/` (init e os de teste) em target/user/<arch>
+	$(XTASK) user --arch $(ARCH) --profile $(PROFILE)
 
 image: ## monta a partição EFI em target/esp/<arch>
 	$(XTASK) image --arch $(ARCH) --profile $(PROFILE)
