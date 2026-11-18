@@ -24,6 +24,7 @@ que só diminuem, sem uid/gid no núcleo.
 | --- | --- |
 | **Verificado** | Lido numa fonte primária (spec, código do Linux, doc do projeto) nesta pesquisa; a fonte vem junto |
 | **Verificado (secundária)** | Lido num espelho ou resumo de terceiro; confirmar antes de codar |
+| **Verificado pelo Linux** | Posição de campo ou valor confirmado no código do Linux (`arch/arm64/tools/sysreg`, `pgtable-hwdef.h`, `arm_arch_timer.h`), que **não** é a especificação da Arm. Basta para escrever o desenho; a ARM ARM confirma antes do código |
 | **NÃO VERIFICADO** | Não confirmado em fonte; **não** é premissa do desenho. Dito o que ler antes de codar |
 | **Proposta** | Desenho do RustOS, sem fonte a citar. Vale o que a decisão do dono disser |
 | **Já é assim** | Fato do código de hoje (caminho dado) |
@@ -170,15 +171,25 @@ Non-paranoid faults on return to userspace are handled by fixup_bad_iret. These 
 de exceção "do kernel" que confiasse no `CS` usaria o `GS` do usuário. O caminho
 `.Lerror_bad_iret` do Linux faz `swapgs`, volta ao CR3 do kernel e chama `fixup_bad_iret`,
 que monta o quadro "as if we faulted immediately after IRET" (**verificado**, cópia local).
+
+**O que o `IRETQ` faz em modo 64 bits** (**verificado**, espelho do SDM:
+[iret](https://www.felixcloutier.com/x86/iret:iretd:iretq)):
+
+| Fato | Consequência para o desenho |
+| --- | --- |
+| `RFLAGS.NT = 1` **no momento do `IRETQ`** dá `#GP(0)`, antes de qualquer pop | É o `NT` **atual do kernel**, não o do quadro. O `FMASK` limpa `NT` na entrada de syscall; que a entrada de exceção também o limpe **NÃO VERIFICADO** no SDM (leitura de gate) |
+| `RSP` ou `SS` não canônico no quadro: **`#SS(0)`** ("an attempt to pop a value off the stack causes a non-canonical address to be referenced"). `RIP` não canônico: `#GP(0)` | O `RSP` do usuário (a CPU o aceita em anel 3) é a fonte real de falha, e cai no vetor 12; o `RIP` cai no 13 |
+| Para `CPL 3`: `IOPL`, `VIF` e `VIP` **não** são restaurados; `RF`, `AC` e `ID` são; `IF` só se `CPL <= IOPL` (o `CPL` do pseudocódigo é o de antes do retorno, o 0 do kernel: leitura nossa do espelho) | O usuário **não** ganha `IOPL` por um quadro adulterado; `NT` do quadro é restaurado sem problema |
+
 Desenho do RustOS:
 
 | O que | Como |
 | --- | --- |
-| Por construção | `CS` e `SS` são constantes do kernel; `RIP` vem de `thread_create`, validado (`USER_MIN <= entry < USER_TOP`), ou é o que a CPU salvou; `RFLAGS` vem da CPU ou, na saída de uma syscall, é `(R11 & 0x3C7FD7) \| 2` **com `NT` limpo** (o usuário põe `NT` e `AC` com `popf`) |
-| O que sobra | O `RSP` do usuário (não canônico, que a CPU aceita em anel 3) e qualquer bit de `RFLAGS` que o `IRETQ` recuse. Que `IRETQ` faça `#GP` com `NT = 1`, e `#SS`/`#GP` com `RSP` não canônico, é **inferência a confirmar no SDM** ([lista](18_fase_4_decisoes_pedidas.md#fontes-lidas-e-o-que-ficou-por-ler)) |
-| Onde se decide | **No stub dos vetores 11 `#NP`, 12 `#SS` e 13 `#GP`, em assembly, antes de tocar em `gs`:** compara o `RIP` do quadro com o endereço do `iretq` (`lea`/`cmp` relativos ao `rip`, que não usam `gs`). Igual: é o caso do *fixup*. Diferente: segue a entrada normal |
+| Por construção | `CS` e `SS` são constantes do kernel; `RIP` vem de `thread_create`, validado (`USER_MIN <= entry < USER_TOP`), ou é o que a CPU salvou; `RFLAGS` vem da CPU ou, numa thread nova, é `0x202` |
+| O que sobra | O `RSP` não canônico (`#SS`), e o `NT` atual do kernel, se algum caminho o deixar ligado |
+| Onde se decide | **No stub dos vetores 11 `#NP`, 12 `#SS` e 13 `#GP`, em assembly, antes de tocar em `gs`:** compara o `RIP` do quadro com o endereço do `iretq` (`lea`/`cmp` relativos ao `rip`, que não usam `gs`). Igual: é o caso do *fixup*. Diferente: segue a entrada normal. O `#SS` do `RSP` não canônico cai no vetor 12, coberto |
 | *Fixup* | Só depois da comparação: `swapgs`; sob KPTI, o CR3 do kernel (o stub e a IDT estão no trampolim, então rodam com o CR3 do usuário); monta o `Fault` de usuário e o processo morre |
-| Teste | `thread_create` com `entry`/`sp` em `0xFFFF_8000_0000_0000`, `0x0000_8000_0000_0000` e `USER_TOP`; usuário com `rsp` não canônico e uma IRQ; usuário que liga `NT = 1` e depois `AC = 1` por `popf` e faz syscall (o quadro sai sanitizado e o processo **não** morre, nem o kernel); e um `iretq` forçado a falhar em `#GP`, `#SS` e `#NP`, com e sem KPTI |
+| Teste | `thread_create` com `entry`/`sp` em `0xFFFF_8000_0000_0000`, `0x0000_8000_0000_0000` e `USER_TOP`; usuário com `rsp` não canônico e uma IRQ (esperado: `#SS(0)` no `iretq`, fixup, processo morto, kernel de pé); usuário que liga `NT = 1` e depois `AC = 1` por `popf` e faz syscall e recebe IRQ (o quadro volta com os bits, o processo **não** morre); `iretq` forçado a falhar em `#GP`, `#SS` e `#NP`, com e sem KPTI |
 
 ### aarch64: SVC
 
@@ -196,13 +207,23 @@ Desenho do RustOS:
 | Pilha na pilha cheia | O `kernel_ventry` do Linux testa o estouro de pilha sem registrador livre (`add sp, sp, x0` e `sub x0, sp, x0`) e, na falha, guarda `x0` em `tpidr_el0`/`tpidrro_el0` e vai para a `overflow_stack` |
 | Contador em EL0 | `arch_counter_set_user_access` liga `ARCH_TIMER_USR_VCT_ACCESS_EN` (acesso de EL0 ao contador virtual) e desliga os acessos ao contador físico, aos timers e ao *event stream* |
 
-**NÃO VERIFICADO** (Arm ARM, DDI 0487, não lido): o layout do `ISS` do SVC (o `imm16`
-estaria em `ISS[15:0]`; o desenho usa sempre `svc #0` e não lê o `imm`); `TCR_EL1.A1`,
-`T0SZ`, `TG0` e os campos de cacheabilidade do `TTBR0`; a largura do ASID
-(`ID_AA64MMFR0_EL1.ASIDBits`); a codificação de `AP[2:1]` para "EL0 pode acessar"; o
-`nG` das folhas de usuário; o número do bit `EL0VCTEN` em `CNTKCTL_EL1` (o Linux o chama
-de `USR_VCT_ACCESS_EN`); o efeito do PAN sobre `LDTR`/`STTR` e o do `UAO`; um `ERET` com
-estado ilegal.
+**Verificado pelo Linux** (`arch/arm64/tools/sysreg`, `pgtable-hwdef.h`, `arm_arch_timer.h`; **não** é a ARM ARM,
+cujas páginas do developer.arm.com não renderizam sem JavaScript):
+
+| Campo | Posição |
+| --- | --- |
+| `TCR_EL1` | `A1` bit 22; `TG0` bits 15:14 (`0b00` = 4 KiB); `EPD0` bit 7; `T0SZ` bits 5:0; `AS` bit 36 (ASID de 16 bits) |
+| `ESR_ELx` | `EC` bits 31:26; `IL` bit 25; `ISS` bits 24:0 |
+| Descritor de página | `AP[1]` bit 6 (`PTE_USER`, acesso de EL0), `AP[2]` bit 7 (`PTE_RDONLY`), `nG` bit 11, `PXN` bit 53, `UXN` bit 54 |
+| `ID_AA64MMFR0_EL1.ASIDBits` | bits 7:4; `0b0000` = 8 bits, `0b0010` = 16 bits |
+| `SCTLR_EL1.WXN` | bit 19 |
+| `CNTKCTL_EL1` | bit 1 = `ARCH_TIMER_USR_VCT_ACCESS_EN` (acesso de EL0 ao contador virtual; o nome `EL0VCTEN` na ARM ARM não foi lido) |
+| Acesso de usuário sob PAN | O Linux usa `ldtr`/`sttr` com `SET_PSTATE_PAN(0)`/`(1)` e `uaccess_ttbr0_enable()` (`asm/uaccess.h`): indício de que o PAN não barra `ldtr`/`sttr`, **não** a regra |
+
+**NÃO VERIFICADO** (nem o Linux o dá): o `imm16` do SVC em `ISS[15:0]` (o desenho usa sempre
+`svc #0` e não o lê); a tabela de `AP[2:1]` por nível de exceção; a regra exata do PAN com
+`LDTR`/`STTR`; a versão em que surgiu o `UAO` (`ID_AA64MMFR2_EL1.UAO`, bits 7:4); se o `WXN`
+torna `XN` também a página gravável de EL0; o nome `EL0VCTEN`; e um `ERET` com estado ilegal.
 
 **Desenho (proposta):**
 
@@ -303,10 +324,20 @@ de 5 000 processos (teste de propriedade com o gerador próprio, como em `core/s
 | Escrita em página anônima ausente | Aloca frame, zera e mapeia (o caso quente; o zeramento é o do [DEBT-0020](../tech-debt/0020-zerar-pagina-pelo-memset-generico.md)) |
 | COW de página já privada (`fork`, `vmo_create_child`) | **Fora da fase 4** (a ABI nativa não tem `fork`; vem com a fase 5) |
 
-O comportamento do Linux (leitura de anônimo mapeia a página zero; escrita copia) está
-no roadmap como "validar em `mm/memory.c`": **NÃO VERIFICADO**. A pesquisa não achou a
-fonte primária. Ler `do_anonymous_page` e `wp_page_copy` antes de codar, e dizer aqui o
-que difere. A página de um VMO físico (initramfs, framebuffer) nunca é zero nem COW.
+**Lido** em `mm/memory.c` do Linux (`master`, 2026-11-17), e o desenho confere com ele:
+
+| Caso | O que o Linux faz | Linha |
+| --- | --- | --- |
+| Leitura de anônimo ausente | `do_anonymous_page`: "Use the zero-page for reads" (sem `FAULT_FLAG_WRITE`, e `!mm_forbids_zeropage`); a entrada é `pte_mkspecial(pfn_pte(zero_pfn(addr), …))`; trava a PTE, reconfere `vmf_pte_changed`, e grava com `set_pte_at` **sem invalidar o TLB** ("it was non-present before") | 5553, 5573–5596 |
+| Escrita em anônimo ausente | "Allocate our own private page" | 5603 |
+| Escrita sobre a página zero | `wp_page_copy`: `is_zero_pfn(pte_pfn(orig_pte))` escolhe o caminho da página zero (`folio_prealloc` com o aviso, **sem** copiar dados); **reconfere a PTE sob o lock** (`pte_same`); `ptep_clear_flush`, `set_pte_at`; solta o mapeamento antigo | 4077, 4098–4106, 4138, 4170–4199 |
+
+Diferenças do RustOS: não há `userfaultfd` nem *rmap*; o frame zero é permanente e não conta
+referência; **a reconferência da entrada sob o lock** (no Linux, `vmf_pte_changed` e
+`pte_same`) entra no tratador, porque outra thread do processo pode ter resolvido a mesma
+falta. Vale também o aviso do Linux: gravar uma entrada que estava ausente não precisa
+invalidar o TLB; trocar a página zero por um frame novo **precisa** (`invlpg`/`tlbi`).
+A página de um VMO físico (initramfs, framebuffer) nunca é zero nem COW.
 
 ### O trampolim e o caminho pronto para KPTI
 
@@ -347,8 +378,8 @@ kernel. Entrada nova depois do boot dessincronizaria as raízes (o Linux resolve
 
 | | x86_64 | aarch64 |
 | --- | --- | --- |
-| Raiz do processo | `CR3` | `TTBR0_EL1` (e `EPD0` volta a 0 com `T0SZ` de 47 bits: **NÃO VERIFICADO** os campos, ler o Arm ARM) |
-| Etiqueta | PCID nos 12 bits baixos do CR3 (`CR4.PCIDE`); **Verificado** que a CPU anuncia `PCID` e o Linux liga `PCIDE` (`cr4_init`); o bit 63 de "não esvaziar" e `INVPCID` **NÃO VERIFICADO** (SDM vol. 3A, "Process-Context Identifiers") | ASID em `TTBR0_EL1[63:48]` quando `TCR_EL1.A1 = 0`; largura de 8 ou 16 bits: **NÃO VERIFICADO** |
+| Raiz do processo | `CR3` | `TTBR0_EL1`; `TCR_EL1.EPD0` (bit 7) volta a 0, `T0SZ` (bits 5:0) fica em 17 para 47 bits, `TG0` (15:14) em `0b00` (**verificado pelo Linux**; ARM ARM por ler) |
+| Etiqueta | PCID nos 12 bits baixos do CR3 (`CR3_PCID_MASK = 0xFFF`, `CR3_NOFLUSH = BIT(63)`: `processor-flags.h` do Linux); o Linux liga `CR4.PCIDE` se a CPU anuncia `PCID` (`cr4_init`). **Verificado** (espelho do SDM, [mov cr3](https://www.felixcloutier.com/x86/mov-1) e [invpcid](https://www.felixcloutier.com/x86/invpcid)): com `PCIDE = 1`, o bit 63 do operando do `mov cr3` decide se o TLB é invalidado; com `PCIDE = 0`, os bits 2:0 e 11:5 do CR3 são ignorados. `INVPCID`: tipo 0 = um endereço de um PCID, 1 = um PCID inteiro, 2 = tudo (global inclusive), 3 = tudo menos o global; **`#GP`** com `PCIDE = 0` e tipo 0 ou 1 com PCID diferente de zero, e com tipo maior que 3 | ASID em `TTBR0_EL1[63:48]` quando `TCR_EL1.A1 = 0`; largura em `ID_AA64MMFR0_EL1.ASIDBits[7:4]` (`0b0000` = 8, `0b0010` = 16) e `TCR_EL1.AS` (bit 36) escolhe 16 bits (**verificado pelo Linux**) |
 | Troca de processo | Escreve CR3 com o PCID do processo; sem esvaziar o TLB | Escreve `TTBR0_EL1` com o ASID; sem `tlbi` |
 | Alocação | Gerador global de ASID/PCID por CPU, com contador de geração: esgotou, esvazia tudo e começa outra geração. Módulo puro em `core/mm/src/asid.rs`, testado no host | idem |
 | Com KPTI | Dois PCIDs por processo (raiz de kernel e raiz de usuário): o custo é metade do espaço de PCID | O ASID já distingue; o `USER_ASID_FLAG` do Linux marca a variante de usuário |
@@ -366,16 +397,17 @@ O [SDD 08](08_roadmap.md) e o [SDD 09](09_seguranca.md) prometem estas mitigaç�
 fase 4, porque mexem na entrada e na saída de syscall. Todas entram na **4e**, com o custo
 medido ([SDD 07](07_desempenho_e_recursos.md)); a regra de cada uma é "liga onde a CPU
 precisa, relata no boot". As fontes de cada uma estão no SDD 09; a pesquisa desta fase
-**não** leu as páginas do Linux sobre elas (`spectre.html`, `mds.html`), então o que
-segue sobre condições e custos é **NÃO VERIFICADO** até a leitura.
+lê as páginas do Linux `spectre.rst` e `mds.rst` e o `nospec.h` (**verificado** abaixo, com os
+ajustes que a leitura obrigou); o que depende de custo ou de condição que elas não dão segue
+**NÃO VERIFICADO**.
 
 | Mitigação | Contra | Onde entra | Custo |
 | --- | --- | --- | --- |
-| Clamp de índice (Spectre v1) | Leitura especulativa fora da tabela | O número da syscall (índice da tabela de despacho) e o índice do handle na tabela do processo: `idx & máscara(idx < len)`, sem desvio. **Sempre ligado**, em toda CPU | Duas ou três instruções por uso; medir. A técnica (o `array_index_nospec` do Linux) **NÃO VERIFICADO** em fonte lida |
-| IBPB | Spectre v2 entre processos | Na troca para outro processo, se a CPU anuncia a instrução e é vulnerável | A medir (o SDD 09 não tem número na fonte) |
-| eIBRS ou retpoline | Spectre v2 no kernel | eIBRS onde a CPU tem; retpoline onde não; o kernel é compilado soft-float, o retpoline exige conferir o alvo de build | A medir |
+| Clamp de índice (Spectre v1) | Leitura especulativa fora da tabela | O número da syscall (índice da tabela de despacho) e o índice do handle na tabela do processo. **Sempre ligado**, em toda CPU | **Verificado** (`include/linux/nospec.h`): `array_index_nospec` calcula uma máscara **sem desvio**, `~(long)(index \| (size - 1UL - index)) >> (BITS_PER_LONG - 1)`, e faz `index & máscara` (índice fora do limite vira 0); uso: `if (index < size) { index = array_index_nospec(index, size); val = array[index]; }`. Custo: **NÃO VERIFICADO**, medir |
+| IBPB | Spectre v2 entre processos | **Condicional, não em toda troca**: o Linux só o emite para tarefa com especulação de desvio indireto restringida (estado `IBPB: conditional`: "Use IBPB on SECCOMP or indirect branch restricted tasks"). No RustOS: na troca **de e para** processo marcado como restrito, se a CPU anuncia a instrução | A medir (o SDD 09 não tem número na fonte) |
+| eIBRS ou retpoline | Spectre v2 no kernel | **eIBRS é o preferido** onde a CPU tem ("should use the feature … instead of retpoline. Enhanced IBRS is more efficient than retpoline": `spectre.rst`); retpoline só onde não há. O kernel é compilado soft-float: o retpoline exige conferir o alvo de build | A medir |
 | STIBP | Spectre v2 entre *hyperthreads* | Só com SMT, e só se a política pedir | A medir |
-| `VERW` na saída para usuário | MDS | Se a CPU é vulnerável e não anuncia `MDS_NO`; o Linux tem `CLEAR_CPU_BUFFERS` antes do `sysretq` (**verificado** no `entry_64.S`) | A medir |
+| Limpeza de buffers na saída para usuário | MDS | `mds.rst`: "The mitigation for MDS clears the affected CPU buffers on return to user space and when entering a guest" (o documento **não nomeia o `VERW`** nessa frase). O `VERW` aparece em `arch/x86/include/asm/nospec-branch.h` ("Macro to execute VERW insns that mitigate transient data sampling") e o Linux tem `CLEAR_CPU_BUFFERS` antes do `sysretq` (**verificado** no `entry_64.S`). Liga se a CPU é vulnerável e não anuncia `MDS_NO` | A medir |
 | SSBD | Spectre v4 | Por processo, sob pedido (política); padrão desligado | A medir |
 | KPTI | Meltdown | [Trampolim](#o-trampolim-e-o-caminho-pronto-para-kpti) | ~100 ciclos por troca de CR3 |
 
@@ -393,8 +425,8 @@ primeiro boot em metal"**, registrada no PR da 4e, com a linha `mitigations:` di
 **Modelo A, decidido** ([SDD 09](09_seguranca.md)): no núcleo, só handles com direitos que
 só diminuem, sem autoridade ambiente; nenhuma API do núcleo recebe uid. O desenho
 segue o Zircon, com as páginas **verificadas** abaixo. O que não foi lido do Zircon
-(valores numéricos de direitos, assinaturas completas, o comportamento de uma ponta que
-morre com mensagens na fila) **não é premissa**.
+(valores numéricos de direitos, assinaturas completas, a profundidade da fila do canal)
+**não é premissa**.
 
 | Fato verificado | Fonte |
 | --- | --- |
@@ -402,7 +434,8 @@ morre com mensagens na fila) **não é premissa**.
 | `zx_handle_replace(handle, rights, out)`: direitos novos devem ser subconjunto (senão `ZX_ERR_INVALID_ARGS`); **"handle is always invalidated"**, em sucesso e em erro; direitos exigidos: **"None"**; erros `BAD_HANDLE`, `INVALID_ARGS` e `NO_MEMORY` | [handle_replace](https://fuchsia.dev/fuchsia-src/reference/syscalls/handle_replace) |
 | `zx_channel_write`: **"All handles are discarded and no longer available to the caller, on success or failure"**; o canal exige `WRITE` e cada handle do array exige `TRANSFER`; handle repetido no array dá `BAD_HANDLE`; a **própria ponta** do canal no array dá `NOT_SUPPORTED`; limites: 65 536 bytes e 64 handles por mensagem | [channel_write](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_write) |
 | `zx_process_create(job, name, …)` devolve o handle do processo e o do VMAR raiz; a thread só roda após `zx_process_start`; exige `ZX_RIGHT_MANAGE_PROCESS` no job | [process_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/process_create) |
-| `zx_channel_create`: dois handles; mensagens de um lado são lidas no outro; transferência de handle com `ZX_RIGHT_TRANSFER`. O comportamento de *peer closed* **NÃO VERIFICADO** na página | [channel_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_create) |
+| `zx_channel_create`: dois handles; mensagens de um lado são lidas no outro; transferência de handle com `ZX_RIGHT_TRANSFER`. **Ponta fechada:** "messages in flight to that endpoint are discarded and any Handles they contained are closed"; leitura de canal vazio com a outra ponta fechada dá `PEER_CLOSED` | [channel_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_create), [conceitos](https://fuchsia.dev/fuchsia-src/concepts/kernel/concepts), [channel_read](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_read) |
+| `zx_process_start(process, thread, entry, stack, arg1, arg2)`: `arg1` é um handle **transferido** ao processo novo (o valor dele entra em `arg1` da thread); **"If zx_process_start() returns an error, arg1 is closed rather than transferred"**; "all other registers are zero upon start" | [process_start](https://fuchsia.dev/fuchsia-src/reference/syscalls/process_start) |
 | seL4: Copy (com direitos), Mint (direitos e badge), Move, Mutate, Delete, Revoke (apaga filhos); Untyped retype: memória vira objeto só por capability | [API do seL4](https://docs.sel4.systems/projects/sel4/api-doc.html) (a definição geral dos direitos Read, Write, Grant, GrantReply não foi lida) |
 
 ### Os objetos da fase
@@ -438,7 +471,7 @@ A destruição é por **contagem de handles**, não pelo último `Arc`.
 
 | Passo | O quê |
 | --- | --- |
-| 1 | Quando a contagem de uma ponta chega a zero, ela **morre**: esvazia a fila **dela** (as mensagens destinadas a ela) e fecha os handles que estão nessas mensagens, em laço com lista de trabalho (sem recursão: fechar um handle pode matar outra ponta, que esvazia outra fila) |
+| 1 | Quando a contagem de uma ponta chega a zero, ela **morre** (o Zircon confirma: ao fechar a ponta, "messages in flight to that endpoint are discarded and any Handles they contained are closed"): esvazia a fila **dela** (as mensagens destinadas a ela) e fecha os handles que estão nessas mensagens, em laço com lista de trabalho (sem recursão: fechar um handle pode matar outra ponta, que esvazia outra fila) |
 | 2 | Levanta `PEER_CLOSED` na outra ponta. As mensagens que já estão na fila da outra seguem legíveis: quem escreve e fecha ainda é lido |
 | 3 | `PEER_CLOSED` depende dos **handles** da outra ponta, não de `Arc` |
 
@@ -482,7 +515,7 @@ para todas as linhas abaixo.
 
 **Regra geral para toda chamada que move handle** (`channel_write`, e `process_create` com
 `bootstrap` e `events`): (1) o handle que **autoriza** a chamada (`ch`, `parent`) é validado
-primeiro, e erro nele **não consome nada**; (2) os handles **movidos** são tratados como um
+primeiro; **erro nele também consome os movidos** (alinhado ao Zircon: `zx_process_start` fecha o `arg1` em **qualquer** erro, e `channel_write` descarta os handles "on success or failure"); só **`ShouldWait`** e a falha ao **ler** o array do usuário (o kernel ainda não sabe quais handles são) não consomem; (2) os handles **movidos** são tratados como um
 array: validar **todos**, depois remover **todos** de uma vez, sob o lock da tabela;
 (3) o mesmo valor duas vezes (`bootstrap == events`, ou repetido no array) é `BadHandle`;
 (4) a partir da remoção, em erro, os removidos são **fechados**; (5) o handle que o kernel
@@ -494,7 +527,7 @@ morreria ali.
 | `handle_close` | Remove o slot. Não pede direito. Se foi o último handle do objeto, `on_zero_handles` roda **depois** de soltar o lock da tabela |
 | `handle_duplicate(h, rights)` | `h` exige `DUPLICATE`; `rights ⊆ h.rights`; insere o handle novo e devolve o valor |
 | `handle_replace(h, rights)` | Remove `h` **sempre** que ele existe, em sucesso e em erro (**verificado** no Zircon: "handle is always invalidated"). Se `rights ⊄ h.rights`: `InvalidArgs`, com o original já invalidado. `h` que não existe: `BadHandle` (nada a invalidar). **Nenhum direito é exigido** (**verificado**: "Rights: None"); em particular, não pede `DUPLICATE` |
-| `process_create(parent, …, bootstrap, events)` | `parent` com `MANAGE_PROCESS` (erro: nada consumido). `bootstrap` (`TRANSFER`) e `events` (`WRITE` e `TRANSFER`) seguem a regra geral. O `bootstrap` vai para a tabela do filho; o `events` fica **no Process**, contado em `handle_count`, e o kernel o fecha depois de escrever o evento final (então o pai vê `PEER_CLOSED` depois do evento) |
+| `process_create(parent, …, bootstrap, events)` | `parent` com `MANAGE_PROCESS` (erro: `bootstrap` e `events` são consumidos, como o `arg1` do Zircon). `bootstrap` (`TRANSFER`) e `events` (`WRITE` e `TRANSFER`) seguem a regra geral. O `bootstrap` vai para a tabela do filho; o `events` fica **no Process**, contado em `handle_count`, e o kernel o fecha depois de escrever o evento final (então o pai vê `PEER_CLOSED` depois do evento) |
 | `channel_write(ch, bytes, handles)` | Abaixo |
 | `channel_read(ch, …)` | Abaixo |
 
@@ -502,7 +535,7 @@ morreria ali.
 [cópia usuário↔kernel](#cópia-usuáriokernel)). A ordem de locks é **tabela, depois canal**,
 nunca o contrário:
 
-1. Sob o lock da tabela, valida `ch`: existe, é canal, tem `WRITE`. Se não: erro **e nenhum handle consumido** (a página do Zircon não distingue esse caso: **NÃO VERIFICADO**; o RustOS poupa quem errou o handle do canal).
+1. Sob o lock da tabela, valida `ch`: existe, é canal, tem `WRITE`. Se não: erro, e os handles do array que existem **são removidos e fechados** (como no Zircon; antes este desenho poupava quem errava o handle do canal, e a divergência não tem fonte que a justifique).
 2. **Sob o lock do canal, antes de tirar qualquer handle da tabela:** a ponta oposta está viva? Se não, `PeerClosed` (a falha **consome** o array, passo 5). Há espaço na fila dela? Se não, **`ShouldWait`: nada é consumido** e nenhum estado muda. Havendo espaço, **reserva o slot** da mensagem.
 3. Para cada handle do array: existe (`BadHandle` se não); não repete no array (`BadHandle`); tem `TRANSFER` (`AccessDenied`); não é a **própria ponta** de `ch`, isto é, nem `ch` nem outro handle da mesma ponta (`NotSupported`). Conferido pela identidade da ponta, não pelo valor do handle.
 4. **Remove da tabela todos os handles do array que existem**, no mesmo passo; sem erro, a mensagem ocupa o slot reservado e `próprios_em_minha_fila` e a [checagem do ciclo](#destruição-de-um-canal) rodam.
@@ -523,9 +556,9 @@ nunca o contrário:
 | Direitos só diminuem | Sequências aleatórias de duplicar, substituir e transferir nunca produzem handle com direito fora do conjunto do handle raiz |
 | **Entrelaçamento** | Cada operação é partida em passos (adquirir o lock, validar, remover, inserir) e o teste embaralha, de modo determinístico, os passos de duas ou três threads do mesmo processo sobre os mesmos handles. Nenhum handle é usado duas vezes, nenhum some sem ser fechado, e a soma dos `handle_count` é igual aos handles em tabela mais os em trânsito. **Sem o lock, o teste tem de falhar** |
 | Ciclo da ponta | O cenário acima termina com as duas pontas mortas e `handle_count` zero, nas duas ordens |
-| Atomicidade do `channel_write` | Handle repetido, a própria ponta, sem `TRANSFER` e `PeerClosed` consomem o array por inteiro; `ch` inválido não consome nada |
+| Atomicidade do `channel_write` | Handle repetido, a própria ponta, sem `TRANSFER` e `PeerClosed` consomem o array por inteiro; `ch` inválido consome o array (os handles que existem saem e fecham) |
 | **`ShouldWait` não consome** | Encher a fila de uma ponta; escrever com um handle: `ShouldWait`, e o handle **segue na tabela**; esperar `WRITABLE`; reescrever: sucesso, e o handle sai da tabela |
-| `process_create` | `bootstrap == events` é `BadHandle` e consome os dois; o `events` entra em `handle_count` (a ponta do pai não vê `PEER_CLOSED` na criação); erro em `parent` não consome |
+| `process_create` | `bootstrap == events` é `BadHandle` e consome os dois; o `events` entra em `handle_count` (a ponta do pai não vê `PEER_CLOSED` na criação); erro em `parent` consome `bootstrap` e `events`, como o `arg1` do `zx_process_start` |
 | `channel_read` | Cópia que falha (ponteiro ruim no meio do buffer) deixa a mensagem na fila e a tabela intacta; duas threads lendo o mesmo canal não perdem nem duplicam mensagem |
 | Ciclo, na escrita | Escrever o handle da ponta oposta pela própria ponta mata a oposta já na escrita |
 | Geração | Nenhum valor de handle reaparece, inclusive depois da aposentadoria do slot |
@@ -608,7 +641,7 @@ O contrato de como um programa **começa**, igual para o `init` e para qualquer 
 | `arg0`, `arg1` | `rdi`, `rsi` (os argumentos de `thread_create`) | `x0`, `x1` |
 | Handle de boot | `process_create` **move** o `bootstrap` para a tabela do filho como o **primeiro handle, de valor `1`**. Quem chama `thread_create` passa `arg0` (o `user/rt` passa `1`); para o `init`, o kernel põe `arg0 = 1` | idem |
 | Demais registradores | Zero | Zero |
-| Pilha | `rsp = sp` de `thread_create`, alinhado a 16 (o alinhamento exato na entrada: **NÃO VERIFICADO** no psABI) | `SP_EL0 = sp`, alinhado a 16 |
+| Pilha | `rsp = sp` de `thread_create`, **alinhado a 16 na entrada**: o psABI diz "guaranteed to be 16-byte aligned at process entry" (**verificado**, [x86-64 psABI](https://github.com/hjl-tools/x86-psABI), `low-level-sys-info.tex`) | `SP_EL0 = sp`, `sp mod 16 = 0` ("The stack must be quad-word aligned", **verificado**, [AAPCS64](https://github.com/ARM-software/abi-aa)) |
 | Conteúdo da pilha | O `init`: o kernel monta `argc = 0`, `argv`, `envp` e o [auxv](#auxv-mínimo). Filho: quem o criou (o `user/rt` do pai) monta o que quiser; o `user/rt` do filho lê o auxv se houver | idem |
 | SIMD | Estado inicial do [SDD 15](15_tarefas_e_preempcao.md): `FCW` `0x037F`, `MXCSR` `0x1F80` | V0–V31, `FPSR`, `FPCR` zerados |
 | TLS | Nenhum: `FS`/`GS` base em zero | `TPIDR_EL0` zero |
@@ -748,7 +781,7 @@ nativo até a fase 5, e o pai só mata o filho pelo canal ou esperando.
 | Item | Valor | Fonte |
 | --- | --- | --- |
 | `e_machine` | `62` (x86_64), `183` (aarch64) | **Verificado**: `include/uapi/linux/elf-em.h` |
-| Classe e ordem | 64 bits, little-endian; valores de `EI_CLASS`/`EI_DATA` | **NÃO VERIFICADO** (a gABI não abriu na pesquisa: HTTP 404); conferir em `<elf.h>` |
+| Classe e ordem | 64 bits, little-endian: `EI_CLASS` (índice 4) = `ELFCLASS64` (2); `EI_DATA` (índice 5) = `ELFDATA2LSB` (1); `EI_VERSION` (6) = `EV_CURRENT` (1); `EI_OSABI` (7) = `ELFOSABI_NONE` (0); `EI_NIDENT` = 16 | **Verificado**: [gABI](https://www.sco.com/developers/gabi/latest/ch4.eheader.html) |
 | Tipo | `ET_EXEC`. `ET_DYN` só com a [decisão 5](18_fase_4_decisoes_pedidas.md#decisão-5--pie-de-usuário-agora-ou-depois) | — |
 | Seções | O kernel **nunca** lê section headers | **Proposta** |
 
@@ -772,7 +805,7 @@ testada no host com ELF sintético e com os casos inválidos (guidelines 09).
 | `p_offset + p_filesz` sem estouro e dentro do arquivo | Proposta |
 | `PT_LOAD` com `p_memsz == 0` **recusado** (não mapeia nada; é erro do linker) | Proposta |
 | `p_vaddr + p_memsz` sem estouro, **e os limites conferidos depois de arredondar à página**: início arredondado para baixo e fim arredondado para cima, ambos dentro de `[USER_MIN, USER_TOP]`, sem estouro no arredondamento | Proposta |
-| `p_vaddr` e `p_offset` congruentes módulo o tamanho da página | Proposta; a regra é do ELF, **NÃO VERIFICADO** na gABI |
+| `p_vaddr ≡ p_offset` **módulo o tamanho da página** (não módulo `p_align`) | **Verificado**: [gABI, ch. 5](https://www.sco.com/developers/gabi/latest/ch5.pheader.html): "loadable process segments must have congruent values for p_vaddr and p_offset, modulo the page size". Sobre `p_align` a gABI diz só que 0 e 1 significam "sem alinhamento" |
 | **Nenhum `PT_LOAD` com W e X** (W^X por segmento) | Proposta; é o que o mapeador já exige |
 | `PT_LOAD` ordenados por `p_vaddr`, sem sobreposição (em granularidade de página) | Proposta |
 | `e_entry` dentro de um `PT_LOAD` executável | Proposta |
@@ -803,11 +836,14 @@ O Linux x86 preenche `AT_HWCAP` com `CPUID.1:EDX` (**verificado**, `elf.h`, pesq
 `fpu-simd.md`); o RustOS não o copia agora. O programa nativo lê `CPUID` e `XGETBV`
 direto ([SIMD de usuário](#simd-de-usuário)).
 
-**Pilha inicial** no formato System V (`argc`, `argv`, `NULL`, `envp`, `NULL`, `auxv`),
-com `rsp` alinhado a 16: **NÃO VERIFICADO**, conferir no psABI de x86-64 e na convenção
-de processo do aarch64 antes de codar. A entrada do programa recebe também o handle do
-canal de boot em `rdi`/`x0` (**Proposta**, no espírito do `zx_process_start`, cuja página
-não foi lida).
+**Pilha inicial.** x86-64, **verificado** no psABI: `rsp` aponta `argc`; acima vêm os ponteiros de
+`argv`, um zero, os de `envp`, um zero, e as entradas do auxv (dois `u64` cada) terminadas por
+uma entrada nula. O desenho monta isso para o `init`. **aarch64:** o AAPCS64 só exige
+`sp mod 16 = 0`; o layout inicial do processo não é dele. O Linux o faz em `fs/binfmt_elf.c`
+(`STACK_ROUND(sp, items)` alinha a 16) e o RustOS usa **a mesma ordem** (`argc`, `argv`,
+`envp`, auxv), mas isso é **o Linux, não uma especificação independente: NÃO VERIFICADO**.
+A entrada do programa recebe também o handle do canal de boot em `rdi`/`x0` (**Proposta**, no
+espírito do `zx_process_start`, que **verificado** transfere um handle como `arg1`).
 
 ### Como o `init` e os outros programas chegam à memória
 
@@ -822,15 +858,44 @@ o kernel garante (W^X, faixas, direitos) vale na `vmar_map`, qualquer que seja o
 
 ### O que muda no linker e no alvo
 
-[SDD 05](05_build_e_execucao.md): os dois alvos são `x86_64-unknown-none` (code model
-`kernel`) e `aarch64-unknown-none-softfloat`, Tier 2, sem `build-std`. Os programas de
-usuário usam os mesmos alvos, com flags diferentes: `-C code-model=small` (x86_64, o do
-`kernel` não serve para endereço baixo: **NÃO VERIFICADO** que o linker aceite, testar na
-4b), `-C relocation-model=static` (PIE só com a [decisão 5](18_fase_4_decisoes_pedidas.md#decisão-5--pie-de-usuário-agora-ou-depois)), linker script próprio
-(`user/link/<isa>.ld`, base `0x40_0000`, um segmento por permissão, `-z max-page-size=0x1000`)
-e `--target-dir` separado. O `.cargo/config.toml` de hoje põe `relocation-model=pie` nos
-dois alvos: o xtask passa as flags de usuário por `CARGO_ENCODED_RUSTFLAGS`, que (**NÃO
-VERIFICADO** na doc do Cargo) substitui as do `config.toml`.
+[SDD 05](05_build_e_execucao.md): os dois alvos são `x86_64-unknown-none` e
+`aarch64-unknown-none-softfloat`, Tier 2, sem `build-std`. Os programas de usuário usam os
+mesmos alvos, com flags diferentes. **Verificado** nesta rodada (fonte do `rustc`, `compiler/rustc_target/src/spec/targets/`):
+
+| Alvo | O que a especificação já define |
+| --- | --- |
+| `x86_64-unknown-none` | `code_model: Some(CodeModel::Kernel)`; `static_position_independent_executables: true`; o `relocation_model` não é definido (padrão `Pic`) |
+| `aarch64-unknown-none-softfloat` | `relocation_model: RelocModel::Static`; sem `code_model` |
+| `CodeModel` | `tiny`, `small`, `kernel`, `large`: **`small` é valor reconhecido** |
+
+**Testado** (`rustc 1.100.0`, 2026-11-17, um `#![no_std] #![no_main]` mínimo com um `static mut` e um
+`static` de leitura, ligado com `rust-lld` num script que põe `.text` em `0x40_0000` e uma página
+por permissão, `-z max-page-size=0x1000`):
+
+| Alvo e flags | Resultado |
+| --- | --- |
+| x86_64, `-C code-model=small -C relocation-model=static` | Compila e liga: `ET_EXEC`, `EM_X86_64`, entrada `0x40_0000`, `PT_LOAD` em `0x40_0000` (`R E`) e `0x40_1000` (`RW`), acessos por `rip` |
+| x86_64, `-C code-model=kernel` (o padrão do alvo), mesmas demais flags | **Também liga e gera o mesmo código** para esse programa mínimo, porque o endereço baixo (< 2 GiB) cabe no modelo. O teste **não distingue** os dois modelos: em programa maior os endereços ainda cabem, então o `small` é a escolha correta, não uma necessidade provada |
+| x86_64, `-C relocation-model=pic` ou `pie`, `code-model=small` | Liga, mas o executável cresce (13 344 contra 8 848 bytes): tem GOT; é o caminho da decisão 5 |
+| aarch64, `-C code-model=small -C relocation-model=static` | Compila e liga; `adrp`/`ldr`, entrada `0x40_0000`. Sem a flag, o padrão do alvo já é `static` |
+
+Precedência de `rustflags` (**verificado** na doc do Cargo, `config.md`, **e testado** com
+`cargo build -v`): são **quatro fontes mutuamente exclusivas**, e vale a primeira que existir:
+`CARGO_ENCODED_RUSTFLAGS`, `RUSTFLAGS`, `target.<triple>.rustflags` (e `target.<cfg>.rustflags`),
+`build.rustflags`. **Não se somam.** No teste, com o `config.toml` pondo `relocation-model=pie` e
+`-C link-arg=-nostartfiles` no alvo, `RUSTFLAGS` e `CARGO_ENCODED_RUSTFLAGS` fizeram o
+`rustc` receber **só** as flags do ambiente (zero ocorrências de `nostartfiles`); sem eles, o
+`config.toml` valeu inteiro.
+
+**O que muda no plano do xtask.** O `.cargo/config.toml` de hoje põe `relocation-model=pie` nos
+dois alvos, para o kernel. O build de usuário passa **a lista inteira** de flags por
+`CARGO_ENCODED_RUSTFLAGS` (separador `\x1f`): `-C code-model=small` (x86_64), `-C relocation-model=static`,
+o linker script de usuário, `-z max-page-size=0x1000`, e qualquer flag que o `config.toml` passe a ter e
+que o usuário também queira, **repetida à mão**, porque a do `config.toml` desaparece. O build do kernel
+não muda. A consequência prática: o xtask não pode confiar em `.cargo/config.toml` para o
+usuário, e um teste do xtask confere a linha de comando do `rustc` (o `-v`) contra a lista esperada.
+Os programas ainda precisam de um `--target-dir` separado (`target/user/<isa>`), senão o cache
+do kernel é invalidado a cada troca de flags.
 
 ## Init
 
@@ -856,16 +921,22 @@ nome e a presença do `TRAILER!!!`, e usa o alinhamento da gramática acima. Ace
 arquivo regular (`c_mode & S_IFMT == S_IFREG`) com `c_nlink == 1`; rejeita diretório que
 tenha dado, link simbólico, dispositivo e hard link. O `init` é o arquivo de nome `init`.
 
-**Limine** (lido na cópia local do `PROTOCOL.md` v8.x; o projeto usa a revisão base 6 e
-o Limine 12.10.0, então **conferir contra o `limine-protocol` da versão em uso**):
+**Limine.** O protocolo **saiu do repositório do bootloader**: em `v12.10.0` do
+[Limine](https://github.com/Limine-Bootloader/Limine) só há `CONFIG.md`; o `PROTOCOL.md` está em
+[`limine-protocol`](https://github.com/Limine-Bootloader/limine-protocol), ramo `trunk`, **sem
+etiqueta que o prenda à 12.10.0** (que o `trunk` corresponda à 12.10.0: **NÃO VERIFICADO**).
+O que mudou desde a v8.x, lido nos dois:
 
-| Item | Valor |
-| --- | --- |
-| Pedido | `LIMINE_MODULE_REQUEST`, id `{ COMMON_MAGIC, 0x3e7e279702be32af, 0xca1c4f3bd1280cee }` |
-| Resposta | `module_count` e `modules`: ponteiros para `struct limine_file` |
-| `limine_file` | `revision`, `address`, `size`, `path`, `cmdline`, `media_type`, e identificadores de partição |
-| Memória | O módulo carregado é marcado `Executable/Modules`, não `Usable` |
-| Chave do módulo no `limine.conf` | **NÃO VERIFICADO** (a `CONFIG.md` não foi lida) |
+| Item | v8.x | `limine-protocol` (`trunk`) |
+| --- | --- | --- |
+| Pedido | `LIMINE_MODULE_REQUEST` | **`LIMINE_MODULE_REQUEST_ID`**, id `{ COMMON_MAGIC, 0x3e7e279702be32af, 0xca1c4f3bd1280cee }` (o mesmo) |
+| Módulo interno | `{ path, cmdline, flags }` | `{ path, string, flags }` (`cmdline` virou `string`) |
+| `limine_file` | `path`, `cmdline`, …, `tftp_ip` | `path`, **`string`**, …, **`tftp_ipv4[4]`** |
+| `INTERNAL_MODULE_COMPRESSED` | "Deprecated … may panic" | honrado se a revisão da resposta for 2 ou maior |
+| Resposta | `module_count` e `modules` (ponteiros para `limine_file`) | idem; o módulo carregado é marcado `Executable/Modules`, não `Usable` |
+
+**`limine.conf`** (**verificado**, `CONFIG.md` da `v12.10.0`): `module_path` ("the path to a module
+(such as initramfs)", repetível) e `module_cmdline` (**alias** de `module_string`, o nome canônico).
 
 Como o módulo cai em `KernelAndModules`, ele **fica fora do mapa direto** ([SDD 13](13_memoria_virtual.md)). O desenho:
 
@@ -942,7 +1013,7 @@ O adaptador Linux da fase 5 traduz o `Fault` em sinal.
 | `simd` | `true` para **toda** thread de usuário. É a primeira das duas saídas da [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md): o ABI do x86_64 exige SSE, e o salvamento eager é a escolha já feita (LazyFP; [SDD 09](09_seguranca.md)). A saída por trap (`CR0.TS`/#NM) fica descartada, e o #NM só voltaria com medida que a justifique |
 | Custo por thread | 832 bytes de área no x86_64 da QEMU e 528 no aarch64 ([SDD 15](15_tarefas_e_preempcao.md)); um `XSAVEOPT`/`XRSTOR` por troca (medido no [SDD 07](07_desempenho_e_recursos.md)) |
 | Estado inicial | O de [SDD 15](15_tarefas_e_preempcao.md): `FCW` `0x037F`, `MXCSR` `0x1F80`, `XSTATE_BV` zero; aarch64 com V0–V31, `FPSR` e `FPCR` zerados |
-| `CPUID` em anel 3 | Não é trapeado por padrão (pesquisa `fpu-simd.md`; SDM não lido) |
+| `CPUID` em anel 3 | **Executa em qualquer anel** (**verificado**, espelho do SDM, [cpuid](https://www.felixcloutier.com/x86/cpuid): "can be executed at any privilege level"; a lista de exceções não tem `#GP` por CPL). O Linux sabe **trapear** o `CPUID` de usuário pelo *CPUID faulting* (`MSR_MISC_FEATURES_ENABLES`, `0x140`, bit 0; `ARCH_SET_CPUID` em `arch_prctl`: **verificado no código do Linux**); o **texto do SDM** sobre isso **NÃO VERIFICADO**. O RustOS não liga o *faulting* na fase 4 |
 | `XGETBV` em anel 3 | Funciona e devolve o `XCR0` que o kernel ligou (x87, SSE, AVX, AVX-512 se a CPU tem, PKRU); a doc do kernel diz para "consult CPUID and use XGETBV to evaluate which features have been enabled by the kernel" (pesquisa `fpu-simd.md`) |
 | `AT_HWCAP` | 0 na fase 4 (decisão futura da fase 5) |
 | AMX | **Fora** do `XCR0` ([SDD 08](08_roadmap.md)); instrução de AMX dá `#UD` e o processo morre. O pedido de AMX só é preciso com sinais (sigframe), que a fase 4 não tem |
@@ -1008,7 +1079,7 @@ Sem crate novo (decisão do agente, [`AGENTS.md`](../../AGENTS.md)):
 
 | Passo | Comando (proposta) | O quê |
 | --- | --- | --- |
-| 1 | `cargo xtask user --arch A` | Compila cada crate de `user/` com as flags de usuário e `--target-dir target/user/<isa>` |
+| 1 | `cargo xtask user --arch A` | Compila cada crate de `user/` com a lista inteira de flags de usuário em `CARGO_ENCODED_RUSTFLAGS` (as do `config.toml` **não** somam: [linker e alvo](#o-que-muda-no-linker-e-no-alvo)) e `--target-dir target/user/<isa>` |
 | 2 | `cargo xtask initramfs --arch A` | Escreve `target/initramfs/<isa>.cpio` em `newc`, com um escritor em Rust puro dentro do `xtask` (cerca de 60 linhas; o `xtask` não depende de crate do workspace, regra 6, então não reaproveita o `core/cpio`) e testado contra bytes de ouro; sem o binário `cpio` do host |
 | 3 | `cargo xtask image` | Copia o cpio para `boot/initramfs.cpio` na ESP e acrescenta o módulo ao `limine.conf` |
 | 4 | `make smoke` | Exige as linhas novas ([abaixo](#linhas-que-o-smoke-passa-a-exigir)) |
@@ -1101,7 +1172,7 @@ do dono. Cada uma vira texto no SDD e teste no mesmo PR.
 | L5 | `fault_kind` contra a tabela do `ProcessEvent` | Já concordam (`breakpoint` incluído); manter um teste que compare as duas |
 | L6 | O `check-layers` não expressa "o `user/` depende só de `elf` e `cpio` entre os crates de `core/`", nem a isenção de `unsafe` só do `user/rt` | Lista por nome no `xtask`, com teste vermelho antes do verde (já pedido para a 4a, ver [guidelines 03](../guidelines/03_camadas_e_dependencias.md)) |
 
-Com o handle de 64 bits ([decisão 2](18_fase_4_decisoes_pedidas.md#decisão-2--abi-nativa-mínima)),
+Com o handle de 64 bits ([decisão 2](18_fase_4_decisoes_pedidas.md#decisão-2--abi-nativa-lista-números-nomes-e-contrato)),
 o texto deste capítulo ainda está em 32 bits. O PR da 4c reescreve os pontos que o
 SDD 18 lista.
 

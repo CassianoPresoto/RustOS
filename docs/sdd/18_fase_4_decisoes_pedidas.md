@@ -197,7 +197,7 @@ fora da lista acima por não serem dos seis casos; cada uma diz o que a faria su
 | --- | --- | --- |
 | **KPTI** | Só em CPU vulnerável (detecção: `IA32_ARCH_CAPABILITIES.RDCL_NO`, bit 0, **verificado** em `msr-index.h`; mais uma lista de CPUs imunes, **NÃO VERIFICADO**), com chave de override `kpti=on\|off\|auto` na linha de comando do Limine (para medir as duas configurações). Sem informação, vulnerável. O [SDD 08](08_roadmap.md) e o [SDD 09](09_seguranca.md) já dizem "só em CPU vulnerável" | Se o dono quiser sempre ligado, a 4e perde a detecção e o override; o resto não muda |
 | **Framebuffer e entrada** | Ficam na fase 5, onde o [SDD 08](08_roadmap.md#decisões-futuras-casos-do-agentsmd) já os lista. O desenho deixa o caminho (VMO físico com política de cache no `vmar_map`; teclado por canal) | A interface é caso 6 quando chegar; nada a decidir na fase 4 |
-| **Alvo de compilação dos programas** | Os mesmos alvos `*-unknown-none`, com flags próprias (`code-model=small`, `relocation-model=static`), linker script próprio e `--target-dir` separado ([SDD 05](05_build_e_execucao.md): sem nightly nem `build-std`) | Se o teste da 4b mostrar que o `code-model` não se sobrepõe, a saída é alvo JSON, que exige `build-std`: **volta ao dono** (ferramenta de build nova, caso 2) |
+| **Alvo de compilação dos programas** | Os mesmos alvos `*-unknown-none`, com `-C code-model=small` (x86_64) e `-C relocation-model=static`, linker script próprio e `--target-dir` separado ([SDD 05](05_build_e_execucao.md): sem nightly nem `build-std`). **Testado** com `rustc 1.100.0` nos dois alvos: compila e liga em `0x40_0000` ([SDD 17](17_processos_isolamento_e_syscalls.md#o-que-muda-no-linker-e-no-alvo)). **Mudança de plano:** as quatro fontes de `rustflags` do Cargo são **exclusivas**, então o xtask passa a lista inteira por `CARGO_ENCODED_RUSTFLAGS` e as flags do `.cargo/config.toml` (o `pie` do kernel) não somam | O risco que sobra é `code-model` em programa maior (o teste mínimo não distingue `small` de `kernel`). Se um alvo JSON virar necessário, exige `build-std`: **volta ao dono** (ferramenta de build nova, caso 2) |
 | **`arch/<isa>-user`** | Crates de adaptador do lado do usuário (`asm!` de `syscall`/`svc`, de `_start`, de `xmm0`/`v0` do teste). Cabem nas regras 4 e 8 do guidelines 03 (adaptador, crate numa pasta existente) | — |
 | **ABI no `hal`** | Módulo `abi` em `core/hal` (a "porta de entrada" do [SDD 02](02_arquitetura.md)): números, `Status`, direitos, mensagens, `USER_TOP`. Porta nova no `hal` é do agente | Um crate `core/abi` é a opção A' da decisão 7 |
 
@@ -209,35 +209,38 @@ tocam o guidelines. O `make layers-check` só aprende a camada `User` no PR da 4
 
 ## Fontes lidas e o que ficou por ler
 
+Marcas: [SDD 17](17_processos_isolamento_e_syscalls.md#como-ler-as-marcas). O relatório de
+conferência desta rodada (URL e trecho literal de cada item) está na pesquisa
+`phase4-verify.md`.
+
 | Fonte | Usada para | Estado |
 | --- | --- | --- |
-| Intel SDM via [felixcloutier](https://www.felixcloutier.com/x86/sysret) (`SYSCALL`, `SYSRET`) | Registradores; `CS` = `STAR[63:48]`+16, `SS` = +8, RPL forçado a 3; `#GP` por `RCX` não canônico | Lida (secundária) |
+| Intel SDM via [felixcloutier](https://www.felixcloutier.com/x86/sysret): `syscall`, `sysret`, [`iret`](https://www.felixcloutier.com/x86/iret:iretd:iretq), [`mov cr3`](https://www.felixcloutier.com/x86/mov-1), [`invpcid`](https://www.felixcloutier.com/x86/invpcid), [`cpuid`](https://www.felixcloutier.com/x86/cpuid) | Registradores; `STAR`; `IRETQ` (`NT` atual dá `#GP`, `RSP` não canônico dá `#SS`, bits restaurados); PCID e `INVPCID`; `CPUID` em qualquer anel | Lidas (espelho; o PDF do SDM não baixou) |
 | [Xen XSA-7](https://xenbits.xen.org/xsa/advisory-7.html) | CVE-2012-0217 | Lida |
-| [Linux `entry_64.S`](https://github.com/torvalds/linux/blob/master/arch/x86/entry/entry_64.S), [`cpu/common.c`](https://github.com/torvalds/linux/blob/master/arch/x86/kernel/cpu/common.c), [`idt.c`](https://github.com/torvalds/linux/blob/master/arch/x86/kernel/idt.c) | Entrada, `FMASK`, `STAR`, `PCIDE`, Meltdown, `#DB` com IST, `fixup_bad_iret` | Lidos (cópia local da pesquisa) |
-| [Linux `syscall_64.c`](https://github.com/torvalds/linux/blob/master/arch/x86/entry/syscall_64.c) | A condição de `SYSRET` contra `IRET` | Lida nesta rodada |
-| [Linux `msr-index.h`](https://github.com/torvalds/linux/blob/master/arch/x86/include/asm/msr-index.h) | Números dos MSRs; `ARCH_CAP_RDCL_NO` = `BIT(0)` | Lida nesta rodada |
-| [Linux `entry.S` (arm64)](https://github.com/torvalds/linux/blob/master/arch/arm64/kernel/entry.S), [`esr.h`](https://sources.debian.org/src/linux/6.12.69-1/arch/arm64/include/asm/esr.h), [`arch_timer.c`](https://github.com/torvalds/linux/blob/master/drivers/clocksource/arm_arch_timer.c) | Vetores, `sp_el0`, KPTI por `TTBR1`, `EC`, acesso de EL0 ao contador | Lidos |
-| [syscall(2)](https://man7.org/linux/man-pages/man2/syscall.2.html), [`auxvec.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/auxvec.h), [`elf-em.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/elf-em.h), `elf.h` das duas ISAs | Convenção de registradores; `AT_*`, `e_machine` e `R_*_RELATIVE` | Lidos nesta rodada |
-| [inode(7)](https://man7.org/linux/man-pages/man7/inode.7.html) | `S_IFMT` e os tipos de arquivo | Lida nesta rodada |
+| Linux x86: [`entry_64.S`](https://github.com/torvalds/linux/blob/master/arch/x86/entry/entry_64.S), [`cpu/common.c`](https://github.com/torvalds/linux/blob/master/arch/x86/kernel/cpu/common.c), [`idt.c`](https://github.com/torvalds/linux/blob/master/arch/x86/kernel/idt.c), [`syscall_64.c`](https://github.com/torvalds/linux/blob/master/arch/x86/entry/syscall_64.c), [`msr-index.h`](https://github.com/torvalds/linux/blob/master/arch/x86/include/asm/msr-index.h), `processor-flags.h`, `process.c`, `nospec.h`, `nospec-branch.h` | Entrada, `FMASK`, `STAR`, `SYSRET` contra `IRET`, MSRs, `PCIDE`, Meltdown, `#DB` com IST, `fixup_bad_iret`, *CPUID faulting*, `array_index_nospec` | Lidos |
+| Linux arm64: [`entry.S`](https://github.com/torvalds/linux/blob/master/arch/arm64/kernel/entry.S), [`esr.h`](https://sources.debian.org/src/linux/6.12.69-1/arch/arm64/include/asm/esr.h), `arm_arch_timer.[ch]`, `tools/sysreg`, `pgtable-hwdef.h`, `uaccess.h` | Vetores, `sp_el0`, KPTI por `TTBR1`, `EC`, campos de `TCR_EL1`, `SCTLR_EL1`, `ID_AA64MMFR*`, bits de PTE, `CNTKCTL` | Lidos (**é o Linux, não a ARM ARM**) |
+| Linux [`mm/memory.c`](https://github.com/torvalds/linux/blob/master/mm/memory.c) | Página zero na leitura, COW (`do_anonymous_page`, `wp_page_copy`) | Lido nesta rodada |
+| Linux `spectre.rst`, `mds.rst` ([hw-vuln](https://github.com/torvalds/linux/tree/master/Documentation/admin-guide/hw-vuln)) | IBPB condicional, eIBRS preferido a retpoline, limpeza de buffers no MDS | Lidos nesta rodada |
+| [syscall(2)](https://man7.org/linux/man-pages/man2/syscall.2.html), [`auxvec.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/auxvec.h), [`elf-em.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/elf-em.h), `elf.h` das duas ISAs, [inode(7)](https://man7.org/linux/man-pages/man7/inode.7.html) | Convenção; `AT_*`, `e_machine`, `R_*_RELATIVE`; `S_IFMT` | Lidos |
+| [gABI](https://www.sco.com/developers/gabi/latest/ch5.pheader.html) (`ch4`, `ch5`) | `EI_*`, congruência de `p_vaddr` e `p_offset` **módulo o tamanho da página** | Lida nesta rodada |
+| [x86-64 psABI](https://github.com/hjl-tools/x86-psABI), [AAPCS64](https://github.com/ARM-software/abi-aa) | `rsp` alinhado a 16 na entrada, layout de `argc`/`argv`/`envp`/auxv; `sp mod 16 = 0` | Lidos |
+| Limine: `CONFIG.md` da `v12.10.0` e [`limine-protocol`](https://github.com/Limine-Bootloader/limine-protocol) (`trunk`) | `module_path`, `module_cmdline`; `LIMINE_MODULE_REQUEST_ID`, `string`, `tftp_ipv4` | Lidos; o `trunk` **não é preso** à 12.10.0 |
+| Cargo `config.md`, fonte do `rustc` (`targets/`, `spec/mod.rs`) | Quatro fontes exclusivas de `rustflags`; `code_model` e `relocation_model` dos alvos | Lidos **e testados** com `rustc 1.100.0` e `cargo build -v` |
 | [Linux PTI](https://docs.kernel.org/arch/x86/pti.html), [entry_64](https://docs.kernel.org/arch/x86/entry_64.html), [x86_64 mm](https://docs.kernel.org/arch/x86/x86_64/mm.html), [arm64 memory](https://docs.kernel.org/arch/arm64/memory.html) | Trampolim, `swapgs`, layout | Lidos |
-| Zircon: [rights](https://fuchsia.dev/fuchsia-src/concepts/kernel/rights), [handle_replace](https://fuchsia.dev/fuchsia-src/reference/syscalls/handle_replace), [channel_write](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_write), [process_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/process_create), [channel_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_create) | Direitos, atomicidade do handle, limites do canal | Lidas |
+| Zircon: [rights](https://fuchsia.dev/fuchsia-src/concepts/kernel/rights), [handle_replace](https://fuchsia.dev/fuchsia-src/reference/syscalls/handle_replace), [channel_write](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_write), [channel_read](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_read), [process_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/process_create), [process_start](https://fuchsia.dev/fuchsia-src/reference/syscalls/process_start), [channel_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_create), [conceitos](https://fuchsia.dev/fuchsia-src/concepts/kernel/concepts) | Direitos, atomicidade, descarte na ponta fechada, `arg1` fechado em erro, limites do canal | Lidas |
 | [API do seL4](https://docs.sel4.systems/projects/sel4/api-doc.html), [Redox, schemes](https://doc.redox-os.org/book/ch05-06-scheme-operation.html) | Contraste | Lidas (direitos do seL4 não; o namespace do Redox está em mudança) |
-| [cpio `newc`](https://docs.kernel.org/driver-api/early-userspace/buffer-format.html) | Gramática, alinhamento, `c_mode`, `c_namesize`, hard link, trailer | Lida (reconferida nesta rodada) |
-| `PROTOCOL.md` v8.x do Limine (cópia local) | Pedido de módulo, `limine_file` | Lida; **a versão em uso (12.10.0) não foi conferida** |
+| [cpio `newc`](https://docs.kernel.org/driver-api/early-userspace/buffer-format.html) | Gramática, `c_mode`, `c_namesize`, hard link, trailer | Lida |
 | [mmap(2)](https://man7.org/linux/man-pages/man2/mmap.2.html), [signal(7)](https://man7.org/linux/man-pages/man7/signal.7.html), [getauxval(3)](https://man7.org/linux/man-pages/man3/getauxval.3.html), [binfmt_elf.c](https://github.com/torvalds/linux/blob/master/fs/binfmt_elf.c), [Hansen, lkml](https://lkml.iu.edu/1712.0/03977.html) | Guarda de pilha, `MAP_FIXED_NOREPLACE`, sinais, auxv, validação de ELF, custo de TLB | Lidos |
 
-**Por ler antes de codar** (cada item é pré-requisito da fatia que o usa):
+**Por ler antes de codar** (só o que sobrou; cada item é pré-requisito da fatia que o usa):
 
 | Item | Fatia |
 | --- | --- |
-| Intel SDM: `IRETQ` com `NT = 1` (inferência: `#GP`) e com `RSP` não canônico (inferência: `#SS`/`#GP`), e os bits de `RFLAGS` que o `IRETQ` recusa | 4a |
-| Arm ARM: `TCR_EL1` (`A1`, `T0SZ`, `TG0`, `EPD0`), `ISS` do SVC, `AP[2:1]`, `nG`, ASID, PAN com `LDTR`/`STTR`, `UAO`, `WXN` sobre EL0, bit de `CNTKCTL_EL1.EL0VCTEN`, `ERET` ilegal | 4a, 4e |
-| Intel SDM: PCID (`CR3` bit 63, `INVPCID`), `IRET` com `RSP` não canônico, `CPUID` em anel 3 | 4a, 4e |
-| Linux `mm/memory.c` (`do_anonymous_page`, `wp_page_copy`) | 4c |
-| psABI x86-64 e aarch64 (pilha inicial, alinhamento); gABI (`EI_*`, congruência de `p_vaddr`/`p_offset`) | 4b |
-| Limine `CONFIG.md` (chave do módulo) e a revisão do `PROTOCOL.md` em uso | 4b |
-| Doc do Cargo: precedência de `CARGO_ENCODED_RUSTFLAGS` contra `target.<triple>.rustflags`; teste real do `-C code-model=small` | 4b |
-| Zircon: `zx_process_start`; *peer closed* e o descarte de handles na morte da ponta | 4c |
-| Linux: `spectre.html`, `mds.html` e a técnica de limitar índice de *array* (Spectre v1) | 4e |
+| **ARM ARM** (as páginas do developer.arm.com não renderizam sem JavaScript; os campos de registrador acima vêm do Linux): o `imm16` do SVC em `ISS[15:0]`; a tabela de `AP[2:1]` por nível de exceção; a regra do PAN com `LDTR`/`STTR`; o efeito do `WXN` sobre EL0; um `ERET` com estado ilegal; a versão e o efeito do `UAO`; o nome `EL0VCTEN` | 4a, 4e |
+| **Intel SDM** em PDF (só o espelho foi lido): o texto sobre *CPUID faulting* (`MSR` `0x140`); se a entrada de exceção limpa `NT` (o `IRETQ` do kernel com `NT = 1` dá `#GP`) | 4a |
+| Layout inicial da pilha do processo no aarch64, em fonte que não seja o `binfmt_elf.c` do Linux | 4b |
+| Limine: se o `trunk` de `limine-protocol` é o da 12.10.0 (conferir a revisão do pedido de módulo e da resposta no binário em uso) | 4b |
+| `-C code-model=small` com um programa de usuário **maior** que o mínimo (o teste não distingue `small` de `kernel`) | 4b |
+| Custo de `array_index_nospec`, IBPB, eIBRS, limpeza de buffers e KPTI: medir; STIBP e SSBD: ler as páginas | 4e |
 
 Levantamento de novembro de 2026.
