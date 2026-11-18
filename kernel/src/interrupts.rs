@@ -137,9 +137,11 @@ pub fn read_input_blocking() -> u8 {
             cpu.restore_interrupts(were_enabled);
             return byte;
         }
+        // Desenha sob a mesma máscara do sono: a tecla de rolagem não traz byte,
+        // e um flush fora daqui perderia a IRQ que chegasse antes de dormir.
+        console::flush();
         task::wait_for_input();
         cpu.restore_interrupts(were_enabled);
-        console::flush();
     }
 }
 

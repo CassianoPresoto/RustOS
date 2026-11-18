@@ -112,8 +112,10 @@ programa não as vê; qualquer outra tecla volta à tela viva antes de virar byt
 (`encode_key`). `Screen::key_event` só chama `press` e deixa a visão suja.
 
 Quem desenha é o `console::flush` do laço do shell, fora da IRQ: a IRQ do teclado
-acorda a tarefa (`notify_input`), e `read_input_blocking` chama `flush` ao acordar,
-mesmo sem byte. O `flush` segura o lock da tela com IRQ mascarada, como em toda
+acorda a tarefa (`notify_input`), e `read_input_blocking` chama `flush` antes de
+cada sono, já com a IRQ mascarada, mesmo sem byte. Fora da máscara, uma tecla de
+rolagem que chegasse entre o `flush` e o sono não acordaria ninguém (o
+`INPUT_WAITER` já foi consumido) e a visão ficaria sem desenho. O `flush` segura o lock da tela com IRQ mascarada, como em toda
 saída; o pior caso medido está no [SDD 07](07_desempenho_e_recursos.md)
 ([DEBT-0051](../tech-debt/0051-redesenho-da-tela-com-irq-mascarada.md)).
 
