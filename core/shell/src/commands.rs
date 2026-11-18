@@ -410,6 +410,9 @@ const ASCII_SET: &str = "\x1b(B";
 
 fn alt(ctx: &mut Ctx<'_>) -> fmt::Result {
     let out = &mut *ctx.out;
+    if !ctx.host.has_alternate_screen() {
+        return out.write_str("alt: this terminal has no alternate screen\r\n");
+    }
     match ctx.args {
         ["off"] => out.write_str(ALT_OFF),
         [] => {
@@ -875,6 +878,17 @@ mod tests {
         assert!(on.contains("alt off"));
         assert_eq!(run("alt", &["off"], &FakeHost::new()), "\x1b[?1049l");
         assert!(run("alt", &["x"], &FakeHost::new()).contains("usage"));
+    }
+
+    #[test]
+    fn alt_warns_instead_of_switching_when_there_is_no_alternate_screen() {
+        let mut host = FakeHost::new();
+        host.alternate = false;
+        for args in [&[][..], &["off"]] {
+            let text = run("alt", args, &host);
+            assert!(text.contains("no alternate screen"), "{text}");
+            assert!(!text.contains("\x1b[?1049"), "{text}");
+        }
     }
 
     #[test]
