@@ -72,9 +72,9 @@ rápido mexe só na faixa pedida ([SDD 13](13_memoria_virtual.md), "Zerar").
 
 ## Andar 3c — modo normal (`make smoke-fast`)
 
-`cargo xtask smoke-fast` sobe a mesma QEMU sem linha de comando. Exige o `boot ok`, a `boot time: kernel N ms to prompt`, as linhas que os dois modos têm (`protections:`, `w^x: ok`, `reclaimed:`, `kaslr: on`, `cpus: N online`, `frame self-test: ok`, `exception self-test: ok`) e que as do modo de teste (`task self-test:`, `switch:`) **não** apareçam: um modo normal que volta a rodar o que o de teste roda é regressão de tempo. Imprime o tempo do kernel até o prompt (X ms) e o de parede. Não é gate de tempo: o TCG varia, e o número vai no PR. Entra no `make pr` e no CI.
+`cargo xtask smoke-fast` sobe a mesma QEMU sem linha de comando. Exige o `boot ok`, a `boot time: kernel N ms to prompt`, as linhas que os dois modos têm (`protections:`, `w^x: ok`, `reclaimed:`, `kaslr: on`, `cpus: N online`, `frame self-test: ok`, `exception self-test: ok`) e que nenhuma linha do modo de teste apareça (a lista é a do modo de teste menos a do normal, mais `task`, `smp` e `wake self-test:`): um modo normal que volta a rodar o que o de teste roda é regressão de tempo. Imprime o tempo do kernel até o prompt (X ms) e o de parede, e reprova se o kernel passar de um teto folgado (100 ms com TCG, 20 ms com HVF ou KVM; o boot normal leva 2 a 30 ms). Entra no `make pr` e no CI.
 
-O que o modo normal deixa de provar (heap, timer, preempção, SIMD por tarefa, migração) só o `make smoke` prova; PR que mexe em `core/sched`, `core/mm`, `kernel/src/task.rs`, `heap.rs` ou no timer roda os dois.
+O que o modo normal deixa de provar (heap, timer, preempção, SIMD por tarefa, migração) só o `make smoke` prova.
 
 ## Andar 3a — pânico (`make smoke-panic`)
 

@@ -58,10 +58,15 @@ pub struct Reading {
 pub struct Calibration {
     pub tsc_hz: u64,
     pub apic_hz: u64,
+    /// Incerteza da medida em partes por milhão: metade do período de uma consulta ao PIT, que
+    /// é quanto a transição pode ter escapado das leituras, sobre o intervalo medido.
+    pub error_ppm: u64,
 }
 
-/// Espera `count` ticks do PIT lendo os contadores nas pontas. `None` se o PIT
-/// não terminar em `max_polls` consultas (sem PIT, ou clock parado).
+/// Espera `count` ticks do PIT lendo os contadores a cada consulta. `None` se o PIT não terminar
+/// em `max_polls` consultas (sem PIT, ou clock parado). O fim é a leitura da consulta que viu a
+/// transição, recuada meia consulta: a transição caiu entre ela e a anterior, e o erro fica em
+/// `±período/2` em vez de `+período` (a latência da porta, de uns 14 µs no TCG).
 pub fn measure<B: RegisterBus>(
     pit: &Pit<B>,
     count: u16,
@@ -70,6 +75,7 @@ pub fn measure<B: RegisterBus>(
 ) -> Option<Calibration> {
     pit.arm(count);
     let start = read();
+    let mut previous = start;
     let mut polls = 0;
     while !pit.expired() {
         polls += 1;
@@ -77,14 +83,48 @@ pub fn measure<B: RegisterBus>(
             pit.disarm();
             return None;
         }
+        previous = read();
     }
-    let end = read();
+    let seen = read();
     pit.disarm();
-    let tsc_delta = end.tsc.checked_sub(start.tsc)?;
-    let apic_delta = end.apic_ticks.checked_sub(start.apic_ticks)?;
+    let tsc_period = seen.tsc.checked_sub(previous.tsc)?;
+    let apic_period = seen.apic_ticks.checked_sub(previous.apic_ticks)?;
+    let tsc_delta = (seen.tsc - tsc_period / 2).checked_sub(start.tsc)?;
+    let apic_delta = (seen.apic_ticks - apic_period / 2).checked_sub(start.apic_ticks)?;
+    let error_ppm = if tsc_delta == 0 {
+        u64::MAX
+    } else {
+        u64::try_from(u128::from(tsc_period / 2) * 1_000_000 / u128::from(tsc_delta)).ok()?
+    };
     Some(Calibration {
         tsc_hz: per_second(tsc_delta, count)?,
         apic_hz: per_second(u64::from(apic_delta), count)?,
+        error_ppm,
+    })
+}
+
+/// Mede com `min_count` e, se a incerteza passar de `max_ppm`, mede de novo com a janela que a
+/// reduziria a esse valor, até `max_count` (o erro cai com o inverso da janela). Hardware de
+/// leitura rápida fecha na primeira; o TCG, de porta lenta, estende. Devolve a de menor incerteza.
+pub fn calibrate<B: RegisterBus>(
+    pit: &Pit<B>,
+    min_count: u16,
+    max_count: u16,
+    max_ppm: u64,
+    max_polls: u32,
+    mut read: impl FnMut() -> Reading,
+) -> Option<Calibration> {
+    let first = measure(pit, min_count, max_polls, &mut read)?;
+    if first.error_ppm <= max_ppm || min_count >= max_count {
+        return Some(first);
+    }
+    let wanted = u128::from(min_count) * u128::from(first.error_ppm) / u128::from(max_ppm.max(1));
+    let count = u16::try_from(wanted + 1).unwrap_or(u16::MAX).min(max_count);
+    let second = measure(pit, count.max(min_count), max_polls, &mut read)?;
+    Some(if second.error_ppm < first.error_ppm {
+        second
+    } else {
+        first
     })
 }
 
@@ -108,6 +148,8 @@ mod tests {
         writes: RefCell<Vec<(usize, u8)>>,
         port_b: Cell<u8>,
         polls_until_expired: Cell<u32>,
+        /// Se não for zero, cada `arm` reabastece as consultas: uma por `polls_per_1000_ticks`/1000 ticks.
+        polls_per_1000_ticks: Cell<u32>,
     }
 
     impl RegisterBus for FakeBus {
@@ -123,9 +165,17 @@ mod tests {
 
         fn write8(&self, offset: usize, value: u8) {
             if offset == PORT_B {
-                self.port_b.set(value);
+                self.port_b.set(value & !OUT2);
             }
             self.writes.borrow_mut().push((offset, value));
+            let per_tick = self.polls_per_1000_ticks.get();
+            if offset == CHANNEL2_DATA && per_tick > 0 {
+                let writes = self.writes.borrow();
+                if let [.., (_, low), (_, high)] = writes[..] {
+                    let count = u32::from(u16::from_le_bytes([low, high]));
+                    self.polls_until_expired.set(count * per_tick / 1000);
+                }
+            }
         }
 
         fn read32(&self, _: usize) -> u32 {
@@ -154,25 +204,29 @@ mod tests {
         );
     }
 
+    /// Leituras que andam `tsc_step` ciclos e `apic_step` ticks por chamada.
+    fn stepping(tsc_step: u64, apic_step: u32) -> impl FnMut() -> Reading {
+        let mut calls = 0_u64;
+        move || {
+            calls += 1;
+            Reading {
+                tsc: 1_000 + calls * tsc_step,
+                apic_ticks: u32::try_from(calls).unwrap() * apic_step,
+            }
+        }
+    }
+
     #[test]
-    fn measure_converts_deltas_to_hz() {
+    fn measure_converts_deltas_to_hz_and_centers_the_end_on_the_poll() {
         let bus = FakeBus::default();
-        bus.polls_until_expired.set(3);
+        bus.polls_until_expired.set(4);
         let pit = Pit::new(bus);
-        let mut readings = [
-            Reading {
-                tsc: 1_000,
-                apic_ticks: 0,
-            },
-            Reading {
-                tsc: 1_000 + 29_830_000,
-                apic_ticks: 625_000,
-            },
-        ]
-        .into_iter();
-        let result = measure(&pit, 11_932, 100, || readings.next().unwrap()).unwrap();
-        assert_eq!(result.tsc_hz, 29_830_000 * PIT_HZ / 11_932);
-        assert_eq!(result.apic_hz, 625_000 * PIT_HZ / 11_932);
+        // 5 leituras: início, 3 consultas sem fim, a que viu o fim. Período de 1 000 ciclos:
+        // o fim recua 500 do último, e o intervalo medido é 4 000 - 500.
+        let result = measure(&pit, 11_932, 100, stepping(1_000, 100)).unwrap();
+        assert_eq!(result.tsc_hz, 3_500 * PIT_HZ / 11_932);
+        assert_eq!(result.apic_hz, 350 * PIT_HZ / 11_932);
+        assert_eq!(result.error_ppm, 500 * 1_000_000 / 3_500);
         assert_eq!(pit.bus.port_b.get() & GATE, 0);
     }
 
@@ -181,11 +235,7 @@ mod tests {
         let bus = FakeBus::default();
         bus.polls_until_expired.set(u32::MAX);
         let pit = Pit::new(bus);
-        let result = measure(&pit, 100, 10, || Reading {
-            tsc: 0,
-            apic_ticks: 0,
-        });
-        assert_eq!(result, None);
+        assert_eq!(measure(&pit, 100, 10, stepping(100, 100)), None);
     }
 
     #[test]
@@ -203,6 +253,44 @@ mod tests {
         ]
         .into_iter();
         assert_eq!(measure(&pit, 100, 10, || readings.next().unwrap()), None);
+    }
+
+    #[test]
+    fn calibrate_stops_at_the_first_window_when_the_reading_is_fast() {
+        let bus = FakeBus::default();
+        bus.polls_per_1000_ticks.set(500);
+        let pit = Pit::new(bus);
+        // 2 983 consultas de 1 ciclo: incerteza de 0,5 ciclo em 2 983, cerca de 170 ppm.
+        let result = calibrate(&pit, 5_966, 23_864, 500, 100_000, stepping(100, 100)).unwrap();
+        assert!(result.error_ppm <= 500, "{}", result.error_ppm);
+        let writes = pit.bus.writes.borrow();
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|(offset, _)| *offset == COMMAND)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn calibrate_asks_for_a_longer_window_when_the_reading_is_slow() {
+        let bus = FakeBus::default();
+        bus.polls_per_1000_ticks.set(10);
+        let pit = Pit::new(bus);
+        // 59 consultas na primeira janela: incerteza de ~8 000 ppm, acima do teto de 500; a
+        // segunda janela vai ao máximo (23 864 ticks, 0x5D38) e a de menor incerteza vence.
+        let result = calibrate(&pit, 5_966, 23_864, 500, 100_000, stepping(100, 100)).unwrap();
+        let writes = pit.bus.writes.borrow();
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|(offset, _)| *offset == COMMAND)
+                .count(),
+            2
+        );
+        assert!(writes.contains(&(CHANNEL2_DATA, 0x38)) && writes.contains(&(CHANNEL2_DATA, 0x5D)));
+        assert!(result.error_ppm < 4_000, "{}", result.error_ppm);
     }
 
     #[test]

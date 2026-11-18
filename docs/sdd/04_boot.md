@@ -31,7 +31,7 @@ Os pedidos ficam em `boot/limine/src/requests.rs`, nas seções `.requests_start
 | Bootloader performance | Marcos de reset, início do Limine e entrega ao kernel, em µs | linha omitida |
 | Executable address | Base física e virtual da imagem (com o sorteio do KASLR), para o kernel mapear cada seção | `BootError::MissingKernelAddress`, pânico |
 | Framebuffer | O primeiro framebuffer linear: endereço no HHDM, tamanho, pitch e máscaras de cor. Só 32 bpp RGB com canais de 8 bits é aceito | sem tela; a serial continua |
-| Executable cmdline | A linha de comando da entrada do `limine.conf`, lida em todo build: `rustos.selftest=1` liga o [modo de teste](#modos-de-boot); com a feature `panic-tests`, `rustos.panic_early=N` (SDD 06). `BootParams::parse` ignora chave e valor que não entende | sem linha, o kernel sobe no modo normal |
+| Executable cmdline | A linha de comando da entrada do `limine.conf`, lida em todo build: `rustos.selftest=1` liga o [modo de teste](#modos-de-boot); com a feature `panic-tests`, `rustos.panic_early=N` (SDD 06). `BootParams::parse` ignora chave e valor que não entende; uma linha que não é ASCII/UTF-8 válido vira `None` e descarta **todos** os parâmetros (o kernel sobe no modo normal; teste em `boot/limine`) | sem linha, o kernel sobe no modo normal |
 | MP | Os núcleos: identificador de hardware (LAPIC ID ou `MPIDR`) e o `goto_address` de cada um. No x86_64 o pedido liga o bit de x2APIC. A presença do pedido faz o Limine acordar os núcleos secundários e estacioná-los | sem resposta o kernel roda numa CPU |
 
 O Limine mapeia o framebuffer no HHDM com o cache certo para vídeo:
@@ -110,7 +110,7 @@ O kernel tem dois modos, escolhidos pela linha de comando do Limine (`BootParams
 | Autotestes | frame, `w^x:` e exceção: os três juntos custam 3 ms no x86_64 em TCG (com as linhas) e 1 ms no aarch64 com HVF, e nada além deles exercita o que provam (o mapa direto, as tabelas ativas, a IDT/`VBAR` e o retorno da exceção) | os três, mais heap, resíduo de chave, timer, preempção com estado de SIMD e migração entre núcleos |
 | Medidas | nenhuma | `zero bench:`, `random bench:`, `idle:`, `switch:`, `scale:`, `alloc storm:` |
 | Linhas na serial | as que um gate confere (`kaslr:`, `reclaimed:`, `protections:`, `cpus:`, `w^x:`) ou que avisam (`random: jitter (weak)`) | todas |
-| Tempo no kernel (`release`) | 24 a 31 ms (x86_64, TCG) · 2 ms (aarch64, HVF) | 0,7 a 3,8 s (x86_64, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md)) · 0,45 s (aarch64) |
+| Tempo no kernel (`release`) | 24 a 35 ms (x86_64, TCG) · 2 ms (aarch64, HVF) | 1,0 a 3,8 s conforme o binário (x86_64 em TCG, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md)) · 0,45 s (aarch64) |
 
 **Por que dois.** O que mais pesava no boot era espera de relógio e medida, não código de boot: `timer:` (50 ms), `idle:` (50 ms), `task self-test:` (80 ms), `smp self-test:` (140 ms), `switch:`/`scale:`/`alloc storm:` (110 ms no aarch64, 550 ms no x86_64) e, no x86_64 em TCG, o `heap self-test:` (12 ms), o `random bench:` (13 ms) e o `zero bench:` (50 ms). Prova que depende de janela de tempo, ou que mede, não vale a cada boot de quem só quer o shell; vale no `make smoke` e no CI. O que roda sempre é o que custa mil vezes menos e que nada mais exercita (a regra que fixa isso é proposta ao guidelines 05 em Draft separado, à espera do dono).
 
@@ -215,7 +215,7 @@ QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB, `-smp 4`, perfil `release`, x86_6
 [rustos] boot ok
 ```
 
-Modo de teste (`make smoke`; as medidas de tarefa do x86_64 em TCG variam muito entre boots, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md)):
+Modo de teste (`make smoke`). **Esta saída é do modo lento do x86_64 em TCG** (`switch: 25962 ns`, `kernel 2774 ms`): o tempo das medidas de tarefa nessa plataforma varia até 10x com o tamanho e o alinhamento do código, e o modo rápido leva cerca de 1 s no total ([DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md)). O `make smoke` do x86_64 foi de ~2,7 para ~4,5 s de parede por isso:
 
 ```text
 [rustos] RustOS 0.1.0 (x86_64)

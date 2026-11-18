@@ -513,7 +513,6 @@ fn storm_rows(out: &mut dyn fmt::Write, storm: &crate::StormSample) -> fmt::Resu
     row(out, "heap", storm.heap_ns, storm.heap_contention)
 }
 
-/// O tempo total de N tarefas de CPU em 1, 2 e 4 núcleos, e quantas vezes mais rápido que 1.
 /// Zerar memória e o gerador aleatório; sem medida, nenhuma linha.
 fn micro_rows(out: &mut dyn fmt::Write, micro: Option<crate::MicroBench>) -> fmt::Result {
     let Some(micro) = micro else {
@@ -542,6 +541,7 @@ fn micro_rows(out: &mut dyn fmt::Write, micro: Option<crate::MicroBench>) -> fmt
     )
 }
 
+/// O tempo total de N tarefas de CPU em 1, 2 e 4 núcleos, e quantas vezes mais rápido que 1.
 fn scale_rows(out: &mut dyn fmt::Write, report: &BenchReport) -> fmt::Result {
     let first = report.scale[0];
     if first.total_ns == 0 {

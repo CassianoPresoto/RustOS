@@ -16,7 +16,6 @@
 - [ ] `make check`
 - [ ] `make test`
 - [ ] `make smoke ARCH=all`
-- [ ] `make smoke-fast ARCH=all` (a linha `boot time:`, antes e depois, se mexeu no boot)
 
 ## Dívidas
 

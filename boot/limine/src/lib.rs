@@ -293,6 +293,16 @@ mod tests {
     }
 
     #[test]
+    fn a_command_line_that_is_not_utf8_drops_every_parameter() {
+        let raw = c"rustos.selftest=1 \xff";
+        // SAFETY: literal C terminado em zero e estático.
+        let line = unsafe { c_str(raw.as_ptr()) };
+        assert_eq!(line, None);
+        let params = rustos_hal::BootParams::parse(line.unwrap_or(""));
+        assert_eq!(params, rustos_hal::BootParams::default());
+    }
+
+    #[test]
     fn c_string_is_read_until_nul() {
         let raw = c"Limine";
         // SAFETY: literal C terminado em zero e estático.

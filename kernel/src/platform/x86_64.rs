@@ -86,9 +86,11 @@ pub const TIMER_HZ: u32 = 100;
 
 /// Páginas de cada pilha de exceção (#DF, NMI, #MC); a de guarda fica abaixo.
 const IST_STACK_PAGES: u64 = 4;
-/// Janela de calibração: 5 ms de PIT (1 193 182 Hz × 0,005 s). Erro de 0,3% no TSC
-/// contra 15 ms de boot (SDD 10, DEBT-0066).
-const PIT_WINDOW_TICKS: u16 = 5_966;
+/// Janela mínima de calibração: 5 ms de PIT (1 193 182 Hz × 0,005 s); a máxima, 20 ms, e a
+/// incerteza aceita, 500 ppm como o `quick_pit_calibrate` do Linux (SDD 10, DEBT-0066).
+const PIT_MIN_TICKS: u16 = 5_966;
+const PIT_MAX_TICKS: u16 = 23_864;
+const PIT_MAX_PPM: u64 = 500;
 /// Consultas à porta B antes de desistir do PIT.
 const PIT_MAX_POLLS: u32 = 50_000_000;
 /// Pinos do I/O APIC da QEMU `q35`: as ISA 1 (teclado) e 4 (COM1) vão direto,
@@ -343,10 +345,17 @@ fn start_clocks(apic: &ApicAccess) -> Result<(), PlatformError> {
     // SAFETY: as portas do PIT são só desta função, no boot.
     let pit = Pit::new(unsafe { PortBus::new(PIT_PORTS) });
     local.start_countdown();
-    let measured = pit::measure(&pit, PIT_WINDOW_TICKS, PIT_MAX_POLLS, || Reading {
-        tsc: rdtsc(),
-        apic_ticks: local.elapsed_ticks(),
-    })
+    let measured = pit::calibrate(
+        &pit,
+        PIT_MIN_TICKS,
+        PIT_MAX_TICKS,
+        PIT_MAX_PPM,
+        PIT_MAX_POLLS,
+        || Reading {
+            tsc: rdtsc(),
+            apic_ticks: local.elapsed_ticks(),
+        },
+    )
     .ok_or(PlatformError::MissingFeature("pit"))?;
     TSC_HZ.store(measured.tsc_hz, Ordering::Relaxed);
     let (mult, shift) = TickScale::new(measured.tsc_hz).map_or((0, 0), TickScale::parts);

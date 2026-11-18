@@ -20,7 +20,7 @@ entre elas está numa seção por ISA, abaixo.
 | 5 | 8259 mascarado (0xFF em 0x21 e 0xA1) | `pic.rs` |
 | 6 | Local APIC: x2APIC por MSR se `CPUID.1:ECX[21]`, senão xAPIC por MMIO na janela de dispositivos | `apic.rs`, `lapic.rs` |
 | 7 | I/O APIC em `0xFEC0_0000` (DEBT-0009): pino 4 (COM1) → vetor `0x24`; pino 1 (teclado) → `0x21`, mascarado | `ioapic.rs` |
-| 8 | Calibração: um intervalo de 5 ms do PIT (canal 2, [medida abaixo](#calibração-pelo-pit-janela-de-5-ms)) mede o TSC e o contador do timer do APIC; o timer fica em modo de um tiro (TSC-deadline se o CPUID anuncia), desarmado: `interrupts::init` arma o primeiro tique | `pit.rs`, `clock.rs`, `lapic.rs` |
+| 8 | Calibração: um intervalo do PIT (canal 2) de 5 a 20 ms, estendido até a incerteza cair a 500 ppm ([medida abaixo](#calibração-pelo-pit-janela-adaptativa-de-5-a-20-ms)), mede o TSC e o contador do timer do APIC; o timer fica em modo de um tiro (TSC-deadline se o CPUID anuncia), desarmado: `interrupts::init` arma o primeiro tique | `pit.rs`, `clock.rs`, `lapic.rs` |
 | 9 | `Uart16550::enable_receive_interrupt` (`IER` bit 0 e `OUT2` do `MCR`), por último | `drivers/uart16550` |
 
 O chamador (`interrupts::init`) liga o `IF` depois. Os núcleos secundários repetem só o que é
@@ -96,9 +96,9 @@ inutiliza o CPUID 0x15 do Linux: por isso a referência é o PIT.
 | `timer: 100 Hz, 5 ticks in …` | 40 a 45 ms (a fase do primeiro tique é aleatória) |
 | `sched: … timer one-shot` | o contador do APIC (62,5 MHz); o TSC-deadline nunca rodou ([DEBT-0034](../tech-debt/0034-tsc-deadline-sem-teste-no-x86.md)) |
 
-### Calibração pelo PIT: janela de 5 ms
+### Calibração pelo PIT: janela adaptativa de 5 a 20 ms
 
-A janela era de 20 ms e é a maior fatia do `interrupts::init` (em TCG o PIT corre em tempo real). Medida a frequência do TSC da QEMU em TCG (1 GHz exatos, o TCG conta nanossegundos) em quatro boots por janela, `release`:
+A janela era de 20 ms e é a maior fatia do `interrupts::init` (em TCG o PIT corre em tempo real). O TSC da QEMU em TCG é de 1 GHz exatos (o TCG conta nanossegundos), o que dá o erro de cada medida. Janela fixa, quatro boots por janela, `release`:
 
 | Janela | TSC medido (Hz), quatro boots | Erro máximo visto |
 | --- | --- | --- |
@@ -106,7 +106,9 @@ A janela era de 20 ms e é a maior fatia do `interrupts::init` (em TCG o PIT cor
 | 5 ms (5 966 ticks) | 1 000 784 902 · 1 000 784 902 · 1 002 784 872 · 1 000 384 908 | 0,28% |
 | 2,5 ms (2 983 ticks) | 1 007 584 799 · 999 984 914 · 1 003 984 854 · 1 008 384 787 | 0,84% |
 
-O erro vem das duas leituras de porta que fecham a janela (cada uma, em TCG, de uns µs a dezenas de µs). A janela de 5 ms troca até 0,3% de erro no relógio (`now_ns`, `uptime`, as medidas) por 15 ms a menos de boot no x86_64 em TCG: é o relógio de uma plataforma que o SDD 07 já diz não comparar com outro sistema. O aarch64 não calibra (o `CNTFRQ_EL0` dá a frequência). Em metal ou KVM, onde o relógio é preciso, a janela vale o que o hardware pedir ([DEBT-0066](../tech-debt/0066-calibracao-do-pit-com-janela-curta-sem-medida-em-kvm.md)).
+O erro vem da latência da leitura de porta que fecha a janela (cerca de 14 µs no TCG), sempre para mais, não da quantização. Por isso `pit::measure` lê os contadores a cada consulta e fecha o intervalo no **meio** da consulta que viu a transição (erro de `±período/2`, sem viés), e devolve a incerteza (`error_ppm` = meio período sobre o intervalo). `pit::calibrate` mede 5 ms e, se a incerteza passar de 500 ppm, mede de novo com a janela que a levaria a 500 ppm, até 20 ms, e fica com a de menor incerteza. É a ideia do `quick_pit_calibrate` do Linux (`arch/x86/kernel/tsc.c`, que mira 500 ppm e estende a janela até `MAX_QUICK_PIT_MS`, 50 ms; nomes e valores conforme a revisão do PR, sem a fonte à mão). Com hardware de leitura rápida a primeira medida fecha; o TCG estende quando a latência varia.
+
+Doze boots com a janela adaptativa (TSC medido contra 1 GHz): erro máximo 0,144%, mediana 0,017% (a incerteza devolvida é uma estimativa: passou de 1 000 ppm em 1 boot e o erro real chegou a 1 440 ppm). Kernel do boot normal: mediana 36 ms, de 25 a 46, com o host sob carga média 6; com a janela fixa de 5 ms eram 30 ms sob carga parecida, e 24 em silêncio. O relógio da QEMU em TCG é só para comparar o RustOS consigo mesmo (SDD 07); o ganho do corte é a diferença para os 20 ms fixos de antes. Em metal ou KVM ninguém mediu ([DEBT-0066](../tech-debt/0066-calibracao-do-pit-com-janela-curta-sem-medida-em-kvm.md)). O aarch64 não calibra (o `CNTFRQ_EL0` dá a frequência).
 
 ### Custo
 
