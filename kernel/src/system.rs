@@ -133,6 +133,10 @@ impl<B: BootInfo> Host for System<'_, B> {
         platform::trigger(kind)
     }
 
+    fn has_alternate_screen(&self) -> bool {
+        console::screen_modes().is_none_or(|(alt, _)| alt)
+    }
+
     fn terminal_size(&self) -> (u16, u16) {
         self.display
             .map_or(SERIAL_SIZE, |display| (display.cols, display.rows))

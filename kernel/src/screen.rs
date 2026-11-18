@@ -41,6 +41,8 @@ const BAR_TEXT_TOP: usize = 3;
 const PADDING: usize = 6;
 /// Largura de tela que ainda usa escala 1; cada múltiplo dela soma 1 à escala.
 const SCALE_STEP_WIDTH: usize = 1600;
+/// Linhas do histórico de rolagem; o custo está no SDD 07 e só há histórico com teclado.
+const HISTORY_LINES: usize = 256;
 
 #[derive(Debug)]
 pub enum ScreenError {
@@ -149,12 +151,16 @@ impl Screen {
         let (cell_w, cell_h) = (font::WIDTH * scale, font::HEIGHT * scale);
         let (grid_x, grid_y) = (PADDING * scale, (BAR_HEIGHT + PADDING) * scale);
         let cols = width.saturating_sub(2 * grid_x) / cell_w;
+        let cols = cols.min(rustos_term::MAX_COLS);
         let rows = height.saturating_sub(grid_y + PADDING * scale) / cell_h;
         let rows = rows.min(rustos_term::MAX_ROWS);
         let cells = memory
             .alloc_slice(Terminal::cells_needed(cols, rows), Cell::BLANK)
             .ok_or(ScreenError::OutOfMemory)?;
-        let terminal = Terminal::new(cells, cols, rows).ok_or(ScreenError::TooSmall)?;
+        let mut terminal = Terminal::new(cells, cols, rows).ok_or(ScreenError::TooSmall)?;
+        if let Some(alt) = memory.alloc_slice(Terminal::cells_needed(cols, rows), Cell::BLANK) {
+            terminal.set_alternate(alt);
+        }
 
         let mut screen = Self {
             surface,
@@ -178,12 +184,33 @@ impl Screen {
         (self.terminal.cols(), self.terminal.rows())
     }
 
+    /// Aloca o histórico de rolagem; `false` se faltar memória. Chamar só com teclado:
+    /// sem ele ninguém rola a visão. Linhas que já saíram da tela se perdem.
+    pub fn enable_history(&mut self, memory: &mut Memory) -> bool {
+        let cells = Terminal::history_cells_needed(self.terminal.cols(), HISTORY_LINES);
+        let Some(history) = memory.alloc_slice(cells, Cell::BLANK) else {
+            return false;
+        };
+        self.terminal.set_history(history);
+        true
+    }
+
+    /// Se há tela alternativa e quantas linhas o histórico guarda.
+    pub fn screens(&self) -> (bool, usize) {
+        (
+            self.terminal.has_alternate(),
+            self.terminal.history_capacity(),
+        )
+    }
+
     /// Tecla física vira bytes pelo layout e pelo modo de cursor do terminal.
+    /// Shift+PageUp e PageDown só marcam a visão suja: quem desenha é o `flush`
+    /// do laço do shell, fora da IRQ.
     pub fn key_event(&mut self, event: rustos_hal::KeyEvent, push: &mut dyn FnMut(u8)) {
         let mut next = self.keyboard.feed(event);
         while let Some(key) = next {
             let mut bytes = [0; 8];
-            let len = self.terminal.encode_key(key, &mut bytes);
+            let len = self.terminal.press(key, &mut bytes);
             bytes[..len].iter().for_each(|&byte| push(byte));
             next = self.keyboard.next_queued();
         }

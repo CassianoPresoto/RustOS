@@ -34,3 +34,4 @@ mesmo PR.
 | [`13_memoria_virtual.md`](13_memoria_virtual.md) | Tabelas próprias, W^X, pilha própria, memória do bootloader devolvida e KASLR: o desenho, as medidas e as escolhas |
 | [`14_escalonador.md`](14_escalonador.md) | A porta `Scheduler` e as políticas `RoundRobin`, `Eevdf`, `Fifo` e `Composite` (o kernel usa o `Composite`): fórmulas, fontes, medidas e o que o kernel precisa saber |
 | [`15_tarefas_e_preempcao.md`](15_tarefas_e_preempcao.md) | Tarefas, troca de contexto e preempção: o escalonador, o desenho por ISA, a regra de lock, o estado de FPU/SIMD e as medidas |
+| [`16_terminal.md`](16_terminal.md) | O que o emulador entende, a memória que o kernel entrega (grade, tela alternativa, histórico), as teclas de rolagem e a conferência contra o xterm |

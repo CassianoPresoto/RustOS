@@ -25,7 +25,7 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0001](0001-boot-pelo-limine.md) | Boot depende do Limine, binário de terceiros | Open | O tempo do bootloader passar a ser a maior parcela do boot medido em metal, ou o primeiro alvo sem UEFI |
 | [0002](0002-dispositivos-no-endereco-da-qemu-virt.md) | Endereços da PL011 e do GICv3 fixos nos da QEMU `virt` | Open | A primeira placa aarch64 que não seja a QEMU `virt` |
 | [0005](0005-panico-antes-do-console-e-mudo.md) | Pânico antes do console, ou com o console preso, não aparece | Open | O primeiro boot que trave sem saída na serial, ou o primeiro boot em metal |
-| [0008](0008-terminal-sem-tela-alternativa.md) | Terminal sem tela alternativa, rolagem para trás nem caractere largo | Open | O primeiro programa de tela cheia (vi, less, top) rodando no terminal, na fase 5 |
+| [0008](0008-terminal-sem-caractere-largo.md) | Terminal sem caractere largo nem combinante | Open | O primeiro programa da fase 5 (vi, less) mostrando CJK, emoji ou acento decomposto no terminal, ou a fonte ganhar glifo de largura dupla |
 | [0009](0009-ioapic-no-endereco-fixo-da-qemu.md) | I/O APIC no endereço fixo e IRQs ISA sem redirecionamento do MADT | Open | A primeira máquina x86_64 que não seja a QEMU q35, ou o parser de ACPI da fase 6 |
 | [0010](0010-teclado-sem-comandos-ao-dispositivo.md) | Teclado sem comandos ao dispositivo, LEDs nem Num Lock | Open | O primeiro boot em metal com um teclado PS/2 real |
 | [0011](0011-gic-e-timer-so-na-cpu-0.md) | GIC e timer configurados só para a CPU 0 | Open | O primeiro núcleo secundário subir, na fase 3 |
@@ -59,3 +59,6 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0045](0045-trava-presa-ao-ceder-a-cpu-some-em-release.md) | `debug_assert` de lock preso ao ceder a CPU some em `release` | Open | O primeiro travamento em `release` que não reproduza em `dev` |
 | [0046](0046-teste-de-simd-sem-os-caminhos-de-xsave.md) | Autoteste de SIMD sem os caminhos de XSAVE e sem a metade alta | Open | A primeira CPU sem `XSAVEOPT`, ou o primeiro boot em metal |
 | [0047](0047-timer-e-pilha-de-falha-sem-teste.md) | `arm_timer`, `next_timer_ns` e a pilha de falha sem teste | Open | O primeiro boot em metal, ou o primeiro defeito de timer ou de pilha de falha |
+| [0048](0048-dec-sem-simbolos-de-controle-nem-nrcs.md) | DEC Special Graphics sem os símbolos de controle, e sem NRCS, G2 nem G3 | Open | O primeiro programa curses da fase 5 que desenhe ACS fora das caixas e dos blocos |
+| [0050](0050-historico-sem-rolagem-no-aarch64.md) | Histórico de rolagem desligado no aarch64 | Open | O primeiro teclado no aarch64 (virtio-input, fase 8) ou um atalho de rolagem pela serial |
+| [0051](0051-redesenho-da-tela-com-irq-mascarada.md) | Redesenho da tela com a IRQ mascarada | Open | O primeiro benchmark de latência de IRQ ou de wakeup com a tela ligada, ou o primeiro código de tempo real que divida a CPU com o shell |

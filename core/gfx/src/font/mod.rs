@@ -150,7 +150,7 @@ mod tests {
     }
 
     fn is_box_or_block(code: u16) -> bool {
-        (0x2500..=0x259F).contains(&code)
+        (0x2500..=0x259F).contains(&code) || (0x23BA..=0x23BD).contains(&code)
     }
 
     #[test]
@@ -204,6 +204,21 @@ mod tests {
         let required = "─│┌┐└┘├┤┬┴┼╭╮╯╰█▀▄▌▐░▒▓■●▶◀▲▼←↑→↓•…–—‘’“”€✓✗⌘\u{FFFD}";
         for ch in required.chars() {
             assert!(has_glyph(ch), "falta {ch} (U+{:04X})", u32::from(ch));
+        }
+    }
+
+    #[test]
+    fn dec_special_graphics_symbols_have_glyphs() {
+        for ch in "◆≤≥π≠⎺⎻⎼⎽".chars() {
+            assert!(has_glyph(ch), "falta {ch} (U+{:04X})", u32::from(ch));
+        }
+    }
+
+    #[test]
+    fn scan_lines_run_edge_to_edge_on_their_own_rows() {
+        for (ch, row) in [('⎺', 0), ('⎻', 4), ('─', 8), ('⎼', 12), ('⎽', 15)] {
+            assert_eq!(rows_with_ink(glyph(ch)), [row], "{ch}");
+            assert_eq!(glyph(ch)[row], 0xFF, "{ch}");
         }
     }
 

@@ -10,6 +10,11 @@ pub trait Host {
     fn uptime_ns(&self) -> Option<u64>;
     /// Tamanho do terminal em (colunas, linhas); a serial usa (80, 24).
     fn terminal_size(&self) -> (u16, u16);
+    /// Se o terminal tem tela alternativa; a serial, que é de quem está do outro
+    /// lado, conta como tendo.
+    fn has_alternate_screen(&self) -> bool {
+        true
+    }
     /// Provoca a exceção pedida para testar o caminho de falha. `PageFault` e
     /// `WriteText` só voltam se a proteção faltar; `false` quando a plataforma
     /// ainda não sabe provocar.

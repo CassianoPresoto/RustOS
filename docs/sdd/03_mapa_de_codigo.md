@@ -34,7 +34,7 @@
 │   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) Rng (fast key erasure) e a semente de reserva por jitter
 │   ├── sched/                  # rustos-sched: trait Scheduler, TaskId, RunQueue; RoundRobin, Eevdf (treap de prazos), Fifo e Composite (teto de 95% para o tempo real); sim, property e bench só em teste (SDD 14; o kernel usa o `Composite`)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16
-│   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células), Cell, Key, Keyboard (layouts)
+│   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células, tela alternativa, histórico, DEC Special Graphics, tabulação; SDD 16), Cell, Key, Keyboard (layouts)
 │   └── shell/                  # rustos-shell: Shell (edição de linha, histórico, comandos) e a porta Host
 ├── lib/
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set)

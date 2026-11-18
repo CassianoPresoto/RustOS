@@ -47,6 +47,7 @@ pub(crate) struct FakeHost {
     pub(crate) keymap: core::cell::Cell<Option<&'static str>>,
     pub(crate) random: Option<u64>,
     pub(crate) bench: Option<BenchReport>,
+    pub(crate) alternate: bool,
 }
 
 impl FakeHost {
@@ -58,6 +59,7 @@ impl FakeHost {
             faults: false,
             keymap: core::cell::Cell::new(Some("us")),
             random: Some(0x0123_4567_89ab_cdef),
+            alternate: true,
             bench: Some(BenchReport {
                 switch_ns: 412,
                 switch_simd_ns: 530,
@@ -84,6 +86,10 @@ impl Host for FakeHost {
 
     fn terminal_size(&self) -> (u16, u16) {
         self.size
+    }
+
+    fn has_alternate_screen(&self) -> bool {
+        self.alternate
     }
 
     fn fault_test(&self, _kind: crate::host::FaultTest) -> bool {
