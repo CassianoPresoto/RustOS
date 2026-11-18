@@ -101,7 +101,7 @@ fn a_message_with_four_handles_goes_from_one_table_to_the_other() {
 }
 
 #[test]
-fn bytes_and_handles_over_the_limits_are_invalid_args_and_consume_nothing() {
+fn too_many_bytes_is_invalid_args_and_consumes_the_array() {
     let pair = pair();
     let object = plain(1);
     let handle = handle_of(&pair.p, &object, Rights::TRANSFER);
@@ -110,13 +110,26 @@ fn bytes_and_handles_over_the_limits_are_invalid_args_and_consume_nothing() {
         write(&pair.p, pair.ha, &big, &[handle]),
         Err(Status::InvalidArgs)
     );
-    let nine = vec![handle; CHANNEL_MAX_HANDLES + 1];
+    assert!(gone(&pair.p, handle));
+    assert_eq!(count(&object), 0);
+    assert_eq!(with_chan(&pair.b, |chan| chan.queued(Side::B)), 0);
+}
+
+#[test]
+fn too_many_handles_is_invalid_args_and_consumes_every_handle_that_exists() {
+    let pair = pair();
+    let objects: Vec<_> = (0..20).map(plain).collect();
+    let mut handles: Vec<_> = objects
+        .iter()
+        .map(|object| handle_of(&pair.p, object, Rights::TRANSFER))
+        .collect();
+    handles.push(Handle::new(0, 500).unwrap());
     assert_eq!(
-        write(&pair.p, pair.ha, b"", &nine),
+        write(&pair.p, pair.ha, b"", &handles),
         Err(Status::InvalidArgs)
     );
-    assert!(!gone(&pair.p, handle));
-    assert_eq!(count(&object), 1);
+    assert!(objects.iter().all(|object| count(object) == 0));
+    assert_eq!(live_handles(&pair.p), 1);
     assert_eq!(with_chan(&pair.b, |chan| chan.queued(Side::B)), 0);
 }
 
@@ -664,4 +677,30 @@ fn closing_in_the_table_lock_never_happens_while_the_lock_is_held() {
     assert_eq!(lock_depth(), 0);
     close(transit, &mut work);
     assert_eq!(count(&object), 0);
+}
+
+#[test]
+fn a_stale_remaining_count_does_not_kill_an_end_that_is_still_reachable() {
+    use crate::Object;
+    let (a, b) = new_channel();
+    let tab = tab();
+    let ha = handle_of(&tab, &a, Rights::CHANNEL);
+    let hb0 = handle_of(&tab, &b, Rights::CHANNEL);
+    let hb2 = handle_of(&tab, &b, Rights::CHANNEL);
+    // T1 fecha `hb0`, desconta e para antes de tomar o lock do par.
+    let transit = tab.with(|t| t.remove(hb0)).unwrap();
+    let stale = transit.object().handles().release();
+    assert_eq!(stale, 1);
+    // T2 duplica `hb2` e escreve `hb2` pelo canal: B tem `hb3` na tabela e `hb2` na própria fila.
+    let hb3 = tab.with(|t| t.duplicate(hb2, Rights::CHANNEL)).unwrap();
+    write(&tab, ha, b"", &[hb2]).unwrap();
+    assert_eq!(with_chan(&a, |chan| chan.own_in_queue(Side::B)), 1);
+    // T1 retoma com o `remaining` velho.
+    let mut work = Stack::default();
+    transit.object().on_handle_closed(stale, &mut work);
+    assert!(!dead(&a, Side::B), "B está viva: o `hb3` segue na tabela");
+    assert!(tab.with(|t| t.get(hb3, Rights::NONE).is_ok()));
+    drop(transit);
+    close_handle(&tab, hb3).unwrap();
+    assert!(dead(&a, Side::B));
 }

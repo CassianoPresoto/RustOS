@@ -79,4 +79,3 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0082](0082-sem-lfence-depois-do-swapgs-condicional.md) | Sem `lfence` depois do `swapgs` condicional das entradas do x86_64 | Open | O primeiro boot do x86_64 em metal ou com KVM, ou a 4e (mitigações de CPU) |
 | [0090](0090-ciclos-entre-filas-de-canais-nao-coletados.md) | Ciclos entre filas de canais não são coletados | Open | O primeiro programa que produza o ciclo entre duas filas, ou os grupos de recursos da fase 9 |
 | [0091](0091-fila-do-canal-com-armazenamento-inline.md) | Fila do canal com armazenamento inline, 7,2 KiB por par de pontas | Open | A medida de memória da 4f ou do SDD 07 mostrar canais entre as maiores parcelas do kernel, ou um processo precisar de mais de 100 canais vivos |
-| [0092](0092-lista-de-trabalho-do-fechamento-no-heap.md) | Lista de trabalho do fechamento de handles sem teto e com `push` que não falha | Open | O kernel da 4c implementar `Worklist` sobre o heap |

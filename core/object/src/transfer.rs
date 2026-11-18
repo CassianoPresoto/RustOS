@@ -39,8 +39,8 @@ impl<T> Outcome<T> {
 
 /// `channel_write(ch, bytes, handles)`. Os `handles` e os `bytes` já foram copiados do usuário
 /// (a alocação é do kernel, antes). Atômica: a mensagem entra com todos os handles ou nenhum
-/// fica a meio caminho. Todo erro **exceto** `ShouldWait` e o argumento fora dos limites
-/// (`InvalidArgs`) fecha os handles do array que existem, fora do lock da tabela.
+/// fica a meio caminho. Todo erro **exceto** `ShouldWait` fecha os handles do array que existem
+/// (inclusive o excesso de bytes ou de handles, `InvalidArgs`), fora do lock da tabela.
 pub fn channel_write<T, S, L, W>(
     table: &L,
     channel: Handle,
@@ -55,6 +55,11 @@ where
     W: Worklist<T>,
 {
     if handles.len() > CHANNEL_MAX_HANDLES || bytes.as_ref().len() > CHANNEL_MAX_BYTES {
+        for chunk in handles.chunks(CHANNEL_MAX_HANDLES) {
+            let taken = table.with(|table| table.remove_existing(chunk));
+            taken.close_all(work);
+        }
+        close_pending(work);
         return Err(Status::InvalidArgs);
     }
     let outcome = table.with(|table| write_locked(table, channel, bytes, handles, work));

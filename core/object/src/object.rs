@@ -214,11 +214,14 @@ pub trait Object: Sized {
     fn with_channel<R>(&self, f: impl FnOnce(&mut Channel<Self>) -> R) -> Option<R>;
 
     /// Chamado por `close` depois de descontar um handle, **sem** lock nenhum. Numa ponta de
-    /// canal, a ponta morre quando só restam handles dentro da fila dela.
+    /// canal, a ponta morre quando só restam handles dentro da fila dela; a contagem é lida de
+    /// novo **sob o lock do par**, porque `remaining` já pode estar velho.
     fn on_handle_closed<W: Worklist<Self>>(&self, remaining: u32, work: &mut W) {
         if let Some(end) = self.channel_end() {
             let died = self
-                .with_channel(|channel| channel.on_handles_changed(end.side, remaining, work))
+                .with_channel(|channel| {
+                    channel.on_handles_changed(end.side, self.handles().get(), work)
+                })
                 .unwrap_or(false);
             if died {
                 self.on_end_died(end.side);

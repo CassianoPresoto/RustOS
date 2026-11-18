@@ -369,6 +369,10 @@ impl<T: Object, S: SlotStorage<T>> HandleTable<T, S> {
 
     fn fill(&mut self, reservation: &Reservation, object: T, rights: Rights) -> Handle {
         let handle = reservation.handle;
+        debug_assert!(
+            rights.is_subset_of(object.kind().rights()),
+            "direito que o tipo do objeto não tem"
+        );
         let slot = &mut self.slots.slots_mut()[handle.index()];
         assert!(
             slot.state() == State::Reserved && slot.generation() == handle.generation(),

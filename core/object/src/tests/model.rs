@@ -445,6 +445,7 @@ impl World {
 
     fn model_write(&mut self, t: usize, ch: u64, bytes: &[u8], arr: &[u64]) -> Result<(), Status> {
         if arr.len() > 8 || bytes.len() > CHANNEL_MAX_BYTES {
+            self.consume(t, arr);
             return Err(Status::InvalidArgs);
         }
         let Some(&(ent, rights)) = self.live[t].get(&ch) else {
