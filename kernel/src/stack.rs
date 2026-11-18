@@ -9,6 +9,7 @@ use rustos_hal::{PAGE_SIZE, VirtAddr};
 /// Nenhum valor que uma pilha escreva de propósito; sem ele o pico sai menor que o real.
 const PATTERN: u64 = 0x5253_5441_434b_2121;
 const WORD: usize = 8;
+const LINE_WORDS: usize = 64 / WORD;
 
 /// Uma pilha mapeada: do topo (fim exclusivo) para baixo, sem a página de guarda.
 #[derive(Clone, Copy, Debug)]
@@ -51,9 +52,14 @@ impl Stack {
         }
     }
 
-    /// O índice da primeira palavra que o padrão não cobre, do fundo para cima.
+    /// O índice da primeira palavra que o padrão não cobre, do fundo para cima. Olha uma palavra
+    /// por linha de cache e refina na última linha limpa: o pico tem resolução de 8 bytes.
     fn first_used(self) -> usize {
-        (0..self.words())
+        let mut line = 0;
+        while line < self.words() && self.word(line).load(Ordering::Relaxed) == PATTERN {
+            line += LINE_WORDS;
+        }
+        (line.saturating_sub(LINE_WORDS - 1)..self.words())
             .find(|&index| self.word(index).load(Ordering::Relaxed) != PATTERN)
             .unwrap_or(self.words())
     }

@@ -61,7 +61,7 @@ passarem; o `smoke` exige a linha `task self-test: ok`, a `smp self-test: ok` (m
 W^X percorre as tabelas novas ([SDD 13](13_memoria_virtual.md)); `fault text` no shell
 confere que a CPU recusa a escrita em `.text`.
 
-Duas linhas do boot são medida e heurística, não gate: `key residue:` (varredura da pilha
+Três linhas do boot são medida e heurística, não gate: `stacks:` (pico de pilha por tipo de thread, [SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)), `key residue:` (varredura da pilha
 atrás de cópias da chave, com uma sonda que planta 4 estados e exige achá-los; [SDD 09](09_seguranca.md))
 e `zero bench:` ([SDD 07](07_desempenho_e_recursos.md)). O kernel as imprime e segue;
 o `smoke` reprova o `FAILED` de qualquer linha. O autoteste do heap confere que o zerar
@@ -69,7 +69,7 @@ rápido mexe só na faixa pedida ([SDD 13](13_memoria_virtual.md), "Zerar").
 
 ## Andar 3a — pânico (`make smoke-panic`)
 
-`cargo xtask smoke-panic` derruba o kernel de propósito em sete pontos, mais um boot que roda `mem`, `ps` e `fetch`, e confere que a mensagem
+`cargo xtask smoke-panic` derruba o kernel de propósito em oito pontos, mais um boot que roda `mem`, `ps` e `fetch`, e confere que a mensagem
 aparece na serial e que nenhum endereço do kernel vem junto (o log inteiro depois do primeiro `[rustos]`, com o corpo do pânico e a saída do shell). Constrói com a feature `panic-tests`
 (além das de `RUSTOS_FEATURES`) e sobe um boot por cenário:
 
@@ -81,11 +81,12 @@ aparece na serial e que nenhum endereço do kernel vem junto (o log inteiro depo
 | Falha com a serial e a tela presas | `fault lock` no shell | `[rustos] fault: page fault at …` |
 | Pânico dentro da mensagem do pânico | `fault nested` | a mensagem do segundo pânico |
 | Pânico em todas as CPUs ao mesmo tempo | `fault all` (uma tarefa por CPU ativa, com barreira) | um único `[rustos] panic:`, sem `failed again` nem texto misturado |
+| Ceder a CPU com um `IrqLock` preso | `fault held` (o shell segura um lock e chama `yield_now`; vale em `release` também, [SDD 15](15_tarefas_e_preempcao.md#regra-de-lock)) | `context switch with 2 IrqLock held, expected 1` |
 | Escrita em `.text` | `fault text` | `page fault at kernel+0x…` (deslocamento, não endereço) |
 
 A linha de comando vem do `cmdline:` da entrada do `limine.conf` (`xtask/src/image.rs`); `core/hal`
-`BootParams::parse` a traduz e tem teste de entrada inválida. Custa oito boots por ISA (cerca de
-25 s no x86_64 e 49 s no aarch64 neste host); `fault lock`, `fault nested` e `fault all` só existem no build com `panic-tests`, por isso é alvo à parte; entra no `make pr` e no CI,
+`BootParams::parse` a traduz e tem teste de entrada inválida. Custa nove boots por ISA (cerca de
+25 s no x86_64 e 49 s no aarch64 neste host); `fault lock`, `fault nested`, `fault all` e `fault held` só existem no build com `panic-tests`, por isso é alvo à parte; entra no `make pr` e no CI,
 não no `make smoke`. Com `debug-addrs` ele recusa rodar: os cenários conferem o endereço relativo.
 
 ## Andar 3b — tela

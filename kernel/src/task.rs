@@ -33,9 +33,8 @@ type Policy = Composite<RT_SLOTS, MAX_TASKS>;
 const SHELL_SLICE_NS: u64 = 200_000;
 /// A tarefa do boot vira o shell: classe justa, nice 0 e a fatia curta.
 pub const SHELL_PARAMS: SchedParams = SchedParams::fair_with_slice(0, SHELL_SLICE_NS);
-/// Páginas da pilha de uma tarefa, fora a de guarda: 32 KiB.
-const STACK_PAGES: u64 = 8;
-const IDLE_STACK_PAGES: u64 = 4;
+/// Páginas da pilha de toda thread do kernel, fora a do boot e a de guarda: 16 KiB (SDD 15).
+pub const STACK_PAGES: u64 = 4;
 /// Intervalo mínimo entre dois pulls periódicos de uma CPU.
 const BALANCE_NS: u64 = 2_000_000;
 
@@ -347,7 +346,6 @@ pub unsafe fn init(frames: Frames, direct_map_offset: u64) -> Result<FpuSummary,
             params: SHELL_PARAMS,
             affinity: 1,
         },
-        IDLE_STACK_PAGES,
     )?;
     ACTIVE.fetch_or(1, Ordering::Release);
     Ok(summary)
@@ -390,7 +388,7 @@ fn publish(cpu: &PerCpu, queue: &Queue) {
 /// Se a nova deve rodar antes da corrente, a troca vem no fim da chamada (`preempt_now`).
 pub fn spawn(config: Spawn) -> Result<TaskId, TaskError> {
     let id = claim_slot().ok_or(TaskError::NoSlot)?;
-    match start(id, config, STACK_PAGES) {
+    match start(id, config) {
         Ok(preempts) => {
             if preempts {
                 let cpu = platform::cpu();
@@ -428,7 +426,7 @@ fn claim_slot() -> Option<usize> {
 }
 
 /// Dá pilha, área de FPU e contexto ao slot reservado e o põe numa fila, pronto.
-fn start(id: usize, config: Spawn, stack_pages: u64) -> Result<bool, TaskError> {
+fn start(id: usize, config: Spawn) -> Result<bool, TaskError> {
     let target = slot(id);
     let (known_stack, has_fpu) = {
         let meta = target.meta.lock();
@@ -443,9 +441,9 @@ fn start(id: usize, config: Spawn, stack_pages: u64) -> Result<bool, TaskError> 
     } else {
         let mut space = SPACE.lock();
         let space = space.as_mut().ok_or(TaskError::NoMemory)?;
-        let top = map_stack(&mut space.frames, &mut space.tables, stack_pages)
+        let top = map_stack(&mut space.frames, &mut space.tables, STACK_PAGES)
             .map_err(TaskError::Stack)?;
-        let stack = Stack::new(top, stack_pages);
+        let stack = Stack::new(top, STACK_PAGES);
         stack.paint();
         stack
     };
@@ -653,6 +651,8 @@ fn pull(thief: usize, gap: u32) -> bool {
     publish(me, &queue);
     bump(&me.stats.pulled, 1);
     true
+}
+
 /// Lock preso na troca é deadlock mudo: a conferência vale também em `release` (SDD 15).
 #[inline]
 fn check_locks_held(expected: u32) {
@@ -666,8 +666,6 @@ fn check_locks_held(expected: u32) {
 #[inline(never)]
 fn locks_held_on_switch(held: u32, expected: u32) -> ! {
     panic!("context switch with {held} IrqLock held, expected {expected}");
-}
-
 }
 
 /// Escolhe a próxima tarefa e troca para ela. Chamar com a interrupção mascarada

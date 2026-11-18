@@ -23,6 +23,7 @@
 │       ├── console.rs          # console global e kprintln!: serial e tela
 │       ├── screen.rs           # tela: framebuffer + grade do term + desenho do gfx, tema e barra
 │       ├── interrupts.rs       # IRQ do timer (o que o escalonador pede: acordar, fim de fatia, próximo disparo), fila de entrada e o relatório de falha
+│       ├── stack.rs            # marca d'água das pilhas: pinta com um padrão e lê o pico varrendo do fundo (SDD 15)
 │       ├── sync.rs             # IrqLock: spinlock que mascara IRQ, conta os presos por CPU e as disputas; `bump` para contador de uma CPU só
 │       ├── percpu.rs           # PerCpu: o bloco de cada núcleo (GS/TPIDR_EL1): índice, hw_id, in_irq, locks_held, prazo armado, carga, fila, cache de frames e contadores
 │       ├── smp.rs              # núcleos secundários: solta pelo pedido MP, entrada na pilha do Limine, init por CPU, espera do escalonador

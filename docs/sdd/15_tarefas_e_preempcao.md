@@ -50,16 +50,16 @@ da fila já solto. `TaskId` é o número do slot.
 - **Slots `0..MAX_CPUS` são as ociosas**, uma por CPU, fora da política (como o `idle` do Linux):
   rodam quando `pick_next` devolve `None` e fazem `hlt`/`wfi` com a interrupção ligada. A da CPU de boot
   é uma thread de pilha própria (4 páginas); a de cada núcleo secundário **é a execução que subiu**,
-  na pilha de 32 KiB que o `smp::start` mapeou.
+  na pilha de 16 KiB que o `smp::start` mapeou.
 - **O slot `MAX_CPUS` é o boot.** `task::init` adota a execução do `kmain`, com a pilha de 64 KiB
   que já tinha, como tarefa `init`. Ela roda os autotestes e, em `run_shell`, vira a
   tarefa `shell`, classe justa, nice 0 e fatia de 200 µs (interativa: o prazo virtual
   curto a põe na frente de quem só calcula, e `PREEMPT_SHORT` fura a proteção da fatia
   de uma corrente de 700 µs). O shell dorme em `park` quando a fila de entrada está vazia, e a IRQ
   da serial ou do teclado (na CPU de boot, [DEBT-0056](../tech-debt/0056-irqs-de-dispositivo-so-na-cpu-de-boot.md)) o acorda (`task::notify_input`), em qualquer CPU em que ele esteja. `wait_for_input` registra o waiter e **confere a fila de novo** antes de dormir (`SeqCst` dos dois lados): a IRQ de outra CPU pode empilhar o byte entre a conferência do shell e o registro, o que com uma CPU só a máscara impedia. O `flush` do terminal roda antes, sob a mesma máscara (SDD 16).
-- **Cada tarefa nova tem pilha própria:** 8 páginas (32 KiB) e uma de guarda sem
+- **Cada tarefa nova tem pilha própria:** 4 páginas (16 KiB, `task::STACK_PAGES`) e uma de guarda sem
   mapeamento, na janela de pilhas (`memory::map_stack`). Reusar o slot reusa a pilha:
-  a janela é só de avanço.
+  a janela é só de avanço. O tamanho vem da medida de pico ([Pico de pilha](#pico-de-pilha)).
 - **`spawn` com os slots cheios** falha com `NoSlot` mesmo se um deles é `Exited` com `on_cpu` ainda alto (a CPU dele não terminou a troca): a janela é de uma troca, e quem cria tarefa em
   laço (o `bench`) espera os slots saírem (`wait_exited`) antes de criar de novo.
 - **Afinidade:** `Spawn::affinity` é uma máscara de CPUs (zero é qualquer uma), fixa até a tarefa
@@ -73,11 +73,62 @@ da fila já solto. `TaskId` é o número do slot.
 | Política por CPU (`Composite<4, 32>`, no heap, criada quando a CPU entra no escalonador) | 3 680 por CPU, a de 4 vagas de FIFO e 32 de EEVDF; 96 por tarefa justa ([SDD 14](14_escalonador.md)) |
 | `PerCpu` (`.bss`, 8 blocos, cada um alinhado a 64 bytes) | cerca de 500 por CPU, com a fila (o `Option<Box>` da política), o cache de 32 frames (256) e os contadores |
 | `Context` | 8 (x86_64: só o `rsp`) e 104 (aarch64: x19–x30 e `sp`) |
-| Pilha mapeada de tarefa | 32 768 (8 páginas), mais as tabelas de página que faltarem |
-| Por núcleo secundário | x86_64: pilha de 32 KiB mais 3 pilhas IST de 16 KiB cada, mais GDT e TSS (cerca de 170 bytes, no heap); aarch64: 32 KiB mais a pilha de falhas de 16 KiB; as guardas não têm frame |
+| Pilha mapeada de tarefa | 16 384 (4 páginas, eram 8), mais as tabelas de página que faltarem |
+| Por núcleo secundário | x86_64: pilha de 16 KiB mais 3 pilhas IST de 16 KiB cada, mais GDT e TSS (cerca de 170 bytes, no heap); aarch64: 16 KiB mais a pilha de falhas de 16 KiB; as guardas não têm frame. Eram 32 KiB de pilha |
 | Área de FPU/SIMD, só da tarefa que usa SIMD | 832 no x86_64 da QEMU (`xsaveopt`, x87 SSE AVX) e 528 no aarch64 |
 
-O pico de uso da pilha não foi medido: [DEBT-0037](../tech-debt/0037-pilha-de-tarefa-sem-medida-de-pico.md).
+### Pico de pilha
+
+Toda pilha de thread do kernel (`task::STACK_PAGES`) e a do boot nascem **pintadas** com o padrão
+`0x5253_5441_434b_2121` (`kernel/src/stack.rs`); o pico é o quanto do topo o padrão deixou de cobrir, varrendo
+do fundo até a primeira palavra diferente. É o `stack_not_used()` do Linux (`CONFIG_DEBUG_STACK_USAGE`, chamado
+em `do_exit`: `while (!*n) n++` a partir de `end_of_stack`), com padrão não nulo: o do Linux usa zero, que uma pilha
+também escreve, e a pilha dele já nasce zerada. Aqui o frame vem do alocador com lixo, então pinta-se.
+
+| Quando | O que custa | Medido (`dev`, 4 CPUs) |
+| --- | --- | --- |
+| Primeiro `spawn` de um slot, e as pilhas do boot e dos secundários | Pinta a pilha inteira, uma escrita atômica relaxada por palavra | aarch64 HVF: 13 pilhas no boot (a de 64 KiB e 12 de 16 KiB) em 11 a 24 us, cada uma de 16 KiB em cerca de 1 us (máximo 5 us); x86_64 TCG: 0,3 a 3,3 ms no boot inteiro (TCG só compara o RustOS consigo mesmo) |
+| `spawn` que reusa o slot | Varre do fundo a uma palavra por linha de cache, refina na última linha limpa e repinta só o que foi usado; o pico da tarefa anterior entra em `TASK_PEAK` | aarch64 HVF: 0,3 us em média (72 reusos no boot e no `bench`; máximo 0,7 a 2,4 us); x86_64 TCG: 3 us. A varredura palavra a palavra, numa pilha de 32 KiB, custava 1,7 us no HVF |
+| `ps`, linha `stacks:` | Varre as pilhas dos slots vivos e dos encerrados (o slot guarda a marca até ser reusado) | fora de qualquer caminho quente |
+
+Pintar só sob demanda não é possível: o pico de uma tarefa se mede *depois* que ela rodou, e a pilha precisava estar pintada antes. A
+saída barata foi não repintar tudo a cada `spawn`. A varredura de uma palavra por linha de cache pode errar para menos por uma linha (64 bytes) se a palavra
+amostrada for um buraco que a tarefa não escreveu; a linha que sobra suja só faz o pico seguinte sair maior.
+
+O pico aparece no `ps` (coluna `stack`, `3.4/16K`: pico e tamanho) e no boot, na linha
+`[rustos] stacks: idle peak X KiB of 16, task peak Y KiB of 16, shell peak Z KiB of 64`: o maior pico de cada tipo desde o boot,
+incluídas as tarefas já encerradas (`ociosa`: as de todas as CPUs; `shell`: a tarefa `init`, que corre na pilha de 64 KiB do boot).
+
+**Medida** (QEMU, 4 CPUs, boot completo, `bench` e `fault break`; o IRQ do timer e o IPI de reescalonar caem na pilha da tarefa corrente e já
+estão no pico; bytes, o máximo de cada tipo; `dev` e `release`):
+
+| Pilha | aarch64 `dev` | aarch64 `release` | x86_64 `dev` | x86_64 `release` |
+| --- | --- | --- | --- | --- |
+| Ociosa da CPU de boot (já em regime) | 1 136 | 928 | 1 152 | 848 |
+| Ociosa de núcleo secundário (inclui o init do núcleo: `ap_main`, GIC ou LAPIC, timer) | 6 688 | 3 904 | 6 736 | 3 792 |
+| Tarefa do autoteste e do `bench` (a maior, `waker`; as outras ficam em 0,3 a 1,3 KiB) | 2 512 | 2 304 | 2 352 | 2 192 |
+| Pânico dentro de uma tarefa (`fault cpu`: o relatório todo, a profundidade da tarefa inclusa) | 1 328 | 1 024 | 1 272 | 1 064 |
+| Falha na pilha de falhas do aarch64 (`fault page`, relatório de falha, 16 KiB) | 2 352 | 1 888 | n/a | n/a |
+| Shell (`init`, na pilha de 64 KiB do boot), em KiB: boot, depois `ps`, depois `bench` | 13,7; 17,1; 23,3 | 16,8; 38,2; 42,6 | 13,5; 17,0; 23,1 | 16,6; 38,1; 42,3 |
+
+`dev` (`opt-level = 1`) usa **mais** pilha que `release` nas tarefas e nas ociosas (2,5 contra 2,3 KiB; 6,7 contra 3,9 KiB), e **bem menos** no shell:
+no `release` o `ps` já leva a pilha do shell a 38 KiB e o `bench` a 42,6 de 64 ([DEBT-0067](../tech-debt/0067-shell-usa-dois-tercos-da-pilha-no-release.md)). O
+`fault page` no x86_64 roda na pilha do shell e não separa o relatório do resto; o `#BP`, o `#PF` e o pânico do x86_64 não usam as pilhas IST (pico zero
+nas três de cada CPU, [DEBT-0068](../tech-debt/0068-pilhas-de-excecao-sem-medida-permanente.md)). Não existe falta de página tratada ainda: a única
+é a que vira relatório.
+
+**Decisão: 4 páginas (16 KiB) para toda thread do kernel que não é o boot**, tarefas, ociosa de cada CPU e pilha de cada núcleo secundário (eram 8, 4 e 8).
+Regra: o tamanho é a menor quantidade de páginas com pelo menos 2x o pior pico de `dev` mais o pior relatório de falha. Isso é 2 x (2,5 + 2,4) = 9,8 KiB, 3
+páginas, e a janela de pilhas pede potência de dois no teste de estouro do aarch64 que o desenho da fase 4 prevê (pilha alinhada ao dobro do tamanho), então 4. A margem é 6,4x o pico de tarefa
+e 2,4x o pico mais fundo (o init do núcleo secundário, em `dev`). 2 páginas (8 KiB) ficariam em 1,6x da soma pessimista e em 1,2x no secundário: não. O Linux usa 16 KiB nos dois
+alvos (`THREAD_SIZE` é `PAGE_SIZE << 2` no x86_64 e `1 << 14` no arm64), e o estouro aqui vira relatório pela guarda sem mapeamento, não corrompe.
+
+Ganho, medido pelo `mem` (`used`, aarch64 `release`, depois do boot e do `bench`): **720,0 para 544,0 KiB**, 176 KiB a menos. Por tarefa, 16 KiB (50% da pilha);
+por núcleo secundário, 16 KiB; os 24 slots de tarefa cheios custariam 384 KiB a menos que antes.
+
+**A fase 4 remede.** Uma syscall e uma falta de página de usuário vão rodar na pilha do kernel da thread, e nenhuma das duas existe neste número
+([DEBT-0066](../tech-debt/0066-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md)). A medida se repete com o mesmo comando: `make screenshot ARCH=… CMDS="ps;bench"` e a linha `stacks:` do
+`make smoke`; para o pânico, uma linha de depuração na pilha onde ele corre (não está no código). O 4a decide se 16 KiB seguem ou se a pilha passa a pedir mais.
 
 ## O escalonador
 
@@ -257,7 +308,7 @@ cascata de faltas na própria entrada.
 **Ninguém cede a CPU com `IrqLock` preso.** `yield_now`, `sleep_until`, `park` e `exit`
 não podem ser chamados com um `IrqLock` em mãos: a tarefa seguinte pode querer o mesmo
 lock com a interrupção mascarada, e a dona nunca mais roda. `IrqLock` conta os presos **por CPU**
-(`PerCpu::locks_held`); `schedule_at` faz `debug_assert_eq!(locks_held(), 0)` antes de pegar o lock da fila e `switch_from`, que só o da fila esteja preso; as quatro
+(`PerCpu::locks_held`); `schedule_at` confere `locks_held() == 0` antes de pegar o lock da fila e `switch_from`, que só o da fila esteja preso, **em `debug` e em `release`**: lock preso na troca vira pânico (`context switch with N IrqLock held, expected M`, sem endereço), não deadlock mudo (`fault held` com `panic-tests`, [SDD 06](06_testes.md)). O custo é um load e um compare por troca: aarch64 HVF `release`, 5 boots, linha `switch:` 41 a 43 ns antes e 42 a 44 depois (média 42,0 e 42,6, no ruído do contador, que tem resolução de 41,7 ns por tique); as quatro
 funções públicas também recusam chamada de dentro de IRQ (`PerCpu::in_irq`). Dentro de
 `switch_from` o lock da fila é solto antes de `switch`. `unpark` e `spawn` só trocam com zero presos (acima). O `IrqLock` é um spinlock de verdade
 (`SpinLock`: `compare_exchange` com acquire, escrita com release, espera lendo): mascara a IRQ da CPU local e
@@ -409,4 +460,6 @@ ISAs (`make smoke` sai com erro); `[rustos] task self-test: ok` é linha exigida
 | `on_cpu` e a espera de que a CPU antiga termine a troca antes de rodar a tarefa em outra | `kernel/sched/core.c` do Linux (`p->on_cpu`, `finish_task_switch`): **o desenho é conhecido do Linux, mas o `core.c` não foi relido para este capítulo** |
 | O relógio do escalonador no x86 é `rdtsc()` sem ordem, convertido por multiplicação e deslocamento; o do arm64 usa `isb; mrs` sem ECV | `native_sched_clock` em `arch/x86/kernel/tsc.c` e `arch_timer_read_cntvct_el0` em `arch/arm64/include/asm/arch_timer.h` do Linux (lidos em 2026-11-17, `master`) |
 | Trocar ao fim de quem acorda, se o contador de preempção é zero e a interrupção está ligada | `preempt_enable` com `CONFIG_PREEMPTION` e `preemptible()` em `include/linux/preempt.h` do Linux (lido em 2026-11-17) |
+| O padrão de pintar a pilha e varrer do fundo atrás da primeira palavra diferente, só que com zero; chamado ao encerrar a tarefa | `stack_not_used()` e `check_stack_usage()` em `kernel/exit.c` do Linux, sob `CONFIG_DEBUG_STACK_USAGE` (lidos em 2026-11-18, `master`) |
+| 16 KiB de pilha de thread do kernel nos dois alvos | `THREAD_SIZE_ORDER (2 + KASAN_STACK_ORDER)` em `arch/x86/include/asm/page_64_types.h` e `MIN_THREAD_SHIFT (14 + KASAN_THREAD_SHIFT)` em `arch/arm64/include/asm/memory.h` do Linux (lidos em 2026-11-18, `master`, sem KASAN) |
 | Spinlock de verdade com `IrqLock` mascarando a IRQ local | `SpinLock` em `lib/sync`, com teste de 4 threads no host |

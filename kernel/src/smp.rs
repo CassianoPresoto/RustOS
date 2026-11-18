@@ -13,8 +13,6 @@ use crate::memory::Memory;
 use crate::stack::Stack;
 use crate::{panic, percpu, platform, task};
 
-/// Pilha do kernel de uma CPU secundária: 32 KiB, a mesma de uma tarefa.
-const STACK_PAGES: u64 = 8;
 /// Quanto o BSP espera um núcleo subir: o TCG sem MTTCG é lento.
 const START_TIMEOUT_NS: u64 = 3_000_000_000;
 
@@ -63,7 +61,7 @@ pub fn start(boot: &impl BootInfo, memory: &mut Memory) -> Started {
         let index = next;
         next += 1;
         let prepared = memory
-            .map_stack(&mut mapper, STACK_PAGES)
+            .map_stack(&mut mapper, task::STACK_PAGES)
             .map_err(platform::PlatformError::Map)
             .and_then(|top| {
                 platform::prepare_secondary(memory, &mut mapper).map(|resources| (top, resources))
@@ -76,7 +74,7 @@ pub fn start(boot: &impl BootInfo, memory: &mut Memory) -> Started {
                 continue;
             }
         };
-        Stack::new(top, STACK_PAGES).paint();
+        Stack::new(top, task::STACK_PAGES).paint();
         *PLANS[index].lock() = Some(Plan { resources });
         STACK_TOPS[index].store(top.as_u64(), Ordering::Release);
         percpu::set_hw_id(index, platform::ipi_target(cpu.hw_id));
@@ -171,5 +169,5 @@ unsafe extern "C" fn ap_main(arg: *mut ()) -> ! {
         core::hint::spin_loop();
     }
     let top = VirtAddr::new(STACK_TOPS[index].load(Ordering::Acquire));
-    task::run_secondary(Stack::new(top, STACK_PAGES))
+    task::run_secondary(Stack::new(top, task::STACK_PAGES))
 }

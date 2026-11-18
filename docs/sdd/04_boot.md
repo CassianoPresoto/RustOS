@@ -146,7 +146,7 @@ não programa a UART e, no aarch64, é a da QEMU `virt` ([DEBT-0064](../tech-deb
 O pedido MP faz o Limine acordar cada núcleo e estacioná-lo. O kernel o solta depois de `interrupts::init` e **antes** de `reclaim_bootloader`:
 o núcleo ainda anda na pilha e nas tabelas do Limine até trocar as dele.
 
-1. **Antes de soltar** (`smp::start`, na CPU de boot): para cada núcleo que não é o de boot, até `MAX_CPUS` (8; o resto fica parado, com aviso), mapeia a pilha de 32 KiB
+1. **Antes de soltar** (`smp::start`, na CPU de boot): para cada núcleo que não é o de boot, até `MAX_CPUS` (8; o resto fica parado, com aviso), mapeia a pilha de 16 KiB, que pinta para medir o pico
    (`Memory::map_stack`) e o que a ISA pede (`platform::prepare_secondary`: 3 pilhas IST e a GDT/TSS no x86_64; a pilha de falhas no aarch64), grava o índice e o `hw_id`, e
    escreve `extra_argument` (o índice) e depois `goto_address`, com release (`boot_limine::start_cpu`).
 2. **A entrada** (`ap_entry`, `RDI`/`X0` = `MpInfo`), ainda na pilha do Limine: instala o `PerCpu` (`GS` ou `TPIDR_EL1`), liga as proteções de hardware e **só então** troca para as tabelas do kernel

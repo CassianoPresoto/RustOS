@@ -43,11 +43,9 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0032](0032-virtio-input-sem-a-leitura-da-spec.md) | virtio-input sem a leitura da especificação | Open | Antes de escrever o driver de virtio-input, na fase 6 |
 | [0034](0034-tsc-deadline-sem-teste-no-x86.md) | TSC-deadline sem teste no x86_64 | Open | O primeiro boot do x86_64 com KVM ou em metal |
 | [0035](0035-sve-sme-e-amx-sem-estado-por-tarefa.md) | SVE, SME e AMX sem estado por tarefa | Open | O primeiro código de usuário (fase 4), ou a primeira CPU de teste com SVE, SME ou AMX |
-| [0037](0037-pilha-de-tarefa-sem-medida-de-pico.md) | Pilha de tarefa de 32 KiB sem medida de pico | Open | O primeiro estouro de pilha de uma tarefa, ou o primeiro código de usuário (fase 4) |
 | [0041](0041-escalonador-do-x86-sem-medida-fora-do-tcg.md) | Escalonador do x86_64 sem medida fora do TCG | Open | O primeiro boot do x86_64 com KVM ou em metal |
 | [0042](0042-troca-de-contexto-lenta-com-eevdf-e-relogio.md) | Troca de contexto com o EEVDF gasta metade do tempo na política | Open | O primeiro benchmark da troca de contexto contra o Linux (lat_ctx) no mesmo hardware |
 | [0043](0043-simd-sem-trap-de-uso-indevido.md) | Tarefa sem SIMD que usa SIMD não é pega | Open | O primeiro código de usuário (fase 4), quando todo processo usa SSE |
-| [0045](0045-trava-presa-ao-ceder-a-cpu-some-em-release.md) | `debug_assert` de lock preso ao ceder a CPU some em `release` | Open | O primeiro travamento em `release` que não reproduza em `dev` |
 | [0046](0046-teste-de-simd-sem-os-caminhos-de-xsave.md) | Autoteste de SIMD sem os caminhos de XSAVE e sem a metade alta | Open | A primeira CPU sem `XSAVEOPT`, ou o primeiro boot em metal |
 | [0047](0047-timer-e-pilha-de-falha-sem-teste.md) | `arm_timer`, `next_timer_ns` e a pilha de falha sem teste | Open | O primeiro boot em metal, ou o primeiro defeito de timer ou de pilha de falha |
 | [0048](0048-dec-sem-simbolos-de-controle-nem-nrcs.md) | DEC Special Graphics sem os símbolos de controle, e sem NRCS, G2 nem G3 | Open | O primeiro programa curses da fase 5 que desenhe ACS fora das caixas e dos blocos |
@@ -68,3 +66,6 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0063](0063-nucleo-secundario-sem-vetores-nem-serial-precoce.md) | Núcleo secundário sem vetores nem serial precoce até o init próprio | Open | O primeiro boot que trave com `cpus: N online` abaixo do pedido e nenhuma linha de falha do núcleo que não subiu, ou o primeiro boot em metal com mais de um núcleo |
 | [0064](0064-serial-precoce-so-confia-no-firmware.md) | Serial precoce confia no que o firmware deixou, só serial e só a da QEMU virt no aarch64 | Open | O primeiro boot em metal, ou o primeiro boot sem serial (só tela) |
 | [0065](0065-acordar-com-lock-preso-troca-so-na-proxima-irq.md) | Acordar com `IrqLock` preso, ou com a IRQ mascarada pelo chamador, só troca na próxima IRQ | Open | O primeiro chamador de `unpark` ou `spawn` que segure um `IrqLock` ou mascare a IRQ e dependa da troca na hora |
+| [0066](0066-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) | Pilha de 16 KiB medida só com tarefas do kernel, sem syscall nem falta de usuário | Open | A primeira syscall ou falta de página de usuário rodando na pilha do kernel de uma thread (fase 4a) |
+| [0067](0067-shell-usa-dois-tercos-da-pilha-no-release.md) | Shell usa dois terços da pilha do boot em release | Open | O `ps` em `release` mostrar o pico do shell acima de 48 KiB dos 64, ou a 4a pôr o shell numa pilha de thread de 16 KiB |
+| [0068](0068-pilhas-de-excecao-sem-medida-permanente.md) | Pilhas de exceção (IST e de falhas) sem medida permanente de pico | Open | A 4a acrescentar a IST do `#DB` ou fazer o aarch64 usar a pilha de falhas só no estouro |
