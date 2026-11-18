@@ -417,7 +417,7 @@ fn start(id: usize, config: Spawn, stack_pages: u64) -> Result<(), TaskError> {
     };
     // SAFETY: `top` é o fim de uma pilha mapeada, alinhada a 16 e só desta tarefa.
     let context = unsafe { platform::Context::new(top, task_entry, id, task_exit) };
-    // SAFETY: o slot está reservado e nunca rodou, então ninguém lê o contexto.
+    // SAFETY: o slot está reservado (`New`) e com `on_cpu` baixo, então ninguém lê o contexto.
     unsafe { *CONTEXTS.0[id].get() = context };
     {
         let mut meta = target.meta.lock();
@@ -488,6 +488,7 @@ fn pick_cpu(affinity: u32, prefer: Option<usize>) -> Option<usize> {
 /// (a corrente devia trocar, ou há prazo mais cedo que o armado), manda o IPI. Lock da fila preso.
 fn notify(target: &PerCpu, queue: &Queue, now: u64) {
     if target.index() == percpu::current().index() {
+        queue.rearm(now);
         return;
     }
     let sooner = queue
@@ -872,7 +873,7 @@ fn assert_task_context() {
 
 /// A tarefa que roda agora nesta CPU.
 pub fn current() -> TaskId {
-    TaskId::new(percpu::current().current.load(Ordering::Relaxed))
+    TaskId::new(percpu::pinned(|cpu| cpu.current.load(Ordering::Relaxed)))
 }
 
 pub fn set_current_name(name: &'static str) {
@@ -890,8 +891,9 @@ pub fn switches(id: TaskId) -> u64 {
 }
 
 /// Chamado da IRQ do timer: acorda quem dorme aqui com prazo vencido, cobra a corrente, puxa
-/// trabalho se vale e devolve o próximo disparo que a fila pede (`None`: nenhum, sem tique).
-pub fn timer_irq(now_ns: u64) -> Option<u64> {
+/// trabalho se vale e arma o próximo disparo que a fila pede, ainda com o lock dela preso: quem
+/// põe tarefa aqui lê o prazo armado sob o mesmo lock, e um prazo velho perderia o IPI.
+pub fn timer_irq(now_ns: u64) {
     let here = percpu::current();
     let index = slot_u32(here.index());
     let mut next = u64::MAX;
@@ -911,7 +913,7 @@ pub fn timer_irq(now_ns: u64) -> Option<u64> {
     let mut queue = here.queue.lock();
     queue.next_wake_ns = next;
     queue.policy().tick(now_ns);
-    queue.next_timer_ns(now_ns)
+    interrupts::arm_or_park(queue.next_timer_ns(now_ns), now_ns);
 }
 
 /// O pull periódico: a CPU com trabalho de sobra, a cada `BALANCE_NS`, acorda uma ociosa para
@@ -939,13 +941,19 @@ fn balance(here: &PerCpu, now: u64) {
 
 /// O escalonador desta CPU já tem a política ligada; antes disso o tique periódico manda.
 pub fn is_ready() -> bool {
-    ACTIVE.load(Ordering::Acquire) >> percpu::current().index() & 1 != 0
+    percpu::pinned(is_active)
+}
+
+/// `is_ready` para quem já está com a interrupção mascarada.
+fn is_active(cpu: &PerCpu) -> bool {
+    ACTIVE.load(Ordering::Acquire) >> cpu.index() & 1 != 0
 }
 
 /// Chamado pelo `arch/` no fim de toda IRQ, depois do EOI, com a interrupção
 /// mascarada e na pilha da tarefa interrompida: o quadro dela sobrevive à troca.
 pub fn preempt() {
-    if is_ready() && percpu::current().queue.lock().wants_resched() {
+    let cpu = percpu::current();
+    if is_active(cpu) && cpu.queue.lock().wants_resched() {
         schedule();
     }
 }

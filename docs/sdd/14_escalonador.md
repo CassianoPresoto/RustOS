@@ -224,6 +224,9 @@ prioridade entre CPUs é decisão do `rt.c` do Linux (push/pull de RT) que o ker
 A política não trava nada nem enxerga outra fila: quem garante que a tarefa em trânsito
 não está em duas filas é o kernel ([SDD 15](15_tarefas_e_preempcao.md), regra de lock).
 
+**Limite do balanceamento:** o pull roda quando a CPU fica ociosa e na IRQ do timer da que tem trabalho (no máximo a cada 2 ms). Uma CPU com **uma** tarefa e sem timer armado não roda `pull`
+(nada a acorda), então o desequilíbrio que só ela poderia desfazer fica até a próxima chegada, ociosidade ou fatia ([DEBT-0053](../tech-debt/0053-balanceamento-sem-dominios.md)).
+
 ## `RoundRobin`
 
 A referência e o fallback (o kernel o usou até ligar o `Composite`): fila circular (`RunQueue`) e fatia fixa de 4 ms

@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use rustos_hal::{Cpu, Ipi, IpiKind};
 
+use crate::percpu::PerCpu;
 use crate::{console, percpu, platform};
 
 /// Índice da CPU que entrou em pânico primeiro, mais um; zero enquanto ninguém entrou.
@@ -18,7 +19,7 @@ const STOP_WAIT_SPINS: u32 = 50_000_000;
 /// Algum núcleo entrou em pânico e não é este.
 pub fn elsewhere() -> bool {
     let owner = OWNER.load(Ordering::Relaxed);
-    owner != 0 && owner != percpu::current().index() + 1
+    owner != 0 && owner != percpu::pinned(PerCpu::index) + 1
 }
 
 /// Para esta CPU para sempre se outro núcleo entrou em pânico. Chamada onde a CPU gira
@@ -38,7 +39,7 @@ pub fn stop_this_cpu() -> ! {
 /// Entra em pânico: o primeiro núcleo ganha o console, para os outros e toma os locks que
 /// eles seguravam. O segundo a chegar aqui só para. Chamar antes de imprimir.
 pub fn begin() {
-    let me = percpu::current().index() + 1;
+    let me = percpu::pinned(PerCpu::index) + 1;
     if OWNER
         .compare_exchange(0, me, Ordering::AcqRel, Ordering::Acquire)
         .is_err()

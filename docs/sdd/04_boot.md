@@ -109,7 +109,7 @@ o núcleo ainda anda na pilha e nas tabelas do Limine até trocar as dele.
 2. **A entrada** (`ap_entry`, `RDI`/`X0` = `MpInfo`), ainda na pilha do Limine: instala o `PerCpu` (`GS` ou `TPIDR_EL1`), liga as proteções de hardware e **só então** troca para as tabelas do kernel
    (`platform::secondary_early`; no aarch64, o atributo de dispositivo do `MAIR` também). A pilha do Limine segue mapeada: o mapa direto do kernel tem o mesmo deslocamento do HHDM.
 3. **Na pilha própria** (`ap_main`): vetores e controlador de interrupção, timer e FPU/SIMD (`platform::secondary_init`, [SDD 10](10_interrupcoes.md)); marca-se online e espera `smp::release`.
-4. **O BSP espera** todos ficarem online (3 s no máximo; o que não respondeu entra em `failed`) e imprime `[rustos] cpus: N online`. O `make smoke` exige essa linha com o número de núcleos que pediu.
+4. **O BSP espera** todos ficarem online (3 s no máximo, ou 4 bilhões de voltas se `now_ns` não responder; o que não respondeu entra em `failed` e em `silent`). **Com um núcleo `silent`, `reclaim_bootloader` não roda** (`reclaim: skipped`): ele ainda pode estar na pilha ou nas tabelas do Limine, e a memória não volta ao alocador. O núcleo que falhou no próprio init, já na pilha dele, não entra em `silent` e imprime `[rustos] cpus: N online`. O `make smoke` exige essa linha com o número de núcleos que pediu.
 5. **O escalonador** (`task::init`, na CPU de boot) termina, `smp::release` solta o portão e cada núcleo entra em `task::run_secondary`: a execução dele vira a ociosa, e ele passa a receber tarefas ([SDD 15](15_tarefas_e_preempcao.md)).
 
 Falha de um núcleo (sem `MpInfo`, init que erra) deixa `cpus: FAILED mask 0x…` e o boot falha. Sem resposta de MP, o kernel roda numa CPU.

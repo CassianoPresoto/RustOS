@@ -13,6 +13,8 @@ paid_date:
 
 O pull compara só o número de tarefas prontas e correntes de cada fila (`load`), puxa a de prazo mais distante e trata todas as CPUs como iguais. Não há domínios de escalonamento (SMT, cache, NUMA), peso por nice na carga, custo de migração nem ocupação de cache. O Linux faz isso em `sched-domains` e `sched_balance_rq`.
 
+Também: uma CPU com uma só tarefa e sem timer armado nunca roda `pull`; o equilíbrio vem da escolha de CPU ao nascer e ao acordar, da CPU que fica ociosa e da fatia da sobrecarregada.
+
 ## Por que foi aceito
 
 Numa máquina simétrica de 4 núcleos e com tarefas do mesmo peso, contar tarefas basta, e foi medido com escala de 3,4x em 4 núcleos ([SDD 07](../sdd/07_desempenho_e_recursos.md)). A topologia só se descobre com ACPI (fase 6).

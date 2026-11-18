@@ -4,7 +4,7 @@
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use rustos_hal::{CpuLocal, MAX_CPUS};
+use rustos_hal::{Cpu, CpuLocal, MAX_CPUS};
 
 use crate::sync::IrqLock;
 use crate::task::Queue;
@@ -149,11 +149,23 @@ pub fn set_hw_id(index: usize, hw_id: u64) {
     CPUS[index].hw_id.store(hw_id, Ordering::Relaxed);
 }
 
-/// O bloco da CPU que executa isto. Só depois de `install` nela.
+/// O bloco da CPU que executa isto. Só depois de `install` nela: antes, o bloco é zero.
+/// Com a IRQ ligada, a tarefa pode migrar entre ler o bloco e ler um campo dele: quem lê
+/// campo da CPU "atual" fora de uma região mascarada usa `pinned`.
 pub fn current() -> &'static PerCpu {
     let block = platform::cpu_local().block();
     // SAFETY: `install` guardou o endereço de um elemento de `CPUS`, que vive para sempre.
     unsafe { &*ptr::with_exposed_provenance::<PerCpu>(block) }
+}
+
+/// Roda `read` com a interrupção mascarada: a tarefa não migra nem é preemptada entre achar
+/// o bloco da CPU e ler dele.
+pub fn pinned<R>(read: impl FnOnce(&'static PerCpu) -> R) -> R {
+    let cpu = platform::cpu();
+    let were_enabled = cpu.save_and_disable_interrupts();
+    let value = read(current());
+    cpu.restore_interrupts(were_enabled);
+    value
 }
 
 /// O bloco da CPU `index`, de qualquer CPU.

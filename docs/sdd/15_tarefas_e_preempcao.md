@@ -60,6 +60,8 @@ da fila já solto. `TaskId` é o número do slot.
 - **Cada tarefa nova tem pilha própria:** 8 páginas (32 KiB) e uma de guarda sem
   mapeamento, na janela de pilhas (`memory::map_stack`). Reusar o slot reusa a pilha:
   a janela é só de avanço.
+- **`spawn` com os slots cheios** falha com `NoSlot` mesmo se um deles é `Exited` com `on_cpu` ainda alto (a CPU dele não terminou a troca): a janela é de uma troca, e quem cria tarefa em
+  laço (o `bench`) espera os slots saírem (`wait_exited`) antes de criar de novo.
 - **Afinidade:** `Spawn::affinity` é uma máscara de CPUs (zero é qualquer uma), fixa até a tarefa
   sair ([DEBT-0052](../tech-debt/0052-afinidade-so-no-spawn.md)).
 
@@ -69,7 +71,7 @@ da fila já solto. `TaskId` é o número do slot.
 | --- | --- |
 | `Slot` de `TASKS` (`.bss`, 32 slots) | cerca de 140 por slot (os atômicos e o `IrqLock` dos metadados) |
 | Política por CPU (`Composite<4, 32>`, no heap, criada quando a CPU entra no escalonador) | 3 680 por CPU, a de 4 vagas de FIFO e 32 de EEVDF; 96 por tarefa justa ([SDD 14](14_escalonador.md)) |
-| `PerCpu` (`.bss`, 8 blocos de 64 alinhados) | cerca de 500 por CPU, com a fila (o `Option<Box>` da política), o cache de 32 frames (256) e os contadores |
+| `PerCpu` (`.bss`, 8 blocos, cada um alinhado a 64 bytes) | cerca de 500 por CPU, com a fila (o `Option<Box>` da política), o cache de 32 frames (256) e os contadores |
 | `Context` | 8 (x86_64: só o `rsp`) e 104 (aarch64: x19–x30 e `sp`) |
 | Pilha mapeada de tarefa | 32 768 (8 páginas), mais as tabelas de página que faltarem |
 | Por núcleo secundário | x86_64: pilha de 32 KiB mais 3 pilhas IST de 16 KiB cada, mais GDT e TSS (cerca de 170 bytes, no heap); aarch64: 32 KiB mais a pilha de falhas de 16 KiB; as guardas não têm frame |
@@ -112,7 +114,8 @@ então "acordar antes de dormir" não perde o acordar (é o que o ping-pong do `
 próprio endereço, e o `arch/` o guarda onde a CPU o acha sozinha pela porta `hal::CpuLocal`: no x86_64,
 `IA32_GS_BASE` e `mov reg, gs:[0]` (sem `rdmsr`); no aarch64, `TPIDR_EL1` e `mrs`. `percpu::current()` é
 essa leitura, sem `pure` nem `nomem` (a tarefa pode trocar de CPU entre duas chamadas). A CPU de boot instala o dela
-na primeira instrução do `kmain`; cada núcleo secundário, na entrada.
+na primeira instrução do `kmain`; cada núcleo secundário, na entrada. Com a IRQ ligada, a tarefa pode migrar entre ler `gs:[0]` e ler um campo do bloco: `task::current`, `is_ready`,
+`interrupts::in_irq` e `panic::elsewhere` leem por `percpu::pinned`, que mascara em volta; código que já roda mascarado (o `schedule`, as IRQs) usa `current()` direto.
 
 | Campo | Quem escreve | Para quê |
 | --- | --- | --- |
@@ -255,8 +258,9 @@ O timer é **por CPU** (o `CNTV` e o Local APIC são de cada núcleo; `armed_ns`
 da corrente (`next_deadline_ns`, só existe se há alguém esperando) e o próximo acordar
 de quem dorme. Quem o arma:
 
-- `interrupts::on_timer` (`task::timer_irq`): acorda quem venceu, chama `tick(now)` e rearma
-  para o pedido; sem pedido, o prazo vai a uma hora (o `start` do `CNTV` faz o mesmo, e o
+- `interrupts::on_timer` (`task::timer_irq`): acorda quem venceu, chama `tick(now)` e **arma o
+  pedido ainda com o lock da fila preso** (quem põe tarefa nesta fila lê o prazo armado sob o mesmo lock;
+  armar depois de soltá-lo deixaria um waker de outra CPU ver um prazo velho, não mandar o IPI, e a tarefa esperaria até a hora de `PARKED_NS`); sem pedido, o prazo vai a uma hora (o `start` do `CNTV` faz o mesmo, e o
   `CVAL` vencido manteria a IRQ do aarch64 em serviço). No x86_64 sem TSC-deadline a
   contagem do APIC é de 32 bits e satura: a uma hora vira `u32::MAX` contagens, cerca de
   69 s a 62,5 MHz, e a ociosa acorda no máximo a cada ~69 s, uma IRQ que só rearma. O

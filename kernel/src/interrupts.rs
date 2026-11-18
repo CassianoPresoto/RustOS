@@ -7,6 +7,7 @@ use rustos_hal::{BootInfo, Cpu, Fault, FaultKind, Handlers, Irq, MAX_CPUS};
 use rustos_sync::ByteRing;
 
 use crate::memory::Memory;
+use crate::percpu::PerCpu;
 use crate::sync::bump;
 use crate::{console, panic, percpu, platform, task};
 
@@ -74,6 +75,11 @@ fn arm(deadline_ns: u64) {
     platform::arm_timer(deadline_ns);
 }
 
+/// Arma o disparo pedido pela fila; sem pedido, o prazo vai longe. Com o lock da fila preso.
+pub fn arm_or_park(deadline_ns: Option<u64>, now_ns: u64) {
+    arm(deadline_ns.unwrap_or(now_ns + PARKED_NS));
+}
+
 /// Adianta o timer de um tiro desta CPU se `deadline_ns` vem antes do prazo armado.
 /// Chamar com a interrupção mascarada.
 pub fn arm_no_later_than(deadline_ns: u64) {
@@ -84,7 +90,7 @@ pub fn arm_no_later_than(deadline_ns: u64) {
 
 /// Se esta CPU está dentro de um handler de IRQ.
 pub fn in_irq() -> bool {
-    percpu::current().in_irq()
+    percpu::pinned(PerCpu::in_irq)
 }
 
 /// IRQ do timer. Antes do escalonador, o tique periódico do autoteste. Depois, só o
@@ -94,10 +100,7 @@ fn on_timer() {
     let now = platform::now_ns().unwrap_or(0);
     bump(&percpu::current().stats.timer_irqs, 1);
     if task::is_ready() {
-        match task::timer_irq(now) {
-            Some(at) => arm(at),
-            None => arm(now + PARKED_NS),
-        }
+        task::timer_irq(now);
         return;
     }
     let tick_due = NEXT_TICK_NS.load(Ordering::Relaxed);

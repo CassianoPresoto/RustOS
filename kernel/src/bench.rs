@@ -114,7 +114,7 @@ pub enum Placement {
 
 /// A CPU de quem mede e, se houver, outra ativa.
 fn cpu_pair() -> (usize, Option<usize>) {
-    let here = percpu::current().index();
+    let here = percpu::pinned(percpu::PerCpu::index);
     let other = (0..rustos_hal::MAX_CPUS)
         .find(|&index| index != here && task::active_cpus() >> index & 1 != 0);
     (here, other)
@@ -616,6 +616,49 @@ fn churn(index: usize) {
     task::unpark(id(&MAIN));
 }
 
+static HOG_STOP: AtomicBool = AtomicBool::new(false);
+static HOG_TURNS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+fn counting_hog(index: usize) {
+    while !HOG_STOP.load(Ordering::Relaxed) {
+        HOG_TURNS[index].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Duas tarefas de CPU presas à CPU de quem mede, e quem mede gira 100 ms sem ceder: só a
+/// preempção do timer dá a CPU às duas. Se o prazo da fatia não foi armado ao pôr a tarefa na
+/// fila local (ninguém cede nem há IRQ), as duas ficam com zero voltas.
+fn preempt_by_timer() -> Option<(u64, u64)> {
+    HOG_STOP.store(false, Ordering::Relaxed);
+    let here = percpu::pinned(percpu::PerCpu::index);
+    let mut ids = Vec::new();
+    for (index, turns) in HOG_TURNS.iter().enumerate() {
+        turns.store(0, Ordering::Relaxed);
+        ids.push(
+            task::spawn(Spawn {
+                name: "hog",
+                entry: counting_hog,
+                arg: index,
+                simd: false,
+                params: SchedParams::fair(0),
+                affinity: 1 << here,
+            })
+            .ok()?,
+        );
+    }
+    let end = platform::now_ns()? + 100_000_000;
+    while platform::now_ns()? < end {
+        core::hint::spin_loop();
+    }
+    HOG_STOP.store(true, Ordering::Release);
+    wait_exited(&ids);
+    let turns = (
+        HOG_TURNS[0].load(Ordering::Relaxed),
+        HOG_TURNS[1].load(Ordering::Relaxed),
+    );
+    (turns.0 > 0 && turns.1 > 0).then_some(turns)
+}
+
 /// Tarefas que rodam, cedem e dormem nas CPUs todas, e migram quando o balanceamento ou o
 /// acordar quer: nenhuma roda em duas CPUs ao mesmo tempo e nenhuma se perde. Devolve as
 /// migrações e as voltas, ou `None` se algo falhou.
@@ -649,6 +692,7 @@ pub fn smp_self_test() -> Option<(u64, u64)> {
         task::sleep_until(platform::now_ns()? + 1_000_000);
     }
     wait_exited(&ids);
+    preempt_by_timer()?;
     (CHURN_DOUBLE_RUNS.load(Ordering::Relaxed) == 0).then(|| {
         (
             CHURN_MIGRATIONS.load(Ordering::Relaxed),

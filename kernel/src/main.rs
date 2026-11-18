@@ -135,7 +135,14 @@ fn boot_kernel(handoff: Handoff) -> ! {
         console::enable_history(&mut memory);
     }
     let cpus = interrupts_on.then(|| smp::start(&boot, &mut memory));
-    let reclaimed = memory.reclaim_bootloader(&mut boot);
+    // Um núcleo que não respondeu pode estar rodando na pilha ou nas tabelas do bootloader: a
+    // memória dele fica onde está.
+    let reclaimed = if cpus.is_some_and(|started| started.silent != 0) {
+        kprintln!("[rustos] reclaim: skipped, a core never answered");
+        0
+    } else {
+        memory.reclaim_bootloader(&mut boot)
+    };
     let source = random::init(&boot_marks(&boot, &memory, entry_cycles));
     report(&boot, &memory, display, reclaimed);
     report_vm(&vm, boot.direct_map_offset());

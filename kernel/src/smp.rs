@@ -10,7 +10,7 @@ use rustos_hal::{BootInfo, Cpu, MAX_CPUS, PhysAddr, VirtAddr};
 use rustos_sync::SpinLock;
 
 use crate::memory::Memory;
-use crate::{percpu, platform, task};
+use crate::{panic, percpu, platform, task};
 
 /// Pilha do kernel de uma CPU secundária: 32 KiB, a mesma de uma tarefa.
 const STACK_PAGES: u64 = 8;
@@ -41,6 +41,8 @@ pub struct Started {
     pub skipped: usize,
     /// Máscara dos que subiram mas falharam, ou nunca responderam.
     pub failed: u32,
+    /// Os que nunca responderam: ainda podem estar na memória do bootloader.
+    pub silent: u32,
 }
 
 /// Solta cada núcleo secundário e espera todos ficarem online. Depois de `interrupts::init` e
@@ -80,8 +82,9 @@ pub fn start(boot: &impl BootInfo, memory: &mut Memory) -> Started {
         unsafe { rustos_boot_limine::start_cpu(cpu.token, index as u64, ap_entry) };
         released |= 1 << index;
     }
-    wait_online(released);
+    let silent = wait_online(released);
     Started {
+        silent,
         online: percpu::online_count(),
         found: cpus.len().max(1),
         skipped,
@@ -89,28 +92,46 @@ pub fn start(boot: &impl BootInfo, memory: &mut Memory) -> Started {
     }
 }
 
-/// Espera os núcleos de `released` (um bit por CPU) ficarem online ou falharem; o que não
-/// respondeu no prazo conta como falha.
-fn wait_online(released: u32) {
-    let deadline = platform::now_ns().unwrap_or(0) + START_TIMEOUT_NS;
+/// Voltas de espera quando não há relógio (`now_ns` devolve `None`) ou ele parou: sem esta
+/// reserva o prazo nunca venceria.
+const START_SPIN_LIMIT: u64 = 4_000_000_000;
+
+/// Espera os núcleos de `released` (um bit por CPU) ficarem online ou falharem. Devolve os que
+/// **não responderam** no prazo: seguem rodando na pilha e nas tabelas do Limine, e a memória
+/// dele não pode ser devolvida.
+fn wait_online(released: u32) -> u32 {
+    let deadline = platform::now_ns().map(|now| now + START_TIMEOUT_NS);
     let pending = || released & !percpu::online_mask() & !FAILED.load(Ordering::Relaxed);
+    let mut spins = 0_u64;
     while pending() != 0 {
-        if platform::now_ns().unwrap_or(0) > deadline {
-            FAILED.fetch_or(pending(), Ordering::Relaxed);
-            break;
+        spins += 1;
+        let expired = match (deadline, platform::now_ns()) {
+            (Some(limit), Some(now)) => now > limit,
+            _ => false,
+        };
+        if expired || spins > START_SPIN_LIMIT {
+            let silent = pending();
+            FAILED.fetch_or(silent, Ordering::Relaxed);
+            return silent;
         }
         core::hint::spin_loop();
     }
+    0
 }
 
 /// O escalonador da CPU de boot está de pé: os núcleos online entram nele e esta espera todos.
 pub fn release() {
     GO.store(true, Ordering::Release);
     let online = percpu::online_count();
-    let deadline = platform::now_ns().unwrap_or(0) + START_TIMEOUT_NS;
-    while (task::active_cpus().count_ones() as usize) < online
-        && platform::now_ns().unwrap_or(0) < deadline
-    {
+    let deadline = platform::now_ns().map(|now| now + START_TIMEOUT_NS);
+    let mut spins = 0_u64;
+    while (task::active_cpus().count_ones() as usize) < online && spins < START_SPIN_LIMIT {
+        spins += 1;
+        if let (Some(limit), Some(now)) = (deadline, platform::now_ns())
+            && now >= limit
+        {
+            break;
+        }
         core::hint::spin_loop();
     }
 }
@@ -144,6 +165,7 @@ unsafe extern "C" fn ap_main(arg: *mut ()) -> ! {
     }
     percpu::mark_online(index);
     while !GO.load(Ordering::Acquire) {
+        panic::stop_if_requested();
         core::hint::spin_loop();
     }
     task::run_secondary()
