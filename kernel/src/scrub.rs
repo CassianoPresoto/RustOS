@@ -1,6 +1,6 @@
 //! Limpeza da pilha do kernel na volta ao usuário (SDD 17). A pilha da tarefa de
 //! usuário é pintada com `STACK_PAINT`; na volta, o que a chamada usou abaixo do quadro volta a
-//! ser pintura, e o `arch/` repinta os 512 bytes que ficam logo abaixo dele.
+//! ser pintura, e o `arch/` repinta os 256 bytes que ficam logo abaixo dele.
 
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -15,6 +15,9 @@ use crate::task::STACK_PAGES;
 const CLEAN_RUN_WORDS: usize = 16;
 /// O que o `arch/` repinta sem usar pilha, abaixo do quadro (igual ao do `asm`).
 const ARCH_WINDOW_BYTES: usize = 256;
+/// Folga para o que o quadro da função usa abaixo do local medido: a conferência de que ele cabe
+/// na janela que o `arch/` repinta (o que a limpeza de Rust nunca toca).
+const FRAME_MARGIN_BYTES: usize = 96;
 const WORD: usize = 8;
 #[allow(
     clippy::cast_possible_truncation,
@@ -67,6 +70,14 @@ fn top_of(frame: usize) -> usize {
 /// `Handlers::leave_user`: `frame` é o quadro que o `arch/` salvou no topo da pilha da tarefa.
 #[inline(never)]
 pub fn leave_user(frame: usize) {
+    #[cfg(feature = "selftest")]
+    crate::process::check_ac();
+    let marker = 0_u8;
+    let used = frame - core::ptr::from_ref(&marker).expose_provenance();
+    assert!(
+        used + FRAME_MARGIN_BYTES <= ARCH_WINDOW_BYTES,
+        "leave_user: o quadro da limpeza passou da janela do arch"
+    );
     let top = top_of(frame);
     let bottom = top - STACK_BYTES;
     let window = ARCH_WINDOW_BYTES / WORD;

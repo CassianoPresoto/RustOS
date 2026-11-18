@@ -1,14 +1,17 @@
 //! Espaço de endereçamento do kernel: tabelas novas, uma permissão por seção da
 //! imagem e o mapa direto refeito. A troca para elas é `Vm::activate`.
 
+use core::{ptr, slice};
+
 use rustos_hal::{
     AddressSpace, BootInfo, FrameSource, MapError, PAGE_SIZE, PageFlags, PageMapper, PhysAddr,
     RegionKind, VirtAddr,
 };
-use rustos_mm::ranges::{coalesce, runs};
+use rustos_mm::ranges::{coalesce, overlaps, runs};
 use rustos_mm::{Section, Violation, WxChecker};
 
 use crate::frames::Frames;
+use crate::memory;
 use crate::platform::{self, PlatformSpace};
 
 unsafe extern "C" {
@@ -30,6 +33,16 @@ pub fn image_range() -> (u64, u64) {
         symbol(&raw const __image_start),
         symbol(&raw const __data_end),
     )
+}
+
+/// O `module_string` do `limine.conf` que marca o módulo como o initramfs.
+const INITRAMFS_STRING: &str = "initramfs";
+
+/// O initramfs mapeado na janela de módulos: início virtual e tamanho em bytes.
+#[derive(Clone, Copy, Debug)]
+struct Initramfs {
+    virt: u64,
+    len: u64,
 }
 
 static RELRO_MARK: u8 = 0;
@@ -88,6 +101,10 @@ pub struct Vm {
         allow(dead_code, reason = "lido só pelo modo de teste")
     )]
     stats: VmStats,
+    initramfs: Option<Initramfs>,
+    initramfs_failed: bool,
+    /// `activate` já trocou para as tabelas; antes disso a janela do initramfs não é lida.
+    activated: bool,
 }
 
 fn symbol(address: *const u8) -> u64 {
@@ -200,12 +217,84 @@ impl Vm {
             image_phys,
             direct,
             stats,
+            initramfs: None,
+            initramfs_failed: false,
+            activated: false,
         })
     }
 
+    /// Mapeia o initramfs, o módulo de `module_string` `initramfs`, só leitura e sem execução, na
+    /// janela de módulos. Sem módulo o boot segue; módulo sobre a imagem ou mapeamento que falha
+    /// dão `initramfs_failed`. Depois de `Memory::place_windows`.
+    pub fn map_initramfs(&mut self, boot: &impl BootInfo, frames: &mut Frames) {
+        let Some(module) = boot
+            .modules()
+            .find(|module| module.string == INITRAMFS_STRING)
+        else {
+            return;
+        };
+        let pages_end = module.start.as_u64() + module.len.next_multiple_of(PAGE_SIZE);
+        if overlaps((module.start.as_u64(), pages_end), self.image_phys) {
+            self.initramfs_failed = true;
+            return;
+        }
+        let mut frames = Counting { frames, taken: 0 };
+        let mapped = memory::map_module(&mut self.space, &mut frames, module.start, module.len);
+        self.stats.table_frames += frames.taken;
+        match mapped {
+            Ok(virt) => {
+                self.initramfs = Some(Initramfs {
+                    virt: virt.as_u64(),
+                    len: module.len,
+                });
+            }
+            Err(_) => self.initramfs_failed = true,
+        }
+    }
+
+    /// O mapeamento do initramfs falhou (o boot segue sem ele).
+    pub fn initramfs_failed(&self) -> bool {
+        self.initramfs_failed
+    }
+
+    /// Os bytes do initramfs, ou `None` sem módulo ou antes de `activate` (a janela só existe nas
+    /// tabelas novas).
+    #[cfg_attr(
+        not(feature = "selftest"),
+        allow(
+            dead_code,
+            reason = "lido só pelo modo de teste, até o init da fase 4b"
+        )
+    )]
+    pub fn initramfs(&self) -> Option<&'static [u8]> {
+        let module = self.initramfs.filter(|_| self.activated)?;
+        let start = ptr::with_exposed_provenance::<u8>(usize::try_from(module.virt).ok()?);
+        // SAFETY: `map_initramfs` mapeou `len` bytes só de leitura, para sempre, e a memória
+        // do módulo não volta ao alocador; ninguém a escreve.
+        Some(unsafe { slice::from_raw_parts(start, usize::try_from(module.len).ok()?) })
+    }
+
+    /// Toda página do initramfs está mapeada só para leitura e sem execução.
+    #[cfg(feature = "selftest")]
+    pub fn initramfs_is_read_only(&self) -> bool {
+        let Some(module) = self.initramfs else {
+            return true;
+        };
+        let (mut pages, mut stray) = (0, 0);
+        self.space.walk(&mut |mapping| {
+            let (start, end) = (mapping.virt.as_u64(), mapping.virt.as_u64() + mapping.size);
+            if start < module.virt + module.len && module.virt < end {
+                pages += mapping.size / PAGE_SIZE;
+                stray += u64::from(mapping.flags.writable || mapping.flags.executable);
+            }
+        });
+        stray == 0 && pages == module.len.div_ceil(PAGE_SIZE)
+    }
+
     /// Passa a traduzir pelas tabelas novas.
-    pub fn activate(&self) {
+    pub fn activate(&mut self) {
         self.space.activate();
+        self.activated = true;
     }
 
     pub fn space_mut(&mut self) -> &mut PlatformSpace {

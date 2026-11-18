@@ -12,9 +12,9 @@
 │   ├── linker/                 # x86_64.ld, aarch64.ld: metade alta, um segmento por permissão, símbolos de cada seção e PT_DYNAMIC (KASLR)
 │   └── src/
 │       ├── main.rs             # kmain: boot → memória → serial → tela → relatório → tarefas → boot ok → shell; modo normal ou de teste (`rustos.selftest=1`, só na imagem com a feature `selftest`); `boot_time.rs`: o relógio por fase do boot
-│       ├── boot.rs             # BootRecord: o que o Limine entregou, copiado para o heap (BootInfo)
+│       ├── boot.rs             # BootRecord: o que o Limine entregou (inclusive os módulos), copiado para o heap (BootInfo)
 │       ├── vm.rs               # Vm: tabelas próprias, W^X por seção, mapa direto, conferência e fault text
-│       ├── memory.rs           # Memory::init: buddy e heap; janelas de dispositivos e de pilhas; map_stack; devolução da memória do bootloader
+│       ├── memory.rs           # Memory::init: buddy e heap; janelas de dispositivos, de pilhas e de módulos; map_stack; map_module; devolução da memória do bootloader
 │       ├── frames.rs           # alocador de frames global (IrqLock), o cache de frames por CPU na frente do buddy e o handle Frames
 │       ├── heap.rs             # GlobalAlloc sobre KernelHeap e DirectMap (FrameMemory); `heap/selftest.rs`: o autoteste e a medida de zerar (feature `selftest`)
 │       ├── random.rs           # gerador global: semente de hardware ou jitter, reposição; `random/selftest.rs`: a medida e o resíduo de chave (feature `selftest`)
@@ -40,7 +40,7 @@
 │       └── platform/           # um módulo por ISA: ARCH, PlatformConsole, cpu(), console()
 ├── core/                       # o centro do hexágono: no_std, forbid(unsafe_code), testado no host
 │   ├── hal/                    # rustos-hal: as portas (traits), os tipos de fronteira, `abi` (o contrato de syscall: números, `Status`, `Rights`, `Handle`, `ProcessEvent`) e `redact` (endereço no log), `clock` (`TickScale`, ticks para ns) e `cmdline` (a linha de comando do kernel), puros
-│   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow, WxChecker, PageTables (a caminhada de 4 níveis das duas ISAs), first_unpainted e lowest_dirty_below (a marca d'água da pilha e a varredura da limpeza), `UserRange` (faixa de usuário conferida), `runs`/`coalesce` (2 MiB ou 4 KiB no mapa direto); porta FrameMemory e trait FrameAllocator (SDD 12, SDD 13)
+│   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow, WxChecker, PageTables (a caminhada de 4 níveis das duas ISAs), first_unpainted e lowest_dirty_below (a marca d'água da pilha e a varredura da limpeza), `UserRange` (faixa de usuário conferida), `runs`/`coalesce` (2 MiB ou 4 KiB no mapa direto), `vmar` (árvore de regiões do espaço de usuário: reserva, alocação com ASLR, `unmap`, a decisão da falta de página; SDD 17) e `asid` (gerador de PCID/ASID com geração entre CPUs; SDD 17); porta FrameMemory e trait FrameAllocator (SDD 12, SDD 13)
 │   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) Rng (fast key erasure) e a semente de reserva por jitter
 │   ├── sched/                  # rustos-sched: trait Scheduler, TaskId, RunQueue; RoundRobin, Eevdf (treap de prazos), Fifo e Composite (teto de 95% para o tempo real); sim, property e bench só em teste (SDD 14; o kernel usa o `Composite`)
 │   ├── gfx/                    # rustos-gfx: Rgb, PixelFormat, Surface, Style e a fonte própria 8x16
@@ -55,7 +55,7 @@
 │   └── aarch64/                # Aarch64Cpu, Aarch64CpuLocal (TPIDR_EL1), Aarch64Ipi (SGI), MmioBus, Aarch64Mmu e DirectMapTables (TTBR1), `early` (a PL011 por TTBR0 antes das tabelas próprias), Aarch64Entropy; vetores (EL1h e EL0, `SVC`), `usercopy` (`ldtr`/`sttr`), `user` (`eret`, `TTBR0_EL1`, `CNTKCTL_EL1`), ICC_*, CNTV de um tiro, PAN, `Context`/`switch` e `fpu`;
 │                               # puros: descriptor (com `Aarch64Format`), esr, prefix, time, intid, sgi, features
 ├── boot/
-│   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 (inclusive MP) escrito aqui → hal::BootInfo
+│   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 (inclusive MP e módulos) escrito aqui → hal::BootInfo
 ├── drivers/                    # adaptadores de dispositivo: genéricos sobre hal::RegisterBus, sem unsafe
 │   ├── uart16550/              # COM1 do PC (porta) ou 16550 em MMIO; recepção por consulta ou interrupção
 │   ├── pl011/                  # serial da QEMU virt e de placas ARM (com a IRQ de recepção)

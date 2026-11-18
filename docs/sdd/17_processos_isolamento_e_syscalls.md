@@ -108,7 +108,10 @@ capítulo segue como desenho. Os números estão em
 | Onde mora o programa de teste | Blob de `global_asm!` em `arch/<isa>/src/user_blob.rs`, na seção `.text` do kernel, copiado para uma página de usuário em `0x40_0000` | O `asm!` só mora em `arch/` (regra 4 do guidelines 04) e o `kernel/` nunca liga `arch/<isa>-user` (regra 12); código de teste fica atrás da feature `selftest` |
 | `simd` | A tarefa de usuário nasce com `simd: true` | Sem área de estado, o `xmm0` e o `v0` vazariam entre tarefas; a 4d fecha o resto |
 | `kernel_half_in_sync` | `Process::load` confere que as 256 entradas altas da raiz nova são as da raiz do kernel e recusa o processo se não forem | Entrada nova do kernel depois da cópia dessincronizaria as raízes |
-| Filtro do `debug_write` | Cada linha sai com `[user] ` na frente | O usuário não imita uma linha `[rustos]` do smoke |
+| `AC` (x86_64) | **Toda** entrada por vetor (a comum, a paranoica e a do `#DB`) faz `clac` **antes** de olhar a origem, se a CPU tem SMAP (sem SMAP, `clac` é `#UD`), como o `ASM_CLAC` do Linux; o `iretq` restaura o `AC` do quadro, então limpar é seguro. Vale para o usuário que liga `AC` por `popf` e para a exceção ou NMI que chega dentro da janela `stac`…`clac` da cópia (um `#PF` recuperável, por exemplo). A entrada por `SYSCALL` já tem o `AC` no `FMASK`. A QEMU limpa o `AC` na IRQ mas não na exceção, e o autoteste pega a exceção: de usuário (`privileged`) e de kernel (o `#PF` do `hello` num ponteiro não mapeado, contado em `usercopy::fixup_stats`) | Sem o `clac`, o tratador e a tarefa de kernel retomada rodariam com o SMAP desarmado |
+| Falta na cópia | O *fixup* só vale se o endereço da falta está abaixo de `USER_TOP`; falta em endereço do kernel durante a cópia é fatal | Um erro do kernel não vira `OutOfRange` |
+| Código de usuário no aarch64 | Escrever página executável pelo mapa direto faz `dc cvau`, `ic ivau`, `dsb ish`, `isb` (`arch/aarch64/src/cache.rs`) | O `CTR_EL0` do HVF é `IDC=1`, `DIC=0`: sem isso o usuário podia executar bytes velhos |
+| Filtro do `debug_write` | Só ASCII imprimível, `\n` e `\t` passam; todo outro byte (inclusive os de UTF-8, que escondem o CSI de 8 bits, U+2028 e o bidi) vira `?`; cada linha sai com `[user] ` na frente e a saída sempre termina em `\n`. O xtask só aceita marcador do kernel no **começo** da linha (`[rustos] …`, sem `\r`) | O usuário não imita uma linha `[rustos]` do smoke nem encerra o boot cedo com um `[rustos] boot ok` no meio da linha dele |
 
 **Medido na QEMU 11.1.3** (o que o desenho tinha como NÃO VERIFICADO e a pesquisa só tinha de fonte
 secundária):
@@ -119,14 +122,14 @@ secundária):
 | SMAP (x86_64) | Um `mov` comum do kernel numa página de usuário dá `#PF` de proteção; a cópia entre `stac` e `clac` funciona |
 | `WXN` sobre EL0 (aarch64) | Uma página de código de usuário mapeada de propósito como RWX (o mapeador foi desligado só nesse teste, que não está no código) executa sem o `WXN` e dá falta de instrução em EL0 com ele. O `WXN` vale para EL0. Ligado depois de `Vm::activate` em cada CPU |
 | `SVC` vindo de EL0 | `EC = 0x15`; o vetor 8 o despacha pelo `x8` |
-| Privilegiada em EL0 | `msr ttbr0_el1` dá `EC 0x18`, que o decodificador trata como instrução ilegal; `brk` de EL0 dá `EC 0x3C` e mata o processo |
+| Privilegiada em EL0 | `msr ttbr0_el1` dá `EC 0x00` (instrução desconhecida), e `mrs` de contador ou timer que o `CNTKCTL_EL1` nega dá `EC 0x18`; o decodificador trata os dois como instrução ilegal. `brk` de EL0 dá `EC 0x3C` e mata o processo |
 | `hlt` e `TF` em anel 3 | `hlt` dá `#GP`; `popf` com `TF` dá `#DB` na IST4, com o processo morto na pilha da tarefa |
 | `SYSRET` | Passa o autoteste inteiro; o `IRETQ` fica de reserva e se pode ligar e desligar pelo autoteste (número no SDD 07) |
 
 **O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs): o `hello` em cada CPU
 ativa (`debug_write`, `clock_get_monotonic`, `random_get`, `process_exit`; o número desconhecido e
 `thread_exit` devolvem `NotSupported` e o processo segue); leitura de
-página do kernel; instrução privilegiada; `TF` ou `brk`; `sp` inválido (o kernel não cai ao voltar);
+página do kernel; instrução privilegiada com `AC` ligado (o `#GP` chega ao kernel com `AC` limpo); `TF` ou `brk`; `sp` inválido (o kernel não cai ao voltar); `NT` e `AC` ligados por `popf` com syscalls e IRQ durante 8 ms (o processo sobrevive e o kernel nunca roda com `AC`); ponteiro de usuário não mapeado em `debug_write` (`OutOfRange`, o processo segue);
 a limpeza da pilha (2 KiB plantados na pilha do kernel somem com a limpeza e aparecem sem ela).
 Depois de cada falha o kernel segue e o caso seguinte roda.
 
@@ -356,7 +359,7 @@ supunha o SMP "por vir".
 | Quando | Regra |
 | --- | --- |
 | 4a a 4d (sem PCID/ASID) | Toda troca de processo esvazia o TLB local (x86_64: `mov cr3` sem `NOFLUSH`; aarch64: um ASID reservado só e `tlbi vmalle1`). Uma CPU que o processo deixou **não guarda entrada dele**: correto e mais lento |
-| 4e (com PCID/ASID) | Gerador global com **geração**; cada CPU guarda a `generation_seen`. Um valor de PCID/ASID só é **reusado** (geração nova) depois que **toda CPU** esvaziou o TLB desde que ele foi liberado: subir a geração marca `flush_pending` em todas as CPUs, e cada uma esvazia na próxima troca de processo, **antes** de carregar um valor da geração nova (x86_64: `INVPCID` tipo 2 ou 3, ou `mov cr3` sem `NOFLUSH`; aarch64: `tlbi vmalle1`) e atualiza a `generation_seen`. É o esquema do `asid.c` do Linux arm64: **NÃO VERIFICADO**, não foi lido |
+| 4e (com PCID/ASID) | Gerador global com **geração**; cada CPU guarda a `generation_seen`. Um valor de PCID/ASID só é **reusado** (geração nova) depois que **toda CPU** esvaziou o TLB desde que ele foi liberado: subir a geração marca `flush_pending` em todas as CPUs, e cada uma esvazia na próxima troca de processo, **antes** de carregar um valor da geração nova (x86_64: `INVPCID` tipo 2 ou 3, ou `mov cr3` sem `NOFLUSH`; aarch64: `tlbi vmalle1`) e atualiza a `generation_seen`. É o esquema do `arch/arm64/mm/context.c` do Linux, conferido pelo revisor do PR do gerador ([abaixo](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)) |
 | 4e, processo que migra | Com PCID/ASID o TLB da CPU antiga **guarda** o valor. Cada Process tem um `tlb_gen` que sobe a cada `unmap`; a CPU que volta a rodá-lo compara com o que ela viu e esvazia só aquele PCID/ASID (`INVPCID` tipo 1; `tlbi aside1`). A ideia é a do `tlb_gen` do Linux x86: **NÃO VERIFICADO** |
 
 #### *Shootdown* de TLB ([DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md))
@@ -427,8 +430,54 @@ O sorteio é **por região, não por mapeamento**: o `ANY` aloca em sequência a
 (**inferência**, não medida). A semente vem de `random::next_u64`
 ([SDD 09](09_seguranca.md)): **em CPU sem RDSEED/RDRAND/RNDR o ASLR herda o jitter
 fraco** ([DEBT-0019](../tech-debt/0019-aleatorio-sem-fonte-de-hardware-fraco.md); no
-Mac com HVF a CPU não anuncia `RNDR`). O boot relata a fonte e o PR de código mede a entropia efetiva
-de 5 000 processos (teste de propriedade com o gerador próprio, como em `core/sched`).
+Mac com HVF a CPU não anuncia `RNDR`). O boot relata a fonte e os bits efetivos (`aslr_bits`,
+abaixo); o PR do kernel que liga o `random::next_u64` ainda mede a entropia de 5 000 processos
+com a fonte real (teste de propriedade com o gerador próprio, como em `core/sched`).
+
+**Como `vmar.rs` entrega isso** (implementado, testado no host): `aslr_base(floor, limit, rng)`
+sorteia a base de uma região, uniforme entre `2^28` páginas (`ASLR_BITS = 28`) a partir de
+`floor`, cortada em `limit`; é o `mmap_base` e o topo da pilha. Dentro da região o `ANY` usa
+`Placement::Lowest` (primeira faixa livre que serve, sem entropia), como o parágrafo acima manda.
+`Placement::Random` também existe: escolhe **uniformemente entre todas as posições alinhadas
+que servem** (conta as posições de cada buraco, sorteia um índice e o localiza), mas o
+kernel **não o usa na 4b nem na 4c**, pelo custo de tabelas de página acima. O sorteio do índice
+é a multiplicação de Lemire com rejeição, no máximo **9 palavras** (1 e mais 8 rejeições):
+esgotadas as rejeições, a nona palavra é usada sem conferir, para uma fonte travada não prender o
+laço. A chance de chegar lá é `(limiar / 2^64)^8`, no máximo 2^-96 para até 2^52 posições. A
+fonte é um `FnMut() -> u64`: o kernel passa `random::next_u64`, o teste passa um xorshift ou
+palavras escolhidas à mão.
+
+**A entropia cai sem aviso se o intervalo é curto.** Com `limit - floor` menor que `2^28` páginas,
+`aslr_base` sorteia entre as páginas que cabem; `aslr_bits(floor, limit)` devolve o `log2` delas
+(arredondado para baixo; 28 com o intervalo cheio; 0 se `aslr_base` daria `None`, o que inclui
+intervalo sem uma página inteira) e **o boot relata esse valor** ao fixar o `mmap_base` e a janela
+da pilha. O teste do host (`aslr_base_has_28_bits_of_page_entropy`) faz 20 000 sorteios com um
+xorshift de semente fixa e confere: base de página, dentro do intervalo, os 28 bits baixos
+todos vistos e metade dos sorteios acima do meio.
+
+### A árvore de regiões (`core/mm/src/vmar.rs`)
+
+A peça pura que a 4b usa direto (o carregador reserva as regiões do `init` e a pilha) e que a
+4c embrulha como objeto VMAR. Ela só diz **o que está reservado e com que permissão**; quem
+mapeia a página e aloca o frame é o `kernel/`. Faixa `[USER_MIN, USER_TOP)` entra por
+parâmetro (`Vmar::new(storage, lo, hi)`), porque o `hal::abi` ainda não existe.
+
+| Decisão | Valor |
+| --- | --- |
+| Estrutura | **Vetor ordenado por início**, em armazenamento dado de fora (`[Region; N]` ou `Box<[Region]>`: o kernel monta o `Box` no heap, sem passar pela pilha de 16 KiB). Capacidade **fixa**; cheio é `VmarError::Full`, sem alocação escondida |
+| Custo ([DEBT-0075](../tech-debt/0075-vmar-com-capacidade-fixa-de-regioes.md)) | `find` e `check_fault` em **O(log N)**; `reserve` e `unmap` em O(log N) mais o deslocamento de até N regiões (`memmove`); `allocate` em **O(N)** (varre os buracos; `Random` varre duas vezes). Números em [SDD 07](07_desempenho_e_recursos.md#árvore-de-regiões-e-gerador-de-asid-fase-4-medido-no-host) |
+| Memória | **32 bytes por região** (`start`, `end`, `Option<Backing>` de 8, permissões, tipo e duas guardas), fixados por `const _: () = assert!`. Armazenamento de N regiões custa `32 N`; sugestão para a 4b: N = 128 (4 KiB por processo) |
+| Guarda | Uma página reservada **abaixo** e/ou **acima**, marcada na própria região (sem região extra, sem gastar vaga). Conta na sobreposição e na alocação; a falta nela é `FaultError::Guard` (estouro de pilha) e nunca resolve |
+| Permissões | `Perms` (`READ`, `WRITE`, `EXECUTE`); **W+X é recusado** (`VmarError::WriteExecute`) em `reserve` e `allocate`. Região sem permissão nenhuma é válida (reserva que sempre falta) |
+| O que a falta precisa | `check_fault(addr, access)` devolve a região (a falta resolve) ou `NoRegion`, `Guard`, `Permission` (o processo morre, [falhas](#falhas-de-usuário)). `Attrs.backing` guarda o **objeto e a página dentro dele** (`Backing { object: NonZeroU32, page_offset: u32 }`); sem `backing`, a região é anônima (página zero na leitura, frame novo na escrita). **Nenhum endereço físico** vive aqui |
+| `unmap(start, len)` | Remove as regiões inteiras e **apara ou parte** as que o intervalo cobre em parte (o `vmar_unmap` aceita qualquer faixa). A guarda de uma ponta aparada deixa de existir; a metade alta de uma região partida soma ao `page_offset` do `backing`. Partir exige uma vaga: sem ela é `Full` **e a árvore não muda**. Faixa sem região é sucesso, sem efeito |
+| Estouro | Todo `base + len` e `base - guarda` é aritmética conferida: estouro é `OutOfRange`, nunca volta ao início do espaço. Testado com uma faixa terminando em `0xFFFF_FFFF_FFFF_F000` |
+| Alinhamento | `align` potência de dois, `>= PAGE` (até `2^63`); `len` e endereços múltiplos de página. A janela do pedido (`Fit.window`) limita a faixa reservada, guardas incluídas |
+
+O `reserve` de faixa fixa é o `FIXED` do [`vmar_map`](#as-chamadas): recusa sobrepor
+(`Overlap`), o equivalente do `MAP_FIXED_NOREPLACE`. Testes: modelo ingênuo (vetor ordenado,
+varredura de página a página) contra 30 000 operações aleatórias com semente fixa em cinco
+configurações, mais as bordas ([SDD 06](06_testes.md)).
 
 ### Página zero compartilhada e COW
 
@@ -493,10 +542,10 @@ kernel. Entrada nova depois do boot dessincronizaria as raízes (o Linux resolve
 
 | | x86_64 | aarch64 |
 | --- | --- | --- |
-| Raiz do processo | `CR3` | `TTBR0_EL1`; `TCR_EL1.EPD0` (bit 7) volta a 0, `T0SZ` (bits 5:0) fica em 17 para 47 bits, `TG0` (15:14) em `0b00` (**verificado pelo Linux**; ARM ARM por ler) |
+| Raiz do processo | `CR3` | `TTBR0_EL1`; `TCR_EL1.EPD0` (bit 7) volta a 0, `T0SZ` (bits 5:0) fica em 16 (48 bits, o que o Limine deixa; o mapeador só passa de `USER_TOP` se alguém pedir), `TG0` (15:14) em `0b00` (**verificado pelo Linux**; ARM ARM por ler) |
 | Etiqueta | PCID nos 12 bits baixos do CR3 (`CR3_PCID_MASK = 0xFFF`, `CR3_NOFLUSH = BIT(63)`: `processor-flags.h` do Linux); o Linux liga `CR4.PCIDE` se a CPU anuncia `PCID` (`cr4_init`). **Verificado** (espelho do SDM, [mov cr3](https://www.felixcloutier.com/x86/mov-1) e [invpcid](https://www.felixcloutier.com/x86/invpcid)): com `PCIDE = 1`, o bit 63 do operando do `mov cr3` decide se o TLB é invalidado; com `PCIDE = 0`, os bits 2:0 e 11:5 do CR3 são ignorados. `INVPCID`: tipo 0 = um endereço de um PCID, 1 = um PCID inteiro, 2 = tudo (global inclusive), 3 = tudo menos o global; **`#GP`** com `PCIDE = 0` e tipo 0 ou 1 com PCID diferente de zero, e com tipo maior que 3 | ASID em `TTBR0_EL1[63:48]` quando `TCR_EL1.A1 = 0`; largura em `ID_AA64MMFR0_EL1.ASIDBits[7:4]` (`0b0000` = 8, `0b0010` = 16) e `TCR_EL1.AS` (bit 36) escolhe 16 bits (**verificado pelo Linux**) |
 | Troca de processo | Escreve CR3 com o PCID do processo; sem esvaziar o TLB | Escreve `TTBR0_EL1` com o ASID; sem `tlbi` |
-| Alocação | Gerador global de ASID/PCID por CPU, com contador de geração: esgotou, esvazia tudo e começa outra geração. Módulo puro em `core/mm/src/asid.rs`, testado no host | idem |
+| Alocação | Gerador global de ASID/PCID, com contador de geração: esgotou, esvazia tudo e começa outra geração. Módulo puro em `core/mm/src/asid.rs`, testado no host ([abaixo](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)); o estado por CPU (`active`, `reserved`, `flush_pending`) mora dentro dele, indexado pela CPU | idem |
 | Com KPTI | Dois PCIDs por processo (raiz de kernel e raiz de usuário): o custo é metade do espaço de PCID | O ASID já distingue; o `USER_ASID_FLAG` do Linux marca a variante de usuário |
 | Fallback | Sem PCID, todo CR3 esvazia o TLB: correto e mais lento | Sem ASID útil, `tlbi` por troca |
 | `PageFlags` | `user` liga U/S (bit 2) | `user` liga o acesso de EL0 e `nG`; o kernel segue com UXN e PXN |
@@ -505,6 +554,46 @@ Folhas de usuário: x86_64 `U/S = 1`, NX salvo se a permissão for execução; c
 kernel não executa, com SMAP não acessa sem `AC`. aarch64: código de usuário com
 `PXN = 1, UXN = 0`; dado de usuário com `UXN = 1`. **O W^X do usuário já é do mapeador**
 (`MapError::WriteExecute`): `vmar_map` e as permissões de `vmar` recusam W+X.
+
+#### O gerador de PCID e ASID (`core/mm/src/asid.rs`)
+
+`AsidAllocator<WORDS, CPUS>` é o gerador global da regra de geração
+([PCID e ASID com várias CPUs](#pcid-e-asid-com-várias-cpus)). Implementado e testado no host;
+a ligação (o lock, o `CR3`, o `INVPCID`, o `tlbi`) é da 4e. A regra foi escrita a partir da
+descrição do SDD; o revisor independente a conferiu contra o
+[`arch/arm64/mm/context.c`](https://raw.githubusercontent.com/torvalds/linux/master/arch/arm64/mm/context.c)
+do Linux, e a conferência pegou um caso: o `flush_context` do Linux diz que, no esgotamento,
+"we must preserve its reserved ASID, as this is the only trace we have of the process it is
+still running", então a CPU ociosa mantém o `reserved` por **vários** esgotamentos
+(`double_rollover_idle_cpu_keeps_index`). A outra evidência é a simulação de TLB abaixo.
+
+**Fora do `AsidAllocator`:** a migração entre CPUs (o `tlb_gen` por processo, que esvazia só o
+PCID/ASID de quem volta a uma CPU que o guardou) **não é do gerador**; fica para a 4e.
+
+| Ponto | Decisão |
+| --- | --- |
+| Valor | `Asid = geração << bits | índice`, nunca zero (a geração começa em 1). A largura `bits` é parâmetro de execução (PCID 12; ASID 8 ou 16), limitada pela capacidade `WORDS * 64` do bitmap; índices abaixo de `first` nunca saem (PCID 0, o ASID da raiz vazia). Com KPTI o chamador usa `bits - 1` e deriva os dois valores do processo |
+| Estado por CPU | No lugar da `generation_seen`, um `flush_pending` por CPU **dentro** do gerador (a mesma regra: sobe a geração, toda CPU esvazia antes de carregar valor novo), mais `active` (o que a CPU roda) e `reserved` (o que ela rodava no último esgotamento) |
+| Chamada | `switch(cpu, current) -> Switch { asid, flush }`: a CPU vai rodar o espaço que tem `current` (`None` se nunca teve). Se `current` é da geração em curso, volta igual; senão o gerador renova. `flush` manda esvaziar o TLB desta CPU **antes** de carregar `asid` |
+| Renovar | Se o valor velho estava **reservado** por alguma CPU (rodava no esgotamento), todas as reservas dele passam ao valor novo e o **índice se mantém**; senão tenta o mesmo índice, se livre; senão toma o próximo. Quem renova **sempre** recebe um valor novo (a geração difere) |
+| Esgotamento | Sem índice livre: sobe a geração, esvazia o bitmap, **reserva o que cada CPU roda agora** e marca `flush_pending` em todas. Exige-se mais índices utilizáveis que CPUs (`TooFewIds`), então o esgotamento sempre acha lugar |
+| **Sem liberação individual** | Não há `release`. O espaço que morre apenas larga o valor; o índice só volta no esgotamento seguinte. Reusar um índice na mesma geração deixaria entrada velha no TLB de outra CPU, sem esvaziamento que a cobrisse. É o que o Linux faz com o ASID |
+| Geração | `u64`, soma 1 por esgotamento. Se `geração << bits` estoura: `GenerationOverflow`, **sem mudar o estado** (inalcançável na prática: 2^48 esgotamentos com 16 bits) |
+| Memória | `AsidAllocator<64, 8>` (PCID de 12 bits, 8 CPUs, `hal::MAX_CPUS`) ocupa **672 bytes**; `<1024, 8>` (ASID de 16 bits) ocupa **8 352 bytes** (cerca de 8,2 KiB). `const fn new`: vive num `static`, sem pilha |
+| Fast path | O gerador é `&mut self`: o kernel o põe atrás de um lock e **toda troca o toma**. O desvio sem lock (como o do Linux: `active` atômico por CPU) não existe; é a [DEBT-0076](../tech-debt/0076-asid-sem-caminho-rapido-sem-lock.md) |
+
+**Evidência.** `fuzz` roda 20 000 trocas aleatórias em 4 CPUs e 40 espaços (nascem e morrem),
+com 4 a 6 bits de índice (muitas gerações), em cinco sementes (a CPU 0 quase não troca, para deixar um espaço rodando por vários
+esgotamentos), e confere: o valor devolvido é da
+geração em curso; **dois espaços vivos da mesma geração nunca dividem um índice**; quem estava
+em geração velha recebe valor diferente; a geração sobe de 1 em 1 e, ao subir, o bitmap tem no
+máximo `CPUS + 1` índices (esvaziou) e a CPU da virada esvazia. A prova central é uma
+**simulação de TLB**: cada CPU guarda, por índice, o espaço que o carregou, esvazia quando
+`flush` manda, e o teste exige que **nenhuma CPU carregue um índice que guarda entrada de outro
+espaço**. Mais uma invariante: o índice carregado numa CPU que ainda roda o espaço é igual ao
+do valor atual dele. O mesmo roteiro com o `flush` ignorado **falha** (o teste prova que a
+simulação pega o erro), e a invariante também falha se o `reserved` de uma CPU ociosa se perde
+(mutação testada à mão).
 
 ## Mitigações de CPU
 
@@ -772,7 +861,7 @@ O contrato de como um programa **começa**, igual para o `init` e para qualquer 
 | `AccessDenied` | -4 | Falta direito no handle |
 | `NoMemory` | -5 | Sem frame, sem slot, passou o teto de handles, ou a contabilidade negou ([decisão 9](#decisão-9--overcommit-na-abi-nativa)) |
 | `BadState` | -6 | **Só** processo já morto ou em morte (`thread_create`, `process_kill`). Não existe "thread já iniciada": `thread_create` cria **e inicia** |
-| `NotSupported` | -7 | Número de syscall desconhecido; flag que a fase não implementa; a própria ponta do canal no array de handles |
+| `NotSupported` | -7 | Número de syscall desconhecido; flag que a fase não implementa; a própria ponta do canal no array de handles; recurso do kernel indisponível (`random_get` com o gerador sem semente, `clock_get_monotonic` sem relógio) |
 | `OutOfRange` | -8 | Ponteiro ou intervalo fora de `UserRange`, ou na faixa nula |
 | `PeerClosed` | -9 | O outro lado do canal sumiu (na leitura, só depois de a fila esvaziar) |
 | `ShouldWait` | -10 | Canal sem mensagem (leitura) ou cheio (escrita): espere e tente de novo. **Não consome handle** |
@@ -1041,7 +1130,9 @@ O `init` é o arquivo de nome `init`, sem `./`. Decisões e testes: [SDD 03](03_
 **Limine.** O protocolo **saiu do repositório do bootloader**: em `v12.10.0` do
 [Limine](https://github.com/Limine-Bootloader/Limine) só há `CONFIG.md`; o `PROTOCOL.md` está em
 [`limine-protocol`](https://github.com/Limine-Bootloader/limine-protocol), ramo `trunk`, **sem
-etiqueta que o prenda à 12.10.0** (que o `trunk` corresponda à 12.10.0: **NÃO VERIFICADO**).
+etiqueta**. Mas o `bootstrap` da `v12.10.0` fixa o `limine-protocol` no commit
+`877c2d4c50e170575f8b8e7fbf7b8fa89b1dc157`, que é o topo do `trunk` (conferido em 2026-11-18): o
+`PROTOCOL.md` e o `include/limine.h` nesse commit são os do binário em uso.
 O que mudou desde a v8.x, lido nos dois:
 
 | Item | v8.x | `limine-protocol` (`trunk`) |
@@ -1052,6 +1143,17 @@ O que mudou desde a v8.x, lido nos dois:
 | `INTERNAL_MODULE_COMPRESSED` | "Deprecated … may panic" | honrado se a revisão da resposta for 2 ou maior |
 | Resposta | `module_count` e `modules` (ponteiros para `limine_file`) | idem; o módulo carregado é marcado `Executable/Modules`, não `Usable` |
 
+**Conferido contra o 12.10.0 na peça do módulo (4b)**, no `common/protos/limine.c` da `v12.10.0` (o que roda de
+verdade) e no `include/limine.h` e `PROTOCOL.md` do commit acima:
+
+| O quê | Verificado |
+| --- | --- |
+| Pedido | Id `{ COMMON_MAGIC, 0x3e7e279702be32af, 0xca1c4f3bd1280cee }`. Revisão 0 é `id[4]`, `revision`, `response` (48 bytes); a revisão 1 acrescenta `internal_module_count` e `internal_modules`. O `limine.c` valida só o prefixo até `internal_module_count` (`get_request_rev0`), então o kernel pede **revisão 0, com 48 bytes**, sem módulo interno (só os do `limine.conf`) |
+| Resposta | `limine.c` responde com **revisão 2**; `module_count` e `modules` (ponteiro para um vetor de ponteiros para `limine_file`). Sem módulo carregado **não há resposta** (o `limine.c` desfaz a alocação e não grava `response`). O kernel lê só os campos da revisão 0 |
+| `limine_file` | 112 bytes: `revision`, `address` (8), `size` (16), `path` (24), `string` (32), `media_type`, `unused`, `tftp_ipv4[4]`, `tftp_port`, `partition_index`, `mbr_disk_id` e três UUIDs de 16 bytes a partir do 64. `address` é **endereço virtual no HHDM** (`reported_addr` soma `direct_map_offset`), logo `físico = address − HHDM`; o PROTOCOL.md garante 4 KiB de alinhamento e que cada módulo tem para si todos os pedaços de 4 KiB que cobre. `string` é a do `module_string` (vazia se não há) |
+| Memória | O módulo é alocado como `MEMMAP_KERNEL_AND_MODULES`. O PROTOCOL.md diz que essas entradas são "ilustrativas", sem garantia de alinhamento nem de não sobreposição entre si; as `Usable` e `BootloaderReclaimable` nunca sobrepõem outra entrada, e é nisso que o adaptador se apoia para recusar um módulo que toque RAM do alocador |
+| Testes | `boot/limine/src/protocol.rs` confere id e `size_of`/`offset_of` contra esses valores; `lib.rs` recusa endereço nulo, abaixo do HHDM, desalinhado, tamanho zero ou acima de 1 GiB, transbordo, fim acima do mapa de memória, e sobreposição a RAM, ao framebuffer e a outro módulo; `string` sem NUL em 257 bytes ou que não é UTF-8 vira vazia; `core/mm` testa `overlaps` (imagem) e `map_module` |
+
 **`limine.conf`** (**verificado**, `CONFIG.md` da `v12.10.0`): `module_path` ("the path to a module
 (such as initramfs)", repetível) e `module_cmdline` (**alias** de `module_string`, o nome canônico).
 
@@ -1059,10 +1161,11 @@ Como o módulo cai em `KernelAndModules`, ele **fica fora do mapa direto** ([SDD
 
 | Passo | O quê |
 | --- | --- |
-| `boot/limine` | Novo pedido de módulo; `hal::BootInfo` ganha `modules()` (porta nova no `hal`, decisão do agente); o `BootRecord` copia `(físico, tamanho)` |
-| `kernel/src/vm.rs` | Mapeia a faixa do módulo só leitura e NX, numa janela (como a imagem tem as dela); o W^X confere |
+| `boot/limine` | **Feito (4b, peça do módulo).** Novo pedido de módulo; `hal::BootInfo` ganha `modules()` (porta nova no `hal`, decisão do agente) e devolve `BootModule { start, len, string }`; o `BootRecord` copia os três |
+| `kernel/src/vm.rs` | **Feito.** `Vm::map_initramfs` mapeia a faixa do módulo de `string` `initramfs` só leitura e NX, numa janela própria (a terceira, de 1 GiB, depois das de dispositivos e de pilhas; [SDD 13](13_memoria_virtual.md#o-módulo-initramfs)); o W^X confere. Sem módulo, o boot segue |
+| Initramfs provisório | **Provisório**: até o `init` existir, o `xtask image` põe no cpio só o arquivo de teste `hello.txt` (`hello from the initramfs`), que o autoteste do kernel lê com o `core/cpio` e confere (`initramfs: 1 files, N bytes`, [SDD 04](04_boot.md)). Na 4b o `init` toma o lugar dele |
 | Initramfs como VMO | **A partir da 4c** (na 4b o kernel só mapeia a faixa e lê o `init` dela): o arquivo vira um **VMO físico** (frames que já existem, sem zerar) com `READ`, `MAP`, `DUPLICATE`, `TRANSFER`, e vai ao `init` pelo canal de boot |
-| Devolver ao buddy | Quando o último handle do VMO fechar, devolver os frames do módulo. Que o protocolo permita reusar a memória `Executable/Modules` que não é da imagem **NÃO VERIFICADO**; se não permitir, o initramfs fica residente |
+| Devolver ao buddy | Quando o último handle do VMO fechar, devolver os frames do módulo. Que o protocolo permita reusar a memória `Executable/Modules` que não é da imagem **NÃO VERIFICADO** (o PROTOCOL.md não diz); enquanto isso o initramfs **fica residente**: [DEBT-0080](../tech-debt/0080-initramfs-residente-sem-devolver-os-frames.md) |
 
 ### O canal de boot
 
@@ -1172,8 +1275,8 @@ Sem crate novo (decisão do agente, [`AGENTS.md`](../../AGENTS.md)):
 
 | Peça | Onde |
 | --- | --- |
-| Árvore de regiões do VMAR, alocação com ASLR, bookkeeping de mapeamentos | `core/mm/src/vmar.rs` (módulo novo) |
-| Gerador de ASID/PCID | `core/mm/src/asid.rs` |
+| Árvore de regiões do VMAR, alocação com ASLR, bookkeeping de mapeamentos | `core/mm/src/vmar.rs` (**feito**, [seção](#a-árvore-de-regiões-coremmsrcvmarrs)) |
+| Gerador de ASID/PCID | `core/mm/src/asid.rs` (**feito**, [seção](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)) |
 | `UserRange` | `core/mm/src/user.rs` |
 | Entrada de syscall (`asm!`), `enter_user`, `usercopy`, área por CPU | `arch/<isa>/src/{syscall,user,usercopy,percpu}.rs`; a parte pura (a checagem do `SYSRET`, o valor do `STAR`, a decodificação do `EC` de SVC) em módulo próprio, testada no host |
 | `PageFlags.user` e as codificações | `core/hal/src/paging.rs`, `arch/*/src/{pte,descriptor}.rs` |
@@ -1198,7 +1301,7 @@ Sem crate novo (decisão do agente, [`AGENTS.md`](../../AGENTS.md)):
 | --- | --- | --- |
 | 1 | `cargo xtask user --arch A` (proposta) | Compila cada crate de `user/` com a lista inteira de flags de usuário em `CARGO_ENCODED_RUSTFLAGS` (as do `config.toml` **não** somam: [linker e alvo](#o-que-muda-no-linker-e-no-alvo)) e `--target-dir target/user/<isa>` |
 | 2 | `cargo xtask initramfs --arch A [--out caminho] [nome=]arquivo...` | Escreve `target/initramfs/<isa>.cpio` em `newc`, com um escritor em Rust puro em `xtask/src/initramfs.rs` (o `xtask` não depende de crate do workspace, regra 6, então não reaproveita o `core/cpio`), sem o binário `cpio` do host. Recebe `(nome, bytes, modo)`; a linha de comando põe o modo `0755`. Grava `070701`, os 13 campos em 8 dígitos hexadecimais, o nome com NUL, os dados e o `TRAILER!!!`; nome e dados alinham a 4 bytes a partir do início do arquivo, que não é preenchido até 512. Campos fixos: `c_ino` sequencial a partir de 1, `c_mtime`, `uid`, `gid`, `dev`, `rdev` e `c_chksum` em 0, `c_nlink` 1; a mesma entrada dá o mesmo arquivo, byte a byte. Recusa nome vazio, com NUL, repetido ou com componente vazio, `.` ou `..` (isso pega `/` inicial, `./` e `/` final), o nome `TRAILER!!!` inteiro (o leitor o toma como o fim; `a/TRAILER!!!` vale), nome de 4096 bytes ou mais, dado de 4 GiB ou mais, 2^32 arquivos ou mais e modo com bit fora de `0o7777`. **Não gera diretórios**: o leitor compara o nome inteiro (`bin/sh` é um nome) e o `init` é plano. Testado contra bytes de ouro escritos à mão, todos os restos de nome módulo 4, arquivo vazio e grande, e, só em desenvolvimento, contra o `bsdcpio` (`cpio -it` e `cpio -idv` listam e extraem os mesmos bytes) |
-| 3 | `cargo xtask image` (proposta) | Copia o cpio para `boot/initramfs.cpio` na ESP e acrescenta o módulo ao `limine.conf` |
+| 3 | `cargo xtask image` | **Feito para o cpio provisório.** Gera `target/initramfs/<isa>.provisional.cpio` (`initramfs::write_provisional`, só o `hello.txt`), o copia para `boot/initramfs.cpio` na ESP e acrescenta ao `limine.conf` `module_path: boot():/boot/initramfs.cpio` e `module_string: initramfs`. Na 4b o conteúdo passa a vir do `cargo xtask user` |
 | 4 | `make smoke` | Exige as linhas novas ([abaixo](#linhas-que-o-smoke-passa-a-exigir)) |
 
 A ordem de build é usuário, initramfs, imagem; o kernel **não** depende dos programas de
@@ -1276,7 +1379,7 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 | Dívida 0023, aarch64 sem `WXN` | **Paga na 4a**: o teste na QEMU confirmou o efeito sobre EL0 (uma página RWX de usuário deixa de executar com o `WXN`); a linha `protections:` do aarch64 ganhou `wxn` |
 | Dívida 0037, pilha sem medida de pico (paga no #19: 16 KiB pelo pico medido) e [DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) | A 4a remediu com syscall e falta fatal: 2,0 KiB e 1,6 KiB de 16 (`release`). Os 16 KiB ficam; a 0070 segue aberta até a 4c e a 4f medirem handles, canais e a falta resolvida |
 | [DEBT-0052](../tech-debt/0052-afinidade-so-no-spawn.md) Afinidade só no `spawn` | Não dispara: a ABI nativa não tem afinidade |
-| **Abertas pela 4a:** [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md) (limpeza da pilha até 128 bytes limpos), [DEBT-0077](../tech-debt/0077-iretq-sem-fixup-de-falha-fora-do-rip-e-do-rsp.md) (`iretq` sem *fixup*), [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md) (EL1h na pilha de falhas), [DEBT-0079](../tech-debt/0079-ac-aberto-na-irq-no-meio-da-copia-de-usuario.md) (`AC` na IRQ da cópia); [DEBT-0072](../tech-debt/0072-pilhas-de-excecao-sem-medida-permanente.md) agora inclui a IST4 | A 4a fecha os itens dela |
+| **Abertas pela 4a:** [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md) (limpeza da pilha até 128 bytes limpos), [DEBT-0077](../tech-debt/0077-iretq-sem-fixup-de-falha-fora-do-rip-e-do-rsp.md) (`iretq` sem *fixup*), [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md) (EL1h na pilha de falhas); [DEBT-0081](../tech-debt/0081-debug-write-de-512-bytes-com-a-irq-mascarada.md) (`debug_write` com a IRQ mascarada) e [DEBT-0082](../tech-debt/0082-sem-lfence-depois-do-swapgs-condicional.md) (sem `lfence` depois do `swapgs`); [DEBT-0072](../tech-debt/0072-pilhas-de-excecao-sem-medida-permanente.md) agora inclui a IST4 | A 4a fecha os itens dela |
 | **A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados (4c; gatilho: o primeiro programa que os produza, ou os grupos de recursos da fase 9); imagem de usuário sem ASLR (4b; [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
 
 **Pagas antes da fase:** 0011 (GIC e timer só na CPU 0), 0018 (frames sem cache por CPU), 0036
@@ -1427,6 +1530,8 @@ lista acima por não serem dos seis casos; cada uma diz o que a faria subir ao d
 | **Framebuffer e entrada** | Ficam na fase 5, onde o [SDD 08](08_roadmap.md#decisões-futuras-casos-do-agentsmd) já os lista. O desenho deixa o caminho (VMO físico com política de cache no `vmar_map`; teclado por canal) | A interface é caso 6 quando chegar; nada a decidir na fase 4 |
 | **Alvo de compilação dos programas** | Os mesmos alvos `*-unknown-none`, com `-C code-model=small` (x86_64) e `-C relocation-model=static`, linker script próprio e `--target-dir` separado ([SDD 05](05_build_e_execucao.md): sem nightly nem `build-std`). **Testado** com `rustc 1.100.0` nos dois alvos: compila e liga em `0x40_0000` ([o linker e o alvo](#o-que-muda-no-linker-e-no-alvo)). **Mudança de plano:** as quatro fontes de `rustflags` do Cargo são **exclusivas**, então o xtask passa a lista inteira por `CARGO_ENCODED_RUSTFLAGS` e as flags do `.cargo/config.toml` (o `pie` do kernel) não somam | O risco que sobra é `code-model` em programa maior (o teste mínimo não distingue `small` de `kernel`). Se um alvo JSON virar necessário, exige `build-std`: **volta ao dono** (ferramenta de build nova, caso 2) |
 | **`arch/<isa>-user`** | Crates de adaptador do lado do usuário (`asm!` de `syscall`/`svc`, de `_start`, de `xmm0`/`v0` do teste). Cabem nas regras 4 e 8 do guidelines 03 (adaptador, crate numa pasta existente) | — |
+| **Árvore de regiões em vetor ordenado, de capacidade fixa** | `core/mm/src/vmar.rs` ([seção](#a-árvore-de-regiões-coremmsrcvmarrs)): vetor ordenado em armazenamento do chamador, 32 bytes por região, guarda como marca da região, `unmap` que apara e parte, `Placement::Lowest` e `Random` | Registrada como [DEBT-0075](../tech-debt/0075-vmar-com-capacidade-fixa-de-regioes.md): se o primeiro processo real passar de umas centenas de regiões, o `memmove` de `reserve` e `unmap` (1,1 µs com 4 096) pede uma árvore; o desenho muda por trás da mesma API |
+| **ASID/PCID sem liberação individual** | `core/mm/src/asid.rs` ([seção](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)): o índice só volta no esgotamento; `flush_pending` por CPU no lugar da `generation_seen` | Se a 4e medir esgotamento frequente, o remédio é largura maior ou menos PCID por processo, não `release`. O lock em toda troca é a [DEBT-0076](../tech-debt/0076-asid-sem-caminho-rapido-sem-lock.md) |
 | **ABI no `hal`** | Módulo `abi` em `core/hal` (a "porta de entrada" do [SDD 02](02_arquitetura.md)): números, `Status`, direitos, mensagens, `USER_TOP`. Porta nova no `hal` é do agente | Um crate `core/abi` é a opção A' da decisão 7 |
 
 ### O diff dos guidelines
@@ -1452,7 +1557,7 @@ O relatório de conferência (URL e trecho literal de cada item) está na pesqui
 | [syscall(2)](https://man7.org/linux/man-pages/man2/syscall.2.html), [`auxvec.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/auxvec.h), [`elf-em.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/elf-em.h), `elf.h` das duas ISAs, [inode(7)](https://man7.org/linux/man-pages/man7/inode.7.html) | Convenção; `AT_*`, `e_machine`, `R_*_RELATIVE`; `S_IFMT` | Lidos |
 | [gABI](https://www.sco.com/developers/gabi/latest/ch5.pheader.html) (`ch4`, `ch5`) | `EI_*`, congruência de `p_vaddr` e `p_offset` **módulo o tamanho da página** | Lida nesta rodada |
 | [x86-64 psABI](https://github.com/hjl-tools/x86-psABI), [AAPCS64](https://github.com/ARM-software/abi-aa) | `rsp` alinhado a 16 na entrada, layout de `argc`/`argv`/`envp`/auxv; `sp mod 16 = 0` | Lidos |
-| Limine: `CONFIG.md` da `v12.10.0` e [`limine-protocol`](https://github.com/Limine-Bootloader/limine-protocol) (`trunk`) | `module_path`, `module_cmdline`; `LIMINE_MODULE_REQUEST_ID`, `string`, `tftp_ipv4` | Lidos; o `trunk` **não é preso** à 12.10.0 |
+| Limine: `CONFIG.md` da `v12.10.0` e [`limine-protocol`](https://github.com/Limine-Bootloader/limine-protocol) (`trunk`) | `module_path`, `module_cmdline`; `LIMINE_MODULE_REQUEST_ID`, `string`, `tftp_ipv4` | Lidos; o `bootstrap` da `v12.10.0` fixa o `limine-protocol` em `877c2d4`, o topo do `trunk` em 2026-11-18, e o `limine.c` da etiqueta confere pedido e resposta (acima) |
 | Cargo `config.md`, fonte do `rustc` (`targets/`, `spec/mod.rs`) | Quatro fontes exclusivas de `rustflags`; `code_model` e `relocation_model` dos alvos | Lidos **e testados** com `rustc 1.100.0` e `cargo build -v` |
 | [Linux PTI](https://docs.kernel.org/arch/x86/pti.html), [entry_64](https://docs.kernel.org/arch/x86/entry_64.html), [x86_64 mm](https://docs.kernel.org/arch/x86/x86_64/mm.html), [arm64 memory](https://docs.kernel.org/arch/arm64/memory.html) | Trampolim, `swapgs`, layout | Lidos |
 | Zircon: [rights](https://fuchsia.dev/fuchsia-src/concepts/kernel/rights), [handle_replace](https://fuchsia.dev/fuchsia-src/reference/syscalls/handle_replace), [channel_write](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_write), [channel_read](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_read), [process_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/process_create), [process_start](https://fuchsia.dev/fuchsia-src/reference/syscalls/process_start), [channel_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_create), [conceitos](https://fuchsia.dev/fuchsia-src/concepts/kernel/concepts) | Direitos, atomicidade, descarte na ponta fechada, `arg1` fechado em erro, limites do canal | Lidas |
@@ -1469,7 +1574,6 @@ Só o que sobrou; cada item é pré-requisito da fatia que o usa.
 | **ARM ARM** (as páginas do developer.arm.com não renderizam sem JavaScript; os campos de registrador acima vêm do Linux): o `imm16` do SVC em `ISS[15:0]`; a tabela de `AP[2:1]` por nível de exceção; um `ERET` com estado ilegal; a versão e o efeito do `UAO`; o nome `EL0VCTEN`. **Feitos na 4a, medidos na QEMU, não na ARM ARM:** a regra do PAN com `LDTR`/`STTR` e o efeito do `WXN` sobre EL0 ([A fatia 4a](#a-fatia-4a-como-entrou)) | 4a, 4e |
 | **Intel SDM** em PDF (só o espelho foi lido): o texto sobre *CPUID faulting* (`MSR` `0x140`); se a entrada de exceção limpa `NT` (o `IRETQ` do kernel com `NT = 1` dá `#GP`) | 4a |
 | Layout inicial da pilha do processo no aarch64, em fonte que não seja o `binfmt_elf.c` do Linux | 4b |
-| Limine: se o `trunk` de `limine-protocol` é o da 12.10.0 (conferir a revisão do pedido de módulo e da resposta no binário em uso) | 4b |
 | `-C code-model=small` com um programa de usuário **maior** que o mínimo (o teste não distingue `small` de `kernel`) | 4b |
 | Custo de `array_index_nospec`, IBPB, eIBRS, limpeza de buffers e KPTI: medir; STIBP e SSBD: ler as páginas | 4e |
 

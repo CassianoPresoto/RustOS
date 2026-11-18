@@ -63,6 +63,17 @@ pub unsafe fn init_syscall() {
     unsafe { wrmsr(MSR_FMASK, FMASK) };
 }
 
+/// `EFLAGS.AC` está ligado agora: o kernel rodando assim tem o SMAP desarmado.
+pub fn ac_flag_set() -> bool {
+    let flags: u64;
+    // SAFETY: `pushfq` e `pop` só leem o `RFLAGS`; a pilha tem espaço para uma palavra.
+    unsafe { asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags)) };
+    flags & AC_BIT != 0
+}
+
+/// `RFLAGS.AC`, bit 18.
+const AC_BIT: u64 = 1 << 18;
+
 /// A raiz do kernel: o que o `CR3` recebe quando a tarefa não é de usuário.
 static KERNEL_ROOT: AtomicU64 = AtomicU64::new(0);
 

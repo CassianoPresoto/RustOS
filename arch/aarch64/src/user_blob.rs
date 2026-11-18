@@ -20,6 +20,7 @@ rustos_user_blob_start:
     .global rustos_user_fault_priv
     .global rustos_user_fault_trap
     .global rustos_user_fault_stack
+    .global rustos_user_flags
     .global rustos_user_null_loop
     .global rustos_user_blob_end
 
@@ -52,6 +53,12 @@ rustos_user_hello:
     svc #0
     cmn x0, #7
     b.ne .Lfail4
+    mov x0, #0x20000
+    mov x1, #8
+    mov x8, #{debug_write}
+    svc #0
+    cmn x0, #8
+    b.ne .Lfail5
     mov x0, #0
     b .Lexit
 .Lfail1:
@@ -65,6 +72,9 @@ rustos_user_hello:
     b .Lexit
 .Lfail4:
     mov x0, #4
+    b .Lexit
+.Lfail5:
+    mov x0, #5
 .Lexit:
     mov x8, #{process_exit}
     svc #0
@@ -105,6 +115,22 @@ rustos_user_fault_stack:
     brk #0
 
     .balign 16
+rustos_user_flags:
+    mov x9, x0
+    mrs x10, cntvct_el0
+1:
+    mov x8, #0
+    svc #0
+    mrs x11, cntvct_el0
+    sub x11, x11, x10
+    cmp x11, x9
+    b.lo 1b
+    mov x0, #0
+    mov x8, #{process_exit}
+    svc #0
+    brk #0
+
+    .balign 16
 rustos_user_null_loop:
     mov x9, x0
     mrs x10, cntvct_el0
@@ -136,6 +162,7 @@ unsafe extern "C" {
     static rustos_user_fault_priv: u8;
     static rustos_user_fault_trap: u8;
     static rustos_user_fault_stack: u8;
+    static rustos_user_flags: u8;
     static rustos_user_null_loop: u8;
 }
 
@@ -153,6 +180,8 @@ pub enum Case {
     FaultTrap,
     /// Aponta o `sp` para um valor inválido e usa a pilha: o kernel não pode cair ao voltar.
     FaultBadStack,
+    /// Chama `nop` por `x0` ciclos do contador, recebendo IRQ (o par do caso do x86_64).
+    FlagsAc,
     /// `x0` chamadas `nop` e sai com os ciclos do contador que levaram.
     NullLoop,
 }
@@ -178,6 +207,7 @@ pub fn offset(case: Case) -> usize {
         Case::FaultPrivileged => address(ptr::addr_of!(rustos_user_fault_priv)),
         Case::FaultTrap => address(ptr::addr_of!(rustos_user_fault_trap)),
         Case::FaultBadStack => address(ptr::addr_of!(rustos_user_fault_stack)),
+        Case::FlagsAc => address(ptr::addr_of!(rustos_user_flags)),
         Case::NullLoop => address(ptr::addr_of!(rustos_user_null_loop)),
     };
     at - start

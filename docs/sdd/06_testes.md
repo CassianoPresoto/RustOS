@@ -23,6 +23,19 @@ faixas recortadas, palavras parciais), `core/mm/src/buddy.rs` e `heap.rs` (400 m
 sobrevive e tudo volta ao estado de partida), `lib/sync/src/spin.rs` (4 threads × 10 000
 incrementos — foi esse teste que achou o `then_some` que soltava o lock alheio).
 
+`core/mm/src/vmar.rs`: 30 000 operações aleatórias (`reserve`, `allocate` nas duas
+colocações, `unmap`, `find`) em cinco configurações de capacidade e tamanho, com semente
+fixa, contra um modelo ingênuo (lista ordenada, candidatos achados página a página); a cada
+passo as duas árvores são iguais, sem sobreposição e sem W+X. Mais as bordas: faixa no topo
+do espaço (`base + len` estoura), alinhamento de `2^63`, espaço cheio, fragmentação, partir
+sem vaga, uniformidade do sorteio (16 000 sorteios em 8 posições), o viés da rejeição e
+`aslr_base` com intervalo menor que uma página.
+`core/mm/src/asid.rs`: 100 000 trocas aleatórias em 4 CPUs e 40 espaços, com uma
+**simulação de TLB por CPU** que falha se uma CPU carrega um índice com entrada de outro
+espaço, e que o índice carregado numa CPU que ainda roda o espaço seja o do valor atual dele
+(a CPU 0 quase não troca); o mesmo roteiro sem esvaziar tem de falhar. O roteiro
+`double_rollover_idle_cpu_keeps_index` fixa o caso de dois esgotamentos com uma CPU ociosa.
+
 Medição de `core/mm` no host, fora do `make test` (testes `#[ignore]`):
 
 ```sh
@@ -64,7 +77,7 @@ passarem; o `smoke` exige a linha `task self-test: ok`, a `smp self-test: ok` (m
 W^X percorre as tabelas novas ([SDD 13](13_memoria_virtual.md)); `fault text` no shell
 confere que a CPU recusa a escrita em `.text`.
 
-Como o modo de teste imprime o que o normal não imprime, o `smoke` exige também a linha de cada autoteste e medida (`frame`, `heap` e `exception self-test: ok`, `timer:`, `idle:`, `key residue:`, `zero bench:`, `random bench:`, `switch:`, `scale:`, `alloc storm:`, `stacks:`, e os do usuário: `user: entered ring3/el0`, `user: fault contained (pid N)` e `user self-test: ok`, [SDD 17](17_processos_isolamento_e_syscalls.md#a-fatia-4a-como-entrou)) e a `boot time:`: se a linha de comando se perder, o boot normal não passa por boot de teste.
+Como o modo de teste imprime o que o normal não imprime, o `smoke` exige também a linha de cada autoteste e medida (`frame`, `heap` e `exception self-test: ok`, `timer:`, `idle:`, `key residue:`, `zero bench:`, `random bench:`, `switch:`, `scale:`, `alloc storm:`, `stacks:`, e os do usuário: `user: entered ring3/el0`, `user: fault contained (pid N)` e `user self-test: ok`, [SDD 17](17_processos_isolamento_e_syscalls.md#a-fatia-4a-como-entrou), `initramfs: 1 files,`) e a `boot time:`: se a linha de comando se perder, o boot normal não passa por boot de teste.
 
 A linha `stacks:` (pico de pilha por tipo de thread e uma prova da marca d'água) é gate: vira `FAILED` se um pico passa de 75% da pilha ou se a prova falha ([SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)). Duas linhas são medida e heurística, não gate: `key residue:` (varredura da pilha
 atrás de cópias da chave, com uma sonda que planta 4 estados e exige achá-los; [SDD 09](09_seguranca.md))

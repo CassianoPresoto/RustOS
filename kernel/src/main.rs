@@ -110,6 +110,7 @@ extern "C" fn kmain() -> ! {
         panic!("address windows: {error:?}");
     }
     addr::set_direct(vm.occupied()[0]);
+    vm.map_initramfs(&boot, &mut memory.frames);
     if let Err(error) = platform::early_serial_map(vm.space_mut(), &mut memory.frames) {
         panic!("early serial: {error:?}");
     }
@@ -190,6 +191,9 @@ fn boot_kernel(handoff: Handoff) -> ! {
     boot_time::enter(boot_time::Phase::Setup);
     let source = random::init(&boot_marks(&boot, &memory, entry_cycles));
     report(&boot, reclaimed);
+    if vm.initramfs_failed() {
+        kprintln!("[rustos] initramfs: not mapped, the boot goes on without it");
+    }
     let selftest = selftest::enabled(selftest);
     if selftest {
         selftest::details(&boot, &memory, display, &vm, source);
@@ -204,10 +208,11 @@ fn boot_kernel(handoff: Handoff) -> ! {
         if frames_ok { "ok" } else { "FAILED" }
     );
     let wx_ok = report_wx(&vm);
+    let initramfs_ok = !selftest || selftest::initramfs(&vm);
     let exception_ok = interrupts_on && system::exception_self_test();
     let full_ok = !selftest || selftest::before_tasks();
     let tasks_ok = exception_ok && full_ok && report_tasks(&boot, &memory, selftest);
-    if !frames_ok || !wx_ok || !tasks_ok || !cpus_ok {
+    if !frames_ok || !wx_ok || !initramfs_ok || !tasks_ok || !cpus_ok {
         rustos_hal::Cpu::halt_forever(&platform::cpu());
     }
     report_boot_time(selftest);

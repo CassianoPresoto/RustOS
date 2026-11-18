@@ -154,6 +154,8 @@ fn push_input(byte: u8) {
 }
 
 fn on_fault(fault: &Fault) {
+    #[cfg(feature = "selftest")]
+    crate::process::check_ac();
     if fault.from_user {
         crate::process::user_fault(fault);
     }
@@ -182,6 +184,8 @@ impl core::fmt::Display for FaultLine<'_> {
 }
 
 fn on_irq(irq: Irq) {
+    #[cfg(feature = "selftest")]
+    crate::process::check_ac();
     let cpu = percpu::current();
     cpu.set_in_irq(true);
     bump(&cpu.stats.irqs, 1);

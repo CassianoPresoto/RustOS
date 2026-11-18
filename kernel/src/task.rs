@@ -748,6 +748,8 @@ fn switch_from(cpu: &PerCpu, mut queue: IrqGuard<'static, Queue>, now_ns: u64) {
 /// Depois de uma troca, já na pilha de quem entrou: libera a tarefa que saiu desta CPU para
 /// qualquer outra CPU escolhê-la. O `Release` publica o contexto que a troca acabou de salvar.
 fn finish_switch() {
+    #[cfg(feature = "selftest")]
+    crate::process::check_ac();
     let cpu = percpu::current();
     let prev = cpu.prev.load(Ordering::Relaxed);
     if prev != NO_TASK {

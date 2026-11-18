@@ -62,6 +62,7 @@ rustos-crypto = { path = "core/crypto" }
 rustos-sched = { path = "core/sched" }
 rustos-gfx = { path = "core/gfx" }
 rustos-term = { path = "core/term" }
+rustos-cpio = { path = "core/cpio" }
 rustos-shell = { path = "core/shell", default-features = false }
 rustos-sync = { path = "lib/sync" }
 rustos-arch-x86_64 = { path = "arch/x86_64" }

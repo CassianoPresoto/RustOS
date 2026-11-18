@@ -3,6 +3,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod cache;
 pub mod descriptor;
 pub mod esr;
 pub mod features;

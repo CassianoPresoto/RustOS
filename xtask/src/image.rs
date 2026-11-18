@@ -5,12 +5,16 @@ use std::path::{Path, PathBuf};
 
 use crate::arch::Arch;
 use crate::cargo::{self, Profile};
-use crate::limine;
+use crate::{initramfs, limine};
+
+/// Onde o initramfs fica na ESP e o `module_string` que o kernel procura (`vm.rs`).
+const INITRAMFS_PATH: &str = "boot/initramfs.cpio";
+const INITRAMFS_STRING: &str = "initramfs";
 
 fn limine_conf(arch: Arch, cmdline: Option<&str>) -> String {
     let cmdline = cmdline.map_or_else(String::new, |line| format!("    cmdline: {line}\n"));
     format!(
-        "timeout: 0\nserial: yes\n\n/RustOS\n    protocol: limine\n    path: boot():/boot/rustos\n    kaslr: yes\n    resolution: {}\n{cmdline}",
+        "timeout: 0\nserial: yes\n\n/RustOS\n    protocol: limine\n    path: boot():/boot/rustos\n    kaslr: yes\n    resolution: {}\n    module_path: boot():/{INITRAMFS_PATH}\n    module_string: {INITRAMFS_STRING}\n{cmdline}",
         arch.screen_resolution()
     )
 }
@@ -45,6 +49,10 @@ pub fn assemble_with(
         &boot_dir.join(arch.efi_loader()),
     )?;
     copy(&kernel, &kernel_dir.join("rustos"))?;
+    copy(
+        &initramfs::write_provisional(root, arch)?,
+        &esp.join(INITRAMFS_PATH),
+    )?;
     fs::write(boot_dir.join("limine.conf"), limine_conf(arch, cmdline))
         .map_err(|error| format!("gravar limine.conf: {error}"))?;
     Ok(esp)
@@ -59,6 +67,15 @@ fn copy(from: &Path, to: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_initramfs_is_a_module_with_the_string_the_kernel_looks_for() {
+        let conf = limine_conf(Arch::X86_64, None);
+        assert!(conf.contains(
+            "    module_path: boot():/boot/initramfs.cpio\n    module_string: initramfs\n"
+        ));
+        assert!(!conf.contains("module_cmdline"));
+    }
 
     #[test]
     fn the_command_line_goes_into_the_boot_entry_only_when_given() {

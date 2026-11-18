@@ -314,7 +314,8 @@ impl Handle {
 
     /// Do valor cru, que o usuário passou: `None` para `0`.
     pub const fn from_raw(raw: u64) -> Option<Self> {
-        if raw.trailing_zeros() >= 16 {
+        let slot = raw & 0xFFFF;
+        if slot == 0 || slot > Self::MAX_SLOTS as u64 {
             None
         } else {
             Some(Self(raw))
@@ -405,9 +406,31 @@ pub mod boot_kind {
     pub const INITRAMFS: u32 = 4;
 }
 
-/// O byte passa pelo filtro do `debug_write`: descarta ESC, controle exceto `\n` e `\t`, e `0x7F`.
+/// O byte passa pelo filtro do `debug_write`: só ASCII imprimível, `\n` e `\t`. ESC, os outros
+/// controles, `0x7F` e tudo acima de `0x7F` (o CSI de 8 bits, U+2028 e o bidi vêm em UTF-8) saem.
 pub const fn debug_byte_allowed(byte: u8) -> bool {
-    byte == b'\n' || byte == b'\t' || byte >= 0x20 && byte != 0x7F
+    byte == b'\n' || byte == b'\t' || byte >= 0x20 && byte < 0x7F
+}
+
+/// O texto do `debug_write` como o console o recebe: o byte que não passa vira `?`, cada linha
+/// ganha `prefix` na frente, e a saída termina em `\n` (o usuário não emenda a linha do kernel).
+pub fn debug_sanitize(bytes: &[u8], prefix: &str, mut emit: impl FnMut(char)) {
+    let mut at_line_start = true;
+    for &byte in bytes {
+        if at_line_start {
+            prefix.chars().for_each(&mut emit);
+        }
+        let ch = if debug_byte_allowed(byte) {
+            char::from(byte)
+        } else {
+            '?'
+        };
+        emit(ch);
+        at_line_start = ch == '\n';
+    }
+    if !at_line_start {
+        emit('\n');
+    }
 }
 
 #[cfg(test)]
@@ -554,6 +577,26 @@ mod tests {
         assert!(Handle::new(0, Handle::MAX_SLOTS).is_none());
         let last = Handle::new(0, Handle::MAX_SLOTS - 1).unwrap();
         assert_eq!(last.raw() & 0xFFFF, 0xFFFE);
+        assert_eq!(Handle::from_raw(last.raw()), Some(last));
+    }
+
+    #[test]
+    fn from_raw_accepts_exactly_what_new_can_build() {
+        assert_eq!(Handle::from_raw(0xFFFF), None);
+        assert_eq!(Handle::from_raw(7 << 16 | 0xFFFF), None);
+        assert!(Handle::from_raw(0xFFFE).is_some());
+        for index in [0, 1, 4095, Handle::MAX_SLOTS - 1] {
+            let built = Handle::new(5, index).unwrap();
+            assert_eq!(Handle::from_raw(built.raw()), Some(built));
+        }
+        for slot in 0..=0xFFFF_u64 {
+            let accepted = Handle::from_raw(slot).is_some();
+            assert_eq!(
+                accepted,
+                (1..=Handle::MAX_SLOTS as u64).contains(&slot),
+                "{slot}"
+            );
+        }
     }
 
     #[test]
@@ -593,14 +636,49 @@ mod tests {
     }
 
     #[test]
-    fn debug_filter_drops_escape_controls_and_delete() {
+    fn debug_filter_keeps_only_printable_ascii_newline_and_tab() {
         assert!(debug_byte_allowed(b'a'));
         assert!(debug_byte_allowed(b'\n'));
         assert!(debug_byte_allowed(b'\t'));
         assert!(debug_byte_allowed(b' '));
-        for byte in [0x1B, 0x00, 0x07, 0x08, 0x0D, 0x7F] {
+        assert!(debug_byte_allowed(b'~'));
+        for byte in [0x1B, 0x00, 0x07, 0x08, 0x0D, 0x7F, 0x80, 0x9B, 0xC2, 0xFF] {
             assert!(!debug_byte_allowed(byte), "{byte:#x}");
         }
+    }
+
+    fn sanitized(bytes: &[u8]) -> String {
+        let mut out = String::new();
+        debug_sanitize(bytes, "[user] ", |ch| out.push(ch));
+        out
+    }
+
+    #[test]
+    fn sanitize_turns_non_ascii_controls_into_question_marks() {
+        for text in ["\u{9b}31m", "a\u{2028}b", "a\u{2029}b", "x\u{202e}y"] {
+            let out = sanitized(text.as_bytes());
+            assert!(out.is_ascii(), "{out:?}");
+            assert!(!out.contains('\u{9b}') && !out.contains('\u{2028}'));
+            assert_eq!(
+                out.matches('?').count(),
+                text.len() - text.chars().filter(char::is_ascii).count()
+            );
+        }
+        assert_eq!(sanitized(b"\x1b[31mred"), "[user] ?[31mred\n");
+    }
+
+    #[test]
+    fn sanitize_prefixes_every_line_and_always_ends_the_output_with_a_newline() {
+        assert_eq!(sanitized(b"a\nb"), "[user] a\n[user] b\n");
+        assert_eq!(sanitized(b"a\n"), "[user] a\n");
+        assert_eq!(sanitized(b"a\n\nb\n"), "[user] a\n[user] \n[user] b\n");
+        assert_eq!(sanitized(b""), "");
+    }
+
+    #[test]
+    fn a_user_line_cannot_start_with_a_kernel_marker() {
+        let out = sanitized(b"[rustos] boot ok\n[rustos] panic: x");
+        assert!(out.lines().all(|line| line.starts_with("[user] ")));
     }
 
     #[test]

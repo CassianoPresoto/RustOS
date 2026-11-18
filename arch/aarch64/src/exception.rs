@@ -7,7 +7,7 @@ use core::arch::{asm, global_asm};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
-use rustos_hal::abi::SyscallArgs;
+use rustos_hal::abi::{SyscallArgs, USER_TOP};
 use rustos_hal::{Fault, FaultKind, Handlers, Irq, STACK_PAINT, VirtAddr};
 
 use crate::percpu::prefix;
@@ -373,8 +373,13 @@ fn synchronous(frame: &mut Frame, index: u64, handlers: &Handlers) {
         frame.x[1] = ret.value;
         return;
     }
-    let kind = esr::decode(syndrome, read_far());
-    if index == 4 && usercopy::is_usercopy_fault(frame.elr) {
+    let far = read_far();
+    let kind = esr::decode(syndrome, far);
+    if index == 4
+        && usercopy::is_usercopy_fault(frame.elr)
+        && matches!(kind, FaultKind::PageFault { .. })
+        && far < USER_TOP
+    {
         frame.elr = usercopy::recovery_address();
         return;
     }

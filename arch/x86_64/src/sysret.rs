@@ -1,5 +1,6 @@
 //! Valores dos MSRs de `SYSCALL` e a conferência de saída por `SYSRET`. Puro: o `asm!` que usa
-//! isto mora em `syscall` (SDD 17, "x86_64: SYSCALL/SYSRET").
+//! isto mora em `traps` (a saída de `rustos_isr_common_swapped`), que repete as mesmas condições
+//! em assembly: mudar uma pede mudar a outra (SDD 17, "x86_64: SYSCALL/SYSRET").
 
 use rustos_hal::abi::USER_TOP;
 
