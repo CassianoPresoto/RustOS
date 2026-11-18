@@ -59,7 +59,7 @@ número novo no [SDD 07](07_desempenho_e_recursos.md).
 | 4b | `core/cpio`, `core/elf`; a árvore de regiões em `core/mm/src/vmar.rs`, **interna ao kernel** (o carregador mapeia frames direto, sem objeto VMO nem VMAR e sem handle); módulo do Limine; `user/` (runtime e `init`); o xtask monta o initramfs | O `init` do initramfs roda, imprime pelo `debug_write` provisório e sai; o smoke exige a linha dele |
 | 4c | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (muda a assinatura da 4a: a ABI é provisória até aqui); página zero; ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; ***shootdown* de TLB** e parada de thread em outra CPU na morte do processo (**paga** [DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md)); o `init` recebe os handles pelo canal de boot | Um processo cria outro, que escreve no console por um handle que recebeu |
 | 4d | SIMD de usuário, canal de eventos do processo, teste de `xmm0`/`v0` entre processos | Dois processos preservam `xmm0`/`v0`; o culpado de uma falha chega ao pai (**paga** [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md)) |
-| 4e | KPTI, PCID/ASID com a regra de geração entre CPUs, mitigações de CPU ([seção](#mitigações-de-cpu)), relatório no boot | Linha `mitigations:` no boot; custo de cada uma medida |
+| 4e | KPTI, PCID/ASID com a regra de geração entre CPUs, mitigações de CPU ([seção](#mitigações-de-cpu)), relatório no boot. **Parte 1 (feita):** detecção de vulnerabilidade e de recurso nas duas ISAs, a linha `mitigations:`, a chave `kpti=` (só no relatório) e o clamp do Spectre v1. **Parte 2:** o KPTI, o PCID/ASID na troca e o IBPB na troca | Linha `mitigations:` no boot; custo de cada uma medida |
 | 4f | As medidas da fase (inclui a falta de página que zera, [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)) ([abaixo](#medidas-da-fase)) e este capítulo virando descritivo | Fecha a fase: "syscall nula medida; processo que toca o kernel morre sem derrubar nada" |
 
 **A ABI da 4a e da 4b é provisória.** Só `process_exit`, `nop`, `clock_get_monotonic` e
@@ -591,13 +591,12 @@ cada escrita no CR3 esvazia o TLB inteiro.
 | Pilha de entrada por CPU | 4a | Uma pilha pequena por CPU na área por CPU. A saída por `IRETQ`/`eret` passa por ela, como o Linux faz (`TSS_sp0` é a pilha do trampolim na saída) |
 | Raízes | 4e | **x86_64:** duas por processo: a *raiz de kernel* (metade de usuário + kernel inteiro) e a *raiz de usuário* (a mesma metade de usuário + uma entrada de nível alto com o trampolim). As duas compartilham as subárvores da metade baixa. **aarch64:** uma raiz de usuário por processo (`TTBR0`) e **uma só** tabela de trampolim para a máquina (`TTBR1`), como o Linux |
 | A troca | 4e | Um teste de byte (`kpti_on`) na entrada e na saída, não remendo de código (o W^X do kernel torna o remendo caro). Custo de um desvio previsível, a medir |
-| Relatório | 4e | `[rustos] mitigations: kpti=<on\|off> reason=<…>` no boot |
+| Relatório | 4e, parte 1 (**feito**) | `kpti off (not implemented, would be on)` na linha `[rustos] mitigations:` ([seção](#mitigações-de-cpu)); o KPTI de fato é a parte 2 ([DEBT-0100](../tech-debt/0100-kpti-nao-implementado.md)) |
 
-**Quem é vulnerável.** **Verificado** (Linux, `cpu/common.c`): o `X86_BUG_CPU_MELTDOWN`
-liga a menos que a CPU esteja na lista `NO_MELTDOWN` ou o `IA32_ARCH_CAPABILITIES`
-tenha `RDCL_NO` (bit 0 do MSR `0x10A`, **verificado** em `msr-index.h`). O conteúdo da
-lista e o bit do `CPUID` que anuncia o MSR **NÃO VERIFICADO**. Para aarch64 a lista de
-CPUs com Meltdown **NÃO VERIFICADO**. Política da proposta: **sem
+**Quem é vulnerável.** O x86_64 liga o `X86_BUG_CPU_MELTDOWN` a menos que a CPU esteja na
+lista `NO_MELTDOWN` ou tenha `RDCL_NO` (bit 0 do MSR `0x10A`); o aarch64, a menos que tenha
+`ID_AA64PFR0_EL1.CSV3` ou conste da `kpti_safe_list`. O código é o `arch/<isa>/src/mitigation.rs`
+([seção](#mitigações-de-cpu) traz as fontes e o estado de cada valor). Política: **sem
 informação, vulnerável** (KPTI ligado).
 
 **A metade do kernel em todo processo.** Cada raiz de processo copia as 256 entradas
@@ -675,15 +674,129 @@ lê as páginas do Linux `spectre.rst` e `mds.rst` e o `nospec.h` (**verificado*
 ajustes que a leitura obrigou); o que depende de custo ou de condição que elas não dão segue
 **NÃO VERIFICADO**.
 
+### O que existe hoje (4e, parte 1)
+
+**Já é assim.** Cada ISA decodifica o que a CPU anuncia num módulo puro, testado no host, e decide
+as vulnerabilidades por uma função pura; o `core/hal` guarda o tipo e a linha do boot.
+
+| Peça | Onde |
+| --- | --- |
+| `Vulns` (meltdown, spectre v2, ssb, mds, bhb), `KptiPolicy`, `Mitigations` e o texto da linha | `core/hal/src/mitigation.rs` |
+| `array_index_nospec` e a máscara | `core/hal/src/nospec.rs`; no aarch64, a barreira `CSDB` em `arch/aarch64/src/nospec.rs` |
+| x86_64: `MitigationFeatures::from_leaves`, `ArchCapabilities` e `vulnerabilities()` | `arch/x86_64/src/mitigation.rs`; a leitura do CPUID e do MSR em `sysreg.rs` |
+| aarch64: `MitigationFeatures::from_regs` e `vulnerabilities()` | `arch/aarch64/src/mitigation.rs`; a leitura dos registradores em `protection.rs` |
+| A linha e o `kpti=` | `kernel/src/mitigation.rs`; `BootParams::kpti` em `core/hal/src/cmdline.rs` |
+
+**A linha `[rustos] mitigations:`** sai **nos dois modos**, logo depois de `protections:` (mesmo
+critério dela: o `make smoke` e o `make smoke-fast` a exigem, e ela avisa o que a CPU precisa e o
+kernel ainda não tem; custa uma linha, 0,3 a 0,4 ms na serial da QEMU, e o `boot time:` não mudou
+além do arredondamento, [SDD 07](07_desempenho_e_recursos.md)). O formato é
+`v1 on, kpti <estado>, v2 <estado>, ssb <estado>, mds <estado>, bhb <estado>`, sem endereço, com
+`<estado>` em:
+
+| Estado | Quer dizer |
+| --- | --- |
+| `on` | O kernel liga a mitigação. Hoje só o `v1` (o clamp de índice) |
+| `off (not needed)` | A CPU não tem a vulnerabilidade, pela regra da tabela abaixo |
+| `off (not implemented)` | A CPU precisa e o kernel não tem a mitigação ([DEBT-0101](../tech-debt/0101-spectre-v2-nao-implementado.md) a [DEBT-0104](../tech-debt/0104-bhb-nao-implementado.md)) |
+| `off (untested)` | Ligada no código, mas nenhum ambiente a exercita (nenhuma hoje; o tipo `Switch::Untested` já existe) |
+
+O KPTI diz mais: `off (not implemented, would be on)` (a CPU tem Meltdown e o kernel o ligaria),
+`off (not implemented, would be on by kpti=on)` (forçado numa CPU sem Meltdown), `off (kpti=off)`
+(a CPU tem Meltdown e a linha de comando mandou não ligar) e `off (not needed)`. A chave é
+`kpti=on|off|auto` na linha de comando do Limine (valor desconhecido vale `auto`); **nesta fatia só
+muda o texto**: quem liga é o PR do KPTI ([DEBT-0100](../tech-debt/0100-kpti-nao-implementado.md)).
+O modo de teste imprime também `[rustos] cpu features: …` com o que o CPUID ou os registradores
+anunciaram (PCID, INVPCID, IBPB, STIBP, SSBD, `MD_CLEAR`, `ARCH_CAPABILITIES`; `CSV2`, `CSV3`,
+`SSBS`, `ECBHB`, `CLRBHB`).
+
+**A regra de cada vulnerabilidade** é a do Linux, na tag `v6.12`. Marca por valor: **Verificado** é o
+código do Linux lido na tag; **Verificado (secundária)** é espelho ou modelo de terceiro.
+
+| ISA | Vulnerabilidade | Regra | Fonte |
+| --- | --- | --- | --- |
+| x86_64 | Meltdown | `!NO_MELTDOWN(vendor, family)` e `!RDCL_NO`; `NO_MELTDOWN` é toda a AMD e a Hygon | **Verificado:** `arch/x86/kernel/cpu/common.c`, `cpu_set_bug_bits` ("`if (x86_arch_cap_msr & ARCH_CAP_RDCL_NO) return;`") e `cpu_vuln_whitelist` |
+| x86_64 | Spectre v2 | `!NO_SPECTRE_V2`; só o Zhaoxin e o Centaur de família 7 | **Verificado:** `common.c` (`VULNWL(ZHAOXIN, 7, …, NO_SPECTRE_V2 \| …)`) |
+| x86_64 | SSB (v4) | `!NO_SSB` e `!SSB_NO` (bit 4) e `!AMD_SSB_NO` (`0x80000008` EBX bit 26); `NO_SSB` é Silvermont, Airmont, KNL, KNM, Yonah e a AMD de família `0xF` a `0x12` | **Verificado:** `common.c` |
+| x86_64 | MDS | `!NO_MDS` e `!MDS_NO` (bit 5); `NO_MDS` é Goldmont, a AMD e a Hygon | **Verificado:** `common.c` |
+| x86_64 | BHI | `!BHI_NO` (bit 20) e `!NO_BHI` e (eIBRS ou hipervisor); eIBRS é `IBRS_ALL` (bit 1) ou `AutoIBRS` (`0x80000021` EAX bit 8) | **Verificado:** `common.c` ("When virtualized, eIBRS could be hidden, assume vulnerable") |
+| x86_64 | Sem especulação | Família 4, 5 da Intel e do Centaur, Bonnell e Saltwell: nada a mitigar | **Verificado:** `common.c`, `intel-family.h` (`0x1C`, `0x26`, `0x27`, `0x35`, `0x36`) |
+| x86_64 | Sem a folha 1 | `Vulns::ALL` (o Linux a trata como família 4; o RustOS não confia nisso) | Decisão do agente |
+| aarch64 | Meltdown | `CSV3 == 0` e fora da `kpti_safe_list` | **Verificado:** `arch/arm64/kernel/cpufeature.c`, `unmap_kernel_at_el0` |
+| aarch64 | Spectre v2 | `CSV2 == 0` e fora da `spectre_v2_safe_list` | **Verificado:** `arch/arm64/kernel/proton-pack.c` |
+| aarch64 | SSB (v4) | Fora da `spectre_v4_safe_list`; `SSBS` só diz que o controle existe | **Verificado:** `proton-pack.c` (`spectre_v4_get_cpu_hw_mitigation_state`) |
+| aarch64 | BHB | `CSV2 != 3`, `ECBHB == 0` e (`CLRBHB`, ou nas listas de laço ou de firmware do Linux, ou em nenhuma lista). **Diverge do Linux** na última parte: ele só marca a CPU das listas | **Verificado:** `proton-pack.c` (`is_spectre_bhb_affected`, `supports_ecbhb`), `cpufeature.h` (`supports_csv2p3`, `supports_clearbhb`) |
+| aarch64 | MDS | Não existe | **Verificado:** o Linux só define `X86_BUG_MDS` |
+
+**Os registradores e bits**, todos com a posição **Verificada** em `arch/arm64/tools/sysreg` (v6.12) e
+**Verificada (secundária)** no espelho da Arm em
+[`df.lth.se/~getz/ARM/SysReg/`](https://df.lth.se/~getz/ARM/SysReg/AArch64-id_aa64pfr0_el1.html)
+(que traz o texto "FEAT_CSV2_3 is implemented" e "FEAT_ECBHB implements the functionality identified
+by the value 0b0001"): `ID_AA64PFR0_EL1.CSV3` [63:60] e `CSV2` [59:56] (3 é `CSV2_3`),
+`ID_AA64PFR1_EL1.SSBS` [7:4], `ID_AA64MMFR1_EL1.ECBHB` [63:60], `ID_AA64ISAR2_EL1.CLRBHB` [31:28]
+(`S3_0_C0_C6_2`, codificado no `asm!` porque o assembler base não o conhece) e `MIDR_EL1`
+(`Implementer` [31:24], `Architecture` [19:16], `PartNum` [15:4]; o Linux só casa lista com
+`Architecture == 0xF`). No x86_64, **Verificado** em `cpufeatures.h` (v6.12): `CPUID.1:ECX` bit 17
+(`PCID`) e 31 (hipervisor); `CPUID.7.0:EBX` bit 10 (`INVPCID`); `CPUID.7.0:EDX` bit 10 (`MD_CLEAR`),
+26 (`IBRS`+`IBPB`), 27 (`STIBP`), 29 (`ARCH_CAPABILITIES`), 31 (`SSBD`); `CPUID.80000008H:EBX`
+bit 12 (`AMD_IBPB`), 14 (`AMD_IBRS`), 15 (`AMD_STIBP`), 24 (`AMD_SSBD`), 25 (`VIRT_SSBD`), 26
+(`AMD_SSB_NO`); e em `msr-index.h`: `IA32_ARCH_CAPABILITIES` `0x10A` com `RDCL_NO` 0, `IBRS_ALL` 1,
+`RSBA` 2, `SSB_NO` 4, `MDS_NO` 5, `TAA_NO` 8, `SBDR_SSDP_NO`/`FBSDP_NO`/`PSDP_NO` 13 a 15,
+`FB_CLEAR` 17, `RRSBA` 19, `BHI_NO` 20, `PBRSB_NO` 24, `GDS_NO` 26, `RFDS_NO` 27;
+`IA32_SPEC_CTRL` `0x48` (`IBRS` 0, `STIBP` 1, `SSBD` 2, `BHI_DIS_S` 10) e `IA32_PRED_CMD` `0x49`
+(`IBPB` 0). A **leitura do `MSR 0x10A` só ocorre com o `CPUID.7.0:EDX[29]`**, como no Linux
+(`x86_read_arch_cap_msr`). O que o SDM e o ARM ARM dizem desses bits **NÃO foi lido** (os
+campos vêm do Linux e do espelho).
+
+**Os testes** de `vulnerabilities()` usam valores de CPUs reais: no x86_64, os dumps de CPUID e
+MSR do repositório [InstLatx64](https://github.com/InstLatx64/InstLatx64) (commit `17be9a9`: Haswell,
+Skylake, Cascade Lake, Ice Lake, Sapphire Rapids, Alder Lake, Goldmont, Silvermont, Zen 2, Zen 4,
+Bulldozer, Hygon); no aarch64, os registradores dos modelos da QEMU 10.0.0 (`target/arm/tcg/cpu64.c`),
+que copiam os de núcleos reais (Cortex-A35, A55, A72, A76, Neoverse N1, V1, N2, A710 e A64FX). Cada
+bit tem também um teste sintético, marcado como tal. As listas são **parte** das do Linux
+([DEBT-0106](../tech-debt/0106-listas-de-cpu-do-linux-so-em-parte.md)).
+
+**O que a QEMU mostra** (`make smoke`, `release`; o modelo de CPU é o `max` e as outras são
+`RUSTOS_CPU`): na TCG o CPUID **não anuncia** `SPEC_CTRL` nem `ARCH_CAPABILITIES` nem nos modelos
+`Skylake-Server` e `Cascadelake-Server`, então estes saem como CPU sem informação (vulnerável).
+
+```text
+x86_64, TCG, -cpu max (AMD família 6):
+[rustos] mitigations: v1 on, kpti off (not needed), v2 off (not implemented), ssb off (not implemented), mds off (not needed), bhb off (not needed)
+x86_64, TCG, -cpu Cascadelake-Server:
+[rustos] mitigations: v1 on, kpti off (not implemented, would be on), v2 off (not implemented), ssb off (not implemented), mds off (not implemented), bhb off (not implemented)
+aarch64, HVF (Apple M5):
+[rustos] mitigations: v1 on, kpti off (not needed), v2 off (not needed), ssb off (not implemented), mds off (not needed), bhb off (not implemented)
+aarch64, TCG, -cpu a64fx:
+[rustos] mitigations: v1 on, kpti off (not implemented, would be on), v2 off (not implemented), ssb off (not implemented), mds off (not needed), bhb off (not implemented)
+```
+
+### A lista de mitigações da fase
+
+**Estado** hoje: o clamp está **feito**; as demais são o desenho da parte 2 ou da primeira máquina em metal, cada uma com a dívida que a deixa `off (not implemented)` na linha.
+
 | Mitigação | Contra | Onde entra | Custo |
 | --- | --- | --- | --- |
-| Clamp de índice (Spectre v1) | Leitura especulativa fora da tabela | O número da syscall (índice da tabela de despacho) e o índice do handle na tabela do processo. **Sempre ligado**, em toda CPU | **Verificado** (`include/linux/nospec.h`): `array_index_nospec` calcula uma máscara **sem desvio**, `~(long)(index \| (size - 1UL - index)) >> (BITS_PER_LONG - 1)`, e faz `index & máscara` (índice fora do limite vira 0); uso: `if (index < size) { index = array_index_nospec(index, size); val = array[index]; }`. Custo: **NÃO VERIFICADO**, medir |
+| Clamp de índice (Spectre v1) | Leitura especulativa fora da tabela | **Feito** para o número da syscall (índice da tabela de despacho de `kernel/src/syscall.rs`); falta o índice do handle na tabela do processo (a tabela entra na 4c). **Sempre ligado**, em toda CPU | **Verificado** (`include/linux/nospec.h`): `array_index_nospec` calcula uma máscara **sem desvio**, `~(long)(index \| (size - 1UL - index)) >> (BITS_PER_LONG - 1)`, e faz `index & máscara` (índice fora do limite vira 0); uso: `if (index < size) { index = array_index_nospec(index, size); val = array[index]; }`. **Medido:** custo no x86_64 e no aarch64 em [SDD 07](07_desempenho_e_recursos.md); no aarch64 o Linux acrescenta `CSDB` depois da máscara (**Verificado**, `arch/arm64/include/asm/barrier.h`), e o RustOS também ([DEBT-0105](../tech-debt/0105-clamp-do-spectre-v1-confere-o-assembly-a-mao.md)) |
 | IBPB | Spectre v2 entre processos | **Condicional, não em toda troca**: o Linux só o emite para tarefa com especulação de desvio indireto restringida (estado `IBPB: conditional`: "Use IBPB on SECCOMP or indirect branch restricted tasks"). No RustOS: na troca **de e para** processo marcado como restrito, se a CPU anuncia a instrução | A medir (o SDD 09 não tem número na fonte) |
 | eIBRS ou retpoline | Spectre v2 no kernel | **eIBRS é o preferido** onde a CPU tem ("should use the feature … instead of retpoline. Enhanced IBRS is more efficient than retpoline": `spectre.rst`); retpoline só onde não há. O kernel é compilado soft-float: o retpoline exige conferir o alvo de build | A medir |
 | STIBP | Spectre v2 entre *hyperthreads* | Só com SMT, e só se a política pedir | A medir |
 | Limpeza de buffers na saída para usuário | MDS | `mds.rst`: "The mitigation for MDS clears the affected CPU buffers on return to user space and when entering a guest" (o documento **não nomeia o `VERW`** nessa frase). O `VERW` aparece em `arch/x86/include/asm/nospec-branch.h` ("Macro to execute VERW insns that mitigate transient data sampling") e o Linux tem `CLEAR_CPU_BUFFERS` antes do `sysretq` (**verificado** no `entry_64.S`). Liga se a CPU é vulnerável e não anuncia `MDS_NO` | A medir |
 | SSBD | Spectre v4 | Por processo, sob pedido (política); padrão desligado | A medir |
 | KPTI | Meltdown | [Trampolim](#o-trampolim-e-o-caminho-pronto-para-kpti) | ~100 ciclos por troca de CR3 |
+
+**O clamp, como está no código.** `array_index_nospec` e a máscara moram em `core/hal/src/nospec.rs`,
+sem `asm!`: o índice passa por `core::hint::black_box`, que faz o papel do `OPTIMIZER_HIDE_VAR` do
+Linux. O despacho de `kernel/src/syscall.rs` virou uma tabela indexada pelo número (de 0 a 0x42,
+vazios para os números que a ABI não define), e o número passa pela conferência de limite e depois
+pelo clamp, como no `nospec.h`. **Conferido no assembly** (`objdump -d` do `syscall::dispatch`,
+`release`, `rustc` 1.100.0): nas duas ISAs a máscara **não virou desvio**. No x86_64 o compilador a
+trocou por `cmov` (`mov $0x42; sub; or; cmovs`): é seleção, não salto, e o Linux usa `cmp; sbb` por
+asm; no aarch64 saiu a aritmética pura (`sub; orr; mvn; asr #63; csdb; and`). O aarch64 **precisa
+de `asm!`** só para a `CSDB`, e ela mora em `arch/aarch64/src/nospec.rs` (o `core/hal` continua sem
+`asm!`): o `kernel/src/platform/aarch64.rs` calcula a máscara, passa-a pela `CSDB` e só então faz o
+`AND`. O x86_64 usa a função do `hal` como está. A garantia depende do código que o `rustc` gera; a
+conferência é manual ([DEBT-0105](../tech-debt/0105-clamp-do-spectre-v1-confere-o-assembly-a-mao.md)).
 
 O Linux faz na entrada `IBRS_ENTER`, `UNTRAIN_RET` e `CLEAR_BRANCH_HISTORY`
 (**verificado**: estão no `entry_64.S`); o desenho não os copia sem a leitura da página de
@@ -1387,7 +1500,8 @@ Em inglês, como toda saída serial. As da 4a valem hoje, no modo de teste; o bo
 | `[rustos] user: fault contained (pid N)` | 4a |
 | `[rustos] user self-test: ok` (os casos acima) | 4a |
 | `[rustos] user: init loaded (N segments)` | 4b |
-| `[rustos] mitigations: kpti=… ` | 4e |
+| `[rustos] mitigations: ` (nos dois modos) | 4e, parte 1 (**feito**) |
+| `[rustos] cpu features: ` (só o modo de teste) | 4e, parte 1 (**feito**) |
 | `[rustos] user: self-test ok` (handles, SIMD, falha, canal) | 4d |
 
 ## Medidas da fase
@@ -1596,7 +1710,12 @@ lista acima por não serem dos seis casos; cada uma diz o que a faria subir ao d
 
 | Decisão | O que o agente decidiu | Contingência |
 | --- | --- | --- |
-| **KPTI** | Só em CPU vulnerável (detecção: `IA32_ARCH_CAPABILITIES.RDCL_NO`, bit 0, **verificado** em `msr-index.h`; mais uma lista de CPUs imunes, **NÃO VERIFICADO**), com chave de override `kpti=on\|off\|auto` na linha de comando do Limine (para medir as duas configurações). Sem informação, vulnerável. O [SDD 08](08_roadmap.md) e o [SDD 09](09_seguranca.md) já dizem "só em CPU vulnerável" | Se o dono quiser sempre ligado, a 4e perde a detecção e o override; o resto não muda |
+| **KPTI** | Só em CPU vulnerável (detecção: `IA32_ARCH_CAPABILITIES.RDCL_NO`, bit 0, **verificado** em `msr-index.h`; mais a lista de CPUs imunes do Linux, **verificada** na tag `v6.12`), com chave de override `kpti=on\|off\|auto` na linha de comando do Limine (para medir as duas configurações; o nome é o do Linux, sem o prefixo `rustos.` das outras chaves). **Feito na parte 1:** a detecção, a lista (**verificada** na tag `v6.12`) e a chave, que só muda o relatório. Sem informação, vulnerável. O [SDD 08](08_roadmap.md) e o [SDD 09](09_seguranca.md) já dizem "só em CPU vulnerável" | Se o dono quiser sempre ligado, a 4e perde a detecção e o override; o resto não muda |
+| **Detecção e linha de mitigação no `hal`** | `Vulns`, `KptiPolicy`, `Mitigations` e o clamp em `core/hal` (módulos `mitigation` e `nospec`); a decodificação por ISA em `arch/<isa>/src/mitigation.rs`, pura. Porta nova no `hal` é do agente ([`AGENTS.md`](../../AGENTS.md)) | — |
+| **A linha `mitigations:` nos dois modos** | Mesmo critério da `protections:` (um gate a confere e ela avisa); custa uma linha e o `boot time:` não mudou além do arredondamento. Só o `cpu features:` é do modo de teste | Se a medida em UART física ([DEBT-0067](../tech-debt/0067-log-do-boot-normal-sem-medida-em-uart-real.md)) pesar, a linha passa para o `fetch` |
+| **BHB do aarch64 em CPU fora das listas** | Conta como afetada (sem informação, vulnerável); o Linux só marca as das listas dele | Alarme falso em CPU nova até a [DEBT-0106](../tech-debt/0106-listas-de-cpu-do-linux-so-em-parte.md) |
+| **`CSDB` no clamp do aarch64, em `arch/`** | O Linux a põe incondicional; o RustOS também, e o `asm!` mora em `arch/aarch64`, sem tocar a regra do `hal` | Custa 12 ns por syscall no HVF ([SDD 07](07_desempenho_e_recursos.md)): tirar exige ler o requisito no Arm ARM ([DEBT-0105](../tech-debt/0105-clamp-do-spectre-v1-confere-o-assembly-a-mao.md)) |
+| **Despacho por tabela indexada** | `kernel/src/syscall.rs` indexa `TABLE` pelo número em vez de percorrer `Syscall::ALL`; é o que dá ao clamp um índice de verdade | — |
 | **Framebuffer e entrada** | Ficam na fase 5, onde o [SDD 08](08_roadmap.md#decisões-futuras-casos-do-agentsmd) já os lista. O desenho deixa o caminho (VMO físico com política de cache no `vmar_map`; teclado por canal) | A interface é caso 6 quando chegar; nada a decidir na fase 4 |
 | **Alvo de compilação dos programas** | Os mesmos alvos `*-unknown-none`, com `-C code-model=small` (x86_64) e `-C relocation-model=static`, linker script próprio e `--target-dir` separado ([SDD 05](05_build_e_execucao.md): sem nightly nem `build-std`). **Testado** com `rustc 1.100.0` nos dois alvos: compila e liga em `0x40_0000` ([o linker e o alvo](#o-que-muda-no-linker-e-no-alvo)). **Mudança de plano:** as quatro fontes de `rustflags` do Cargo são **exclusivas**, então o xtask passa a lista inteira por `CARGO_ENCODED_RUSTFLAGS` e as flags do `.cargo/config.toml` (o `pie` do kernel) não somam | O risco que sobra é `code-model` em programa maior (o teste mínimo não distingue `small` de `kernel`). Se um alvo JSON virar necessário, exige `build-std`: **volta ao dono** (ferramenta de build nova, caso 2) |
 | **`arch/<isa>-user`** | Crates de adaptador do lado do usuário (`asm!` de `syscall`/`svc`, de `_start`, de `xmm0`/`v0` do teste). Cabem nas regras 4 e 8 do guidelines 03 (adaptador, crate numa pasta existente) | — |
@@ -1621,6 +1740,10 @@ O relatório de conferência (URL e trecho literal de cada item) está na pesqui
 | Intel SDM via [felixcloutier](https://www.felixcloutier.com/x86/sysret): `syscall`, `sysret`, [`iret`](https://www.felixcloutier.com/x86/iret:iretd:iretq), [`mov cr3`](https://www.felixcloutier.com/x86/mov-1), [`invpcid`](https://www.felixcloutier.com/x86/invpcid), [`cpuid`](https://www.felixcloutier.com/x86/cpuid) | Registradores; `STAR`; `IRETQ` (`NT` atual dá `#GP`, `RSP` não canônico dá `#SS`, bits restaurados); PCID e `INVPCID`; `CPUID` em qualquer anel | Lidas (espelho; o PDF do SDM não baixou) |
 | [Xen XSA-7](https://xenbits.xen.org/xsa/advisory-7.html) | CVE-2012-0217 | Lida |
 | Linux x86: [`entry_64.S`](https://github.com/torvalds/linux/blob/master/arch/x86/entry/entry_64.S), [`cpu/common.c`](https://github.com/torvalds/linux/blob/master/arch/x86/kernel/cpu/common.c), [`idt.c`](https://github.com/torvalds/linux/blob/master/arch/x86/kernel/idt.c), [`syscall_64.c`](https://github.com/torvalds/linux/blob/master/arch/x86/entry/syscall_64.c), [`msr-index.h`](https://github.com/torvalds/linux/blob/master/arch/x86/include/asm/msr-index.h), `processor-flags.h`, `process.c`, `nospec.h`, `nospec-branch.h` | Entrada, `FMASK`, `STAR`, `SYSRET` contra `IRET`, MSRs, `PCIDE`, Meltdown, `#DB` com IST, `fixup_bad_iret`, *CPUID faulting*, `array_index_nospec` | Lidos |
+| Linux `v6.12` (tag): `arch/x86/kernel/cpu/common.c` (`cpu_vuln_whitelist`, `cpu_set_bug_bits`), `arch/x86/include/asm/{cpufeatures,msr-index,intel-family,barrier}.h`, `arch/x86/lib/cpu.c` (`x86_family`, `x86_model`), `include/linux/nospec.h` | Regras das vulnerabilidades, bits de CPUID e de MSR, família e modelo, `array_index_nospec` | Lidos na tag (a leitura de hoje, 2026-11-18) |
+| Linux `v6.12`: `arch/arm64/kernel/{cpufeature,proton-pack}.c`, `arch/arm64/include/asm/{cpufeature,cputype,barrier}.h`, `arch/arm64/tools/sysreg` | `unmap_kernel_at_el0`, listas de MIDR, `supports_csv2p3`, `supports_clearbhb`, `CSDB`, posição de `CSV2`, `CSV3`, `SSBS`, `ECBHB`, `CLRBHB` | Lidos na tag |
+| [`df.lth.se/~getz/ARM/SysReg/`](https://df.lth.se/~getz/ARM/SysReg/) (espelho do XML da Arm): `id_aa64pfr0_el1`, `id_aa64pfr1_el1`, `id_aa64mmfr1_el1`, `id_aa64isar2_el1`, `midr_el1` | Confirmação dos campos acima | Lido (secundária) |
+| [InstLatx64](https://github.com/InstLatx64/InstLatx64) (commit `17be9a9`), QEMU [`target/arm/tcg/cpu64.c`](https://github.com/qemu/qemu/blob/v10.0.0/target/arm/tcg/cpu64.c) (`v10.0.0`) | Valores de CPUID, MSR e registradores de CPUs reais, para os testes | Lidos (secundária) |
 | Linux arm64: [`entry.S`](https://github.com/torvalds/linux/blob/master/arch/arm64/kernel/entry.S), [`esr.h`](https://sources.debian.org/src/linux/6.12.69-1/arch/arm64/include/asm/esr.h), `arm_arch_timer.[ch]`, `tools/sysreg`, `pgtable-hwdef.h`, `uaccess.h` | Vetores, `sp_el0`, KPTI por `TTBR1`, `EC`, campos de `TCR_EL1`, `SCTLR_EL1`, `ID_AA64MMFR*`, bits de PTE, `CNTKCTL` | Lidos (**é o Linux, não a ARM ARM**) |
 | Linux [`mm/memory.c`](https://github.com/torvalds/linux/blob/master/mm/memory.c) | Página zero na leitura, COW (`do_anonymous_page`, `wp_page_copy`) | Lido nesta rodada |
 | Linux `spectre.rst`, `mds.rst` ([hw-vuln](https://github.com/torvalds/linux/tree/master/Documentation/admin-guide/hw-vuln)) | IBPB condicional, eIBRS preferido a retpoline, limpeza de buffers no MDS | Lidos nesta rodada |
@@ -1645,6 +1768,6 @@ Só o que sobrou; cada item é pré-requisito da fatia que o usa.
 | **Intel SDM** em PDF (só o espelho foi lido): o texto sobre *CPUID faulting* (`MSR` `0x140`); se a entrada de exceção limpa `NT` (o `IRETQ` do kernel com `NT = 1` dá `#GP`) | 4a |
 | Layout inicial da pilha do processo no aarch64, em fonte que não seja o `binfmt_elf.c` do Linux | 4b |
 | `-C code-model=small` com um programa de usuário **maior** que o mínimo (o teste não distingue `small` de `kernel`) | 4b |
-| Custo de `array_index_nospec`, IBPB, eIBRS, limpeza de buffers e KPTI: medir; STIBP e SSBD: ler as páginas | 4e |
+| Custo de IBPB, eIBRS, limpeza de buffers e KPTI: medir (o do `array_index_nospec` está no [SDD 07](07_desempenho_e_recursos.md)); STIBP e SSBD: ler as páginas do Linux; o texto do **SDM** e do **ARM ARM** sobre os bits da detecção e o requisito da `CSDB` ([DEBT-0105](../tech-debt/0105-clamp-do-spectre-v1-confere-o-assembly-a-mao.md)) | 4e |
 
 Levantamento de novembro de 2026.

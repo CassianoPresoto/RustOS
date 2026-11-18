@@ -83,6 +83,40 @@ roda em **TCG**: o número serve de regressão do RustOS contra ele mesmo, nunca
   mínimo (`hello`) gasta 24 frames (96 KiB: a raiz, 3 tabelas para o código e 3 para a pilha, 1 página de
   código e 16 de pilha) mais 16 KiB de pilha do kernel, e devolve os frames zerados ao morrer.
 
+### Clamp do Spectre v1 na syscall (fatia 4e, parte 1)
+
+Como se mede: o mesmo da [seção anterior](#syscall-nula-e-limpeza-da-pilha-fatia-4a) (`make smoke`,
+linha `user: null syscall`, `release`), cinco rodadas **alternadas** entre as variantes, cada
+número já a mediana de 5 dentro do autoteste. aarch64 sob **HVF** (`RUSTOS_ACCEL=hvf make smoke
+ARCH=aarch64 PROFILE=release`, QEMU 11.1.3, Apple M5); x86_64 em TCG, que só compara o RustOS
+consigo mesmo. As variantes: **A** a `main` (`Syscall::from_raw`, que percorre `Syscall::ALL`),
+**B** a tabela indexada pelo número, sem clamp, **C** a tabela com a máscara e sem a `CSDB`, **D** o
+que entra (tabela, máscara e `CSDB` no aarch64).
+
+| Syscall nula, com a pilha limpa | A (`main`) | B (tabela) | C (tabela + máscara) | D (tabela + máscara + `CSDB`) |
+| --- | --- | --- | --- | --- |
+| aarch64 HVF, `release`, 5 rodadas | 46,2 a 50,4 ns | 46,6 a 51,3 ns | 46,8 a 50,9 ns | **58,1 a 62,1 ns** |
+| x86_64 TCG, `release`, 5 rodadas | 413,7 a 421,0 ns | 424,5 a 546,6 ns (uma rodada de 546) | não medida (no x86_64 D é C) | **426,0 a 440,3 ns** |
+
+- **A máscara é de graça no aarch64** (C contra B: dentro do ruído, 0 a 1 ns), e **a `CSDB` custa
+  cerca de 12 ns** (D contra C: +25% na chamada nula, que sem a limpeza da pilha vai de 37 a 40 ns
+  para 49 ns). O número é do Apple M5; outros núcleos não foram medidos
+  ([DEBT-0105](../tech-debt/0105-clamp-do-spectre-v1-confere-o-assembly-a-mao.md)). **A `CSDB` fica**:
+  o Linux a põe incondicional (`arch/arm64/include/asm/barrier.h`) e tirá-la sem ler o requisito é
+  desligar segurança sem prova ([guidelines 09](../guidelines/09_seguranca.md)); este é o número que
+  a prova pede.
+- **A tabela indexada custa o mesmo que o laço** para `nop`, a primeira entrada de `Syscall::ALL`
+  (B contra A). Para as chamadas do fim da lista é mais barata, e não foi medida.
+- **x86_64 TCG:** D fica cerca de 15 ns (3,7% na mediana das cinco rodadas: 434,3 contra 418,9 ns) acima de A; é a emulação do `cmov`, do armazenamento e
+  da recarga do `black_box`, e a faixa do B mostra o quanto o TCG varia com o código.
+- **Boot normal:** `make smoke-fast ARCH=all PROFILE=release`, 5 boots, linha `boot time:`: x86_64
+  25 a 26 ms antes e 26 a 27 depois; aarch64 2 a 3 ms antes e 2 a 3 depois. A linha `mitigations:` e a
+  leitura do CPUID e do MSR não aparecem acima do arredondamento.
+- **Tamanho** (`make size`, `carregado`, sobre a `main` `c42f274`): `release` x86_64 371 635 para 376 615
+  bytes (+4 980) e aarch64 314 265 para 317 161 (+2 896); `release-small` x86_64 195 367 para 197 647
+  (+2 280) e aarch64 177 329 para 179 401 (+2 072). É a detecção, as listas, a formatação da linha e a
+  tabela de despacho (536 bytes de `.rodata`). O `.bss` não mudou.
+
 ### Troca de contexto e jitter de acordar (fase 3)
 
 Como se mede: `make screenshot ARCH=… PROFILE=release CMDS="bench;bench;bench"` e a linha
