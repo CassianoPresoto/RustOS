@@ -42,8 +42,9 @@ que só diminuem, sem uid/gid no núcleo.
 | `PageFlags` não tem bit de usuário; o mapeador recusa W+X | `core/hal/src/paging.rs` | `PageFlags` ganha `user`; o W^X de usuário vem de graça |
 | `Fault` não diz de que anel veio | `core/hal/src/interrupt.rs` | Ganha `from_user` ([falhas de usuário](#falhas-de-usuário)) |
 | `Context`/`switch` de thread do kernel, `simd` por tarefa, EEVDF | [SDD 15](15_tarefas_e_preempcao.md) | O processo de usuário é uma tarefa com mais estado |
-| `MAX_TASKS = 16` e `Composite<4, 16>` | `kernel/src/task.rs` ([SDD 15](15_tarefas_e_preempcao.md)) | Pouco para processos; a fase sobe a capacidade (ver [o que muda no kernel](#o-que-muda-no-kernel)) |
-| Pilha de falha do aarch64 em `SP_EL0` (o `vector_fault` faz `msr spsel, #0` e empilha lá); EL1h com `SP_EL1` por tarefa | [SDD 15](15_tarefas_e_preempcao.md) | Em EL0, `SP_EL0` é a pilha do **usuário**: o `vector_fault` passa a pegar a pilha de falhas pela área por CPU ([aarch64](#aarch64-svc)) |
+| `MAX_TASKS = 32` (8 ociosas e 24 tarefas) e uma política `Composite<4, 32>` **por CPU**, no heap | `kernel/src/task.rs` ([SDD 15](15_tarefas_e_preempcao.md)) | Pouco para processos; a fase sobe a capacidade, e o custo agora **multiplica pelo número de CPUs** (a política de cada CPU cabe qualquer tarefa; 96 bytes por tarefa justa) |
+| Pilha de falha do aarch64 em `SP_EL0` (o `vector_fault` faz `msr spsel, #0` e empilha lá; `install_secondary` grava a de cada CPU); EL1h com `SP_EL1` por tarefa | [SDD 15](15_tarefas_e_preempcao.md), [SDD 10](10_interrupcoes.md) | Em EL0, `SP_EL0` é a pilha do **usuário**: o `vector_fault` passa a pegar a pilha de falhas pelo bloco por CPU, que o `TPIDR_EL1` já aponta ([aarch64](#aarch64-svc)) |
+| **SMP completo (#13):** um bloco `PerCpu` por núcleo (`IA32_GS_BASE` com `gs:[0]` = o endereço, e `IA32_KERNEL_GS_BASE` **zerado de propósito**, à espera do `swapgs`; `TPIDR_EL1` no aarch64); GDT, TSS e 3 pilhas IST por CPU, IDT compartilhada; IPI de reescalonar (`0xFD`, SGI 0) e de parar (`0xFE`, SGI 1); fila `Composite` por CPU, migração, `on_cpu` e `percpu::pinned` | [SDD 15](15_tarefas_e_preempcao.md), [SDD 10](10_interrupcoes.md) | A fase 4 **nasce em N núcleos**: tudo o que ela guarda por CPU vive no `PerCpu`; uma tarefa de usuário migra como as outras. [DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md) (sem *shootdown* de TLB) é o gatilho que a fase dispara |
 | `#DF`, NMI e `#MC` têm IST (IST1 a IST3); `#DB` não | `arch/x86_64/src/traps.rs` | `#DB` ganha IST própria e entrada paranoica ([exceções do anel 3](#exceções-vindas-do-anel-3)) |
 | Janela de pilhas só de avanço | [SDD 13](13_memoria_virtual.md) | Criar e matar processos em laço esgota endereço; precisa reciclar |
 
@@ -54,12 +55,12 @@ número novo no [SDD 07](07_desempenho_e_recursos.md).
 
 | Fatia | Entrega | Pronto quando |
 | --- | --- | --- |
-| 4a | Entrada de syscall e saída para anel 3/EL0 nas duas ISAs; `PageFlags.user`; `Fault.from_user`; `#DB` com IST; cópia usuário↔kernel; espaço de **um** processo, sem objetos; `nop`, `clock_get_monotonic`, `random_get`, `process_exit` e **`debug_write(ptr, len)` provisória, sem handle**; um programa embutido no kernel só para esta fatia | `hello` imprime de anel 3 e de EL0; falha de usuário mata o processo e o kernel segue (**paga** [DEBT-0012](../tech-debt/0012-excecao-de-usuario-so-para-a-cpu.md)) |
+| 4a | Entrada de syscall e saída para anel 3/EL0 nas duas ISAs; `PageFlags.user`; `Fault.from_user`; `#DB` com IST; cópia usuário↔kernel; espaço de **um** processo, sem objetos; **limpeza da pilha do kernel na volta ao usuário** (**paga** [DEBT-0059](../tech-debt/0059-estado-do-chacha20-derramado-na-pilha-no-x86.md)); a troca para o par `swapgs` e os MSRs de syscall em cada CPU; `nop`, `clock_get_monotonic`, `random_get`, `process_exit` e **`debug_write(ptr, len)` provisória, sem handle**; um programa embutido no kernel só para esta fatia | `hello` imprime de anel 3 e de EL0; falha de usuário mata o processo e o kernel segue (**paga** [DEBT-0012](../tech-debt/0012-excecao-de-usuario-so-para-a-cpu.md)) |
 | 4b | `core/cpio`, `core/elf`; a árvore de regiões em `core/mm/src/vmar.rs`, **interna ao kernel** (o carregador mapeia frames direto, sem objeto VMO nem VMAR e sem handle); módulo do Limine; `user/` (runtime e `init`); o xtask monta o initramfs | O `init` do initramfs roda, imprime pelo `debug_write` provisório e sai; o smoke exige a linha dele |
-| 4c | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (muda a assinatura da 4a: a ABI é provisória até aqui); página zero; ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; o `init` recebe os handles pelo canal de boot | Um processo cria outro, que escreve no console por um handle que recebeu |
+| 4c | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (muda a assinatura da 4a: a ABI é provisória até aqui); página zero; ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; ***shootdown* de TLB** e parada de thread em outra CPU na morte do processo (**paga** [DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md)); o `init` recebe os handles pelo canal de boot | Um processo cria outro, que escreve no console por um handle que recebeu |
 | 4d | SIMD de usuário, canal de eventos do processo, teste de `xmm0`/`v0` entre processos | Dois processos preservam `xmm0`/`v0`; o culpado de uma falha chega ao pai (**paga** [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md)) |
-| 4e | KPTI, PCID/ASID, mitigações de CPU ([seção](#mitigações-de-cpu)), relatório no boot | Linha `mitigations:` no boot; custo de cada uma medida |
-| 4f | As medidas da fase ([abaixo](#medidas-da-fase)) e este capítulo virando descritivo | Fecha a fase: "syscall nula medida; processo que toca o kernel morre sem derrubar nada" |
+| 4e | KPTI, PCID/ASID com a regra de geração entre CPUs, mitigações de CPU ([seção](#mitigações-de-cpu)), relatório no boot | Linha `mitigations:` no boot; custo de cada uma medida |
+| 4f | As medidas da fase (inclui a falta de página que zera, [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)) ([abaixo](#medidas-da-fase)) e este capítulo virando descritivo | Fecha a fase: "syscall nula medida; processo que toca o kernel morre sem derrubar nada" |
 
 **A ABI da 4a e da 4b é provisória.** Só `process_exit`, `nop`, `clock_get_monotonic` e
 `random_get` já têm a forma final; `debug_write` muda na 4c. A ABI nativa é experimental
@@ -114,12 +115,12 @@ numa pilha à parte.
 
 | Passo | O quê |
 | --- | --- |
-| `EFER.SCE` | Ligado no boot, em cada CPU |
+| `EFER.SCE`, `STAR`, `LSTAR`, `FMASK` | **MSRs por CPU**: cada núcleo os grava no próprio init (um passo novo depois dos de `CR0`/`CR4`/`XCR0` da lista do [SDD 10](10_interrupcoes.md)), a CPU de boot e as secundárias |
 | `STAR` | `(0x10 << 48) \| (0x08 << 32)`: com a GDT de hoje, `SYSRET` dá `SS = 0x18 \| 3` e `CS = 0x20 \| 3` (a conta `+8`/`+16` é a **verificada** acima), que são `USER_DATA` e `USER_CODE` de `segments.rs` |
 | `LSTAR` | `rustos_syscall_entry`, na seção `.entry.text` ([KPTI-ready](#o-trampolim-e-o-caminho-pronto-para-kpti)) |
 | `FMASK` | A máscara do Linux acima. Interrupção só liga quando a pilha da tarefa já é a do kernel |
-| Pilha | A entrada guarda o `rsp` do usuário em `gs:[user_rsp]`, carrega `gs:[kernel_rsp]` e monta o **mesmo** `TrapFrame` de 22 palavras que as IRQs já usam ([SDD 15](15_tarefas_e_preempcao.md)), com `SS`, `RSP`, `R11` como `RFLAGS`, `CS`, `RCX` como `RIP` |
-| `kernel_rsp` | A troca de contexto escreve o topo da pilha da tarefa que entra em dois lugares: `gs:[kernel_rsp]` e `TSS.rsp[0]` (o hardware carrega `RSP0` ao subir de anel numa exceção ou IRQ). Hoje a TSS não usa `rsp[0]` |
+| Pilha | A entrada guarda o `rsp` do usuário em `gs:[user_rsp]`, carrega `gs:[kernel_rsp]` e monta o **mesmo** `TrapFrame` de 22 palavras que as IRQs já usam ([SDD 15](15_tarefas_e_preempcao.md)), com `SS`, `RSP`, `R11` como `RFLAGS`, `CS`, `RCX` como `RIP`. `user_rsp` e `kernel_rsp` são campos **do bloco `PerCpu` desta CPU**, no prefixo que o `arch/` define ([SMP](#interação-com-o-smp-e-o-estado-por-cpu)) |
+| `kernel_rsp` | A troca de contexto escreve o topo da pilha da tarefa que entra em dois lugares **desta CPU**: `gs:[kernel_rsp]` e o `rsp[0]` **da TSS desta CPU** (a `CpuTables` por CPU que o #13 criou; o hardware carrega `RSP0` ao subir de anel numa exceção ou IRQ). Hoje nenhuma TSS usa `rsp[0]`. Como cada CPU tem a sua TSS, a migração não cria corrida: quem escreve é sempre a CPU que troca. A troca roda mascarada, então a tarefa não migra no meio |
 | Despacho | `rax` indexa a tabela de syscalls **depois do clamp de índice** ([mitigações](#mitigações-de-cpu)); número fora da tabela devolve `NotSupported` e o processo **segue** |
 | Saída rápida | As seis condições do Linux, acima, com `RCX < USER_TOP` no lugar de `ip < TASK_SIZE_MAX` (todo valor abaixo de `USER_TOP` é canônico; vale em toda CPU, não só Intel). Na fase 4 nada altera o quadro, então `rcx == rip` e `r11 == rflags` valem por construção; a função confere assim mesmo, porque o mecanismo equivalente ao `ptrace` da fase 5 vai poder alterá-lo |
 | Saída lenta | Qualquer outro caso: `IRETQ`. Na fatia 4a: **sempre `IRETQ`**; o `SYSRET` entra com o número que o justifique |
@@ -137,11 +138,25 @@ desenho: **o kernel nunca roda com o `GS` do usuário.**
 | --- | --- |
 | `SYSCALL` | Sempre vem de anel 3: `swapgs` incondicional |
 | Exceção ou IRQ por vetor | `CS` do quadro com `RPL = 3`, antes de tocar em `gs`. **Todo stub de vetor de hoje (`traps.rs`) ganha esse teste** na entrada e na saída |
-| NMI, `#DF`, `#MC`, `#DB` (IST) | Podem vir de qualquer estado: **entrada paranoica**. Lê `IA32_GS_BASE` e compara com o endereço da área por CPU (o caminho caro) |
+| NMI, `#DF`, `#MC`, `#DB` (IST) | Podem vir de qualquer estado: **entrada paranoica**. Decide pelo valor de `IA32_GS_BASE` (um `rdmsr`, o caminho caro): em kernel ele é o endereço do `PerCpu`, da metade alta; em usuário é o `GS` do usuário, da metade baixa (proposta; a técnica do Linux, `paranoid_entry`, **não foi lida** nesta rodada) |
 
-`IA32_KERNEL_GS_BASE` guarda o `GS` do usuário enquanto o kernel roda, e `IA32_GS_BASE`
-aponta a **área por CPU**. `CR4.FSGSBASE` fica desligado (o usuário não escreve `FS`/`GS`
-base; a fase 4 não tem TLS, ver [carregador](#executável-e-carregador)).
+**A troca para o par `swapgs`, na 4a.** O #13 deixou `IA32_GS_BASE` = `PerCpu` e
+`IA32_KERNEL_GS_BASE` = 0 (SDD 10, passo 1 do init de cada núcleo). Esse estado **já é** o de
+"kernel rodando, `GS` do usuário vale 0": a 4a não regrava MSR nenhum. Basta a regra "**um
+`swapgs` em cada transição de anel**, e nenhuma em tarefa só de kernel":
+
+| Momento | `IA32_GS_BASE` | `IA32_KERNEL_GS_BASE` |
+| --- | --- | --- |
+| Hoje, e em qualquer thread do kernel | `PerCpu` desta CPU | 0 |
+| Rodando no kernel, depois da 4a (qualquer origem) | `PerCpu` (`gs:[0]` funciona, `percpu::current()` não muda) | o `GS` do usuário (0: `FSGSBASE` desligado e a fase 4 não tem TLS) |
+| Rodando em anel 3 | o `GS` do usuário (0) | `PerCpu` |
+| Cada `swapgs` | troca os dois | troca os dois |
+
+O primeiro `swapgs` de uma CPU, na saída da primeira tarefa para o anel 3, produz o estado da
+linha "anel 3" sem escrever MSR. **Por CPU:** cada núcleo mantém o seu par; nada é global.
+`percpu::pinned` continua valendo (o `swapgs` só roda com IRQ mascarada). `CR4.FSGSBASE` fica
+desligado (o usuário não escreve `FS`/`GS` base; a fase 4 não tem TLS, ver
+[carregador](#executável-e-carregador)).
 
 **Ring 3 sem E/S de porta:** `RFLAGS` inicial do usuário é `0x202` (só `IF`; `IOPL = 0`)
 e `TSS.iomap_base` precisa ficar além do limite da TSS. Conferir os dois no PR da 4a
@@ -160,7 +175,7 @@ kernel).
 | --- | --- | --- |
 | 0 `#DE`, 3 `#BP`, 4 `#OF`, 5 `#BR`, 6 `#UD`, 7 `#NM`, 10 `#TS`, 11 `#NP`, 12 `#SS`, 13 `#GP`, 16 `#MF`, 17 `#AC`, 19 `#XF`, 20 `#VE`, 21 `#CP` | `Fault`: o processo morre. (`#NM` não deveria ocorrer: `CR0.TS = 0`, o estado de SIMD é eager) | Como hoje: relata e para |
 | 14 `#PF` | Resolve (página zero, frame novo) ou `Fault` | Se o `pc` está no `usercopy`, trata como [falta do processo ou *fixup*](#cópia-usuáriokernel); senão como hoje |
-| 1 `#DB` | `Fault` (sem depuração na fase 4). **Ganha IST própria** (IST4, com guarda abaixo), porque pode disparar na primeira instrução da entrada, antes do `swapgs` e da troca de pilha. **Vindo do anel 3, o stub da IST4 não trata nada nela:** faz `swapgs` (e o CR3 do kernel sob KPTI), **copia o quadro de hardware para a pilha da tarefa** (`gs:[kernel_rsp]`, a do `TSS.rsp[0]`) e segue como entrada normal, como a `idtentry_mce_db` do Linux ("switch stacks and treat it as a normal entry"). Matar o processo e o `schedule` rodam na pilha da tarefa, **nunca na IST** | Entrada paranoica na IST, relata e para |
+| 1 `#DB` | `Fault` (sem depuração na fase 4). **Ganha IST própria** (IST4, com guarda abaixo, **uma por CPU**: a `CpuTables` passa de 3 para 4 pilhas IST de 16 KiB), porque pode disparar na primeira instrução da entrada, antes do `swapgs` e da troca de pilha. **Vindo do anel 3, o stub da IST4 não trata nada nela:** faz `swapgs` (e o CR3 do kernel sob KPTI), **copia o quadro de hardware para a pilha da tarefa** (`gs:[kernel_rsp]`, a do `TSS.rsp[0]`) e segue como entrada normal, como a `idtentry_mce_db` do Linux ("switch stacks and treat it as a normal entry"). Matar o processo e o `schedule` rodam na pilha da tarefa, **nunca na IST** | Entrada paranoica na IST, relata e para |
 | 2 NMI, 8 `#DF`, 18 `#MC` | Continuam com IST e fatais com relatório, mesmo vindos de usuário | idem |
 | Qualquer outro vetor sem tratador | `Fault` | Como hoje |
 
@@ -234,7 +249,7 @@ torna `XN` também a página gravável de EL0; o nome `EL0VCTEN`; e um `ERET` co
 | Pilha de falhas | **O invariante "`SP_EL0` é sempre a pilha de falhas" é falso:** entre a entrada de EL0 e o prólogo que guarda `SP_EL0`, ele é o do usuário, e o `vector_fault` do [SDD 15](15_tarefas_e_preempcao.md) (`msr spsel, #0` e empilhar) empilharia na pilha do usuário. O desenho **adota a ordem do Linux**: toda exceção síncrona ou SError de EL1h entra **na pilha da tarefa** (`SP_EL1`), com o teste de estouro de pilha do `kernel_ventry` (**verificado**: `add sp, sp, x0` e `sub x0, sp, x0`, sem registrador livre, e `tbnz` no bit `THREAD_SHIFT`); **só no estouro** vai para a pilha de falhas (o `__bad_stack`, que guarda `x0` em `tpidr_el0`/`tpidrro_el0`). O teste por bit do `sp` exige a pilha alinhada ao dobro do tamanho: pilha de 32 KiB em 64 KiB de endereço (custo só de janela, não de memória), ou comparar o `sp` com o limite guardado na área por CPU |
 | Por que a ordem muda | O `vector_fault` de hoje também serve o `brk` que **volta** (`exception.rs`, [SDD 10](10_interrupcoes.md)) e passa a servir a falta recuperável do `usercopy`. Quem volta não pode empilhar numa pilha de falhas que a próxima falha reinicia do topo. Com a ordem do Linux, `brk`, `usercopy` e IRQ usam o mesmo caminho: a pilha da tarefa |
 | Falta aninhada | No `__bad_stack`, se o `sp` já está **dentro** da pilha de falhas (falta enquanto relata uma falta), **continua nela**, sem reiniciar do topo |
-| `TPIDR_EL1` | O ponteiro da área por CPU (com o topo e a base da pilha de falhas) é posto em `exception::install`, **antes de qualquer falha possível**; o caminho de estouro o lê |
+| `TPIDR_EL1` | **Já guarda o `PerCpu` desta CPU** (#13, porta `hal::CpuLocal`), posto na entrada do núcleo, antes de qualquer falha. O topo e a base da pilha de falhas **desta CPU** entram como campos do prefixo do bloco que o `arch/` define; o caminho de estouro os lê por `mrs x, tpidr_el1`. `exception::install` e `install_secondary` **deixam de gravar o `SP_EL0`** com a pilha de falhas e gravam o topo no bloco |
 | Efeito nos outros capítulos | O [SDD 15](15_tarefas_e_preempcao.md) e o [SDD 10](10_interrupcoes.md) descrevem o `vector_fault` de hoje ("sempre e sem testar o `sp`"). Os dois ganham uma nota "desenho da fase 4" no mesmo commit deste capítulo; o texto de hoje só muda quando o código mudar |
 | `TPIDR_EL0` e `TPIDRRO_EL0` | O usuário escreve `TPIDR_EL0`: salvo e restaurado por thread (ou zerado ao trocar de processo), senão vaza entre processos. O `Context` do aarch64 cresce 16 bytes |
 | `CNTKCTL_EL1` | Liga o acesso de EL0 ao `CNTVCT_EL0` e desliga o resto, como o Linux. Sem isso, `mrs x, cntvct_el0` em EL0 dá `EC 0x18` e a medida da syscall nula não roda. É a contrapartida do `CR4.TSD = 0` do x86_64 ([SDD 09](09_seguranca.md)) |
@@ -259,13 +274,49 @@ Toda leitura e escrita de memória de usuário passa por rotinas de `arch/<isa>/
 
 ### Interação com o SMP e o estado por CPU
 
+O SMP **já existe** ([#13](15_tarefas_e_preempcao.md#estado-por-cpu)): a fase 4 roda em N núcleos desde o
+primeiro PR, e o que ela guarda por CPU **entra no `PerCpu`**, não em estado global. O desenho antigo
+supunha o SMP "por vir".
+
 | | x86_64 | aarch64 |
 | --- | --- | --- |
-| Registrador da área por CPU | `IA32_GS_BASE` no kernel; `IA32_KERNEL_GS_BASE` guarda o do usuário | `TPIDR_EL1` (uso do registrador como ponteiro por CPU: prática comum, **NÃO VERIFICADO** em fonte lida) |
-| O que a área guarda | `user_rsp` (rascunho), `kernel_rsp` (topo da pilha da tarefa), id da CPU, tarefa corrente, pilha do trampolim (KPTI) | idem, sem `user_rsp` (o `SP_EL0` vai ao quadro); pilha de falhas |
-| Quem a cria | A 2ª onda da fase 3 ([DEBT-0011](../tech-debt/0011-gic-e-timer-so-na-cpu-0.md), [DEBT-0036](../tech-debt/0036-escalonador-com-estado-de-troca-global.md), [DEBT-0039](../tech-debt/0039-escalonador-de-uma-cpu.md)): estado de troca por CPU | idem |
-| Se a fase 4 vier antes do SMP | Cria o esqueleto para a CPU 0; o SMP só acrescenta instâncias. **Nada na fase 4 pode supor uma CPU** além do que o [SDD 15](15_tarefas_e_preempcao.md) já supõe | idem |
-| TLB | Uma CPU: `invlpg`/`tlbi` local basta. Processo com threads em duas CPUs exige *shootdown* por IPI; **não existe** até o SMP ([SDD 08](08_roadmap.md)) | idem |
+| Registrador do bloco | `IA32_GS_BASE` no kernel ([troca para o par `swapgs`](#x86_64-syscallsysret)) | `TPIDR_EL1` (**já em uso**, #13) |
+| Prefixo que o `arch/` define | `PerCpu` começa por `self` (offset 0, já existe); a 4a acrescenta `user_rsp` e `kernel_rsp` logo depois. O asm de entrada só conhece esses offsets, que o `arch/x86_64` exporta; o `kernel/` embute o prefixo como o primeiro campo do `PerCpu` | `self`, mais `fault_stack_top` e `fault_stack_base`; sem `user_rsp` (o `SP_EL0` vai ao quadro) |
+| TSS e pilhas | `rsp[0]` da TSS **desta CPU** a cada troca de tarefa; IST4 por CPU | A pilha de falhas por CPU, no bloco |
+| Registradores de entrada | `STAR`, `LSTAR`, `FMASK`, `EFER.SCE`: por CPU, no init de cada núcleo | `VBAR_EL1`, `CNTKCTL_EL1`, `TCR_EL1`, `SCTLR_EL1`: por CPU, no init de cada núcleo |
+| Raiz ativa | `CR3` de **cada** CPU; a tarefa só de kernel usa a raiz do kernel | `TTBR0_EL1` de **cada** CPU; a tarefa só de kernel usa a raiz vazia |
+| Quais CPUs rodam o processo | Cada Process guarda `active_cpus` (máscara): quem o está rodando **agora** | idem |
+
+#### PCID e ASID com várias CPUs
+
+| Quando | Regra |
+| --- | --- |
+| 4a a 4d (sem PCID/ASID) | Toda troca de processo esvazia o TLB local (x86_64: `mov cr3` sem `NOFLUSH`; aarch64: um ASID reservado só e `tlbi vmalle1`). Uma CPU que o processo deixou **não guarda entrada dele**: correto e mais lento |
+| 4e (com PCID/ASID) | Gerador global com **geração**; cada CPU guarda a `generation_seen`. Um valor de PCID/ASID só é **reusado** (geração nova) depois que **toda CPU** esvaziou o TLB desde que ele foi liberado: subir a geração marca `flush_pending` em todas as CPUs, e cada uma esvazia na próxima troca de processo, **antes** de carregar um valor da geração nova (x86_64: `INVPCID` tipo 2 ou 3, ou `mov cr3` sem `NOFLUSH`; aarch64: `tlbi vmalle1`) e atualiza a `generation_seen`. É o esquema do `asid.c` do Linux arm64: **NÃO VERIFICADO**, não foi lido |
+| 4e, processo que migra | Com PCID/ASID o TLB da CPU antiga **guarda** o valor. Cada Process tem um `tlb_gen` que sobe a cada `unmap`; a CPU que volta a rodá-lo compara com o que ela viu e esvazia só aquele PCID/ASID (`INVPCID` tipo 1; `tlbi aside1`). A ideia é a do `tlb_gen` do Linux x86: **NÃO VERIFICADO** |
+
+#### *Shootdown* de TLB ([DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md))
+
+Hoje `entry_changed` só invalida a CPU que mexeu, e isso basta porque o kernel **só
+acrescenta** mapeamentos depois do boot. A fase 4 **remove** mapeamentos de usuário.
+
+| Ponto | Desenho |
+| --- | --- |
+| Quando vira pré-requisito | **4c**, com `thread_create` (threads do mesmo processo em CPUs diferentes) e `process_kill`. Em 4a e 4b (uma thread por processo, sem `unmap`, sem PCID) não há CPU com entrada velha; o `exit` libera os frames só depois de o processo sair de **todas** as CPUs |
+| Dispara | `vmar_unmap` (e `vmar_protect`, se um dia existir) de um processo **com `active_cpus` além da CPU que chama**; a morte do processo com thread correndo noutra CPU |
+| x86_64 | **O mecanismo de IPI por máscara já existe** (ICR por CPU, `hw_id`); os dois vetores de hoje são reescalonar (`0xFD`) e parar (`0xFE`), então **entra um vetor novo**, `Shootdown`. O iniciador grava a faixa (ou "tudo") numa caixa por CPU, manda o IPI a `active_cpus`, faz o `invlpg` local e **espera todas as confirmações antes de liberar o frame ou reusar o endereço** |
+| aarch64 | `tlbi vae1is` / `aside1is`, `dsb ish`, `isb`: o domínio *inner shareable* alcança todas as CPUs **sem IPI** (a premissa da DEBT-0055, não conferida no Arm ARM); a espera é o próprio `dsb ish` |
+| Morte com thread em outra CPU | Marca o processo "em morte" ([ordem da morte](#falhas-de-usuário)), manda o IPI de **reescalonar** à CPU da thread e espera o `on_cpu` baixar (o campo do #13) antes de liberar a pilha de kernel e as tabelas |
+| Kernel | A janela de pilhas passa a **reciclar endereço sem desmapear** (a pilha segue mapeada; só o slot volta à lista): não é remoção, não pede *shootdown*. Desmapear a pilha reabriria a DEBT-0055 para o kernel |
+| Teste | Duas CPUs leem uma página que uma terceira remove (o teste que a DEBT-0055 pede); depois do `unmap`, nenhuma lê o valor velho |
+
+#### Outras dívidas do SMP que a fase toca
+
+| Dívida | Efeito na fase 4 |
+| --- | --- |
+| [DEBT-0057](../tech-debt/0057-tsc-entre-nucleos-sem-verificacao.md) TSC entre núcleos sem verificação | `clock_get_monotonic` só é monotônico **entre CPUs** se o TSC for sincronizado; thread de usuário migra, então no x86_64 o relógio pode andar para trás entre duas chamadas. Aarch64 não tem o problema (`CNTVCT_EL0` é do sistema). A fase **não** paga; o contrato diz "monotônico por CPU" no x86_64 até a dívida |
+| [DEBT-0054](../tech-debt/0054-heap-com-lock-global.md) Heap com lock global | O gatilho ("o primeiro programa que aloque do heap em todos os núcleos", fase 4) dispara: criar processos em N CPUs aloca objetos do kernel. Medir no `bench` da 4c; pagar se a disputa passar de 10% |
+| [DEBT-0052](../tech-debt/0052-afinidade-so-no-spawn.md) Afinidade só no `spawn` | **Não dispara**: a ABI nativa não tem chamada de afinidade (o `sched_setaffinity` é do adaptador Linux, fase 5) |
 
 ## Espaço do usuário
 
@@ -321,7 +372,7 @@ de 5 000 processos (teste de propriedade com o gerador próprio, como em `core/s
 | --- | --- |
 | Leitura de página anônima nunca tocada | A tabela aponta para **um** frame zerado, permanente, só leitura e NX. Nunca vai ao buddy, então não precisa de contagem de referência |
 | Escrita nessa página | Falta de proteção: aloca frame, zera, troca a entrada para o frame novo com escrita. É o COW a partir da página zero |
-| Escrita em página anônima ausente | Aloca frame, zera e mapeia (o caso quente; o zeramento é o do [DEBT-0020](../tech-debt/0020-zerar-pagina-pelo-memset-generico.md)) |
+| Escrita em página anônima ausente | Aloca frame, zera e mapeia (o caso quente; o zeramento é o `DC ZVA` do aarch64 e o `rep stosq` do x86_64; a dívida 0020 (zerar pelo `memset`) foi paga no #11, e o x86_64 segue na [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)) |
 | COW de página já privada (`fork`, `vmo_create_child`) | **Fora da fase 4** (a ABI nativa não tem `fork`; vem com a fase 5) |
 
 **Lido** em `mm/memory.c` do Linux (`master`, 2026-11-17), e o desenho confere com ele:
@@ -740,7 +791,7 @@ ilegal, falta sem região) mata, pelo [canal de eventos](#falhas-de-usuário).
 São menores de propósito (a meta de memória): a mensagem de boot cabe, e dado maior vai por
 VMO. O custo é que um protocolo que precise de mensagem grande tem de usar VMO.
 
-**`clock_get_monotonic`:** nanossegundos desde o boot do kernel (o relógio do [SDD 10](10_interrupcoes.md): TSC calibrado no x86_64, `CNTVCT_EL0` no aarch64), monotônico, `u64`, sem suspensão a descontar. Resolução: a do contador. **`deadline_ns`** é absoluto nesse relógio; `deadline <= agora` consulta sem bloquear (devolve os sinais se já valem, senão `TimedOut`); `u64::MAX` espera sem fim. Não há acordar falso: a chamada reavalia os sinais antes de voltar.
+**`clock_get_monotonic`:** nanossegundos desde o boot do kernel (o relógio do [SDD 10](10_interrupcoes.md): TSC calibrado no x86_64, `CNTVCT_EL0` no aarch64), monotônico, `u64`, sem suspensão a descontar. **No x86_64 só é monotônico por CPU** enquanto a [DEBT-0057](../tech-debt/0057-tsc-entre-nucleos-sem-verificacao.md) estiver aberta (o TSC de cada núcleo não é conferido). Resolução: a do contador. **`deadline_ns`** é absoluto nesse relógio; `deadline <= agora` consulta sem bloquear (devolve os sinais se já valem, senão `TimedOut`); `u64::MAX` espera sem fim. Não há acordar falso: a chamada reavalia os sinais antes de voltar.
 
 **`ProcessEvent`** (`#[repr(C)]`, 56 bytes, uma mensagem no canal de eventos; sem handles):
 
@@ -1069,9 +1120,9 @@ Sem crate novo (decisão do agente, [`AGENTS.md`](../../AGENTS.md)):
 
 | Ponto | Mudança |
 | --- | --- |
-| `MAX_TASKS` e `Composite<4, 16>` | Sobem (cada tarefa custa cerca de 250 bytes em `.data`; [SDD 15](15_tarefas_e_preempcao.md)); a capacidade vira configurável ou cresce do heap. O número entra no PR |
+| `MAX_TASKS` e `Composite<4, 32>` por CPU | Sobem (96 bytes por tarefa justa **em cada CPU**; [SDD 15](15_tarefas_e_preempcao.md)); a capacidade vira configurável ou cresce do heap. O número entra no PR |
 | Pilha de kernel por thread de usuário | 8 páginas como as de hoje, **até a medida de pico** ([DEBT-0037](../tech-debt/0037-pilha-de-tarefa-sem-medida-de-pico.md)); a janela de pilhas passa a reciclar endereço (lista livre), senão laço de criar e matar esgota a janela de 1 GiB |
-| Troca de contexto | Se o processo muda, troca `CR3`/`TTBR0` (com PCID/ASID) e escreve `kernel_rsp`/`TSS.rsp[0]` |
+| Troca de contexto | Se o processo muda, troca `CR3`/`TTBR0` **desta CPU** (com PCID/ASID e a regra de geração), atualiza `active_cpus` e escreve `kernel_rsp` e o `rsp[0]` da TSS **desta CPU** |
 | Contas de tempo | O tempo de CPU por tarefa já existe; processo soma as threads |
 | `ps` | Uma coluna de processo; a de SIMD já existe |
 
@@ -1129,8 +1180,9 @@ Não se comparam com o RustOS: servem para dizer o que esperar.
 | Criação de processo: `lat_proc` (fork, exec) | lmbench | **NÃO VERIFICADO** (só a página de `lat_syscall` foi lida); os modelos diferem |
 | Falta de página: nenhuma referência achada | — | — |
 
-O zeramento do primeiro toque tem peso próprio: 160 ns por página só para zerar no aarch64
-HVF ([DEBT-0020](../tech-debt/0020-zerar-pagina-pelo-memset-generico.md)).
+O zeramento do primeiro toque tem peso próprio. No aarch64 HVF, depois do `DC ZVA` (#11), o
+4 KiB quente custa 18 a 55 ns (típico 20) e o par alocar e liberar, 102 a 133 ns ([SDD 07](07_desempenho_e_recursos.md));
+no x86_64 o número só vale em KVM ou metal ([DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)).
 
 **O que a QEMU não prova.** Sob TCG o TLB é de software e o custo de CR3, PCID e ASID não
 representa o metal (**inferência**); KPTI e PCID só valem sob KVM, HVF (aarch64) ou metal
@@ -1139,23 +1191,32 @@ regressão entre PRs, não para comparar com o Linux.
 
 ## Dívidas que a fase paga, move ou abre
 
+O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arquivos saíram de
+`docs/tech-debt/`).
+
 | Dívida | O que a fase faz |
 | --- | --- |
 | [DEBT-0012](../tech-debt/0012-excecao-de-usuario-so-para-a-cpu.md) Exceção de usuário só para a CPU | **Paga** na 4a (distinguir a origem, matar o processo) e fecha na 4d (canal de eventos) |
 | [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md) SIMD sem trap | **Paga** na 4d: `simd: true` em toda thread de usuário |
+| [DEBT-0059](../tech-debt/0059-estado-do-chacha20-derramado-na-pilha-no-x86.md) Estado do ChaCha20 derramado na pilha | O gatilho é "a primeira volta ao usuário": **entra e é paga na 4a**. Limpa a pilha do kernel na saída para o usuário, como o Linux (`STACKLEAK_ERASE_NOCLOBBER` no retorno de syscall do x86 e `stackleak_erase_on_task_stack` em `ret_to_user` do arm64, ambos **verificados** nos `entry`). Mede o custo no `null_syscall` com e sem a limpeza; se pesar, só limpa a pilha que a chamada usou de fato (a marca de pico da [DEBT-0037](../tech-debt/0037-pilha-de-tarefa-sem-medida-de-pico.md)) |
+| [DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md) Kernel sem *shootdown* de TLB | O gatilho (espaço de usuário compartilhado entre núcleos) dispara. **Entra e é paga na 4c**, quando há thread em outra CPU e `unmap`: vetor novo de IPI no x86_64 sobre o mecanismo que já existe, `tlbi ...is` no aarch64 ([seção](#shootdown-de-tlb-debt-0055)). A regra de geração de PCID/ASID é da 4e |
+| [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md) Zerar página no x86 sem medida em hardware | O zerar entra no caminho da **falta de página de usuário**. A 4f mede a falta (primeiro toque, página zero, COW) nas duas ISAs; o do x86_64 só decide `stosq` contra `stosb` sob KVM ou metal (o gatilho da dívida): sob TCG a 4f registra o número e **deixa a dívida aberta** |
+| [DEBT-0054](../tech-debt/0054-heap-com-lock-global.md) Heap com lock global | O gatilho dispara (4c, processos criados em N núcleos). Medir no `bench`; pagar se a disputa passar de 10% |
+| [DEBT-0057](../tech-debt/0057-tsc-entre-nucleos-sem-verificacao.md) TSC entre núcleos | Não paga; o contrato de `clock_get_monotonic` diz "monotônico por CPU" no x86_64 até lá |
 | [DEBT-0035](../tech-debt/0035-sve-sme-e-amx-sem-estado-por-tarefa.md) SVE, SME e AMX | O gatilho dispara, mas a fase **não liga** nada: o acesso trapeia e o processo morre. Reescrever o gatilho no PR da 4d |
-| [DEBT-0020](../tech-debt/0020-zerar-pagina-pelo-memset-generico.md) Zerar página | O gatilho dispara (falta de página de usuário). Primeiro medir o caminho; pagar só se aparecer no número |
 | [DEBT-0019](../tech-debt/0019-aleatorio-sem-fonte-de-hardware-fraco.md) Aleatório fraco | O ASLR é o primeiro consumidor de segurança: em CPU sem fonte de hardware o ASLR é fraco, e o boot o diz |
 | [DEBT-0022](../tech-debt/0022-endereco-do-kernel-no-log-de-boot.md) Endereço do kernel no log | Nenhum endereço do kernel sai no `ProcessEvent` nem no `debug_write` |
 | [DEBT-0023](../tech-debt/0023-aarch64-sem-wxn.md) aarch64 sem `WXN` | O gatilho dispara (primeiro mapeamento de usuário). Ligar na 4a, junto com `PageFlags.user`, se o Arm ARM confirmar o efeito sobre EL0 |
-| [DEBT-0025](../tech-debt/0025-residuo-de-chave-na-pilha.md) Resíduo de chave na pilha | O gatilho dispara. Regra nova: estrutura que o kernel copia para o usuário é inicializada por inteiro, com o preenchimento zerado |
 | [DEBT-0037](../tech-debt/0037-pilha-de-tarefa-sem-medida-de-pico.md) Pilha sem medida de pico | O gatilho dispara. A 4a mede o pico (syscall e falta de página) antes de fixar as 8 páginas |
+| [DEBT-0052](../tech-debt/0052-afinidade-so-no-spawn.md) Afinidade só no `spawn` | Não dispara: a ABI nativa não tem afinidade |
 | **A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados (4c; gatilho: o primeiro programa que os produza, ou os grupos de recursos da fase 9); imagem de usuário sem ASLR (4b; [decisão 5](18_fase_4_decisoes_pedidas.md#decisão-5--pie-de-usuário-agora-ou-depois)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
-| [DEBT-0011](../tech-debt/0011-gic-e-timer-so-na-cpu-0.md), [DEBT-0036](../tech-debt/0036-escalonador-com-estado-de-troca-global.md), [DEBT-0039](../tech-debt/0039-escalonador-de-uma-cpu.md) SMP | Não bloqueiam; o desenho põe a área por CPU de modo que o SMP só acrescente instâncias |
+
+**Pagas antes da fase:** 0011 (GIC e timer só na CPU 0), 0018 (frames sem cache por CPU), 0036
+(estado de troca global) e 0039 (escalonador de uma CPU), no #13; 0020 (zerar página pelo `memset`) e
+0025 (resíduo de chave na pilha), no #11. O resto do texto as cita no passado.
 
 **O que fica de fora, e vira dívida com gatilho no PR em que o código nascer:** imagem
-de usuário sem ASLR ([decisão 5](18_fase_4_decisoes_pedidas.md#decisão-5--pie-de-usuário-agora-ou-depois)), *shootdown* de TLB (segundo núcleo rodando thread do
-mesmo processo), `vmar_protect`, sub-VMARs, TLS, `fork` e COW inteiro, multithread nativo
+de usuário sem ASLR ([decisão 5](18_fase_4_decisoes_pedidas.md#decisão-5--pie-de-usuário-agora-ou-depois)), `vmar_protect`, sub-VMARs, TLS, `fork` e COW inteiro, multithread nativo
 se a variante enxuta vencer, `rdtsc` por processo, AMX e VL do SVE por processo.
 
 ## Lacunas a fechar no PR da 4c

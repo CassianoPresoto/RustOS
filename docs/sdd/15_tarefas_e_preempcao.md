@@ -234,8 +234,9 @@ cascata de faltas na própria entrada.
 > **Desenho da fase 4 (ainda não implementado, [SDD 17](17_processos_isolamento_e_syscalls.md#aarch64-svc)):** com EL0, o `SP_EL0` passa a ser a pilha do usuário e o
 > `vector_fault` não pode mais empilhar nele, nem o `brk` e a falta do `usercopy`, que voltam. A ordem passa a ser a do
 > Linux: exceção síncrona e SError de EL1h entram na pilha da tarefa, com teste de estouro, e só o estouro troca para a
-> pilha de falhas, achada pelo `TPIDR_EL1` (posto em `exception::install`); falta dentro da pilha de falhas continua nela.
-> O texto acima descreve o código de hoje.
+> pilha de falhas **desta CPU**, achada pelo bloco `PerCpu` que o `TPIDR_EL1` já aponta (acima, "Estado por CPU"): o topo e a base
+> dela viram campos do prefixo do bloco, e `install` e `install_secondary` deixam de gravar o `SP_EL0`. Falta dentro da pilha de
+> falhas continua nela. O texto acima descreve o código de hoje.
 
 ## Regra de lock
 

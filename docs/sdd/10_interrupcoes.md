@@ -55,7 +55,7 @@ Limine) e o `goto_address` ([SDD 04](04_boot.md)). O que o kernel refaz **em cad
 
 | Passo | O quê | Onde |
 | --- | --- | --- |
-| 1 | `IA32_GS_BASE` aponta o bloco `PerCpu` (`KERNEL_GS_BASE` fica em zero para o `swapgs` da fase 4); `gs:[0]` devolve o endereço dele | `percpu.rs` |
+| 1 | `IA32_GS_BASE` aponta o bloco `PerCpu` (`KERNEL_GS_BASE` fica em zero para o `swapgs` da fase 4: [SDD 17](17_processos_isolamento_e_syscalls.md#x86_64-syscallsysret) descreve o par); `gs:[0]` devolve o endereço dele | `percpu.rs` |
 | 2 | WP, SMEP, SMAP, UMIP e NXE, e só então o `CR3` do kernel (o NXE tem de valer antes das tabelas com NX) | `protect.rs`, `mmu.rs` |
 | 3 | Troca para a pilha própria (`call_on_stack`) | `stack.rs` |
 | 4 | **GDT e TSS próprias** (`CpuTables`) com as 3 pilhas IST próprias, e `lidt` da **IDT compartilhada** (montada uma vez pela CPU de boot). O `ltr` marca a TSS como ocupada na GDT, por isso uma GDT por CPU. Carregar o seletor nulo no `GS` pode zerar a base: `load_cpu` lê a `GS_BASE` antes e a escreve depois | `traps.rs` |
@@ -140,7 +140,7 @@ foi conferida nelas.
 | Peça | Como é |
 | --- | --- |
 | Vetores | `VBAR_EL1` aponta para `rustos_vectors` (`arch/aarch64/src/exception.rs`): 2 KiB, 16 entradas de 0x80. O kernel roda em EL1h (`call_on_stack` seleciona `SP_EL1`), então é interrompido no grupo "EL1 com SPx" (4–7); o grupo SP0 usa o mesmo corpo |
-| Pilha | IRQ empilha na pilha da própria tarefa (`SP_EL1`). Síncrona e SError (4 e 7) fazem `msr spsel, #0` e empilham em `SP_EL0`, a pilha de falhas de 4 páginas com guarda (`map_stack`) que `install` grava, com `SPSel` em 0 (só assim do EL1 se escreve `SP_EL0`) ([SDD 15](15_tarefas_e_preempcao.md)) **Desenho da fase 4, ainda não implementado:** com EL0 a síncrona e o SError entram na pilha da tarefa, com teste de estouro, e só o estouro vai para a pilha de falhas, achada pelo `TPIDR_EL1` ([SDD 17](17_processos_isolamento_e_syscalls.md#aarch64-svc)) |
+| Pilha | IRQ empilha na pilha da própria tarefa (`SP_EL1`). Síncrona e SError (4 e 7) fazem `msr spsel, #0` e empilham em `SP_EL0`, a pilha de falhas de 4 páginas com guarda (`map_stack`) que `install` grava, com `SPSel` em 0 (só assim do EL1 se escreve `SP_EL0`) ([SDD 15](15_tarefas_e_preempcao.md)) **Desenho da fase 4, ainda não implementado:** com EL0 a síncrona e o SError entram na pilha da tarefa, com teste de estouro, e só o estouro vai para a pilha de falhas **desta CPU**, achada pelo bloco `PerCpu` que o `TPIDR_EL1` já aponta (e `install_secondary` deixa de gravar o `SP_EL0`) ([SDD 17](17_processos_isolamento_e_syscalls.md#aarch64-svc)) |
 | Quadro | x0–x30, `ELR_EL1`, `SPSR_EL1`: 272 bytes. `brk` volta para a instrução seguinte (o `ELR` aponta para o próprio `brk`: soma 4); falha não recuperável para a CPU em `wfe` |
 | `ESR_EL1` | `esr.rs` (puro): classe → `hal::FaultKind`; em aborto, `DFSC`/`IFSC` (tradução por nível, acesso, permissão, alinhamento) e `WnR`. `Fault.code` é o `ESR` cru |
 | GICv3 | `drivers/gicv3` (MMIO) mais `gic_cpu.rs` (`ICC_*_EL1`). Distribuidor em `0x0800_0000` e a região dos redistribuidores em `0x080A_0000` (`0x20000` por CPU), pela janela de dispositivos (DEBT-0002). Sequência: distribuidor desligado → `ARE` + grupo 1 → **acha o redistribuidor desta CPU** → acorda-o (`GICR_WAKER`) → `ICC_SRE_EL1`, `PMR`, `IGRPEN1` |
