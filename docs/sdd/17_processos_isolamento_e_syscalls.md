@@ -1,17 +1,16 @@
-# SDD 17 — Processos, isolamento e syscalls (desenho da fase 4, aguardando decisão)
+# SDD 17 — Processos, isolamento e syscalls (desenho da fase 4)
 
 > **O que este capítulo responde:** como o kernel passa a rodar código em anel 3 e
 > EL0 com espaço de endereçamento próprio, como o programa chama o kernel (entrada
-> de syscall, handles, ABI nativa), como o primeiro programa chega à memória, e o
-> que o dono precisa decidir antes de qualquer código.
+> de syscall, handles, ABI nativa), como o primeiro programa chega à memória, e quais
+> decisões do dono o desenho aplica.
 
-**Estado: Draft. Nada aqui está implementado.** Este capítulo nasce num PR em
-Draft só com docs porque a ABI de syscall e o formato de executável são contrato
-que o mundo de fora enxerga (caso 6 do [`AGENTS.md`](../../AGENTS.md)), e crate
-novo em `core/` e pasta nova de primeiro nível são o caso 1. O merge do Draft é a
-aprovação; as [decisões pedidas ao dono](18_fase_4_decisoes_pedidas.md) estão no capítulo seguinte. O
-código vem em PRs seguintes, e este capítulo passa a descritivo à medida que cada
-um entra.
+**Estado: desenho aprovado no #9 (2026-11-18). Nada aqui está implementado.** A ABI de
+syscall e o formato de executável são contrato que o mundo de fora enxerga (caso 6 do
+[`AGENTS.md`](../../AGENTS.md)), e crate novo em `core/` e pasta nova de primeiro nível são
+o caso 1; por isso o desenho nasceu num PR em Draft só com docs. O dono aprovou as nove
+[decisões pedidas](#as-decisões-do-dono) sem mudança. O código vem em PRs seguintes, e
+este capítulo passa a descritivo à medida que cada fatia entra.
 
 Fase 4 do [roadmap](08_roadmap.md). Pesquisa de origem, com as marcas de
 verificação: `syscalls-processes.md` (2026-11-17). O modelo de controle de acesso
@@ -26,7 +25,7 @@ que só diminuem, sem uid/gid no núcleo.
 | **Verificado (secundária)** | Lido num espelho ou resumo de terceiro; confirmar antes de codar |
 | **Verificado pelo Linux** | Posição de campo ou valor confirmado no código do Linux (`arch/arm64/tools/sysreg`, `pgtable-hwdef.h`, `arm_arch_timer.h`), que **não** é a especificação da Arm. Basta para escrever o desenho; a ARM ARM confirma antes do código |
 | **NÃO VERIFICADO** | Não confirmado em fonte; **não** é premissa do desenho. Dito o que ler antes de codar |
-| **Proposta** | Desenho do RustOS, sem fonte a citar. Vale o que a decisão do dono disser |
+| **Proposta** | Desenho do RustOS aprovado pelo dono no #9, sem fonte a citar. Vira fato quando o código da fatia entra |
 | **Já é assim** | Fato do código de hoje (caminho dado) |
 
 ## Estado e escopo
@@ -48,7 +47,7 @@ que só diminuem, sem uid/gid no núcleo.
 | `#DF`, NMI e `#MC` têm IST (IST1 a IST3); `#DB` não | `arch/x86_64/src/traps.rs` | `#DB` ganha IST própria e entrada paranoica ([exceções do anel 3](#exceções-vindas-do-anel-3)) |
 | Janela de pilhas só de avanço | [SDD 13](13_memoria_virtual.md) | Criar e matar processos em laço esgota endereço; precisa reciclar |
 
-### O que a fase entrega, por fatia (proposta)
+### O que a fase entrega, por fatia
 
 A fase é grande demais para um PR. Cada fatia é um PR com `make pr` verde e um
 número novo no [SDD 07](07_desempenho_e_recursos.md).
@@ -66,15 +65,15 @@ número novo no [SDD 07](07_desempenho_e_recursos.md).
 `random_get` já têm a forma final; `debug_write` muda na 4c. A ABI nativa é experimental
 até o fim da fase 5, então a mudança não quebra contrato.
 
-### Divergências em relação ao roadmap atual (propostas)
+### Divergências em relação ao roadmap
 
-O [SDD 08](08_roadmap.md) descreve a fase 4 antes deste desenho. Três pontos mudam
-se o dono aprovar; o roadmap só muda no PR que os torna verdade.
+O [SDD 08](08_roadmap.md) descreve a fase 4 antes deste desenho. Três pontos mudam. O
+roadmap muda no PR de cada fatia que torna o ponto verdade, junto com o código.
 
-| O roadmap diz | O desenho propõe | Por quê |
+| O roadmap diz | O desenho da fase 4 diz | Por quê |
 | --- | --- | --- |
 | "VFS mínimo, initramfs e tmpfs" | Sem VFS na fase 4: o initramfs é um arquivo lido por quem o recebe como VMO; VFS e tmpfs entram na fase 5, com a tabela de descritores | O modelo nativo não tem caminho: tem handle. VFS existe para a ABI Linux |
-| "sinais mínimos" | Sem sinais POSIX na ABI nativa; falha vira mensagem num canal ([decisão 6](18_fase_4_decisoes_pedidas.md#decisão-6--falha-de-usuário-canal-de-eventos-ou-sinal-síncrono)) | Sinal exige o sigframe, e o sigframe exige decidir antes o pedido de AMX e o VL do SVE ([SDD 08](08_roadmap.md#decisões-futuras-casos-do-agentsmd)); sem sinal, as duas decisões esperam a fase 5 |
+| "sinais mínimos" | Sem sinais POSIX na ABI nativa; falha vira mensagem num canal ([decisão 6](#decisão-6--falha-de-usuário-canal-de-eventos-ou-sinal-síncrono)) | Sinal exige o sigframe, e o sigframe exige decidir antes o pedido de AMX e o VL do SVE ([SDD 08](08_roadmap.md#decisões-futuras-casos-do-agentsmd)); sem sinal, as duas decisões esperam a fase 5 |
 | "COW no fork" | COW só a partir da página zero compartilhada; `fork` e o COW inteiro vêm com a ABI Linux (fase 5) | A ABI nativa não tem `fork`: cria processo vazio e o preenche |
 
 ## Entrada de syscall por ISA
@@ -332,7 +331,7 @@ usuário, `TTBR1` para o kernel, seleção pelo bit 55; faixa padrão de 48 bits
 | Faixa (proposta) | O quê | Sorteio |
 | --- | --- | --- |
 | `[0, 0x1_0000)` | **Faixa nula**: nada mapeia (o equivalente do `mmap_min_addr`; o valor do Linux **NÃO VERIFICADO**) | — |
-| `0x40_0000` em diante | Imagem do `ET_EXEC`, no endereço em que o linker a pôs (`user/link/<isa>.ld`) | Nenhum na fase 4 ([decisão 5](18_fase_4_decisoes_pedidas.md#decisão-5--pie-de-usuário-agora-ou-depois)) |
+| `0x40_0000` em diante | Imagem do `ET_EXEC`, no endereço em que o linker a pôs (`user/link/<isa>.ld`) | Nenhum na fase 4 ([decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois)) |
 | `[mmap_base, …)` | Mapeamentos pedidos com `ANY` | `mmap_base` com 28 bits de página |
 | Janela da pilha | Pilha inicial, com uma página de guarda **abaixo** e outra **acima** | Topo com 28 bits de página |
 | `USER_TOP = 0x0000_7FFF_FFFF_F000` | Fim exclusivo; a última página nunca mapeia | — |
@@ -502,15 +501,15 @@ segue o Zircon, com as páginas **verificadas** abaixo. O que não foi lido do Z
 
 ### Tabela de handles
 
-Proposta, sem equivalente verificado no Zircon:
+Proposta, sem equivalente verificado no Zircon. O handle tem **64 bits** (decisão 2):
 
 | Item | Desenho |
 | --- | --- |
-| Valor | `u32` = `geração << 16 \| (índice + 1)`. **`0` nunca é válido** (o índice mais um é no mínimo 1). A geração começa em 0, então o primeiro handle de um processo vale `1` |
-| Geração | 16 bits, sobe a cada reuso do slot. **Aposentadoria:** o slot cuja geração chegaria a `0xFFFF` é aposentado e nunca mais é usado, então a geração nunca dá a volta e handle velho jamais aponta para outro objeto. Teste de propriedade: nenhum valor de handle reaparece |
-| **Orçamento da geração** | Um valor de 32 bits tem 2^32 combinações: **cada processo gasta, na vida inteira, até cerca de 2^32 handles** (65 534 slots × 65 535 usos); depois disso a tabela não tem slot e toda criação dá `NoMemory`. A 1 M de handles por segundo são cerca de 71 minutos: um servidor que cria um handle por pedido esgota. A saída é **contrato** e vai para a [decisão 2](18_fase_4_decisoes_pedidas.md#decisão-2--abi-nativa-lista-números-nomes-e-contrato): lista livre FIFO (**não** aumenta o total, só o gasta por igual), ou **handle de 64 bits antes de congelar a ABI** |
-| Teto | 4 096 handles **em tabela** por processo (proposta); passar disso é `NoMemory`. O índice vai até 65 534. **O handle dentro de uma mensagem em fila não conta nesses 4 096** (por isso há também o [limite de canais](#destruição-de-um-canal)) |
-| Slot | **24 bytes**, não 16. `Object` é um enum fechado de `Arc<Process>`, `Arc<Thread>`, `Arc<Vmo>`, `Arc<Vmar>`, `Arc<ChannelEnd>` e `Arc<Console>`: tag mais ponteiro dão **16 bytes** (medido com `rustc` na revisão); somam-se `rights: u32` e `generation: u16`, e o alinhamento fecha em 24. Chegar a 16 exigiria `tag: u8` e ponteiro como campos separados, com `unsafe` para remontar o `Arc` a cada acesso: **sem ganho medido, fica 24**. **Sem `dyn`** em todo caso: `Arc<dyn Objeto>` tem ponteiro gordo (16) e o slot passa de 24. Pior caso do teto: 4 096 × 24 = 96 KiB por processo, e a tabela cresce por demanda |
+| Valor | `u64` = `geração << 16 \| (índice + 1)`: geração de 48 bits, índice de 16. **`0` nunca é válido** (o índice mais um é no mínimo 1). A geração começa em 0, então o primeiro handle de um processo vale `1` |
+| Geração | 48 bits, sobe a cada reuso do slot. **Aposentadoria:** o slot cuja geração chegaria a `0xFFFF_FFFF_FFFF` é aposentado e nunca mais é usado, então a geração nunca dá a volta e handle velho jamais aponta para outro objeto. Teste de propriedade: nenhum valor de handle reaparece |
+| **Orçamento da geração** | Cada slot aguenta 2^48 − 1 usos; a tabela, 65 534 slots, soma cerca de 2^64. A 1 M de handles por segundo, **um único slot reciclado sem parar** se aposenta em cerca de 8,9 anos (2^48 ÷ 10^6 s), e a tabela inteira leva cerca de 585 mil anos. O esgotamento por geração deixou de ser risco prático; a [decisão 2](#decisão-2--abi-nativa-lista-números-nomes-e-contrato) trocou os 32 bits (cerca de 2^32 handles na vida do processo, 71 minutos àquela taxa) pelos 64 |
+| Teto | 4 096 handles **em tabela** por processo (proposta); passar disso é `NoMemory`. O índice vai até 65 534 (16 bits). **O handle dentro de uma mensagem em fila não conta nesses 4 096** (por isso há também o [limite de canais](#destruição-de-um-canal)) |
+| Slot | **32 bytes**, não 16 nem 24. `Object` é um enum fechado de `Arc<Process>`, `Arc<Thread>`, `Arc<Vmo>`, `Arc<Vmar>`, `Arc<ChannelEnd>` e `Arc<Console>`: tag mais ponteiro dão **16 bytes** (medido com `rustc` na revisão); somam-se `rights: u32` e `generation: u64` (a geração de 48 bits), 28 bytes, e o alinhamento fecha em 32. Com a geração de 16 bits o slot era de 24; encolher a tag e o ponteiro (campos separados, com `unsafe` para remontar o `Arc` a cada acesso) não adianta, porque a geração sozinha já passa de 16. **Sem `dyn`** em todo caso: `Arc<dyn Objeto>` tem ponteiro gordo (16) e o slot passa de 32. Pior caso do teto: 4 096 × 32 = 128 KiB por processo, e a tabela cresce por demanda |
 | Tabela | `Vec` de slots mais lista de livres, cresce por demanda; protegida por **um `IrqLock` por processo** |
 | Referências | O `Arc` segura a **memória** do objeto (handle, mapeamento e fila de mensagem); o **ciclo de vida lógico** vem da contagem de handles, abaixo. Filho para pai usa `Weak`: sem ciclo de `Arc` |
 | Contagem de handles | Cada objeto guarda `handle_count`: handles em tabela **e em trânsito** (dentro de uma mensagem). Chega a zero: o objeto recebe `on_zero_handles()` |
@@ -614,7 +613,7 @@ nunca o contrário:
 | Ciclo, na escrita | Escrever o handle da ponta oposta pela própria ponta mata a oposta já na escrita |
 | Geração | Nenhum valor de handle reaparece, inclusive depois da aposentadoria do slot |
 
-### Direitos iniciais ([decisão 3](18_fase_4_decisoes_pedidas.md#decisão-3--o-conjunto-inicial-de-bits-de-direito))
+### Direitos iniciais ([decisão 3](#decisão-3--o-conjunto-inicial-de-bits-de-direito))
 
 `rights` é `u32`. Bits de 11 a 31 reservados: valor com bit reservado ligado é
 `InvalidArgs`.
@@ -657,15 +656,15 @@ objeto próprio.
 | `process_exit`, `thread_exit` | Só afetam quem chama |
 | `handle_close`, `handle_duplicate`, `handle_replace` | Agem na própria tabela |
 | `clock_get_monotonic` | Tempo não é segredo (`rdtsc` já está liberado em usuário; [SDD 09](09_seguranca.md)) |
-| `vmo_create`, `channel_create` | Criam objeto novo do chamador. **`vmo_create` gasta memória do sistema**: sem handle de recurso, um processo esgota a RAM. Na fase 4 a defesa é a contabilidade da [decisão 9](18_fase_4_decisoes_pedidas.md#decisão-9--overcommit-na-abi-nativa); o limite **por processo** é da fase 9, e até lá um processo pode reservar a RAM inteira e negar `NoMemory` aos outros |
+| `vmo_create`, `channel_create` | Criam objeto novo do chamador. **`vmo_create` gasta memória do sistema**: sem handle de recurso, um processo esgota a RAM. Na fase 4 a defesa é a contabilidade da [decisão 9](#decisão-9--overcommit-na-abi-nativa); o limite **por processo** é da fase 9, e até lá um processo pode reservar a RAM inteira e negar `NoMemory` aos outros |
 | `random_get` | Entrega bytes do gerador do kernel, como o `getrandom` do Linux. Segredo do kernel não sai: o gerador troca a chave a cada pedido ([SDD 09](09_seguranca.md)) |
 
 Processo nasce com **um** handle: o canal de boot.
 
 ## ABI nativa mínima
 
-Tudo desta seção é **Proposta**; a numeração, os nomes e o contrato são a
-[decisão 2](18_fase_4_decisoes_pedidas.md#decisão-2--abi-nativa-lista-números-nomes-e-contrato).
+Tudo desta seção é **Proposta**; a numeração, os nomes e o contrato foram aprovados na
+[decisão 2](#decisão-2--abi-nativa-lista-números-nomes-e-contrato).
 
 ### Convenção de chamada
 
@@ -678,9 +677,9 @@ Tudo desta seção é **Proposta**; a numeração, os nomes e o contrato são a
 | Preservados | Todos, exceto `rax`, `rdx` e **`rcx`/`r11`** (o hardware os sobrescreve) | Todos, exceto `x0`, `x1` | `rcx`/`r11`: **verificado** no `entry_64.S` |
 | Status | `0` = `Ok`; negativo = erro | idem | **Proposta** (o Linux devolve `-errno`; o espaço de números não é copiado) |
 
-Dois valores de retorno evitam ponteiro de saída nas chamadas que criam objeto:
-`vmo_create` devolve o handle em `rdx`/`x1`; `channel_create` e `process_create`
-devolvem **dois** handles de 32 bits empacotados (`h0 | h1 << 32`).
+`vmo_create` devolve o handle em `rdx`/`x1`. `channel_create` e `process_create` devolvem
+**dois** handles, e dois `u64` não cabem em `rdx`/`x1`: o par vai por **ponteiro de saída**
+(`out`, dois `u64` consecutivos). A falha ao gravar `out` desfaz a criação ([L4](#lacunas-a-fechar-no-pr-da-4c)).
 
 ### Entrada do programa
 
@@ -706,7 +705,7 @@ O contrato de como um programa **começa**, igual para o `init` e para qualquer 
 | `BadHandle` | -2 | Valor que não é handle vivo (inclui geração velha) ou handle repetido num array |
 | `WrongType` | -3 | Handle de outro tipo de objeto |
 | `AccessDenied` | -4 | Falta direito no handle |
-| `NoMemory` | -5 | Sem frame, sem slot, passou o teto de handles, ou a contabilidade negou ([decisão 9](18_fase_4_decisoes_pedidas.md#decisão-9--overcommit-na-abi-nativa)) |
+| `NoMemory` | -5 | Sem frame, sem slot, passou o teto de handles, ou a contabilidade negou ([decisão 9](#decisão-9--overcommit-na-abi-nativa)) |
 | `BadState` | -6 | **Só** processo já morto ou em morte (`thread_create`, `process_kill`). Não existe "thread já iniciada": `thread_create` cria **e inicia** |
 | `NotSupported` | -7 | Número de syscall desconhecido; flag que a fase não implementa; a própria ponta do canal no array de handles |
 | `OutOfRange` | -8 | Ponteiro ou intervalo fora de `UserRange`, ou na faixa nula |
@@ -738,12 +737,12 @@ ilegal, falta sem região) mata, pelo [canal de eventos](#falhas-de-usuário).
 | `0x20` | `vmo_create` | `size`, `flags` (0) | handle do VMO | Nenhum (ver acima) |
 | `0x21` | `vmar_map` | `vmar`, `vmo`, `vmo_off`, `len`, `flags`, `vmar_off` | endereço mapeado | `vmar`: `MAP`; `vmo`: `MAP` e cada permissão pedida (`READ`/`WRITE`/`EXECUTE`), todas também no teto do `vmar` |
 | `0x22` | `vmar_unmap` | `vmar`, `addr`, `len` | — | `vmar`: `MAP` |
-| `0x30` | `process_create` | `parent`, `name_ptr`, `name_len`, `bootstrap`, `events` | processo e VMAR raiz (empacotados) | `parent`: `MANAGE_PROCESS`; `bootstrap`: `TRANSFER` (move); `events`: `WRITE` e `TRANSFER` (move; 0 = nenhum) |
+| `0x30` | `process_create` | `parent`, `name_ptr`, `name_len`, `bootstrap`, `events`, `out` | — (processo e VMAR raiz, dois `u64`, em `out`) | `parent`: `MANAGE_PROCESS`; `bootstrap`: `TRANSFER` (move); `events`: `WRITE` e `TRANSFER` (move; 0 = nenhum) |
 | `0x31` | `thread_create` | `process`, `entry`, `sp`, `arg0`, `arg1` | handle da thread | `process`: `MANAGE_THREAD`. Cria **e inicia**; a primeira thread inicia o processo |
 | `0x32` | `process_kill` | `process` | — | `process`: `DESTROY` |
-| `0x40` | `channel_create` | `flags` (0) | dois handles (empacotados) | Nenhum |
-| `0x41` | `channel_write` | `ch`, `bytes`, `nbytes`, `handles`, `nhandles` | — | `ch`: `WRITE`; cada handle: `TRANSFER`. [Consome o array](#operações-sobre-handle) |
-| `0x42` | `channel_read` | `ch`, `bytes`, `bytes_cap`, `handles`, `handles_cap`, `actual*` | — (tamanhos em `actual`) | `ch`: `READ`. Só retira a mensagem **depois** da cópia ([ordem](#operações-sobre-handle)) |
+| `0x40` | `channel_create` | `flags` (0), `out` | — (as duas pontas, dois `u64`, em `out`) | Nenhum |
+| `0x41` | `channel_write` | `ch`, `bytes`, `nbytes`, `handles` (array de `u64`), `nhandles` | — | `ch`: `WRITE`; cada handle: `TRANSFER`. [Consome o array](#operações-sobre-handle) |
+| `0x42` | `channel_read` | `ch`, `bytes`, `bytes_cap`, `handles` (array de `u64`), `handles_cap`, `actual*` | — (tamanhos em `actual`) | `ch`: `READ`. Só retira a mensagem **depois** da cópia ([ordem](#operações-sobre-handle)) |
 
 - **`thread_create` e o carregador validam `USER_MIN <= entry < USER_TOP`, `sp <= USER_TOP` e `sp` alinhado a 16** antes de qualquer outra coisa; fora disso, `InvalidArgs`. Teste no host com `0xFFFF_8000_0000_0000`, `0x0000_8000_0000_0000` e `USER_TOP` (o `RIP` que o `IRETQ` restaura vem daqui: [exceções do anel 3](#exceções-vindas-do-anel-3)).
 - **`vmar_map`:** `flags` leva `READ`/`WRITE`/`EXECUTE` e, opcionalmente, `FIXED` (`vmar_off` exato; **recusa** sobrepor mapeamento existente, o equivalente do `MAP_FIXED_NOREPLACE` do Linux, **verificado** em [mmap(2)](https://man7.org/linux/man-pages/man2/mmap.2.html); o `MAP_FIXED` do Linux apaga o que havia, e o RustOS não o oferece). Sem `FIXED` o kernel escolhe o endereço, com o [ASLR](#aslr-quantos-bits), e `vmar_off` tem de ser 0. W+X é `InvalidArgs`. Intervalo na faixa nula ou acima de `USER_TOP` é `OutOfRange`.
@@ -777,7 +776,7 @@ ilegal, falta sem região) mata, pelo [canal de eventos](#falhas-de-usuário).
 | Boot do `init` | Console | `DUPLICATE`, `TRANSFER`, `WRITE` |
 | Boot do `init` | Initramfs (VMO físico) | `DUPLICATE`, `TRANSFER`, `READ`, `MAP` (sem `EXECUTE`, sem `WRITE`) |
 
-**Handle:** `u32`, `0` inválido, geração de 16 bits com aposentadoria do slot, teto de 4 096 em tabela por processo e **orçamento de cerca de 2^32 handles por processo na vida** ([tabela de handles](#tabela-de-handles); a largura é pergunta da decisão 2).
+**Handle:** `u64`, `0` inválido, geração de 48 bits e índice de 16 com aposentadoria do slot, teto de 4 096 em tabela por processo e **orçamento de 2^48 − 1 usos por slot** ([tabela de handles](#tabela-de-handles)).
 
 **Limites do canal.** Comparados com o Zircon (**verificado**: 65 536 bytes e 64 handles por mensagem; a profundidade da fila **NÃO VERIFICADO**):
 
@@ -817,7 +816,7 @@ programa precisar dela, com o caso de uso no PR.
 ### Estabilidade
 
 A ABI nativa é **experimental até o fim da fase 5**: pode mudar sem compatibilidade. A
-partir daí o que existir é contrato. Está na [decisão 2](18_fase_4_decisoes_pedidas.md#decisão-2--abi-nativa-lista-números-nomes-e-contrato).
+partir daí o que existir é contrato ([decisão 2](#decisão-2--abi-nativa-lista-números-nomes-e-contrato)).
 
 ### Variante enxuta (16 chamadas)
 
@@ -827,13 +826,13 @@ nativo até a fase 5, e o pai só mata o filho pelo canal ou esperando.
 
 ## Executável e carregador
 
-### Formato: ELF64 estático (proposta, [decisão 1](18_fase_4_decisoes_pedidas.md#decisão-1--formato-do-executável-nativo))
+### Formato: ELF64 estático ([decisão 1](#decisão-1--formato-do-executável-nativo))
 
 | Item | Valor | Fonte |
 | --- | --- | --- |
 | `e_machine` | `62` (x86_64), `183` (aarch64) | **Verificado**: `include/uapi/linux/elf-em.h` |
 | Classe e ordem | 64 bits, little-endian: `EI_CLASS` (índice 4) = `ELFCLASS64` (2); `EI_DATA` (índice 5) = `ELFDATA2LSB` (1); `EI_VERSION` (6) = `EV_CURRENT` (1); `EI_OSABI` (7) = `ELFOSABI_NONE` (0); `EI_NIDENT` = 16 | **Verificado**: [gABI](https://www.sco.com/developers/gabi/latest/ch4.eheader.html) |
-| Tipo | `ET_EXEC`. `ET_DYN` só com a [decisão 5](18_fase_4_decisoes_pedidas.md#decisão-5--pie-de-usuário-agora-ou-depois) | — |
+| Tipo | `ET_EXEC`. `ET_DYN` só com a [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois) | — |
 | Seções | O kernel **nunca** lê section headers | **Proposta** |
 
 ### Validação, regra por regra
@@ -845,7 +844,7 @@ testada no host com ELF sintético e com os casos inválidos (guidelines 09).
 | Regra | De onde |
 | --- | --- |
 | `e_ident` começa com `ELFMAG` | Linux (verificado) |
-| `e_type` é `ET_EXEC` (ou `ET_DYN`, se a [decisão 5](18_fase_4_decisoes_pedidas.md#decisão-5--pie-de-usuário-agora-ou-depois) permitir) | Linux (verificado) |
+| `e_type` é `ET_EXEC` (ou `ET_DYN`, se a [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois) permitir) | Linux (verificado) |
 | Máquina e classe batem com a ISA do kernel (`elf_check_arch`) | Linux (verificado; `EI_CLASS`/`EI_DATA` estão dentro dela, não visíveis no trecho lido) |
 | `e_phentsize == size_of::<Phdr>()` | Linux (verificado) |
 | `e_phoff + e_phnum * e_phentsize` sem estouro e **dentro do arquivo** (a tabela de program headers inteira) | **Proposta** (própria) |
@@ -952,7 +951,7 @@ do kernel é invalidado a cada troca de flags.
 
 O `init` é o primeiro processo e o único que o kernel lança sozinho.
 
-### Origem ([decisão 4](18_fase_4_decisoes_pedidas.md#decisão-4--de-onde-vem-o-init))
+### Origem ([decisão 4](#decisão-4--de-onde-vem-o-init))
 
 **Verificado** (cpio `newc`, [early-userspace buffer format](https://docs.kernel.org/driver-api/early-userspace/buffer-format.html)):
 
@@ -1038,7 +1037,7 @@ Hoje toda exceção não recuperável para a CPU ([DEBT-0012](../tech-debt/0012-
 | 6 | Levanta `TERMINATED` no Process e escreve o evento no canal de eventos | Quem espera já enxerga o estado final |
 | 7 | **A pilha de kernel da thread que sai só é liberada depois do `switch`**, por quem entra (ou por uma lista de recolhimento que a ociosa esvazia) | A thread não pode liberar a pilha em que ela mesma roda; o slot `Exited` já mantém a pilha ([SDD 15](15_tarefas_e_preempcao.md)), e o endereço só volta à lista de livres depois |
 
-### Canal de eventos ([decisão 6](18_fase_4_decisoes_pedidas.md#decisão-6--falha-de-usuário-canal-de-eventos-ou-sinal-síncrono))
+### Canal de eventos ([decisão 6](#decisão-6--falha-de-usuário-canal-de-eventos-ou-sinal-síncrono))
 
 O pai passa uma ponta de canal em `process_create(.., events)`. Quando o processo termina,
 o kernel escreve **uma** mensagem de `ProcessEvent` nela:
@@ -1077,7 +1076,7 @@ O adaptador Linux da fase 5 traduz o `Fault` em sinal.
 ### Crates novos
 
 **Crate novo em `core/` e pasta nova de primeiro nível são o caso 1**; a regra 5 do guidelines
-03 que muda é o caso 3. As decisões [7](18_fase_4_decisoes_pedidas.md#decisão-7--crates-novos-em-core) e [8](18_fase_4_decisoes_pedidas.md#decisão-8--pasta-user-e-a-regra-5-do-guidelines-03) pedem a aprovação.
+03 que muda é o caso 3. As decisões [7](#decisão-7--crates-novos-em-core) e [8](#decisão-8--pasta-user-e-a-regra-5-do-guidelines-03) as aprovaram.
 
 | Crate | Pasta | O que faz | `unsafe` | Depende de |
 | --- | --- | --- | --- | --- |
@@ -1209,14 +1208,14 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 | [DEBT-0023](../tech-debt/0023-aarch64-sem-wxn.md) aarch64 sem `WXN` | O gatilho dispara (primeiro mapeamento de usuário). Ligar na 4a, junto com `PageFlags.user`, se o Arm ARM confirmar o efeito sobre EL0 |
 | Dívida 0037, pilha sem medida de pico (paga no #19: 16 KiB pelo pico medido) e [DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) | O gatilho da 0070 dispara na 4a: remede o pico com syscall e falta de página de usuário (a linha `stacks:` e o gate de 75% já existem) antes de manter os 16 KiB |
 | [DEBT-0052](../tech-debt/0052-afinidade-so-no-spawn.md) Afinidade só no `spawn` | Não dispara: a ABI nativa não tem afinidade |
-| **A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados (4c; gatilho: o primeiro programa que os produza, ou os grupos de recursos da fase 9); imagem de usuário sem ASLR (4b; [decisão 5](18_fase_4_decisoes_pedidas.md#decisão-5--pie-de-usuário-agora-ou-depois)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
+| **A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados (4c; gatilho: o primeiro programa que os produza, ou os grupos de recursos da fase 9); imagem de usuário sem ASLR (4b; [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
 
 **Pagas antes da fase:** 0011 (GIC e timer só na CPU 0), 0018 (frames sem cache por CPU), 0036
 (estado de troca global) e 0039 (escalonador de uma CPU), no #13; 0020 (zerar página pelo `memset`) e
 0025 (resíduo de chave na pilha), no #11. O resto do texto as cita no passado.
 
 **O que fica de fora, e vira dívida com gatilho no PR em que o código nascer:** imagem
-de usuário sem ASLR ([decisão 5](18_fase_4_decisoes_pedidas.md#decisão-5--pie-de-usuário-agora-ou-depois)), `vmar_protect`, sub-VMARs, TLS, `fork` e COW inteiro, multithread nativo
+de usuário sem ASLR ([decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois)), `vmar_protect`, sub-VMARs, TLS, `fork` e COW inteiro, multithread nativo
 se a variante enxuta vencer, `rdtsc` por processo, AMX e VL do SVE por processo.
 
 ## Lacunas a fechar no PR da 4c
@@ -1229,16 +1228,180 @@ do dono. Cada uma vira texto no SDD e teste no mesmo PR.
 | L1 | Entre a reserva do slot e o *commit* do `channel_write`, a ponta oposta pode morrer em outra CPU (SMP) | O *commit* reconfere a ponta viva sob o lock do canal; se morreu, os handles seguem a regra de descarte |
 | L2 | A repetição do `channel_read` (sequência mudou) | A repetição libera as reservas do passo 2, e um valor de handle reservado e solto não reaparece |
 | L3 | Regra de lock dos canais não está escrita | Um lock por par de pontas (A→B e B→A pegam o mesmo); a destruição tira as mensagens sob o lock e fecha os handles **depois** de soltá-lo; o passo 1 do `channel_read` valida `ch` sob a tabela antes do canal; ordem global tabela → canal |
-| L4 | Chamadas que devolvem handle por ponteiro de saída (`channel_create`, `process_create`, com o handle de 64 bits) | O mesmo padrão reserva → copia → *commit*: falha no `copy_to_user` desfaz a criação, sem objeto órfão |
+| L4 | Chamadas que devolvem handle por ponteiro de saída (`channel_create`, `process_create`) | O mesmo padrão reserva → copia → *commit*: falha no `copy_to_user` desfaz a criação, sem objeto órfão |
 | L5 | `fault_kind` contra a tabela do `ProcessEvent` | Já concordam (`breakpoint` incluído); manter um teste que compare as duas |
 | L6 | O `check-layers` não expressa "o `user/` depende só de `elf` e `cpio` entre os crates de `core/`", nem a isenção de `unsafe` só do `user/rt` | Lista por nome no `xtask`, com teste vermelho antes do verde (já pedido para a 4a, ver [guidelines 03](../guidelines/03_camadas_e_dependencias.md)) |
 
-Com o handle de 64 bits ([decisão 2](18_fase_4_decisoes_pedidas.md#decisão-2--abi-nativa-lista-números-nomes-e-contrato)),
-o texto deste capítulo ainda está em 32 bits. O PR da 4c reescreve os pontos que o
-SDD 18 lista.
-
 ## Decisões e fontes
 
-As decisões do dono, as do agente e as fontes lidas estão no
-[SDD 18](18_fase_4_decisoes_pedidas.md). O diff dos guidelines que elas produzem já está em
-[`guidelines/03`](../guidelines/03_camadas_e_dependencias.md).
+O dono aprovou as nove decisões abaixo no #9, em 2026-11-18, **todas como o desenho as
+recomendava e sem mudança**. Cada uma é caso de parada do [`AGENTS.md`](../../AGENTS.md); o
+texto deste capítulo já as aplica, e as tabelas de opções que as precederam saíram com o
+Draft. As marcas de verificação são as de [Como ler as marcas](#como-ler-as-marcas).
+
+### As decisões do dono
+
+"Fatia" é a [fatia de código](#o-que-a-fase-entrega-por-fatia) que depende da decisão.
+
+| # | Decisão | O que foi escolhido | Caso | Fatia |
+| --- | --- | --- | --- | --- |
+| 1 | Formato do executável nativo | ELF64 estático `ET_EXEC`; os handles iniciais vão no canal de boot, não no cabeçalho | 6 | 4b |
+| 2 | ABI nativa: lista, números, nomes e contrato | 18 chamadas e um `nop`, em blocos por área; `duplicate` e `replace` separados; handle de 64 bits; experimental até a fase 5 | 6 | 4a |
+| 3 | Bits de direito | 11 bits em `u32`, nomes e sentido do Zircon; sem `GET_PROPERTY`/`SET_PROPERTY`; `INSPECT` reservado; uid e gid fora | 6 | 4c |
+| 4 | De onde vem o `init` | Um módulo do Limine com cpio `newc`; o kernel acha `init` | 6 | 4b |
+| 5 | PIE de usuário | Depois: `ET_EXEC` na fase 4, PIE no início da fase 5 | 6 | 4b |
+| 6 | Falha de usuário | Canal de eventos, sem sinal; o processo morre; o dono decidiu ciente do custo escondido | 6 | 4a |
+| 7 | Crates novos em `core/` | `core/elf`, `core/cpio`, `core/object`; a ABI como módulo `abi` do `hal` | 1 | 4b |
+| 8 | Pasta `user/` e a regra 5 do guidelines 03 | `user/` com os adaptadores `arch/<isa>-user`; regra 5 alterada, regras 11 e 12 novas | 1 e 3 | 4a |
+| 9 | Overcommit na ABI nativa | Contabilidade estrita, por processo | 6 | 4c |
+
+O que cada decisão **fixa além do que o capítulo já diz**, e o que ela muda no código:
+
+#### Decisão 1 — formato do executável nativo
+
+O formato está em [Executável e carregador](#executável-e-carregador). **O que muda:** `core/elf`
+(decisão 7); `user/link/*.ld`; `kernel/src/loader.rs`.
+
+#### Decisão 2 — ABI nativa: lista, números, nomes e contrato
+
+A lista, a convenção e o contrato estão em [ABI nativa mínima](#abi-nativa-mínima). Respostas às
+perguntas que a decisão fechou:
+
+| Pergunta | Resposta |
+| --- | --- |
+| Numeração | Blocos por área (`0x00` sistema, `0x10` handles, `0x20` memória, `0x30` processos, `0x40` canais) |
+| Retorno | Status em `rax`/`x0`, valor em `rdx`/`x1` |
+| Quem cria processo | Handle do pai com `MANAGE_PROCESS`; `Job` só na fase 9 |
+| `nop` de medida | Sempre presente, número `0x00` |
+| Aleatório | `random_get(ptr, len)` ambiente, até 256 bytes: o `init` precisa dele para `AT_RANDOM` dos filhos |
+| Autoridade sem handle | Só a lista de [Autoridade que não passa por handle](#autoridade-que-não-passa-por-handle) |
+| Valores numéricos (`Status`, sinais, flags, direitos iniciais, limites do canal, `ProcessEvent`, mensagem de boot) | Os das tabelas do [contrato numérico](#contrato-numérico) |
+| **Largura do handle e orçamento da geração** | **Handle de 64 bits** (geração de 48 bits, índice de 16), fixado **antes de congelar a ABI**. Com 32 bits, cada processo gastaria até cerca de 2^32 handles na vida e depois toda criação daria `NoMemory` (cerca de 71 minutos a 1 M de handles por segundo); a lista livre FIFO só distribuiria o gasto. Com 64 bits: `channel_create` e `process_create` devolvem o par por **ponteiro de saída** (dois `u64` não cabem em `rdx`/`x1`); os arrays de handles de `channel_write` e `channel_read` são `u64`; o slot sobe de 24 para 32 bytes (pior caso de 4 096: 128 KiB). `ProcessEvent` e a mensagem de boot não mudam de tamanho. A conta está na [tabela de handles](#tabela-de-handles) |
+| Estabilidade | Experimental até o fim da fase 5 |
+
+**O que muda:** `core/hal/src/abi.rs`; `kernel/src/syscall.rs`; `user/rt` (stubs); `arch/*-user` (`asm!`).
+
+#### Decisão 3 — o conjunto inicial de bits de direito
+
+Os 11 bits estão em [Direitos iniciais](#direitos-iniciais-decisão-3). Uid e gid não entram: a
+tradução vive no adaptador Linux (fase 5). **O que muda:** `hal::abi::Rights`; `core/object`
+(regras de subconjunto); testes de propriedade.
+
+#### Decisão 4 — de onde vem o `init`
+
+O `newc` é lido por ferramenta de fora, e o módulo é pedido novo ao Limine, que já é binário
+aceito; por isso é caso 6. Está em [Origem](#origem-decisão-4). **O que muda:** pedido de módulo em
+`boot/limine` e `BootInfo::modules()`; `core/cpio`; mapeamento do módulo em `kernel/src/vm.rs`;
+`xtask/src/initramfs.rs`; `limine.conf`.
+
+#### Decisão 5 — PIE de usuário: agora ou depois
+
+Os números **verificados** (Linux `arch/x86/include/asm/elf.h` e `arch/arm64/include/asm/elf.h`):
+`R_X86_64_RELATIVE` = 8, `R_AARCH64_RELATIVE` = 1027. O kernel já é PIE (888 relocações
+relativas no x86_64, 648 no aarch64: [SDD 13](13_memoria_virtual.md)); o custo do `ET_DYN` é
+código e teste nos dois carregadores, não pesquisa. **A abrir no PR da 4b:** `DEBT-NNNN`
+"imagem de usuário sem ASLR", gatilho: o primeiro programa que não seja nosso, ou o início da
+fase 5. **O que muda:** `core/elf` recusa `ET_DYN`; `user/link/*.ld` fixa a base.
+
+#### Decisão 6 — falha de usuário: canal de eventos ou sinal síncrono
+
+**O custo escondido, que o dono aceitou.** O adaptador Linux da fase 5 precisa entregar
+`SIGSEGV`, `SIGBUS`, `SIGILL` e `SIGFPE` com *handler* do programa. Isso exige **capturar a
+falta sem matar o processo**: a thread faltosa fica suspensa, o adaptador lê e altera o
+contexto (monta o sigframe) e a retoma. É mecanismo novo: estado "suspensa por exceção" na
+thread, leitura e escrita do contexto de outra thread e uma chamada de retomada, e entra a
+decisão de AMX e SVE que a escolha adia. **A escolha é reversível só com esse trabalho**: o
+canal de eventos da fase 4 vira o início dele (a mensagem de `Fault` já leva o que o sinal
+precisa), mas a fase 5 paga a suspensão e a retomada. O canal paga a
+[DEBT-0012](../tech-debt/0012-excecao-de-usuario-so-para-a-cpu.md). **O que muda:**
+`hal::Fault.from_user`; `hal::abi::ProcessEvent`; `kernel/src/process.rs`; o último argumento
+de `process_create`.
+
+#### Decisão 7 — crates novos em `core/`
+
+`core/elf` e `core/object` dependem só do `hal`; `core/cpio`, de nada. A ABI é módulo do `hal`,
+não crate (um `core/abi` quebraria a regra 2 do guidelines 03: caso 3). **O que muda:**
+`Cargo.toml` (`[workspace]`, `[workspace.dependencies]`, `default-members`);
+[SDD 03](03_mapa_de_codigo.md); testes no host (ELF e cpio inválidos, propriedade dos
+direitos, entrelaçamento de handles).
+
+#### Decisão 8 — pasta `user/` e a regra 5 do guidelines 03
+
+O diff está feito em [`guidelines/03`](../guidelines/03_camadas_e_dependencias.md) (regra 5
+alterada, regras 11 e 12 novas). **O PR da 4a traz o `check-layers` conhecendo `user/` e a
+regra 12, com o teste vermelho antes do verde:** hoje `arch/x86_64-user` seria classificado
+como `Adapter` e o `Kernel` poderia depender dele; `user/` não classifica em camada nenhuma.
+**O que muda:** `Cargo.toml` (`default-members` sem `user/` nem `arch/*-user`, que só compilam
+para os alvos bare-metal); `xtask/src/checks/layers.rs` (a camada `User`);
+[SDD 03](03_mapa_de_codigo.md) e [SDD 05](05_build_e_execucao.md).
+
+#### Decisão 9 — overcommit na ABI nativa
+
+`vmo_create` e `vmar_map` reservam páginas contra o total; as páginas seguem preguiçosas. Falta
+de memória vira `NoMemory` numa chamada, tratável, e não um processo morto na falta de página.
+O custo (reservar mais que o uso real) **não foi medido**. **O limite que a decisão não
+resolve:** um contador **global** estrito, sem limite **por processo**, deixa um processo
+reservar a RAM inteira e negar `NoMemory` aos outros até os grupos de recursos da fase 9; a
+fase 4 só impede que o total passe da RAM. A política é **por processo**: o adaptador Linux da
+fase 5 poderá pedir o modo heurístico para os programas dele. O modo exato do Linux
+(`vm.overcommit_memory`) **NÃO VERIFICADO**. **O que muda:** um contador de reserva no kernel;
+`NoMemory` em `vmo_create` e `vmar_map`; o campo de política no Process.
+
+### Decisões do agente
+
+O `AGENTS.md` manda o agente decidir o que segue o desenho e as regras. Estas ficaram fora da
+lista acima por não serem dos seis casos; cada uma diz o que a faria subir ao dono.
+
+| Decisão | O que o agente decidiu | Contingência |
+| --- | --- | --- |
+| **KPTI** | Só em CPU vulnerável (detecção: `IA32_ARCH_CAPABILITIES.RDCL_NO`, bit 0, **verificado** em `msr-index.h`; mais uma lista de CPUs imunes, **NÃO VERIFICADO**), com chave de override `kpti=on\|off\|auto` na linha de comando do Limine (para medir as duas configurações). Sem informação, vulnerável. O [SDD 08](08_roadmap.md) e o [SDD 09](09_seguranca.md) já dizem "só em CPU vulnerável" | Se o dono quiser sempre ligado, a 4e perde a detecção e o override; o resto não muda |
+| **Framebuffer e entrada** | Ficam na fase 5, onde o [SDD 08](08_roadmap.md#decisões-futuras-casos-do-agentsmd) já os lista. O desenho deixa o caminho (VMO físico com política de cache no `vmar_map`; teclado por canal) | A interface é caso 6 quando chegar; nada a decidir na fase 4 |
+| **Alvo de compilação dos programas** | Os mesmos alvos `*-unknown-none`, com `-C code-model=small` (x86_64) e `-C relocation-model=static`, linker script próprio e `--target-dir` separado ([SDD 05](05_build_e_execucao.md): sem nightly nem `build-std`). **Testado** com `rustc 1.100.0` nos dois alvos: compila e liga em `0x40_0000` ([o linker e o alvo](#o-que-muda-no-linker-e-no-alvo)). **Mudança de plano:** as quatro fontes de `rustflags` do Cargo são **exclusivas**, então o xtask passa a lista inteira por `CARGO_ENCODED_RUSTFLAGS` e as flags do `.cargo/config.toml` (o `pie` do kernel) não somam | O risco que sobra é `code-model` em programa maior (o teste mínimo não distingue `small` de `kernel`). Se um alvo JSON virar necessário, exige `build-std`: **volta ao dono** (ferramenta de build nova, caso 2) |
+| **`arch/<isa>-user`** | Crates de adaptador do lado do usuário (`asm!` de `syscall`/`svc`, de `_start`, de `xmm0`/`v0` do teste). Cabem nas regras 4 e 8 do guidelines 03 (adaptador, crate numa pasta existente) | — |
+| **ABI no `hal`** | Módulo `abi` em `core/hal` (a "porta de entrada" do [SDD 02](02_arquitetura.md)): números, `Status`, direitos, mensagens, `USER_TOP`. Porta nova no `hal` é do agente | Um crate `core/abi` é a opção A' da decisão 7 |
+
+### O diff dos guidelines
+
+[`guidelines/03`](../guidelines/03_camadas_e_dependencias.md) traz as regras alteradas e novas
+(regra 5; regras 11 e 12 para `user/`, `arch/<isa>-user` e o `unsafe` mínimo do `user/rt`).
+As outras decisões não tocam o guidelines. O `make layers-check` só aprende a camada `User` no
+PR da 4a.
+
+### Fontes lidas e o que ficou por ler
+
+O relatório de conferência (URL e trecho literal de cada item) está na pesquisa
+`phase4-verify.md`.
+
+| Fonte | Usada para | Estado |
+| --- | --- | --- |
+| Intel SDM via [felixcloutier](https://www.felixcloutier.com/x86/sysret): `syscall`, `sysret`, [`iret`](https://www.felixcloutier.com/x86/iret:iretd:iretq), [`mov cr3`](https://www.felixcloutier.com/x86/mov-1), [`invpcid`](https://www.felixcloutier.com/x86/invpcid), [`cpuid`](https://www.felixcloutier.com/x86/cpuid) | Registradores; `STAR`; `IRETQ` (`NT` atual dá `#GP`, `RSP` não canônico dá `#SS`, bits restaurados); PCID e `INVPCID`; `CPUID` em qualquer anel | Lidas (espelho; o PDF do SDM não baixou) |
+| [Xen XSA-7](https://xenbits.xen.org/xsa/advisory-7.html) | CVE-2012-0217 | Lida |
+| Linux x86: [`entry_64.S`](https://github.com/torvalds/linux/blob/master/arch/x86/entry/entry_64.S), [`cpu/common.c`](https://github.com/torvalds/linux/blob/master/arch/x86/kernel/cpu/common.c), [`idt.c`](https://github.com/torvalds/linux/blob/master/arch/x86/kernel/idt.c), [`syscall_64.c`](https://github.com/torvalds/linux/blob/master/arch/x86/entry/syscall_64.c), [`msr-index.h`](https://github.com/torvalds/linux/blob/master/arch/x86/include/asm/msr-index.h), `processor-flags.h`, `process.c`, `nospec.h`, `nospec-branch.h` | Entrada, `FMASK`, `STAR`, `SYSRET` contra `IRET`, MSRs, `PCIDE`, Meltdown, `#DB` com IST, `fixup_bad_iret`, *CPUID faulting*, `array_index_nospec` | Lidos |
+| Linux arm64: [`entry.S`](https://github.com/torvalds/linux/blob/master/arch/arm64/kernel/entry.S), [`esr.h`](https://sources.debian.org/src/linux/6.12.69-1/arch/arm64/include/asm/esr.h), `arm_arch_timer.[ch]`, `tools/sysreg`, `pgtable-hwdef.h`, `uaccess.h` | Vetores, `sp_el0`, KPTI por `TTBR1`, `EC`, campos de `TCR_EL1`, `SCTLR_EL1`, `ID_AA64MMFR*`, bits de PTE, `CNTKCTL` | Lidos (**é o Linux, não a ARM ARM**) |
+| Linux [`mm/memory.c`](https://github.com/torvalds/linux/blob/master/mm/memory.c) | Página zero na leitura, COW (`do_anonymous_page`, `wp_page_copy`) | Lido nesta rodada |
+| Linux `spectre.rst`, `mds.rst` ([hw-vuln](https://github.com/torvalds/linux/tree/master/Documentation/admin-guide/hw-vuln)) | IBPB condicional, eIBRS preferido a retpoline, limpeza de buffers no MDS | Lidos nesta rodada |
+| [syscall(2)](https://man7.org/linux/man-pages/man2/syscall.2.html), [`auxvec.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/auxvec.h), [`elf-em.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/elf-em.h), `elf.h` das duas ISAs, [inode(7)](https://man7.org/linux/man-pages/man7/inode.7.html) | Convenção; `AT_*`, `e_machine`, `R_*_RELATIVE`; `S_IFMT` | Lidos |
+| [gABI](https://www.sco.com/developers/gabi/latest/ch5.pheader.html) (`ch4`, `ch5`) | `EI_*`, congruência de `p_vaddr` e `p_offset` **módulo o tamanho da página** | Lida nesta rodada |
+| [x86-64 psABI](https://github.com/hjl-tools/x86-psABI), [AAPCS64](https://github.com/ARM-software/abi-aa) | `rsp` alinhado a 16 na entrada, layout de `argc`/`argv`/`envp`/auxv; `sp mod 16 = 0` | Lidos |
+| Limine: `CONFIG.md` da `v12.10.0` e [`limine-protocol`](https://github.com/Limine-Bootloader/limine-protocol) (`trunk`) | `module_path`, `module_cmdline`; `LIMINE_MODULE_REQUEST_ID`, `string`, `tftp_ipv4` | Lidos; o `trunk` **não é preso** à 12.10.0 |
+| Cargo `config.md`, fonte do `rustc` (`targets/`, `spec/mod.rs`) | Quatro fontes exclusivas de `rustflags`; `code_model` e `relocation_model` dos alvos | Lidos **e testados** com `rustc 1.100.0` e `cargo build -v` |
+| [Linux PTI](https://docs.kernel.org/arch/x86/pti.html), [entry_64](https://docs.kernel.org/arch/x86/entry_64.html), [x86_64 mm](https://docs.kernel.org/arch/x86/x86_64/mm.html), [arm64 memory](https://docs.kernel.org/arch/arm64/memory.html) | Trampolim, `swapgs`, layout | Lidos |
+| Zircon: [rights](https://fuchsia.dev/fuchsia-src/concepts/kernel/rights), [handle_replace](https://fuchsia.dev/fuchsia-src/reference/syscalls/handle_replace), [channel_write](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_write), [channel_read](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_read), [process_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/process_create), [process_start](https://fuchsia.dev/fuchsia-src/reference/syscalls/process_start), [channel_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_create), [conceitos](https://fuchsia.dev/fuchsia-src/concepts/kernel/concepts) | Direitos, atomicidade, descarte na ponta fechada, `arg1` fechado em erro, limites do canal | Lidas |
+| [API do seL4](https://docs.sel4.systems/projects/sel4/api-doc.html), [Redox, schemes](https://doc.redox-os.org/book/ch05-06-scheme-operation.html) | Contraste | Lidas (direitos do seL4 não; o namespace do Redox está em mudança) |
+| [cpio `newc`](https://docs.kernel.org/driver-api/early-userspace/buffer-format.html) | Gramática, `c_mode`, `c_namesize`, hard link, trailer | Lida |
+| [mmap(2)](https://man7.org/linux/man-pages/man2/mmap.2.html), [signal(7)](https://man7.org/linux/man-pages/man7/signal.7.html), [getauxval(3)](https://man7.org/linux/man-pages/man3/getauxval.3.html), [binfmt_elf.c](https://github.com/torvalds/linux/blob/master/fs/binfmt_elf.c), [Hansen, lkml](https://lkml.iu.edu/1712.0/03977.html) | Guarda de pilha, `MAP_FIXED_NOREPLACE`, sinais, auxv, validação de ELF, custo de TLB | Lidos |
+
+#### Por ler antes de codar
+
+Só o que sobrou; cada item é pré-requisito da fatia que o usa.
+
+| Item | Fatia |
+| --- | --- |
+| **ARM ARM** (as páginas do developer.arm.com não renderizam sem JavaScript; os campos de registrador acima vêm do Linux): o `imm16` do SVC em `ISS[15:0]`; a tabela de `AP[2:1]` por nível de exceção; a regra do PAN com `LDTR`/`STTR`; o efeito do `WXN` sobre EL0; um `ERET` com estado ilegal; a versão e o efeito do `UAO`; o nome `EL0VCTEN` | 4a, 4e |
+| **Intel SDM** em PDF (só o espelho foi lido): o texto sobre *CPUID faulting* (`MSR` `0x140`); se a entrada de exceção limpa `NT` (o `IRETQ` do kernel com `NT = 1` dá `#GP`) | 4a |
+| Layout inicial da pilha do processo no aarch64, em fonte que não seja o `binfmt_elf.c` do Linux | 4b |
+| Limine: se o `trunk` de `limine-protocol` é o da 12.10.0 (conferir a revisão do pedido de módulo e da resposta no binário em uso) | 4b |
+| `-C code-model=small` com um programa de usuário **maior** que o mínimo (o teste não distingue `small` de `kernel`) | 4b |
+| Custo de `array_index_nospec`, IBPB, eIBRS, limpeza de buffers e KPTI: medir; STIBP e SSBD: ler as páginas | 4e |
+
+Levantamento de novembro de 2026.
