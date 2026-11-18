@@ -90,19 +90,22 @@ cada evento à fila da CPU dona da tarefa, sempre com o relógio `now_ns`:
 | --- | --- |
 | `spawn`, e `init` para o boot | `add(id, params, now)` na CPU menos carregada que a afinidade permite (as ociosas não entram) |
 | `park`, `sleep_until` | `sleep(id, now)` na fila da CPU que roda, antes de `schedule` |
-| `unpark`, acordar do timer | `wake(id, now)` na fila dona; se a CPU escolhida é outra, `detach` ali e `add_with_lag` lá ([abaixo](#migração-e-balanceamento)) |
+| `unpark`, acordar do timer | `wake(id, now)` na fila dona; se a CPU escolhida é outra, `detach` ali e `add_with_lag` lá ([abaixo](#migração-e-balanceamento)). Pinada a uma CPU só, fica na dela sem olhar a carga das outras |
 | `yield_now` | `yield_current(now)` |
 | `exit` | `remove(id)` |
 | IRQ do timer | `tick(now)` |
-| Fim de toda IRQ, e `schedule()` | `needs_resched()` e `pick_next(now)` |
+| Fim de toda IRQ, de `unpark` e de `spawn`, e `schedule()` | `needs_resched()` e `pick_next(now)` ([Preempção](#preempção)) |
 
 A política só tem tarefa pronta, corrente ou dormindo na fila dela, então não há varredura de quem
 bloqueia ou saiu. `MAX_TASKS` é a capacidade de cada política, que cabe qualquer tarefa do sistema:
 uma tarefa pode migrar para qualquer fila.
 
-`schedule()` é a única função que troca: contabiliza o tempo da que sai, pede `pick_next`
+`switch_from` é a única função que troca: contabiliza o tempo da que sai, pede `pick_next`
 (`None` vira a ociosa), marca `on_cpu` da que entra, rearma o timer, publica a carga, solta o lock da
-fila, salva e restaura o estado de SIMD (só de tarefa marcada) e chama `switch`. Depois do
+fila, salva e restaura o estado de SIMD (só de tarefa marcada) e chama `switch`. Recebe o lock da fila **já preso**:
+`park`, `sleep_until`, `yield_now` e `exit` o pegam para decidir (bloquear, ceder) e o passam adiante sem soltar, uma
+tomada só da decisão à escolha (com o atalho do `wake_target`, -2 ns por troca no HVF). `schedule()` e `schedule_at(now)` pegam o lock e chamam `switch_from`
+(a ociosa e a preempção do fim da IRQ). Depois do
 `switch`, já na pilha de quem entrou, `finish_switch` baixa o `on_cpu` da que saiu desta CPU (com
 release): só então outra CPU pode escolhê-la.
 O `unpark` com a tarefa ainda não bloqueada deixa um aviso que o próximo `park` consome,
@@ -201,6 +204,24 @@ depois do EOI, ainda mascarada, na pilha da tarefa interrompida: `trap_dispatch`
 do `switch` dentro do próprio handler, retorna pelo mesmo caminho e o quadro da IRQ, que
 ficou na pilha dela, é desempilhado.
 
+### Fora da IRQ: `unpark` e `spawn`
+
+`wake` e `add` levantam o `needs_resched` também quando a chamada vem de uma **tarefa**, e antes só a próxima IRQ o
+consumia (o fim da fatia da corrente, 100 µs depois no HVF). Agora `unpark` e `spawn` conferem o sinal ao fim, com a
+interrupção mascarada, e trocam na hora (`preempt_now`): é o `preempt_enable` do Linux com `CONFIG_PREEMPTION`, que
+chama `__preempt_schedule` quando o contador cai a zero com `TIF_NEED_RESCHED` de pé. O critério de quem preempta é o do
+EEVDF, o mesmo da IRQ: fatia menor que a da corrente (`PREEMPT_SHORT`), ou ser a escolha de `pick_eevdf`; fatia igual
+dentro de uma fatia protegida não preempta, e o ping-pong do `bench` segue sem trocar no `unpark`. Consequência: **`spawn` pode
+rodar o filho antes de retornar** (o pai volta quando o filho bloqueia ou a fatia acaba); quem cria tarefa não pode supor que
+escreve o estado compartilhado do filho depois do `spawn`.
+
+Equivalente do `preemptible()` do Linux (`preempt_count() == 0 && !irqs_disabled()`): **não troca** se o chamador já tinha a
+interrupção mascarada, se está dentro de uma IRQ (o `preempt` do fim dela cuida) ou se segura um `IrqLock`
+(`locks_held() != 0`, a regra de lock abaixo). Nesses casos o pedido fica na política e vale na próxima IRQ ou no próximo
+`schedule`, como antes. O Linux difere só em adiar para o ponto em que o contador zera; aqui a espera é a da IRQ seguinte, e hoje
+nenhum chamador do kernel segura `IrqLock` ao acordar (`notify_input` roda em IRQ): [DEBT-0065](../tech-debt/0065-acordar-com-lock-preso-troca-so-na-proxima-irq.md). Quem acorda numa fila **de outra** CPU já
+preemptava, pelo IPI.
+
 ### x86_64
 
 As IRQs do APIC (vetores `0x20`, `0x21`, `0x24`, `0xFF`) têm IST zero: caem na pilha da
@@ -236,9 +257,9 @@ cascata de faltas na própria entrada.
 **Ninguém cede a CPU com `IrqLock` preso.** `yield_now`, `sleep_until`, `park` e `exit`
 não podem ser chamados com um `IrqLock` em mãos: a tarefa seguinte pode querer o mesmo
 lock com a interrupção mascarada, e a dona nunca mais roda. `IrqLock` conta os presos **por CPU**
-(`PerCpu::locks_held`) e `schedule()` faz `debug_assert_eq!(locks_held(), 0)`; as quatro
+(`PerCpu::locks_held`); `schedule_at` faz `debug_assert_eq!(locks_held(), 0)` antes de pegar o lock da fila e `switch_from`, que só o da fila esteja preso; as quatro
 funções públicas também recusam chamada de dentro de IRQ (`PerCpu::in_irq`). Dentro de
-`schedule` o lock da fila é solto antes de `switch`. O `IrqLock` é um spinlock de verdade
+`switch_from` o lock da fila é solto antes de `switch`. `unpark` e `spawn` só trocam com zero presos (acima). O `IrqLock` é um spinlock de verdade
 (`SpinLock`: `compare_exchange` com acquire, escrita com release, espera lendo): mascara a IRQ da CPU local e
 gira até a outra CPU soltar. `SpinLock` simples não mascara IRQ: só vale onde o handler nunca o pega (o `KEYBOARD`, o único que
 restou, só a IRQ de uma CPU usa). `DEVICES` e `STACKS` são `IrqLock`, porque `map_stack` roda de tarefa em qualquer CPU e
@@ -251,6 +272,8 @@ O lock conta as tentativas que o acharam preso (`SpinLock::contentions`): é a m
 | --- | --- | --- |
 | Disparo | TSC-deadline (`IA32_TSC_DEADLINE`) se `CPUID.1:ECX[24]`; senão o contador do APIC em modo de um tiro (divisor 16) | `CNTV_CVAL_EL0` absoluto, desde o começo |
 | Relógio | TSC calibrado pelo PIT (SDD 10) | `CNTVCT_EL0` |
+| Conversão para ns | `hal::TickScale`: `ticks * mult >> shift`, `mult` arredondado para cima (erro < 1 ns); o `cyc2ns` do Linux | igual |
+| Relógio do escalonador | `rdtsc` (que já não é ordenado) | `mrs cntvct_el0` **sem `isb`** (`sched_clock_ns`) |
 | Sob TCG | one-shot (o `-cpu max` não anuncia TSC-deadline) | `cntv-cval` |
 
 O timer é **por CPU** (o `CNTV` e o Local APIC são de cada núcleo; `armed_ns` é do `PerCpu`) e sempre de um tiro, e **não há tique periódico depois de `task::init`**
@@ -269,6 +292,18 @@ de quem dorme. Quem o arma:
   disparo que sobrou depois de a corrente mudar custa uma IRQ que não faz nada e rearma.
   Assim o ping-pong do `bench`, que só tem uma tarefa pronta por vez, não escreve no
   timer a cada troca. O timer de **outra** CPU o dono dela rearma: quem põe a tarefa lá manda o IPI de reescalonar quando o prazo novo vem antes do armado.
+
+**O relógio do escalonador** (`task::now`, a leitura de `unpark`, `park`, `sleep_until`, `yield_now` e do timer) não é o da
+medida. No aarch64 o `isb` antes do `mrs` custa 8 ns isolado e 11 ns por leitura dentro da troca, de duas por troca
+(uma em `unpark` e outra em `park`): tirá-lo levou o ping-pong de 71 a 48 ns. Sem ele a leitura pode sair antes das instruções
+anteriores (alguns ns, dentro de um tique de 41,7 ns a 24 MHz) e, em tese, dois `mrs` seguidos saírem fora de ordem; a
+política só usa diferenças com `saturating_sub`, a leitura do relógio também (`elapsed_ns`: contador atrás da origem lê zero) e compara `now <= last`, então um passo atrás de um tique não quebra nada.
+É o que o Linux faz no x86 (`native_sched_clock` usa `rdtsc()` sem ordem, "the scheduler clock tolerates small errors") e
+**não** o que faz no arm64: lá `arch_timer_read_cntvct_el0` é `isb; mrs`, salvo com ECV (`CNTVCTSS_EL0`, autossincronizado).
+Aqui o ECV não vale a pena: `ID_AA64MMFR0_EL1.ECV` é 0 no HVF e o caminho não se mediria. `now_ns`, `cycles` e o que mede
+tempo (`bench`, `sleep_until` do `bench`, semente) seguem com o `isb`. A conversão por multiplicação e deslocamento
+(`hal::TickScale`, o `cyc2ns` do Linux; aritmética pura e igual nas duas ISAs, por isso mora no `hal`, que já tem `redact` e `cmdline`) tirou a divisão de 128 bits: 12,6 para 9,8 ns no `now_ns` do aarch64 (HVF) e 43 para 33 ns
+no x86_64 (TCG).
 
 O TSC e o contador do APIC são medidos uma vez, na CPU de boot, e valem para todos os núcleos ([DEBT-0057](../tech-debt/0057-tsc-entre-nucleos-sem-verificacao.md)).
 
@@ -332,10 +367,27 @@ ISAs (`make smoke` sai com erro); `[rustos] task self-test: ok` é linha exigida
 - **Jitter de acordar:** 200 chamadas de `sleep_until` (20 no boot) de 0,5 a 1,5 ms;
   `agora − pedido` depois do retorno, média e máximo, com o resto do sistema parado e com uma
   tarefa ocupando a CPU.
+- **Latência de acordar entre tarefas** (`wake_task_latency`): uma tarefa de fatia 100 µs (o dorminhoco) dorme
+  em `park`; outra de fatia base na mesma CPU (o acordador) a acorda e gira até ela rodar; o tempo é o do `unpark` até o
+  primeiro carimbo do dorminhoco. O aquecimento não conta e vai até 2 acertos seguidos (no máximo 20 rodadas): a tarefa nova gasta os primeiros ciclos com lag negativo e não preempta;
+  200 amostras no `bench` e 20 no boot. Mediana, média e máximo, e quantas vezes o dorminhoco já tinha rodado quando
+  `unpark` voltou (`direct`).
+- **Aquecimento do `bench`:** o comando gira a CPU 300 ms antes da primeira medida (`Effort::warmup_ms`). Sem isso ele chega
+  depois de segundos ociosos e a troca de contexto sai ~1,5 a 3x pior que a do boot no HVF: o hospedeiro mantém a vCPU em
+  frequência baixa por centenas de ms (50 ms de laço deixou 63 ns; 150 ms, 50; 300 ms, 42 a 48, o valor do boot).
 - **Política:** `pick_next` e `tick` do `Composite` com 8 tarefas prontas e um relógio de
   mentira (`policy_ns`), melhor de 4 rodadas: o custo do código da política no alvo, com o
   `i128` do EEVDF.
 - **Tique ocioso:** a linha `idle:` (acima).
+- **Autoteste de acordar** (`wake self-test:`, dentro do `smp_self_test`): a mesma medida com 20 amostras. Passa se em 90%
+  delas o dorminhoco já tinha rodado quando `unpark` voltou (`direct`); sem a troca no fim do `unpark` são 0 de 20. O critério
+  é contar, não um tempo: o x86_64 em TCG `dev` com uma CPU tem dois modos por boot, com a troca de contexto em 3 µs ou em 30 µs
+  (medido na revisão do PR, com `RUSTOS_SMP=1`: `dev`, 9 de 64 boots neste código e 8 de 64 na `main`; `release`, 10 de 12 neste código
+  com ~10 µs e 9 de 12 na `main` com ~13 µs; não é regressão; sem IRQ por troca nem `rdtsc` lento, a causa não foi isolada, e a hipótese
+  é a TLB do TCG batendo no layout sorteado pelo KASLR), e um limite em µs reprovava o modo lento. Imprime média, mediana, máximo e `direct`. Uma amostra em
+  umas 350 chega a esperar o fim da fatia (350 µs no HVF: lag negativo do dorminhoco, a regra do EEVDF); a amostra que passa de 5 ms
+  conta como "não direta" e o teste segue. É linha exigida do
+  boot (`make smoke`).
 - **Autoteste SMP** (`smp self-test:`): 8 tarefas rodam, cedem e dormem por 40 ms nas CPUs todas. Cada volta sobe uma bandeira por tarefa e a baixa ao fim: duas CPUs
   rodando a mesma tarefa fariam a segunda ver a bandeira subida. Passa se nenhuma tarefa se perdeu e a bandeira nunca foi vista subida; imprime voltas e migrações.
   Repetido 16 vezes (8 em cada ISA, `dev`) sem falha.
@@ -355,4 +407,6 @@ ISAs (`make smoke` sai com erro); `[rustos] task self-test: ok` é linha exigida
 | Que o IPI do arm64 é uma SGI configurada por CPU (`ipi_setup`) e o IPI de parar existe junto com o de reescalonar | `arch/arm64/kernel/smp.c` do Linux (`IPI_RESCHEDULE`, `IPI_CPU_STOP`, `ipi_setup`; lido em 2026-11-17) |
 | Escrever `ICC_SGI1R_EL1`: `TargetList` 15:0, `Aff1` 23:16, INTID 27:24, `Aff2` 39:32, `IRM` bit 40, `RS` 47:44, `Aff3` 55:48 | `ICC_SGI1R_*` em `include/linux/irqchip/arm-gic-v3.h` do Linux (lido em 2026-11-17) |
 | `on_cpu` e a espera de que a CPU antiga termine a troca antes de rodar a tarefa em outra | `kernel/sched/core.c` do Linux (`p->on_cpu`, `finish_task_switch`): **o desenho é conhecido do Linux, mas o `core.c` não foi relido para este capítulo** |
+| O relógio do escalonador no x86 é `rdtsc()` sem ordem, convertido por multiplicação e deslocamento; o do arm64 usa `isb; mrs` sem ECV | `native_sched_clock` em `arch/x86/kernel/tsc.c` e `arch_timer_read_cntvct_el0` em `arch/arm64/include/asm/arch_timer.h` do Linux (lidos em 2026-11-17, `master`) |
+| Trocar ao fim de quem acorda, se o contador de preempção é zero e a interrupção está ligada | `preempt_enable` com `CONFIG_PREEMPTION` e `preemptible()` em `include/linux/preempt.h` do Linux (lido em 2026-11-17) |
 | Spinlock de verdade com `IrqLock` mascarando a IRQ local | `SpinLock` em `lib/sync`, com teste de 4 threads no host |

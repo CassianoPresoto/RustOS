@@ -25,7 +25,7 @@ const LINK_BASE: &str = "kernel base: 0xffffffff80000000 ";
 /// Linhas que todo boot precisa ter (guidelines 09): as proteções de hardware, o
 /// W^X conferido nas tabelas de página, a memória que o bootloader devolveu e a
 /// preempção com o estado de SIMD por tarefa.
-const REQUIRED: [(&str, &str); 5] = [
+const REQUIRED: [(&str, &str); 6] = [
     ("[rustos] protections:", "a linha de proteções de hardware"),
     (
         "[rustos] w^x: ok",
@@ -39,6 +39,10 @@ const REQUIRED: [(&str, &str); 5] = [
     (
         "[rustos] smp self-test: ok",
         "o autoteste de migração entre núcleos",
+    ),
+    (
+        "[rustos] wake self-test: ok",
+        "o autoteste de acordar uma tarefa de fatia curta na mesma CPU",
     ),
 ];
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);

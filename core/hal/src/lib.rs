@@ -1,11 +1,13 @@
 //! Portas do hexágono: os contratos que o núcleo usa para falar com o hardware.
-//! Só tipos e traits; quem implementa mora em `arch/`, `boot/` e `drivers/`.
+//! Tipos, traits e lógica pura sem estado de hardware (`clock`, `cmdline`, `redact`);
+//! quem implementa as portas mora em `arch/`, `boot/` e `drivers/`.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
 pub mod addr;
 pub mod boot;
+pub mod clock;
 pub mod cmdline;
 pub mod console;
 pub mod cpu;
@@ -20,6 +22,7 @@ pub mod redact;
 
 pub use addr::{PhysAddr, VirtAddr};
 pub use boot::{BootInfo, BootTimeline, BootloaderId, CpuDescriptor, KernelImage};
+pub use clock::TickScale;
 pub use cmdline::{BootParams, EarlyPanic};
 pub use console::Console;
 pub use cpu::{Cpu, CpuLocal, Ipi, IpiKind, MAX_CPUS};

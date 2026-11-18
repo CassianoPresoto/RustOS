@@ -4,9 +4,9 @@
 use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use rustos_arch_x86_64::clock::{elapsed_ns, ns_to_ticks, ticks_to_ns};
+use rustos_arch_x86_64::clock::ns_to_ticks;
 pub use rustos_arch_x86_64::fpu::{
     AREA_ALIGN as FPU_AREA_ALIGN, restore as fpu_restore, save as fpu_save,
 };
@@ -29,7 +29,7 @@ use rustos_driver_i8042::I8042;
 use rustos_driver_uart16550::{DIVISOR_115200, Uart16550};
 use rustos_hal::{
     BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, MmuControl, PAGE_SIZE, PageMapper,
-    PhysAddr,
+    PhysAddr, TickScale,
 };
 use rustos_mm::PageTables;
 use rustos_sync::SpinLock;
@@ -107,6 +107,9 @@ static READY: AtomicBool = AtomicBool::new(false);
 static GUARD_PAGE: AtomicU64 = AtomicU64::new(0);
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
 static TSC_ORIGIN: AtomicU64 = AtomicU64::new(0);
+/// `TickScale` do TSC, em dois atômicos: `now_ns` não divide.
+static TSC_MULT: AtomicU64 = AtomicU64::new(0);
+static TSC_SHIFT: AtomicU32 = AtomicU32::new(0);
 /// Frequência do contador do timer do APIC, já com o divisor.
 static APIC_HZ: AtomicU64 = AtomicU64::new(0);
 static TSC_DEADLINE: AtomicBool = AtomicBool::new(false);
@@ -345,7 +348,11 @@ fn start_clocks(apic: &ApicAccess) -> Result<(), PlatformError> {
     })
     .ok_or(PlatformError::MissingFeature("pit"))?;
     TSC_HZ.store(measured.tsc_hz, Ordering::Relaxed);
+    let (mult, shift) = TickScale::new(measured.tsc_hz).map_or((0, 0), TickScale::parts);
     TSC_ORIGIN.store(rdtsc(), Ordering::Relaxed);
+    TSC_SHIFT.store(shift, Ordering::Relaxed);
+    // O `mult` publica o relógio: gravado por último, quem o vê já vê origem e `shift`.
+    TSC_MULT.store(mult, Ordering::Release);
     APIC_HZ.store(measured.apic_hz, Ordering::Relaxed);
     let deadline = cpu_features().tsc_deadline;
     TSC_DEADLINE.store(deadline, Ordering::Relaxed);
@@ -382,7 +389,7 @@ pub fn arm_timer(deadline_ns: u64) {
 
 /// Nanossegundos que `ticks` do contador de ciclos valem.
 pub fn cycles_to_ns(ticks: u64) -> u64 {
-    ticks_to_ns(ticks, TSC_HZ.load(Ordering::Relaxed))
+    tsc_scale().convert(ticks)
 }
 
 /// Liga x87, SSE e XSAVE; o relatório diz o que a troca de contexto salva.
@@ -437,8 +444,20 @@ pub fn keyboard_event() -> Option<KeyEvent> {
 
 /// Nanossegundos desde que `init_interrupts` ligou o relógio; `None` antes.
 pub fn now_ns() -> Option<u64> {
-    let hz = TSC_HZ.load(Ordering::Relaxed);
-    (hz != 0).then(|| elapsed_ns(rdtsc(), TSC_ORIGIN.load(Ordering::Relaxed), hz))
+    let scale = tsc_scale();
+    (!scale.is_zero())
+        .then(|| scale.convert(rdtsc().saturating_sub(TSC_ORIGIN.load(Ordering::Relaxed))))
+}
+
+/// Lê o `mult` primeiro (acquire): quem o vê diferente de zero vê o `shift` já gravado.
+fn tsc_scale() -> TickScale {
+    let mult = TSC_MULT.load(Ordering::Acquire);
+    TickScale::from_parts(mult, TSC_SHIFT.load(Ordering::Relaxed))
+}
+
+/// `now_ns` do escalonador: o `rdtsc` já não é ordenado, como no `sched_clock` do Linux.
+pub fn sched_clock_ns() -> Option<u64> {
+    now_ns()
 }
 
 /// Contador de ciclos (TSC): o relógio da semente de reserva.

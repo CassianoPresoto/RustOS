@@ -2,15 +2,20 @@
 //! A frequência vem de `CNTFRQ_EL0` em tempo de execução; nenhuma constante.
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crate::time::{ns_to_ticks, ticks_to_ns};
+use rustos_hal::TickScale;
+
+use crate::time::ns_to_ticks;
 
 /// `CNTV_CTL_EL0`: `ENABLE` ligado, `IMASK` desligado.
 const CTL_ENABLE: u64 = 1;
 
 static FREQUENCY_HZ: AtomicU64 = AtomicU64::new(0);
 static EPOCH_TICKS: AtomicU64 = AtomicU64::new(0);
+/// `TickScale` da frequência, em dois atômicos: `now_ns` não divide.
+static SCALE_MULT: AtomicU64 = AtomicU64::new(0);
+static SCALE_SHIFT: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimerError {
@@ -32,8 +37,12 @@ pub unsafe fn start() -> Result<u64, TimerError> {
         return Err(TimerError::NoFrequency);
     }
     FREQUENCY_HZ.store(frequency, Ordering::Relaxed);
+    let (mult, shift) = TickScale::new(frequency).map_or((0, 0), TickScale::parts);
     let now = counter();
     EPOCH_TICKS.store(now, Ordering::Relaxed);
+    SCALE_SHIFT.store(shift, Ordering::Relaxed);
+    // O `mult` publica o relógio: gravado por último, quem o vê já vê época e `shift`.
+    SCALE_MULT.store(mult, Ordering::Release);
     // Desarmado: o comparador no futuro distante, antes de o timer ligar.
     write_deadline(now.wrapping_add(frequency.saturating_mul(3600)));
     // SAFETY: EL1+; o `isb` garante que o disparo vale antes de a IRQ ser destravada.
@@ -68,15 +77,29 @@ fn write_deadline(deadline: u64) {
     unsafe { asm!("msr cntv_cval_el0, {}", in(reg) deadline, options(nostack, preserves_flags)) };
 }
 
+/// Lê o `mult` primeiro (acquire): quem o vê diferente de zero vê o `shift` já gravado.
+fn scale() -> TickScale {
+    let mult = SCALE_MULT.load(Ordering::Acquire);
+    TickScale::from_parts(mult, SCALE_SHIFT.load(Ordering::Relaxed))
+}
+
 /// Nanossegundos desde `start`; `None` antes dele.
 pub fn now_ns() -> Option<u64> {
-    let elapsed = counter().wrapping_sub(EPOCH_TICKS.load(Ordering::Relaxed));
-    ticks_to_ns(elapsed, FREQUENCY_HZ.load(Ordering::Relaxed))
+    let scale = scale();
+    let epoch = EPOCH_TICKS.load(Ordering::Relaxed);
+    (!scale.is_zero()).then(|| scale.elapsed_ns(counter(), epoch))
+}
+
+/// `now_ns` sem o `isb`, só para o relógio do escalonador (SDD 15, "Tempo"): quem mede usa `now_ns`.
+pub fn sched_clock_ns() -> Option<u64> {
+    let scale = scale();
+    let epoch = EPOCH_TICKS.load(Ordering::Relaxed);
+    (!scale.is_zero()).then(|| scale.elapsed_ns(counter_nosync(), epoch))
 }
 
 /// Nanossegundos que `ticks` do `CNTVCT_EL0` valem; zero antes de `start`.
 pub fn counter_to_ns(ticks: u64) -> u64 {
-    ticks_to_ns(ticks, FREQUENCY_HZ.load(Ordering::Relaxed)).unwrap_or(0)
+    scale().convert(ticks)
 }
 
 /// `CNTVCT_EL0`, em ticks de `CNTFRQ_EL0`.
@@ -85,6 +108,16 @@ pub fn counter() -> u64 {
     // SAFETY: o `isb` impede a leitura de subir antes das instruções anteriores.
     unsafe {
         asm!("isb", "mrs {}, cntvct_el0", out(reg) ticks, options(nomem, nostack, preserves_flags));
+    };
+    ticks
+}
+
+/// `CNTVCT_EL0` sem o `isb`: sem ordem contra as instruções vizinhas.
+fn counter_nosync() -> u64 {
+    let ticks: u64;
+    // SAFETY: `mrs` de `CNTVCT_EL0` não escreve memória nem registrador; o EL1 sempre o lê.
+    unsafe {
+        asm!("mrs {}, cntvct_el0", out(reg) ticks, options(nomem, nostack, preserves_flags));
     };
     ticks
 }
