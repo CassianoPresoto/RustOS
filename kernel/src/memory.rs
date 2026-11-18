@@ -19,11 +19,12 @@ use crate::heap;
 use crate::stack::Stack;
 use crate::sync::IrqLock;
 
-/// Janelas de dispositivos e de pilhas: 1 GiB cada, vazias até `place_windows`.
+/// Janelas de dispositivos, de pilhas e de módulos: 1 GiB cada, vazias até `place_windows`.
 const WINDOW_LEN: u64 = 1 << 30;
 
 static DEVICES: IrqLock<AddressWindow> = IrqLock::new(AddressWindow::new(VirtAddr::new(0), 0));
 static STACKS: IrqLock<AddressWindow> = IrqLock::new(AddressWindow::new(VirtAddr::new(0), 0));
+static MODULES: IrqLock<AddressWindow> = IrqLock::new(AddressWindow::new(VirtAddr::new(0), 0));
 
 #[derive(Debug)]
 pub enum MemoryError {
@@ -84,6 +85,8 @@ impl Memory {
         crate::addr::set_windows(base.as_u64(), WINDOW_LEN);
         *DEVICES.lock() = AddressWindow::new(base, WINDOW_LEN);
         *STACKS.lock() = AddressWindow::new(stacks, WINDOW_LEN);
+        *MODULES.lock() =
+            AddressWindow::new(VirtAddr::new(stacks.as_u64() + WINDOW_LEN), WINDOW_LEN);
         Ok(())
     }
 
@@ -215,6 +218,28 @@ pub fn map_device(
         mapper.map_page(page_virt, page_phys, PageFlags::DEVICE, frames)?;
     }
     Ok(VirtAddr::new(virt.as_u64() + offset))
+}
+
+/// Mapeia `[phys, phys + len)`, de um módulo do bootloader, só leitura e sem execução, na janela
+/// de módulos. `phys` é alinhado a uma página. Devolve o endereço virtual do primeiro byte.
+pub fn map_module(
+    mapper: &mut impl PageMapper,
+    frames: &mut impl FrameSource,
+    phys: PhysAddr,
+    len: u64,
+) -> Result<VirtAddr, MapError> {
+    let pages = len.div_ceil(PAGE_SIZE);
+    let virt = MODULES
+        .lock()
+        .take(pages * PAGE_SIZE)
+        .ok_or(MapError::OutOfAddressSpace)?;
+    for page in 0..pages {
+        let delta = page * PAGE_SIZE;
+        let page_virt = VirtAddr::new(virt.as_u64() + delta);
+        let page_phys = PhysAddr::new(phys.as_u64() + delta);
+        mapper.map_page(page_virt, page_phys, PageFlags::RODATA, frames)?;
+    }
+    Ok(virt)
 }
 
 /// # Safety
