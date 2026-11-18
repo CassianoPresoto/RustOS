@@ -22,6 +22,8 @@ pub enum CacheMode {
 pub struct PageFlags {
     pub writable: bool,
     pub executable: bool,
+    /// Acessível ao anel 3 ou a EL0; só na metade de usuário (SDD 17).
+    pub user: bool,
     pub cache: CacheMode,
 }
 
@@ -30,29 +32,50 @@ impl PageFlags {
     pub const CODE: Self = Self {
         writable: false,
         executable: true,
+        user: false,
         cache: CacheMode::WriteBack,
     };
     /// `.rodata`: só leitura.
     pub const RODATA: Self = Self {
         writable: false,
         executable: false,
+        user: false,
         cache: CacheMode::WriteBack,
     };
     /// `.data`, `.bss`, pilhas, mapa direto: leitura e escrita, sem execução.
     pub const DATA: Self = Self {
         writable: true,
         executable: false,
+        user: false,
         cache: CacheMode::WriteBack,
     };
     pub const DEVICE: Self = Self {
         writable: true,
         executable: false,
+        user: false,
         cache: CacheMode::Device,
     };
     pub const FRAMEBUFFER: Self = Self {
         writable: true,
         executable: false,
+        user: false,
         cache: CacheMode::WriteCombining,
+    };
+
+    /// Código de usuário: leitura e execução.
+    pub const USER_CODE: Self = Self {
+        user: true,
+        ..Self::CODE
+    };
+    /// Dado somente leitura de usuário.
+    pub const USER_RODATA: Self = Self {
+        user: true,
+        ..Self::RODATA
+    };
+    /// Dado, pilha e heap de usuário: leitura e escrita, sem execução.
+    pub const USER_DATA: Self = Self {
+        user: true,
+        ..Self::DATA
     };
 
     /// Gravável e executável ao mesmo tempo: o que o guidelines 09 proíbe.
@@ -76,6 +99,8 @@ pub enum MapError {
     Unsupported(&'static str),
     /// Gravável e executável ao mesmo tempo: o mapeador recusa (guidelines 09).
     WriteExecute(VirtAddr),
+    /// Folha de usuário fora de `[USER_MIN, USER_TOP)`, ou do kernel na metade de usuário.
+    UserRange(VirtAddr),
 }
 
 /// Fonte de frames físicos para as tabelas de página intermediárias.
@@ -117,6 +142,11 @@ pub trait TableMemory {
 pub trait PageFormat {
     /// Entrada de nível intermediário: permissão ampla, quem restringe é a folha.
     fn table_entry(next: PhysAddr) -> u64;
+    /// Como `table_entry`, para a hierarquia de uma folha de usuário (no x86_64 o `U/S` vale
+    /// em todos os níveis).
+    fn user_table_entry(next: PhysAddr) -> u64 {
+        Self::table_entry(next)
+    }
     /// Folha de `PAGE_SIZE` (último nível).
     fn page_entry(phys: PhysAddr, flags: PageFlags) -> u64;
     /// Folha de `LARGE_PAGE_SIZE` (um nível acima do último).
@@ -181,9 +211,29 @@ mod tests {
         let both = PageFlags {
             writable: true,
             executable: true,
+            user: false,
             cache: CacheMode::WriteBack,
         };
         assert!(both.violates_wx());
+    }
+
+    const _: () = {
+        assert!(PageFlags::USER_CODE.user && PageFlags::USER_CODE.executable);
+        assert!(!PageFlags::USER_CODE.writable);
+        assert!(PageFlags::USER_DATA.writable && !PageFlags::USER_DATA.executable);
+        assert!(!PageFlags::USER_RODATA.writable && !PageFlags::USER_RODATA.executable);
+        assert!(!PageFlags::DATA.user && !PageFlags::DEVICE.user);
+    };
+
+    #[test]
+    fn user_flags_never_write_and_execute() {
+        for flags in [
+            PageFlags::USER_CODE,
+            PageFlags::USER_RODATA,
+            PageFlags::USER_DATA,
+        ] {
+            assert!(!flags.violates_wx());
+        }
     }
 
     #[test]

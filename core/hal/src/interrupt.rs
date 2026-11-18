@@ -2,6 +2,7 @@
 //! quando a CPU é desviada. O kernel instala os `Handlers`; o `arch/` os chama.
 
 use crate::VirtAddr;
+use crate::abi::{SyscallArgs, SyscallReturn};
 
 /// Número da interrupção no controlador: vetor da IDT (x86_64) ou INTID do GIC (aarch64).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -42,17 +43,26 @@ pub struct Fault {
     pub kind: FaultKind,
     pub pc: VirtAddr,
     pub code: u64,
+    /// A exceção veio do anel 3 ou de EL0: o processo morre e o kernel segue.
+    pub from_user: bool,
+    /// Valor do `sp` do usuário quando `from_user`; zero se veio do kernel.
+    pub user_sp: u64,
 }
 
 /// O que o `arch/` chama. `fault` volta só para exceção recuperável; `irq` roda
 /// com interrupções mascaradas, e o `arch/` sinaliza o fim (EOI) depois dele.
 /// `preempt` roda depois do EOI, ainda mascarado, na pilha da tarefa interrompida:
 /// é o ponto onde o núcleo pode trocar de tarefa antes do retorno da interrupção.
+/// `syscall` atende a entrada de usuário (mascarada, na pilha da tarefa). `leave_user` roda
+/// depois de todo quadro de kernel morto, logo antes da volta ao usuário, com o endereço
+/// do quadro salvo: o núcleo limpa a pilha abaixo dele.
 #[derive(Clone, Copy, Debug)]
 pub struct Handlers {
     pub fault: fn(&Fault),
     pub irq: fn(Irq),
     pub preempt: fn(),
+    pub syscall: fn(&SyscallArgs) -> SyscallReturn,
+    pub leave_user: fn(usize),
 }
 
 #[cfg(test)]
@@ -71,5 +81,17 @@ mod tests {
             present: false,
         };
         assert!(!page.is_recoverable());
+    }
+
+    #[test]
+    fn a_fault_remembers_where_it_came_from() {
+        let fault = Fault {
+            kind: FaultKind::InvalidOpcode,
+            pc: VirtAddr::new(0x40_0000),
+            code: 6 << 32,
+            from_user: true,
+            user_sp: 0x7000_0000,
+        };
+        assert!(fault.from_user && !fault.kind.is_recoverable());
     }
 }
