@@ -269,14 +269,23 @@ const fn vector_of(kind: IpiKind) -> u8 {
     }
 }
 
+/// Escritas em MSR do x2APIC não ordenam as anteriores à memória: `weak_wrmsr_fence` do Linux
+/// (`x2apic_phys.c`) põe uma barreira antes do ICR, para quem chama sem `lock` antes.
+fn ipi_fence() {
+    // SAFETY: `mfence` não tem pré-condição.
+    unsafe { asm!("mfence", options(nostack, preserves_flags)) };
+}
+
 impl Ipi for X86Ipi {
     fn send(&self, hw_id: u64, kind: IpiKind) {
+        ipi_fence();
         if let Some(local) = published() {
             local.send_ipi(u32::try_from(hw_id).unwrap_or(u32::MAX), vector_of(kind));
         }
     }
 
     fn send_all_but_self(&self, kind: IpiKind) {
+        ipi_fence();
         if let Some(local) = published() {
             local.send_ipi_all_but_self(vector_of(kind));
         }

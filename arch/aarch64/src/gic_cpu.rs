@@ -94,11 +94,14 @@ const fn sgi_of(kind: IpiKind) -> u32 {
     }
 }
 
+/// O `dsb ishst` torna as escritas em memória normal visíveis às outras CPUs antes do IPI
+/// (`gic_ipi_send_mask` do Linux): sem ele, quem manda `kick_pending = true` pode ver o destino
+/// limpá-lo antes da escrita chegar, e o IPI seguinte ficaria suprimido.
 fn write_sgi1r(value: u64) {
     // SAFETY: `ICC_SGI1R_EL1` só gera a SGI; `Aarch64Ipi::new` exige a interface ligada. O
     // `isb` a faz valer antes do que vem a seguir.
     unsafe {
-        asm!("msr icc_sgi1r_el1, {}", "isb", in(reg) value, options(nostack, preserves_flags));
+        asm!("dsb ishst", "msr icc_sgi1r_el1, {}", "isb", in(reg) value, options(nostack, preserves_flags));
     }
 }
 
