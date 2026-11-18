@@ -1087,6 +1087,24 @@ de usuário sem ASLR ([decisão 5](18_fase_4_decisoes_pedidas.md#decisão-5--pie
 mesmo processo), `vmar_protect`, sub-VMARs, TLS, `fork` e COW inteiro, multithread nativo
 se a variante enxuta vencer, `rdtsc` por processo, AMX e VL do SVE por processo.
 
+## Lacunas a fechar no PR da 4c
+
+A revisão do desenho as deixou para o PR que codar os canais. Nenhuma muda uma decisão
+do dono. Cada uma vira texto no SDD e teste no mesmo PR.
+
+| # | Lacuna | O que o PR da 4c escreve e testa |
+| --- | --- | --- |
+| L1 | Entre a reserva do slot e o *commit* do `channel_write`, a ponta oposta pode morrer em outra CPU (SMP) | O *commit* reconfere a ponta viva sob o lock do canal; se morreu, os handles seguem a regra de descarte |
+| L2 | A repetição do `channel_read` (sequência mudou) | A repetição libera as reservas do passo 2, e um valor de handle reservado e solto não reaparece |
+| L3 | Regra de lock dos canais não está escrita | Um lock por par de pontas (A→B e B→A pegam o mesmo); a destruição tira as mensagens sob o lock e fecha os handles **depois** de soltá-lo; o passo 1 do `channel_read` valida `ch` sob a tabela antes do canal; ordem global tabela → canal |
+| L4 | Chamadas que devolvem handle por ponteiro de saída (`channel_create`, `process_create`, com o handle de 64 bits) | O mesmo padrão reserva → copia → *commit*: falha no `copy_to_user` desfaz a criação, sem objeto órfão |
+| L5 | `fault_kind` contra a tabela do `ProcessEvent` | Já concordam (`breakpoint` incluído); manter um teste que compare as duas |
+| L6 | O `check-layers` não expressa "o `user/` depende só de `elf` e `cpio` entre os crates de `core/`", nem a isenção de `unsafe` só do `user/rt` | Lista por nome no `xtask`, com teste vermelho antes do verde (já pedido para a 4a, ver [guidelines 03](../guidelines/03_camadas_e_dependencias.md)) |
+
+Com o handle de 64 bits ([decisão 2](18_fase_4_decisoes_pedidas.md#decisão-2--abi-nativa-mínima)),
+o texto deste capítulo ainda está em 32 bits. O PR da 4c reescreve os pontos que o
+SDD 18 lista.
+
 ## Decisões e fontes
 
 As decisões do dono, as do agente e as fontes lidas estão no
