@@ -6,7 +6,11 @@ pub const VALID: u64 = 1 << 0;
 /// Nos níveis 0-2 distingue tabela (1) de bloco (0); no nível 3 é obrigatório.
 pub const TABLE_OR_PAGE: u64 = 1 << 1;
 const ATTR_INDEX_SHIFT: u32 = 2;
+/// `AP[1]`: a página é acessível a EL0 (`PTE_USER` do Linux).
+const USER_ACCESS: u64 = 1 << 6;
 const READ_ONLY: u64 = 1 << 7;
+/// `nG`: a tradução é por ASID, não global; toda página de usuário a liga.
+const NOT_GLOBAL: u64 = 1 << 11;
 const INNER_SHAREABLE: u64 = 0b11 << 8;
 const OUTER_SHAREABLE: u64 = 0b10 << 8;
 const SHAREABILITY_MASK: u64 = 0b11 << 8;
@@ -31,8 +35,12 @@ pub const fn table_descriptor(next: PhysAddr) -> u64 {
     (next.as_u64() & OUTPUT_ADDRESS) | VALID | TABLE_OR_PAGE
 }
 
-/// Atributos comuns a página e bloco. Página do kernel nunca executa em EL0.
+/// Atributos comuns a página e bloco. Página do kernel nunca executa em EL0. Página de usuário
+/// nunca executa em EL1 (`PXN`) e só executa em EL0 se `executable`.
 const fn leaf_bits(flags: PageFlags) -> u64 {
+    if flags.user {
+        return user_leaf_bits(flags);
+    }
     let mut bits = VALID | ACCESS_FLAG | USER_EXECUTE_NEVER;
     bits |= match flags.cache {
         CacheMode::WriteBack => (MAIR_NORMAL_INDEX << ATTR_INDEX_SHIFT) | INNER_SHAREABLE,
@@ -44,6 +52,23 @@ const fn leaf_bits(flags: PageFlags) -> u64 {
     }
     if !flags.executable {
         bits |= PRIVILEGED_EXECUTE_NEVER;
+    }
+    bits
+}
+
+const fn user_leaf_bits(flags: PageFlags) -> u64 {
+    let mut bits = VALID
+        | ACCESS_FLAG
+        | USER_ACCESS
+        | NOT_GLOBAL
+        | PRIVILEGED_EXECUTE_NEVER
+        | (MAIR_NORMAL_INDEX << ATTR_INDEX_SHIFT)
+        | INNER_SHAREABLE;
+    if !flags.writable {
+        bits |= READ_ONLY;
+    }
+    if !flags.executable {
+        bits |= USER_EXECUTE_NEVER;
     }
     bits
 }
@@ -67,9 +92,15 @@ pub const fn decode_leaf(entry: u64, block: bool) -> (PhysAddr, PageFlags) {
         MAIR_DEVICE_INDEX => CacheMode::Device,
         _ => CacheMode::Other,
     };
+    let user = entry & USER_ACCESS != 0;
     let flags = PageFlags {
         writable: entry & READ_ONLY == 0,
-        executable: entry & PRIVILEGED_EXECUTE_NEVER == 0,
+        executable: if user {
+            entry & USER_EXECUTE_NEVER == 0
+        } else {
+            entry & PRIVILEGED_EXECUTE_NEVER == 0
+        },
+        user,
         cache,
     };
     let mask = if block { BLOCK_ADDRESS } else { OUTPUT_ADDRESS };
@@ -264,5 +295,51 @@ mod tests {
         assert!(!Aarch64Format::is_table(VALID, 1));
         assert!(Aarch64Format::is_valid(page));
         assert_eq!(Aarch64Format::table_address(table), PhysAddr::new(0x2000));
+    }
+
+    #[test]
+    fn user_code_is_executable_only_by_el0_and_read_only() {
+        let entry = page_descriptor(PhysAddr::new(0x4000_0000), PageFlags::USER_CODE);
+        assert_ne!(entry & USER_ACCESS, 0);
+        assert_ne!(entry & NOT_GLOBAL, 0);
+        assert_ne!(entry & READ_ONLY, 0);
+        assert_ne!(
+            entry & PRIVILEGED_EXECUTE_NEVER,
+            0,
+            "EL1 nunca executa página de usuário"
+        );
+        assert_eq!(entry & USER_EXECUTE_NEVER, 0);
+        assert!(decode_leaf(entry, false).1.executable);
+    }
+
+    #[test]
+    fn user_data_never_executes_and_keeps_write() {
+        let entry = page_descriptor(PhysAddr::new(0x4000_0000), PageFlags::USER_DATA);
+        assert_eq!(entry & READ_ONLY, 0);
+        assert_ne!(entry & USER_EXECUTE_NEVER, 0);
+        assert_ne!(entry & PRIVILEGED_EXECUTE_NEVER, 0);
+        let (_, flags) = decode_leaf(entry, false);
+        assert_eq!(flags, PageFlags::USER_DATA);
+        let rodata = decode_leaf(
+            page_descriptor(PhysAddr::new(0x1000), PageFlags::USER_RODATA),
+            false,
+        )
+        .1;
+        assert_eq!(rodata, PageFlags::USER_RODATA);
+    }
+
+    #[test]
+    fn kernel_pages_are_never_el0_accessible_or_non_global() {
+        for flags in [
+            PageFlags::CODE,
+            PageFlags::RODATA,
+            PageFlags::DATA,
+            PageFlags::DEVICE,
+        ] {
+            let entry = page_descriptor(PhysAddr::new(0x1000), flags);
+            assert_eq!(entry & (USER_ACCESS | NOT_GLOBAL), 0);
+            assert_ne!(entry & USER_EXECUTE_NEVER, 0);
+            assert!(!decode_leaf(entry, false).1.user);
+        }
     }
 }

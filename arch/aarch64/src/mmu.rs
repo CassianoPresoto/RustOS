@@ -10,6 +10,8 @@ use crate::descriptor::{MAIR_DEVICE_INDEX, MAIR_DEVICE_NGNRNE, OUTPUT_ADDRESS};
 
 /// `TCR_EL1.EPD0`: desliga a caminhada da metade baixa (`TTBR0_EL1`).
 const TCR_EPD0: u64 = 1 << 7;
+/// `SCTLR_EL1.WXN` (bit 19, `sysreg` do Linux): página gravável vira não executável, em EL1 e EL0.
+const SCTLR_WXN: u64 = 1 << 19;
 
 /// Raiz da hierarquia que o `TTBR1_EL1` aponta agora.
 ///
@@ -77,6 +79,17 @@ impl MmuControl for Aarch64Mmu {
         unsafe { asm!("msr tcr_el1, {}", "isb", in(reg) tcr, options(nostack, preserves_flags)) };
         // SAFETY: descarta as traduções do espaço antigo; sem pré-condição.
         unsafe { asm!("tlbi vmalle1", "dsb ish", "isb", options(nostack)) };
+        let mut sctlr: u64;
+        // SAFETY: leitura de registrador de sistema em EL1.
+        unsafe {
+            asm!("mrs {}, sctlr_el1", out(reg) sctlr, options(nomem, nostack, preserves_flags));
+        }
+        sctlr |= SCTLR_WXN;
+        // SAFETY: as tabelas do kernel são conferidas sem W+X; ligar `WXN` não muda nenhuma
+        // permissão delas, só trava o que um erro futuro criasse.
+        unsafe {
+            asm!("msr sctlr_el1, {}", "isb", in(reg) sctlr, options(nostack, preserves_flags))
+        };
     }
 }
 
@@ -117,4 +130,14 @@ impl TableMemory for DirectMapTables {
         // SAFETY: o frame novo é acessível pelo mapa direto e ainda não é usado pela MMU.
         unsafe { ptr::write_bytes(self.entry(table, 0), 0, words) }
     }
+}
+
+/// `SCTLR_EL1.WXN` está ligado nesta CPU.
+pub fn wxn_active() -> bool {
+    let sctlr: u64;
+    // SAFETY: leitura de registrador de sistema em EL1, sem efeito colateral.
+    unsafe {
+        asm!("mrs {}, sctlr_el1", out(reg) sctlr, options(nomem, nostack, preserves_flags));
+    }
+    sctlr & SCTLR_WXN != 0
 }

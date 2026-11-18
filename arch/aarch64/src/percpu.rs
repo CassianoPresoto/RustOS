@@ -1,8 +1,11 @@
 //! `hal::CpuLocal` sobre o `TPIDR_EL1`: o endereço do bloco por CPU mora nele.
 
 use core::arch::asm;
+use core::ptr;
 
 use rustos_hal::CpuLocal;
+
+use crate::prefix::CpuPrefix;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Aarch64CpuLocal {
@@ -32,4 +35,15 @@ impl CpuLocal for Aarch64CpuLocal {
         }
         block
     }
+}
+
+/// O começo do bloco desta CPU: o `PerCpu` do kernel o embute como primeiro campo.
+pub(crate) fn prefix() -> &'static CpuPrefix {
+    let block: usize;
+    // SAFETY: EL1; `TPIDR_EL1` é o endereço do bloco, posto por `install`.
+    unsafe {
+        asm!("mrs {}, tpidr_el1", out(reg) block, options(nostack, preserves_flags, readonly));
+    }
+    // SAFETY: o bloco existe para sempre e começa por um `CpuPrefix` (contrato do kernel).
+    unsafe { &*ptr::with_exposed_provenance::<CpuPrefix>(block) }
 }

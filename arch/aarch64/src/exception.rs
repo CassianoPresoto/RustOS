@@ -1,36 +1,56 @@
 //! Tabela de vetores do EL1 e o despacho de exceções e IRQs para `hal::Handlers`.
-//! O kernel roda em EL1h: a IRQ salva o quadro na pilha da própria tarefa, onde ele
-//! sobrevive à troca de contexto. Falha síncrona e SError passam para a pilha de falhas.
+//! O kernel roda em EL1h: a IRQ e a exceção vinda de EL0 salvam o quadro na pilha da própria
+//! tarefa, onde ele sobrevive à troca de contexto. Falha síncrona e SError de EL1h passam para a
+//! pilha de falhas desta CPU (o bloco por CPU, achado pelo `TPIDR_EL1`).
 
 use core::arch::{asm, global_asm};
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use rustos_hal::{Fault, FaultKind, Handlers, Irq, VirtAddr};
+use rustos_hal::abi::SyscallArgs;
+use rustos_hal::{Fault, FaultKind, Handlers, Irq, STACK_PAINT, VirtAddr};
 
-use crate::esr;
-use crate::gic_cpu;
+use crate::percpu::prefix;
+use crate::prefix::OFFSET_FAULT_STACK_TOP;
+use crate::{esr, gic_cpu, usercopy};
 
-/// Registradores salvos na entrada, na ordem que o `global_asm!` abaixo grava.
+/// Registradores salvos na entrada, na ordem que o `global_asm!` abaixo grava. Os dois últimos
+/// só valem para exceção vinda de EL0: o `SP_EL0` e o `TPIDR_EL0` do usuário.
 #[repr(C)]
 struct Frame {
     x: [u64; 31],
     elr: u64,
     spsr: u64,
+    sp_el0: u64,
+    tpidr_el0: u64,
     _align: u64,
 }
 
 const FRAME_SIZE: usize = size_of::<Frame>();
-const _: () = assert!(FRAME_SIZE == 272 && FRAME_SIZE.is_multiple_of(16));
+const _: () = assert!(FRAME_SIZE == 288 && FRAME_SIZE.is_multiple_of(16));
+const SP_EL0_AT: usize = core::mem::offset_of!(Frame, sp_el0);
+const SPSR_AT: usize = core::mem::offset_of!(Frame, spsr);
+const ELR_AT: usize = core::mem::offset_of!(Frame, elr);
+const _: () = assert!(ELR_AT == 248 && SPSR_AT == 256 && SP_EL0_AT == 264);
 /// `BRK` tem 4 bytes e o `ELR_EL1` aponta para ele: retornar exige somar isto.
 const BRK_LEN: u64 = 4;
+/// Bytes abaixo do quadro que a saída para EL0 repinta, sem usar pilha.
+const SCRUB_WINDOW_BYTES: usize = 512;
+/// As quatro metades de 16 bits do padrão de pintura, para o `movz`/`movk`.
+const PAINT_0: u64 = STACK_PAINT & 0xFFFF;
+const PAINT_1: u64 = STACK_PAINT >> 16 & 0xFFFF;
+const PAINT_2: u64 = STACK_PAINT >> 32 & 0xFFFF;
+const PAINT_3: u64 = STACK_PAINT >> 48;
 
 static HANDLERS: AtomicPtr<Handlers> = AtomicPtr::new(ptr::null_mut());
 
 // Cada entrada guarda x0, x1 e o índice (0–15) e salta para o corpo comum. As
 // quatro entradas de um grupo: síncrona, IRQ, FIQ, SError; os grupos: EL1 com
 // SP0, EL1 com SPx, EL0 AArch64, EL0 AArch32. Cada entrada ocupa 0x80 bytes.
-// `vector_fault` (síncrona e SError de EL1h) empilha em `SP_EL0`, a pilha de falhas.
+// `vector_fault` (síncrona e SError de EL1h) empilha na pilha de falhas desta CPU, que o bloco por
+// CPU guarda; sem ela (cedo no boot) usa o `SP_EL0`, a pilha precoce. O `x0` espera no
+// `TPIDRRO_EL0`, que a saída para EL0 zera. A volta para EL0 limpa a pilha do kernel, repinta
+// 512 bytes abaixo do quadro e restaura o `SP_EL0` e o `TPIDR_EL0` do usuário.
 global_asm!(
     r#"
     .macro vector_entry index
@@ -43,7 +63,18 @@ global_asm!(
 
     .macro vector_fault index
     .balign 0x80
+    msr tpidrro_el0, x0
+    mrs x0, tpidr_el1
+    cbz x0, 8f
+    ldr x0, [x0, #{fault_top}]
+    cbz x0, 8f
     msr spsel, #0
+    mov sp, x0
+    b 9f
+8:
+    msr spsel, #0
+9:
+    mrs x0, tpidrro_el0
     sub sp, sp, #{frame}
     stp x0, x1, [sp]
     mov x1, #\index
@@ -90,10 +121,36 @@ rustos_exception_common:
     str x30, [sp, #240]
     mrs x2, elr_el1
     mrs x3, spsr_el1
-    stp x2, x3, [sp, #248]
+    stp x2, x3, [sp, #{elr_at}]
+    tst x3, #0xf
+    b.ne 1f
+    mrs x4, sp_el0
+    mrs x5, tpidr_el0
+    stp x4, x5, [sp, #{sp_el0_at}]
+1:
     mov x0, sp
     bl {dispatch}
-    ldp x2, x3, [sp, #248]
+    ldr x3, [sp, #{spsr_at}]
+    tst x3, #0xf
+    b.ne 2f
+    mov x0, sp
+    bl {leave_user}
+    sub x0, sp, #{window}
+    movz x1, #{paint_0}
+    movk x1, #{paint_1}, lsl #16
+    movk x1, #{paint_2}, lsl #32
+    movk x1, #{paint_3}, lsl #48
+    mov x2, #{window} / 16
+3:
+    stp x1, x1, [x0], #16
+    subs x2, x2, #1
+    b.ne 3b
+    ldp x4, x5, [sp, #{sp_el0_at}]
+    msr sp_el0, x4
+    msr tpidr_el0, x5
+    msr tpidrro_el0, xzr
+2:
+    ldp x2, x3, [sp, #{elr_at}]
     msr elr_el1, x2
     msr spsr_el1, x3
     ldp x2, x3, [sp, #16]
@@ -117,7 +174,17 @@ rustos_exception_common:
     .popsection
     "#,
     frame = const FRAME_SIZE,
+    fault_top = const OFFSET_FAULT_STACK_TOP,
+    elr_at = const ELR_AT,
+    spsr_at = const SPSR_AT,
+    sp_el0_at = const SP_EL0_AT,
+    window = const SCRUB_WINDOW_BYTES,
+    paint_0 = const PAINT_0,
+    paint_1 = const PAINT_1,
+    paint_2 = const PAINT_2,
+    paint_3 = const PAINT_3,
     dispatch = sym dispatch,
+    leave_user = sym leave_user,
 );
 
 /// Vetores antes de haver memória: `handlers.fault` não volta. `install` os troca.
@@ -125,7 +192,8 @@ rustos_exception_common:
 /// # Safety
 /// Em EL1 com IRQ mascarada, na entrada, com 8 KiB livres abaixo da pilha viva.
 pub unsafe fn install_early(handlers: &'static Handlers) {
-    // A pilha que a exceção usa (`SP_EL1` em EL1t, `SP_EL0` em EL1h) vai para esses 8 KiB.
+    // A pilha que a exceção usa (`SP_EL1` em EL1t, `SP_EL0` em EL1h) vai para esses 8 KiB, e o
+    // `TPIDR_EL1` zerado diz ao vetor que ainda não há bloco por CPU.
     HANDLERS.store(ptr::from_ref(handlers).cast_mut(), Ordering::Release);
     // SAFETY: `SP_EL1` só se escreve com `SPSel` em 1; sem acesso à pilha entre as trocas.
     // `isb` publica o `VBAR`.
@@ -147,6 +215,7 @@ pub unsafe fn install_early(handlers: &'static Handlers) {
             "adrp {top}, rustos_vectors",
             "add {top}, {top}, :lo12:rustos_vectors",
             "msr vbar_el1, {top}",
+            "msr tpidr_el1, xzr",
             "isb",
             sel = out(reg) _,
             top = out(reg) _,
@@ -163,8 +232,8 @@ pub enum InstallError {
 
 /// Instala os vetores e a pilha de falhas e registra os handlers.
 /// # Safety
-/// Em EL1h com interrupções mascaradas. `stack_top` é o fim, alinhado a 16
-/// bytes, de uma pilha mapeada que só as falhas usam (fica em `SP_EL0`).
+/// Em EL1h com interrupções mascaradas, depois de `percpu::install` nesta CPU. `stack_top` é o
+/// fim, alinhado a 16 bytes, de uma pilha mapeada que só as falhas usam (fica no bloco por CPU).
 pub unsafe fn install(
     handlers: &'static Handlers,
     stack_top: VirtAddr,
@@ -182,8 +251,9 @@ pub unsafe fn install(
 
 /// Instala os vetores e a pilha de falhas desta CPU; os handlers já são os de `install`.
 /// # Safety
-/// Em EL1h com interrupções mascaradas, depois de `install` na CPU de boot. `stack_top` é
-/// o fim, alinhado a 16 bytes, de uma pilha mapeada que só as falhas desta CPU usam.
+/// Em EL1h com interrupções mascaradas, depois de `install` na CPU de boot e de `percpu::install`
+/// nesta. `stack_top` é o fim, alinhado a 16 bytes, de uma pilha mapeada que só as falhas desta
+/// CPU usam.
 pub unsafe fn install_secondary(stack_top: VirtAddr) -> Result<(), InstallError> {
     let selected: u64;
     // SAFETY: leitura de registrador de estado em EL1, sem efeito colateral.
@@ -191,17 +261,9 @@ pub unsafe fn install_secondary(stack_top: VirtAddr) -> Result<(), InstallError>
     if selected & 1 == 0 {
         return Err(InstallError::NotOnEl1h);
     }
-    // SAFETY: `SP_EL0` só se escreve com `SPSel` em 0; sem acesso à pilha entre as
-    // trocas, e com `SPSel` voltando a 1 o `sp` do kernel é o de antes.
-    unsafe {
-        asm!(
-            "msr spsel, #0",
-            "mov sp, {top}",
-            "msr spsel, #1",
-            top = in(reg) stack_top.as_u64(),
-            options(nomem, nostack, preserves_flags),
-        );
-    }
+    prefix()
+        .fault_stack_top
+        .store(stack_top.as_u64(), Ordering::Release);
     // SAFETY: `rustos_vectors` é a tabela acima, alinhada a 2 KiB; `isb` publica o `VBAR`.
     unsafe {
         asm!(
@@ -254,10 +316,7 @@ fn park() -> ! {
 
 /// Chamado pelo `global_asm!` com o quadro salvo e o índice da entrada (0–15).
 extern "C" fn dispatch(frame: &mut Frame, index: u64) {
-    // SAFETY: `HANDLERS` só recebe um `&'static Handlers`, em `install`.
-    let Some(handlers) = (unsafe { HANDLERS.load(Ordering::Acquire).as_ref() }) else {
-        park()
-    };
+    let handlers = handlers();
     match index % 4 {
         1 => {
             let intid = gic_cpu::acknowledge();
@@ -265,30 +324,68 @@ extern "C" fn dispatch(frame: &mut Frame, index: u64) {
             gic_cpu::end_of_interrupt(intid);
             (handlers.preempt)();
         }
-        0 | 3 => {
-            let syndrome = read_esr();
-            let kind = esr::decode(syndrome, read_far());
-            let fault = Fault {
-                kind,
-                pc: VirtAddr::new(frame.elr),
-                code: syndrome,
-            };
-            (handlers.fault)(&fault);
-            if !kind.is_recoverable() {
-                park();
-            }
-            if kind == FaultKind::Breakpoint {
-                frame.elr += BRK_LEN;
-            }
-        }
+        0 | 3 => synchronous(frame, index, handlers),
         _ => {
             let fault = Fault {
                 kind: FaultKind::Other,
                 pc: VirtAddr::new(frame.elr),
                 code: index,
+                from_user: false,
+                user_sp: 0,
             };
             (handlers.fault)(&fault);
             park();
         }
     }
+}
+
+fn handlers() -> &'static Handlers {
+    // SAFETY: `HANDLERS` só recebe um `&'static Handlers`, em `install`.
+    match unsafe { HANDLERS.load(Ordering::Acquire).as_ref() } {
+        Some(handlers) => handlers,
+        None => park(),
+    }
+}
+
+/// Grupo 8 do vetor: síncrona de EL0 em AArch64. A SError (índice 11) é fatal mesmo de EL0.
+const EL0_SYNC: u64 = 8;
+
+fn synchronous(frame: &mut Frame, index: u64, handlers: &Handlers) {
+    let syndrome = read_esr();
+    if index == EL0_SYNC && esr::is_svc64(syndrome) {
+        let regs = &frame.x;
+        let args = SyscallArgs {
+            number: regs[8],
+            args: [regs[0], regs[1], regs[2], regs[3], regs[4], regs[5]],
+        };
+        let ret = (handlers.syscall)(&args);
+        frame.x[0] = ret.status.cast_unsigned();
+        frame.x[1] = ret.value;
+        return;
+    }
+    let kind = esr::decode(syndrome, read_far());
+    if index == 4 && usercopy::is_usercopy_fault(frame.elr) {
+        frame.elr = usercopy::recovery_address();
+        return;
+    }
+    let from_user = index == EL0_SYNC;
+    let fault = Fault {
+        kind,
+        pc: VirtAddr::new(frame.elr),
+        code: syndrome,
+        from_user,
+        user_sp: if from_user { frame.sp_el0 } else { 0 },
+    };
+    (handlers.fault)(&fault);
+    if !kind.is_recoverable() {
+        park();
+    }
+    if kind == FaultKind::Breakpoint {
+        frame.elr += BRK_LEN;
+    }
+}
+
+/// Última coisa antes do `eret` para EL0, com o quadro de kernel já morto abaixo de `frame`.
+extern "C" fn leave_user(frame: usize) {
+    (handlers().leave_user)(frame);
 }
