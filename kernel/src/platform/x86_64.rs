@@ -709,6 +709,12 @@ pub fn ac_set() -> bool {
     rustos_arch_x86_64::ac_flag_set()
 }
 
+/// Faltas de cópia recuperadas e quantas rodaram o tratador com `AC` ligado.
+#[cfg(feature = "selftest")]
+pub fn copy_fixup_stats() -> Option<(usize, usize)> {
+    Some(rustos_arch_x86_64::usercopy::fixup_stats())
+}
+
 /// Esta ISA tem saída rápida de syscall (`SYSRET`) que se liga e desliga.
 #[cfg(feature = "selftest")]
 pub const HAS_FAST_RETURN: bool = true;

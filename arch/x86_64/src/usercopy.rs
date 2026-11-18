@@ -4,10 +4,30 @@
 
 use core::arch::global_asm;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// A CPU tem SMAP: sem ele `stac` e `clac` são `#UD`.
 pub(crate) static SMAP_ON: AtomicBool = AtomicBool::new(false);
+
+/// Faltas de cópia recuperadas, e quantas chegaram ao tratador com `EFLAGS.AC` ligado (a entrada
+/// faz `clac` em qualquer origem: tem de ser zero).
+static FIXUPS: AtomicUsize = AtomicUsize::new(0);
+static FIXUPS_WITH_AC: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn note_fixup(ac_set: bool) {
+    FIXUPS.fetch_add(1, Ordering::Relaxed);
+    if ac_set {
+        FIXUPS_WITH_AC.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// `(recuperadas, com AC ligado)` desde o boot.
+pub fn fixup_stats() -> (usize, usize) {
+    (
+        FIXUPS.load(Ordering::Relaxed),
+        FIXUPS_WITH_AC.load(Ordering::Relaxed),
+    )
+}
 
 /// Diz à rotina se `stac` e `clac` existem. Uma vez, no boot, antes da primeira cópia.
 pub fn set_smap(on: bool) {

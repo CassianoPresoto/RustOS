@@ -590,6 +590,12 @@ pub fn ac_set() -> bool {
     false
 }
 
+/// O aarch64 não tem `AC`: não há o que contar.
+#[cfg(feature = "selftest")]
+pub fn copy_fixup_stats() -> Option<(usize, usize)> {
+    None
+}
+
 /// O `eret` é a única saída para EL0: não há saída rápida a ligar.
 #[cfg(feature = "selftest")]
 pub const HAS_FAST_RETURN: bool = false;

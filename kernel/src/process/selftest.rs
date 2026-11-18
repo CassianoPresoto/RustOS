@@ -189,6 +189,12 @@ fn residue(frames: Frames, map_offset: u64) -> Option<usize> {
     Some(FOUND.load(Ordering::Relaxed)).filter(|&found| found != usize::MAX)
 }
 
+/// O `hello` passou um ponteiro não mapeado ao `debug_write`: a falta da cópia foi recuperada no
+/// kernel (onde há `AC`) e o tratador rodou com `AC` limpo, vindo do kernel dentro da janela do `stac`.
+fn copy_fixup_ran_with_ac_clear() -> bool {
+    platform::copy_fixup_stats().is_none_or(|(fixups, with_ac)| fixups > 0 && with_ac == 0)
+}
+
 /// O `hello` roda e sai com 0 em cada CPU ativa: a entrada de syscall e o espaço de usuário de
 /// cada núcleo (os MSRs de `SYSCALL` ou o `TTBR0_EL1`) são conferidos um a um.
 fn hello_on_every_cpu(frames: Frames, map_offset: u64) -> bool {
@@ -203,7 +209,7 @@ fn hello_on_every_cpu(frames: Frames, map_offset: u64) -> bool {
 
 /// Os casos do programa embutido. `false` se algum falhou.
 pub fn self_test(frames: Frames, map_offset: u64) -> bool {
-    let hello = hello_on_every_cpu(frames, map_offset);
+    let hello = hello_on_every_cpu(frames, map_offset) && copy_fixup_ran_with_ac_clear();
     let probe = ptr::addr_of!(KERNEL_PROBE).expose_provenance() as u64;
     let kernel = faulted(run_case(frames, map_offset, Case::FaultMemory, probe, 0));
     let kernel_ok = kernel.is_some_and(|event| event.fault_kind == fault_kind::PAGE_FAULT);

@@ -138,13 +138,14 @@ rustos_isr_stubs:
 
     .balign 16
 rustos_isr_common:
-    test byte ptr [rsp + 24], 3
-    jz 1f
-    swapgs
     cmp byte ptr [rip + {SMAP_ON}], 0
     je 1f
     clac
 1:
+    test byte ptr [rsp + 24], 3
+    jz 2f
+    swapgs
+2:
     .global rustos_isr_common_swapped
 rustos_isr_common_swapped:
     push rax
@@ -254,6 +255,10 @@ rustos_isr_common_swapped:
 
     .balign 16
 rustos_isr_paranoid:
+    cmp byte ptr [rip + {SMAP_ON}], 0
+    je 5f
+    clac
+5:
     push rax
     push rcx
     push rdx
@@ -276,9 +281,6 @@ rustos_isr_paranoid:
     js 6f
     swapgs
     mov ebx, 1
-    cmp byte ptr [rip + {SMAP_ON}], 0
-    je 6f
-    clac
 6:
     cld
     mov rdi, rsp
@@ -307,6 +309,10 @@ rustos_isr_paranoid:
 
     .balign 16
 rustos_debug_entry:
+    cmp byte ptr [rip + {SMAP_ON}], 0
+    je 4f
+    clac
+4:
     test byte ptr [rsp + 8], 3
     jnz 8f
     push 0
@@ -314,10 +320,6 @@ rustos_debug_entry:
     jmp rustos_isr_paranoid
 8:
     swapgs
-    cmp byte ptr [rip + {SMAP_ON}], 0
-    je 9f
-    clac
-9:
     push rax
     push rcx
     mov rcx, gs:[{KERNEL_RSP}]
@@ -423,6 +425,7 @@ extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
             && usercopy::is_usercopy_fault(frame.rip)
             && cr2 < USER_TOP
         {
+            usercopy::note_fixup(user::ac_flag_set());
             frame.rip = usercopy::recovery_address();
             return;
         }
