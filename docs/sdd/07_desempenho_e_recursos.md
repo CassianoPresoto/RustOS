@@ -107,7 +107,7 @@ Comandos, os mesmos antes e depois (`perf/scheduler-switch` contra a `main` `298
 | --- | --- | --- |
 | Troca, linha do boot (ns) | 68 / 72 | **41 / 41** |
 | Troca com SIMD, linha do boot (ns) | 83 / 90 | 41 / 42 (um boot com 76) |
-| Troca, comando `bench` (ns) | 73 / 132 | **42 / 42** |
+| Troca, comando `bench` (ns) | 73 / 132 | **42 / 42** (8 boots, um deu 101: o aquecimento de 300 ms nem sempre basta) |
 | Troca com SIMD, comando `bench` (ns) | 91 / 125 | 43 / 45 |
 | Acordar entre tarefas, mediana (`wake self-test:`) | 102 µs | **42 a 83 ns** |
 | Acordar de `sleep_until`, ociosa (média, µs) | 472 a 514 | 504 a 562 (igual: é o `wfi` do HVF) |
