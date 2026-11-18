@@ -177,6 +177,32 @@ fn published() -> Option<LocalApic<ApicAccess>> {
     )
 }
 
+/// Liga o Local APIC desta CPU secundária no modo que a de boot publicou; `false` sem isso.
+/// # Safety
+/// Ring 0, depois de `publish` na CPU de boot; o CPUID anuncia o modo publicado.
+pub unsafe fn enable_secondary() -> bool {
+    if ACTIVE_X2APIC.load(Ordering::Acquire) {
+        // SAFETY: o contrato da função: a CPU de boot já usa o x2APIC, que o CPUID anuncia.
+        let access = unsafe { ApicAccess::enable_x2apic() };
+        access.local().enable();
+        return true;
+    }
+    let base = ACTIVE_MMIO.load(Ordering::Relaxed);
+    if base == 0 {
+        return false;
+    }
+    // SAFETY: `publish` guardou a página mapeada de `IA32_APIC_BASE`, a mesma em toda CPU.
+    let access = unsafe { ApicAccess::enable_xapic(VirtAddr::new(base as u64)) };
+    access.local().enable();
+    true
+}
+
+/// O LAPIC ID desta CPU; `None` antes de `publish`.
+pub fn local_id() -> Option<u32> {
+    let x2apic = ACTIVE_X2APIC.load(Ordering::Acquire);
+    published().map(|local| local.id(x2apic))
+}
+
 /// Avisa o Local APIC que a interrupção em serviço terminou. Sem efeito antes de `publish`.
 pub fn eoi() {
     if let Some(local) = published() {
