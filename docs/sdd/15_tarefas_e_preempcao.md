@@ -211,7 +211,9 @@ consumia (o fim da fatia da corrente, 100 µs depois no HVF). Agora `unpark` e `
 interrupção mascarada, e trocam na hora (`preempt_now`): é o `preempt_enable` do Linux com `CONFIG_PREEMPTION`, que
 chama `__preempt_schedule` quando o contador cai a zero com `TIF_NEED_RESCHED` de pé. O critério de quem preempta é o do
 EEVDF, o mesmo da IRQ: fatia menor que a da corrente (`PREEMPT_SHORT`), ou ser a escolha de `pick_eevdf`; fatia igual
-dentro de uma fatia protegida não preempta, e o ping-pong do `bench` segue sem trocar no `unpark`.
+dentro de uma fatia protegida não preempta, e o ping-pong do `bench` segue sem trocar no `unpark`. Consequência: **`spawn` pode
+rodar o filho antes de retornar** (o pai volta quando o filho bloqueia ou a fatia acaba); quem cria tarefa não pode supor que
+escreve o estado compartilhado do filho depois do `spawn`.
 
 Equivalente do `preemptible()` do Linux (`preempt_count() == 0 && !irqs_disabled()`): **não troca** se o chamador já tinha a
 interrupção mascarada, se está dentro de uma IRQ (o `preempt` do fim dela cuida) ou se segura um `IrqLock`
@@ -270,7 +272,7 @@ O lock conta as tentativas que o acharam preso (`SpinLock::contentions`): é a m
 | --- | --- | --- |
 | Disparo | TSC-deadline (`IA32_TSC_DEADLINE`) se `CPUID.1:ECX[24]`; senão o contador do APIC em modo de um tiro (divisor 16) | `CNTV_CVAL_EL0` absoluto, desde o começo |
 | Relógio | TSC calibrado pelo PIT (SDD 10) | `CNTVCT_EL0` |
-| Conversão para ns | `TickScale`: `ticks * mult >> shift`, `mult` arredondado para cima (erro < 1 ns) | igual |
+| Conversão para ns | `hal::TickScale`: `ticks * mult >> shift`, `mult` arredondado para cima (erro < 1 ns); o `cyc2ns` do Linux | igual |
 | Relógio do escalonador | `rdtsc` (que já não é ordenado) | `mrs cntvct_el0` **sem `isb`** (`sched_clock_ns`) |
 | Sob TCG | one-shot (o `-cpu max` não anuncia TSC-deadline) | `cntv-cval` |
 
@@ -295,12 +297,12 @@ de quem dorme. Quem o arma:
 medida. No aarch64 o `isb` antes do `mrs` custa 8 ns isolado e 11 ns por leitura dentro da troca, de duas por troca
 (uma em `unpark` e outra em `park`): tirá-lo levou o ping-pong de 71 a 48 ns. Sem ele a leitura pode sair antes das instruções
 anteriores (alguns ns, dentro de um tique de 41,7 ns a 24 MHz) e, em tese, dois `mrs` seguidos saírem fora de ordem; a
-política só usa diferenças com `saturating_sub` e compara `now <= last`, então um passo atrás de um tique não quebra nada.
+política só usa diferenças com `saturating_sub`, a leitura do relógio também (`elapsed_ns`: contador atrás da origem lê zero) e compara `now <= last`, então um passo atrás de um tique não quebra nada.
 É o que o Linux faz no x86 (`native_sched_clock` usa `rdtsc()` sem ordem, "the scheduler clock tolerates small errors") e
 **não** o que faz no arm64: lá `arch_timer_read_cntvct_el0` é `isb; mrs`, salvo com ECV (`CNTVCTSS_EL0`, autossincronizado).
 Aqui o ECV não vale a pena: `ID_AA64MMFR0_EL1.ECV` é 0 no HVF e o caminho não se mediria. `now_ns`, `cycles` e o que mede
 tempo (`bench`, `sleep_until` do `bench`, semente) seguem com o `isb`. A conversão por multiplicação e deslocamento
-(`TickScale`, o `cyc2ns` do Linux) tirou a divisão de 128 bits: 12,6 para 9,8 ns no `now_ns` do aarch64 (HVF) e 43 para 33 ns
+(`hal::TickScale`, o `cyc2ns` do Linux; aritmética pura e igual nas duas ISAs, por isso mora no `hal`, que já tem `redact` e `cmdline`) tirou a divisão de 128 bits: 12,6 para 9,8 ns no `now_ns` do aarch64 (HVF) e 43 para 33 ns
 no x86_64 (TCG).
 
 O TSC e o contador do APIC são medidos uma vez, na CPU de boot, e valem para todos os núcleos ([DEBT-0057](../tech-debt/0057-tsc-entre-nucleos-sem-verificacao.md)).
@@ -367,7 +369,7 @@ ISAs (`make smoke` sai com erro); `[rustos] task self-test: ok` é linha exigida
   tarefa ocupando a CPU.
 - **Latência de acordar entre tarefas** (`wake_task_latency`): uma tarefa de fatia 100 µs (o dorminhoco) dorme
   em `park`; outra de fatia base na mesma CPU (o acordador) a acorda e gira até ela rodar; o tempo é o do `unpark` até o
-  primeiro carimbo do dorminhoco. Duas rodadas de aquecimento não contam (tarefa nova nasce com lag negativo e não preempta);
+  primeiro carimbo do dorminhoco. O aquecimento não conta e vai até 2 acertos seguidos (no máximo 20 rodadas): a tarefa nova gasta os primeiros ciclos com lag negativo e não preempta;
   200 amostras no `bench` e 20 no boot. Mediana, média e máximo, e quantas vezes o dorminhoco já tinha rodado quando
   `unpark` voltou (`direct`).
 - **Aquecimento do `bench`:** o comando gira a CPU 300 ms antes da primeira medida (`Effort::warmup_ms`). Sem isso ele chega
@@ -380,9 +382,11 @@ ISAs (`make smoke` sai com erro); `[rustos] task self-test: ok` é linha exigida
 - **Autoteste de acordar** (`wake self-test:`, dentro do `smp_self_test`): a mesma medida com 20 amostras. Passa se em 90%
   delas o dorminhoco já tinha rodado quando `unpark` voltou (`direct`); sem a troca no fim do `unpark` são 0 de 20. O critério
   é contar, não um tempo: o x86_64 em TCG `dev` com uma CPU tem dois modos por boot, com a troca de contexto em 3 µs ou em 30 µs
-  (também na `main`, em 2 de 24 boots, e em cerca de metade deles com este código; sem IRQ por troca nem `rdtsc` lento, a causa não foi
-  isolada; hipótese: a TLB do TCG batendo no layout sorteado pelo KASLR; não visto no `release` nem no HVF), e um limite em µs reprovava o modo lento. Imprime média, mediana, máximo e `direct`. Uma amostra em
-  umas 350 chega a esperar o fim da fatia (350 µs no HVF: lag negativo do dorminhoco, a regra do EEVDF). É linha exigida do
+  (medido pelo revisor com `RUSTOS_SMP=1`: `dev`, 9 de 64 boots neste código e 8 de 64 na `main`; `release`, 10 de 12 neste código
+  com ~10 µs e 9 de 12 na `main` com ~13 µs; não é regressão; sem IRQ por troca nem `rdtsc` lento, a causa não foi isolada, e a hipótese
+  é a TLB do TCG batendo no layout sorteado pelo KASLR), e um limite em µs reprovava o modo lento. Imprime média, mediana, máximo e `direct`. Uma amostra em
+  umas 350 chega a esperar o fim da fatia (350 µs no HVF: lag negativo do dorminhoco, a regra do EEVDF); a amostra que passa de 5 ms
+  conta como "não direta" e o teste segue. É linha exigida do
   boot (`make smoke`).
 - **Autoteste SMP** (`smp self-test:`): 8 tarefas rodam, cedem e dormem por 40 ms nas CPUs todas. Cada volta sobe uma bandeira por tarefa e a baixa ao fim: duas CPUs
   rodando a mesma tarefa fariam a segunda ver a bandeira subida. Passa se nenhuma tarefa se perdeu e a bandeira nunca foi vista subida; imprime voltas e migrações.

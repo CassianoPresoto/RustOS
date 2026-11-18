@@ -85,7 +85,7 @@ O timer do Local APIC é de um tiro: no modo TSC-deadline se `CPUID.1:ECX[24]`
 Até `task::init` o núcleo o rearma a cada disparo para o próximo tique de `TIMER_HZ`
 (o autoteste `timer:`); depois, só para o menor entre o fim da fatia da corrente e o
 próximo acordar, e sem tique com tudo ocioso, salvo a saturação do contador de 32 bits do APIC, que acorda a ociosa a cada ~69 s ([SDD 15](15_tarefas_e_preempcao.md)). O relógio (`now_ns`) é o TSC menos a leitura da calibração,
-convertido por `ticks * mult >> shift` (`TickScale`, o `cyc2ns` do Linux; sem divisão de 128 bits nem ponto flutuante). Sob a QEMU
+convertido por `ticks * mult >> shift` (`hal::TickScale`, o `cyc2ns` do Linux; sem divisão de 128 bits nem ponto flutuante). Sob a QEMU
 `-cpu max` em TCG não há TSC-deadline nem TSC invariante, e o vendor é AMD, o que
 inutiliza o CPUID 0x15 do Linux: por isso a referência é o PIT.
 
@@ -150,7 +150,7 @@ foi conferida nelas.
 | Núcleo secundário | Em EL1t pelo Limine; `call_on_stack` passa a EL1h; depois, em ordem: `MAIR` (índice 7) e `PAN` na entrada, `TTBR1_EL1` do kernel (`Aarch64Mmu::activate`); no `ap_main`, `VBAR_EL1` e `SP_EL0` (pilha de falhas própria: `install_secondary`), o redistribuidor, `ICC_*`, o PPI do timer e as SGIs, `CNTV` ligado e desarmado, `CPACR_EL1.FPEN`. `MAIR_EL1`, `SCTLR_EL1`, `TCR_EL1` e `CPACR_EL1` são por CPU |
 | EOI | `EOImode` 0: um `ICC_EOIR1_EL1` baixa a prioridade e desativa, antes de `Handlers.preempt`. INTID ≥ 1020 (espúrio) não leva EOI |
 | Timer | `CNTV` (o Linux usa o virtual em EL1 sem EL2 e o HVF só entrega o virtual). `CNTFRQ_EL0` lido em tempo de execução. O disparo usa `CNTV_CVAL_EL0` absoluto (`TVAL` acumulava ~2 ms de atraso por tique sob QEMU: 50 tiques em 600 ms), de um tiro: o núcleo o rearma a cada disparo para o próximo tique ou acordar |
-| Relógio | `now_ns` = `(CNTVCT − início) × mult >> shift` (`TickScale` de `CNTFRQ`, sem divisão); zero em `init_interrupts`. `sched_clock_ns` é o mesmo sem o `isb` antes do `mrs`, só para o escalonador ([SDD 15](15_tarefas_e_preempcao.md), "Tempo") |
+| Relógio | `now_ns` = `(CNTVCT − início) × mult >> shift` (`hal::TickScale` de `CNTFRQ`, sem divisão; um contador atrás da origem lê zero); zero em `init_interrupts`. `sched_clock_ns` é o mesmo sem o `isb` antes do `mrs`, só para o escalonador ([SDD 15](15_tarefas_e_preempcao.md), "Tempo") |
 | PL011 | `IMSC.RXIM \| RTIM`; `ICR` limpo no começo da IRQ, antes de drenar o FIFO: o byte que chega depois rearma a IRQ (limpar depois perdia o acordar no modelo da QEMU) |
 | PAN | ligado se `ID_AA64MMFR1_EL1.PAN` ≠ 0, com `SCTLR_EL1.SPAN` = 0 (liga na entrada da exceção) e `PSTATE.PAN` = 1 agora; `protections:` mostra o `PSTATE.PAN` lido de volta |
 

@@ -6,7 +6,7 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use rustos_arch_x86_64::clock::{TickScale, ns_to_ticks};
+use rustos_arch_x86_64::clock::ns_to_ticks;
 pub use rustos_arch_x86_64::fpu::{
     AREA_ALIGN as FPU_AREA_ALIGN, restore as fpu_restore, save as fpu_save,
 };
@@ -29,7 +29,7 @@ use rustos_driver_i8042::I8042;
 use rustos_driver_uart16550::{DIVISOR_115200, Uart16550};
 use rustos_hal::{
     BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, MmuControl, PAGE_SIZE, PageMapper,
-    PhysAddr,
+    PhysAddr, TickScale,
 };
 use rustos_mm::PageTables;
 use rustos_sync::SpinLock;
@@ -349,8 +349,8 @@ fn start_clocks(apic: &ApicAccess) -> Result<(), PlatformError> {
     .ok_or(PlatformError::MissingFeature("pit"))?;
     TSC_HZ.store(measured.tsc_hz, Ordering::Relaxed);
     let (mult, shift) = TickScale::new(measured.tsc_hz).map_or((0, 0), TickScale::parts);
-    TSC_MULT.store(mult, Ordering::Relaxed);
     TSC_SHIFT.store(shift, Ordering::Relaxed);
+    TSC_MULT.store(mult, Ordering::Release);
     TSC_ORIGIN.store(rdtsc(), Ordering::Relaxed);
     APIC_HZ.store(measured.apic_hz, Ordering::Relaxed);
     let deadline = cpu_features().tsc_deadline;
@@ -448,11 +448,10 @@ pub fn now_ns() -> Option<u64> {
         .then(|| scale.convert(rdtsc().saturating_sub(TSC_ORIGIN.load(Ordering::Relaxed))))
 }
 
+/// Lê o `mult` primeiro (acquire): quem o vê diferente de zero vê o `shift` já gravado.
 fn tsc_scale() -> TickScale {
-    TickScale::from_parts(
-        TSC_MULT.load(Ordering::Relaxed),
-        TSC_SHIFT.load(Ordering::Relaxed),
-    )
+    let mult = TSC_MULT.load(Ordering::Acquire);
+    TickScale::from_parts(mult, TSC_SHIFT.load(Ordering::Relaxed))
 }
 
 /// `now_ns` do escalonador: o `rdtsc` já não é ordenado, como no `sched_clock` do Linux.

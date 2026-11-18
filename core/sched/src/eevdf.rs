@@ -59,6 +59,15 @@ const FRESH: Entity = Entity {
     state: State::Sleeping,
 };
 
+/// `lag * peso / soma_dos_pesos`, em 64 bits quando o produto cabe: a divisão de `i128` custa.
+fn lag_share(lag: i128, weight: u32, sum_weight: i64) -> i128 {
+    let product = lag * i128::from(weight);
+    match i64::try_from(product) {
+        Ok(narrow) => i128::from(narrow / sum_weight),
+        Err(_) => product / i128::from(sum_weight),
+    }
+}
+
 fn saturate_i64(value: i128) -> i64 {
     i64::try_from(value).unwrap_or(if value < 0 { i64::MIN } else { i64::MAX })
 }
@@ -203,11 +212,7 @@ impl<const N: usize> Eevdf<N> {
         let ent = *self.ent(slot);
         let mut lag = i128::from(ent.vlag);
         if self.runnable > 0 && self.sum_weight > 0 && lag != 0 {
-            let product = lag * i128::from(ent.weight);
-            lag += match i64::try_from(product) {
-                Ok(narrow) => i128::from(narrow / self.sum_weight),
-                Err(_) => product / i128::from(self.sum_weight),
-            };
+            lag += lag_share(lag, ent.weight, self.sum_weight);
         }
         let vruntime = average.wrapping_sub(saturate_i64(lag).cast_unsigned());
         let mut vslice = real_to_virtual(ent.slice_ns, ent.weight);
@@ -654,6 +659,36 @@ mod tests {
 
     fn fair() -> SchedParams {
         SchedParams::fair(0)
+    }
+
+    /// O atalho de 64 bits de `lag_share` contra a divisão de `i128`, com o produto dentro e
+    /// fora de `i64`.
+    #[test]
+    fn lag_share_in_64_bits_equals_the_128_bit_division() {
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for round in 0..3_000_000_u32 {
+            let bits = 1 + round % 63;
+            let magnitude = i128::from(next() >> (64 - bits));
+            let lag = if next() & 1 == 0 {
+                magnitude
+            } else {
+                -magnitude
+            };
+            let weight = crate::weight::weight_of_nice(i8::try_from(next() % 40).unwrap() - 20);
+            let sum_weight = i64::try_from(1 + next() % 5_000_000).unwrap();
+            let expected = lag * i128::from(weight) / i128::from(sum_weight);
+            assert_eq!(
+                lag_share(lag, weight, sum_weight),
+                expected,
+                "{lag} {weight} {sum_weight}"
+            );
+        }
     }
 
     #[test]

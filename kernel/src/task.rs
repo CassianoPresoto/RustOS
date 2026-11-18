@@ -154,7 +154,7 @@ struct Slot {
     /// Quando acorda, se está em `Sleeping`.
     wake_at_ns: AtomicU64,
     cpu_ns: AtomicU64,
-    /// Quando a tarefa assumiu a CPU, no relógio `now_ns`.
+    /// Quando a tarefa assumiu a CPU, no relógio do escalonador (`now`).
     since_ns: AtomicU64,
     switches: AtomicU64,
     /// Endereço da área de FPU/SIMD; zero se a tarefa não usa SIMD.
@@ -823,7 +823,7 @@ fn wake_task(id: usize, why: Wake, now: u64) -> bool {
 /// terminou (`on_cpu`), ou se está ociosa e a afinidade deixa; senão a menos carregada.
 fn wake_target(task: &Slot, home: usize) -> usize {
     let mask = task.affinity.load(Ordering::Relaxed);
-    if task.on_cpu.load(Ordering::Acquire) || mask != 0 && mask.is_power_of_two() {
+    if task.on_cpu.load(Ordering::Acquire) || (mask != 0 && mask.is_power_of_two()) {
         return home;
     }
     let home_idle = percpu::get(home).load.load(Ordering::Relaxed) == 0;
@@ -860,9 +860,8 @@ pub fn unpark(id: TaskId) {
     cpu.restore_interrupts(were_enabled);
 }
 
-/// O ponto de preempção de `unpark` e `spawn` (o `preempt_enable` do Linux): troca já se a fila
-/// desta CPU pede. Não troca com a interrupção mascarada pelo chamador, dentro de IRQ nem com
-/// `IrqLock` preso: o pedido segue na política e vale no fim da próxima IRQ (`preempt`).
+/// Troca já se a fila desta CPU pede. Não troca com a IRQ mascarada pelo chamador, dentro de IRQ
+/// nem com `IrqLock` preso: o pedido vale na próxima IRQ (SDD 15, "Preempção"; DEBT-0065).
 fn preempt_now(were_enabled: bool, now_ns: u64) {
     let here = percpu::current();
     if !were_enabled || here.in_irq() || here.locks_held() != 0 {
