@@ -49,13 +49,10 @@ pub struct Fault {
     pub user_sp: u64,
 }
 
-/// O que o `arch/` chama. `fault` volta só para exceção recuperável; `irq` roda
-/// com interrupções mascaradas, e o `arch/` sinaliza o fim (EOI) depois dele.
-/// `preempt` roda depois do EOI, ainda mascarado, na pilha da tarefa interrompida:
-/// é o ponto onde o núcleo pode trocar de tarefa antes do retorno da interrupção.
-/// `syscall` atende a entrada de usuário (mascarada, na pilha da tarefa). `leave_user` roda
-/// depois de todo quadro de kernel morto, logo antes da volta ao usuário, com o endereço
-/// do quadro salvo: o núcleo limpa a pilha abaixo dele.
+/// O que o `arch/` chama. `fault` volta só para exceção recuperável; `irq` roda mascarada e o
+/// `arch/` dá o EOI depois. `preempt` roda depois do EOI, na pilha da tarefa interrompida: ali o
+/// núcleo pode trocar de tarefa. `syscall` atende o usuário, mascarada. `leave_user` roda logo
+/// antes da volta ao usuário, com o quadro salvo: o núcleo limpa a pilha abaixo dele.
 #[derive(Clone, Copy, Debug)]
 pub struct Handlers {
     pub fault: fn(&Fault),

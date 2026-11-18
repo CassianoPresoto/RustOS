@@ -521,8 +521,7 @@ pub fn switch_space(root: u64, _kernel_stack_top: u64) {
 /// Primeira volta a EL0. Nunca volta.
 ///
 /// # Safety
-/// Contrato de `rustos_arch_aarch64::enter_user`: EL1h com a IRQ mascarada, `kernel_top` o topo da
-/// pilha desta tarefa, `entry`/`sp` de usuário.
+/// Contrato de `rustos_arch_aarch64::enter_user`.
 pub unsafe fn enter_user(entry: u64, sp: u64, arg0: u64, arg1: u64, kernel_top: u64) -> ! {
     // SAFETY: o contrato desta função.
     unsafe { rustos_arch_aarch64::enter_user(entry, sp, arg0, arg1, kernel_top) }

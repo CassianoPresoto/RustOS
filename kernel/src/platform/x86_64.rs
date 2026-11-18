@@ -643,8 +643,7 @@ pub fn switch_space(root: u64, kernel_stack_top: u64) {
 /// Primeira volta ao anel 3. Nunca volta.
 ///
 /// # Safety
-/// Contrato de `rustos_arch_x86_64::enter_user`: IRQ mascarada, `switch_space` já feito para
-/// esta tarefa, e `entry`/`sp` de usuário.
+/// Contrato de `rustos_arch_x86_64::enter_user`.
 pub unsafe fn enter_user(entry: u64, sp: u64, arg0: u64, arg1: u64, _kernel_top: u64) -> ! {
     // SAFETY: o contrato desta função.
     unsafe { rustos_arch_x86_64::enter_user(entry, sp, arg0, arg1) }

@@ -51,8 +51,7 @@ unsafe extern "C" {
 /// Copia `len` bytes de `src` (usuário) para `dst` (kernel). Devolve os bytes que faltaram.
 ///
 /// # Safety
-/// `dst` é memória do kernel gravável por `len` bytes; `[src, src + len)` está em
-/// `[USER_MIN, USER_TOP)` (um `UserRange`), de modo que a cópia só toca a metade de usuário.
+/// `dst` é memória do kernel gravável por `len` bytes; `[src, src + len)` é um `UserRange`.
 pub unsafe fn copy_from_user(dst: *mut u8, src: u64, len: usize) -> usize {
     let src = ptr::with_exposed_provenance::<u8>(usize::try_from(src).unwrap_or(usize::MAX));
     // SAFETY: o contrato da função; uma falta em `src` cai no ponto de recuperação.
@@ -62,8 +61,7 @@ pub unsafe fn copy_from_user(dst: *mut u8, src: u64, len: usize) -> usize {
 /// Copia `len` bytes de `src` (kernel) para `dst` (usuário). Devolve os bytes que faltaram.
 ///
 /// # Safety
-/// `src` é memória do kernel legível por `len` bytes; `[dst, dst + len)` está em
-/// `[USER_MIN, USER_TOP)` (um `UserRange`).
+/// `src` é memória do kernel legível por `len` bytes; `[dst, dst + len)` é um `UserRange`.
 pub unsafe fn copy_to_user(dst: u64, src: *const u8, len: usize) -> usize {
     let dst = ptr::with_exposed_provenance_mut::<u8>(usize::try_from(dst).unwrap_or(usize::MAX));
     // SAFETY: o contrato da função; uma falta em `dst` cai no ponto de recuperação.

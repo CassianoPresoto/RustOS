@@ -32,7 +32,7 @@ roda no `cargo test` do host, com `RegisterBus` e memória de tabelas falsos.
 | Vetor | Quem | Pilha |
 | --- | --- | --- |
 | 0–31 | Exceções da CPU; tem código de erro 8, 10–14, 17, 21, 29 e 30 (`fault::ERROR_CODE_VECTORS`) | atual |
-| 8 (#DF), 2 (NMI), 18 (#MC) | IST1, IST2 e IST3 da TSS (o campo do gate é o índice mais um) | própria |
+| 8 (#DF), 2 (NMI), 18 (#MC), 1 (#DB) | IST1, IST2, IST3 e IST4 da TSS (o campo do gate é o índice mais um). Os quatro entram pela **entrada paranoica**, que decide o `GS` pelo sinal de `IA32_GS_BASE`; o `#DB` vindo do anel 3 copia o quadro para a pilha da tarefa e segue como entrada normal | própria |
 | `0x20` | Timer do Local APIC | atual (a da tarefa interrompida) |
 | `0x21` | Teclado PS/2 (pino 1, mascarado) | atual |
 | `0x24` | COM1 (pino 4) | atual |
@@ -46,7 +46,7 @@ entrada comum salva os 15 registradores (ordem de `TrapFrame`), faz `cld` e cham
 `trap_dispatch`, que decodifica em `hal::Fault` (page fault pelos bits do código de
 erro e pelo `CR2`) ou entrega `hal::Irq` ao núcleo, dá o EOI depois do handler e chama
 `Handlers.preempt`, onde o núcleo pode trocar de tarefa ([SDD 15](15_tarefas_e_preempcao.md)).
-O breakpoint volta; qualquer outra exceção pára a CPU.
+O breakpoint volta; qualquer outra exceção pára a CPU, **menos a que vem do anel 3**: com o `CS` salvo em RPL 3 a entrada faz `swapgs` (e outro na saída), `Fault.from_user` fica ligado e o kernel mata só o processo (a falta de página no `rip` da cópia de usuário volta ao ponto de recuperação). `NMI`, `#DF` e `#MC` seguem fatais mesmo de usuário. A entrada por `SYSCALL` (`rustos_syscall_entry`) monta o mesmo quadro, com o vetor `0x100`, e sai por `SYSRET` (se a conferência passa) ou pelo `IRETQ`; a volta ao usuário limpa a pilha do kernel e exige `RIP` e `RSP` canônicos ([SDD 17](17_processos_isolamento_e_syscalls.md#a-fatia-4a-como-entrou)).
 
 ### Núcleos secundários (x86_64)
 
@@ -55,10 +55,10 @@ Limine) e o `goto_address` ([SDD 04](04_boot.md)). O que o kernel refaz **em cad
 
 | Passo | O quê | Onde |
 | --- | --- | --- |
-| 1 | `IA32_GS_BASE` aponta o bloco `PerCpu` (`KERNEL_GS_BASE` fica em zero para o `swapgs` da fase 4: [SDD 17](17_processos_isolamento_e_syscalls.md#x86_64-syscallsysret) descreve o par); `gs:[0]` devolve o endereço dele | `percpu.rs` |
+| 1 | `IA32_GS_BASE` aponta o bloco `PerCpu` (`KERNEL_GS_BASE` fica em zero, o `GS` do usuário, que o `swapgs` troca a cada transição de anel: [SDD 17](17_processos_isolamento_e_syscalls.md#x86_64-syscallsysret)); `gs:[0]` devolve o endereço dele, e os campos seguintes (`user_rsp`, `kernel_rsp`, o `rsp[0]` da TSS, a raiz ativa) são o `CpuPrefix` que o `asm` de entrada lê | `percpu.rs` |
 | 2 | WP, SMEP, SMAP, UMIP e NXE, e só então o `CR3` do kernel (o NXE tem de valer antes das tabelas com NX) | `protect.rs`, `mmu.rs` |
 | 3 | Troca para a pilha própria (`call_on_stack`) | `stack.rs` |
-| 4 | **GDT e TSS próprias** (`CpuTables`) com as 3 pilhas IST próprias, e `lidt` da **IDT compartilhada** (montada uma vez pela CPU de boot). O `ltr` marca a TSS como ocupada na GDT, por isso uma GDT por CPU. Carregar o seletor nulo no `GS` pode zerar a base: `load_cpu` lê a `GS_BASE` antes e a escreve depois | `traps.rs` |
+| 4 | **GDT e TSS próprias** (`CpuTables`) com as 4 pilhas IST próprias, e `lidt` da **IDT compartilhada** (montada uma vez pela CPU de boot). O `ltr` marca a TSS como ocupada na GDT, por isso uma GDT por CPU. Carregar o seletor nulo no `GS` pode zerar a base: `load_cpu` lê a `GS_BASE` antes e a escreve depois | `traps.rs` |
 | 5 | Local APIC no modo que a CPU de boot escolheu (x2APIC por MSR, ou xAPIC na mesma página MMIO, que cada núcleo vê como a sua), vetor espúrio, timer mascarado e depois no mesmo modo de um tiro | `apic.rs` |
 | 6 | `CR0`, `CR4` e `XCR0` de FPU/SIMD | `fpu.rs` |
 
@@ -166,14 +166,14 @@ foi conferida nelas.
 | Peça | Como é |
 | --- | --- |
 | Vetores | `VBAR_EL1` aponta para `rustos_vectors` (`arch/aarch64/src/exception.rs`): 2 KiB, 16 entradas de 0x80. O kernel roda em EL1h (`call_on_stack` seleciona `SP_EL1`), então é interrompido no grupo "EL1 com SPx" (4–7); o grupo SP0 usa o mesmo corpo |
-| Pilha | IRQ empilha na pilha da própria tarefa (`SP_EL1`). Síncrona e SError (4 e 7) fazem `msr spsel, #0` e empilham em `SP_EL0`, a pilha de falhas de 4 páginas com guarda (`map_stack`) que `install` grava, com `SPSel` em 0 (só assim do EL1 se escreve `SP_EL0`) ([SDD 15](15_tarefas_e_preempcao.md)) **Desenho da fase 4, ainda não implementado:** com EL0 a síncrona e o SError entram na pilha da tarefa, com teste de estouro, e só o estouro vai para a pilha de falhas **desta CPU**, achada pelo bloco `PerCpu` que o `TPIDR_EL1` já aponta (e `install_secondary` deixa de gravar o `SP_EL0`) ([SDD 17](17_processos_isolamento_e_syscalls.md#aarch64-svc)) |
+| Pilha | IRQ empilha na pilha da própria tarefa (`SP_EL1`), e a exceção vinda de EL0 (vetores 8 a 11) também: o quadro de 288 bytes guarda o `SP_EL0` e o `TPIDR_EL0` do usuário, e a volta a EL0 limpa a pilha, restaura os dois e zera o `TPIDRRO_EL0`. Síncrona e SError de EL1h (4 e 7) pegam a pilha de falhas **desta CPU**, de 4 páginas com guarda, cujo topo `install` e `install_secondary` gravam no bloco `PerCpu` (o `vector_fault` o lê pelo `TPIDR_EL1`, guardando o `x0` no `TPIDRRO_EL0`; sem o topo ainda, no começo do boot, usa o `SP_EL0` da pilha precoce) ([SDD 15](15_tarefas_e_preempcao.md)). **Desenho que a 4a não fez:** a ordem do Linux, toda síncrona na pilha da tarefa e só o estouro na de falhas ([SDD 17](17_processos_isolamento_e_syscalls.md#aarch64-svc), [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md)) |
 | Quadro | x0–x30, `ELR_EL1`, `SPSR_EL1`: 272 bytes. `brk` volta para a instrução seguinte (o `ELR` aponta para o próprio `brk`: soma 4); falha não recuperável para a CPU em `wfe` |
 | `ESR_EL1` | `esr.rs` (puro): classe → `hal::FaultKind`; em aborto, `DFSC`/`IFSC` (tradução por nível, acesso, permissão, alinhamento) e `WnR`. `Fault.code` é o `ESR` cru |
 | GICv3 | `drivers/gicv3` (MMIO) mais `gic_cpu.rs` (`ICC_*_EL1`). Distribuidor em `0x0800_0000` e a região dos redistribuidores em `0x080A_0000` (`0x20000` por CPU), pela janela de dispositivos (DEBT-0002). Sequência: distribuidor desligado → `ARE` + grupo 1 → **acha o redistribuidor desta CPU** → acorda-o (`GICR_WAKER`) → `ICC_SRE_EL1`, `PMR`, `IGRPEN1` |
 | Redistribuidor por CPU | `find_redistributor` percorre os frames da região a partir do primeiro, lê `GICR_TYPER` e compara a afinidade (`[63:32]`) com a do `MPIDR_EL1` da CPU; para em `Last` (bit 4) sem achar. Cada frame tem 128 KiB (`RD_base` e `SGI_base`), ou 256 KiB com `VLPIS` (bit 1; GICv4: mais `VLPI_base` e uma página reservada). Cada CPU só mexe no frame dela |
 | IPI | `dsb ishst` e depois `ICC_SGI1R_EL1` (a barreira de `gic_ipi_send_mask` do Linux: as escritas em memória normal ficam visíveis às outras CPUs antes da SGI), SGI do grupo 1: INTID 0 reescalonar, 1 parar; `Aff3.Aff2.Aff1` no registrador, `TargetList` = `1 << (Aff0 % 16)` e `RS` = `Aff0 / 16`; "todos menos eu" é `IRM = 1`. As duas SGIs são habilitadas, prioridade `0x40`, em **cada** redistribuidor (`ISENABLER0`) |
 | Fontes | PPI 27 (`CNTV`, nível) no redistribuidor **de cada CPU** e SPI 33 (UART0, nível) no distribuidor, grupo 1, roteada para a afinidade da CPU de boot ([DEBT-0056](../tech-debt/0056-irqs-de-dispositivo-so-na-cpu-de-boot.md)) |
-| Núcleo secundário | Em EL1t pelo Limine; `call_on_stack` passa a EL1h; depois, em ordem: `MAIR` (índice 7) e `PAN` na entrada, `TTBR1_EL1` do kernel (`Aarch64Mmu::activate`); no `ap_main`, `VBAR_EL1` e `SP_EL0` (pilha de falhas própria: `install_secondary`), o redistribuidor, `ICC_*`, o PPI do timer e as SGIs, `CNTV` ligado e desarmado, `CPACR_EL1.FPEN`. `MAIR_EL1`, `SCTLR_EL1`, `TCR_EL1` e `CPACR_EL1` são por CPU |
+| Núcleo secundário | Em EL1t pelo Limine; `call_on_stack` passa a EL1h; depois, em ordem: `MAIR` (índice 7) e `PAN` na entrada, `TTBR1_EL1` do kernel (`Aarch64Mmu::activate`); no `ap_main`, `VBAR_EL1` e a pilha de falhas no bloco `PerCpu` (`install_secondary`), o redistribuidor, `ICC_*`, o PPI do timer e as SGIs, `CNTV` ligado e desarmado, `CPACR_EL1.FPEN`. `MAIR_EL1`, `SCTLR_EL1`, `TCR_EL1` e `CPACR_EL1` são por CPU |
 | EOI | `EOImode` 0: um `ICC_EOIR1_EL1` baixa a prioridade e desativa, antes de `Handlers.preempt`. INTID ≥ 1020 (espúrio) não leva EOI |
 | Timer | `CNTV` (o Linux usa o virtual em EL1 sem EL2 e o HVF só entrega o virtual). `CNTFRQ_EL0` lido em tempo de execução. O disparo usa `CNTV_CVAL_EL0` absoluto (`TVAL` acumulava ~2 ms de atraso por tique sob QEMU: 50 tiques em 600 ms), de um tiro: o núcleo o rearma a cada disparo para o próximo tique ou acordar |
 | Relógio | `now_ns` = `(CNTVCT − início) × mult >> shift` (`hal::TickScale` de `CNTFRQ`, sem divisão; um contador atrás da origem lê zero); zero em `init_interrupts`. `sched_clock_ns` é o mesmo sem o `isb` antes do `mrs`, só para o escalonador ([SDD 15](15_tarefas_e_preempcao.md), "Tempo") |

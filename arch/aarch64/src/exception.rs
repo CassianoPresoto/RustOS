@@ -44,13 +44,10 @@ const PAINT_3: u64 = STACK_PAINT >> 48;
 
 static HANDLERS: AtomicPtr<Handlers> = AtomicPtr::new(ptr::null_mut());
 
-// Cada entrada guarda x0, x1 e o índice (0–15) e salta para o corpo comum. As
-// quatro entradas de um grupo: síncrona, IRQ, FIQ, SError; os grupos: EL1 com
-// SP0, EL1 com SPx, EL0 AArch64, EL0 AArch32. Cada entrada ocupa 0x80 bytes.
-// `vector_fault` (síncrona e SError de EL1h) empilha na pilha de falhas desta CPU, que o bloco por
-// CPU guarda; sem ela (cedo no boot) usa o `SP_EL0`, a pilha precoce. O `x0` espera no
-// `TPIDRRO_EL0`, que a saída para EL0 zera. A volta para EL0 limpa a pilha do kernel, repinta
-// 512 bytes abaixo do quadro e restaura o `SP_EL0` e o `TPIDR_EL0` do usuário.
+// Cada entrada guarda x0, x1 e o índice (0–15): grupos EL1t, EL1h, EL0 A64, EL0 A32, cada um com
+// síncrona, IRQ, FIQ e SError, 0x80 bytes por entrada. `vector_fault` usa a pilha de falhas do
+// bloco por CPU (o `SP_EL0` precoce se ela não existe) e guarda o `x0` no `TPIDRRO_EL0`, que a
+// saída para EL0 zera. Essa saída limpa a pilha do kernel e restaura `SP_EL0` e `TPIDR_EL0`.
 global_asm!(
     r#"
     .macro vector_entry index
@@ -265,9 +262,8 @@ pub unsafe fn install(
 
 /// Instala os vetores e a pilha de falhas desta CPU; os handlers já são os de `install`.
 /// # Safety
-/// Em EL1h com interrupções mascaradas, depois de `install` na CPU de boot e de `percpu::install`
-/// nesta. `stack_top` é o fim, alinhado a 16 bytes, de uma pilha mapeada que só as falhas desta
-/// CPU usam.
+/// Em EL1h, mascarada, depois de `install` e de `percpu::install` nesta CPU. `stack_top` é o
+/// fim, alinhado a 16, de uma pilha mapeada só das falhas desta CPU.
 pub unsafe fn install_secondary(stack_top: VirtAddr) -> Result<(), InstallError> {
     let selected: u64;
     // SAFETY: leitura de registrador de estado em EL1, sem efeito colateral.

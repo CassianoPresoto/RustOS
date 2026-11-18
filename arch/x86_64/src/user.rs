@@ -71,14 +71,10 @@ pub fn set_kernel_root(root: u64) {
     KERNEL_ROOT.store(root, Ordering::Release);
 }
 
-/// Faz o `CR3` e a pilha de entrada desta CPU serem os da tarefa que vai rodar: `root == 0` é
-/// tarefa do kernel (raiz do kernel, e a pilha de entrada fica como está); senão a raiz do
-/// processo e `kernel_stack_top` no `RSP0` da TSS e em `gs:[kernel_rsp]`. Sem PCID, trocar o
-/// `CR3` descarta o TLB: só se escreve quando a raiz muda.
-///
+/// Põe no `CR3` a raiz da tarefa (`0`: a do kernel) e, se é de usuário, `kernel_stack_top` no
+/// `RSP0` da TSS e em `gs:[kernel_rsp]`. Só escreve o `CR3` se a raiz mudou.
 /// # Safety
-/// Ring 0 com a IRQ mascarada; `root` é a raiz de um espaço que mapeia o kernel inteiro na
-/// metade alta e `kernel_stack_top` é o topo, alinhado a 16, da pilha da tarefa.
+/// Ring 0, mascarada; `root` mapeia o kernel inteiro na metade alta.
 pub unsafe fn switch_space(root: u64, kernel_stack_top: u64) {
     let cpu = prefix();
     let target = if root == 0 {
@@ -106,13 +102,10 @@ fn set_entry_stack(cpu: &CpuPrefix, top: u64) {
     unsafe { rsp0.write_unaligned(top) };
 }
 
-/// Primeira volta ao usuário: monta o quadro de `iretq` no topo da pilha do kernel desta
-/// tarefa, zera todo registrador (nenhum valor do kernel vai ao anel 3), põe `arg0` em `rdi` e
-/// `arg1` em `rsi`, troca o `GS` e salta. Nunca volta.
-///
+/// Primeira volta ao anel 3: quadro de `iretq` no topo da pilha, registradores zero (`rdi` e `rsi`
+/// levam `arg0` e `arg1`), `swapgs`. Nunca volta.
 /// # Safety
-/// Ring 0 com a IRQ mascarada, em tarefa cuja pilha de entrada já é a desta CPU
-/// (`switch_space`). `entry` e `sp` são de usuário e `sp` é alinhado a 16 (pelo kernel).
+/// Ring 0, mascarada, depois de `switch_space`; `entry` e `sp` são de usuário.
 pub unsafe fn enter_user(entry: u64, sp: u64, arg0: u64, arg1: u64) -> ! {
     // SAFETY: o contrato da função; o quadro é o que a CPU espera de um `iretq` para o anel 3.
     unsafe {

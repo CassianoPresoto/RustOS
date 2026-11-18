@@ -1,4 +1,4 @@
-//! Limpeza da pilha do kernel na volta ao usuário (SDD 17; paga DEBT-0059). A pilha da tarefa de
+//! Limpeza da pilha do kernel na volta ao usuário (SDD 17). A pilha da tarefa de
 //! usuário é pintada com `STACK_PAINT`; na volta, o que a chamada usou abaixo do quadro volta a
 //! ser pintura, e o `arch/` repinta os 512 bytes que ficam logo abaixo dele.
 

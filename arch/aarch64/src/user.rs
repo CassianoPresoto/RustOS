@@ -15,12 +15,9 @@ const TCR_EPD0: u64 = 1 << 7;
 /// A raiz vazia que a tarefa só de kernel usa no `TTBR0_EL1`.
 static EMPTY_ROOT: AtomicU64 = AtomicU64::new(0);
 
-/// Prepara EL0 nesta CPU: `CNTKCTL_EL1`, o `TTBR0_EL1` na raiz vazia `empty_root` (um frame
-/// zerado) e `EPD0` limpo: a metade baixa passa a ser traduzida. Cada núcleo faz o seu.
-///
+/// Prepara EL0 nesta CPU: `CNTKCTL_EL1`, `TTBR0_EL1` na raiz vazia e `EPD0` limpo.
 /// # Safety
-/// EL1 com a MMU ligada e a IRQ mascarada; `empty_root` é o endereço físico de um frame zerado
-/// que vive para sempre. Depois de `Vm::activate` nesta CPU (que liga `EPD0`).
+/// EL1, mascarada, depois de `Vm::activate` nesta CPU; `empty_root` é um frame zerado eterno.
 pub unsafe fn init_user(empty_root: u64) {
     EMPTY_ROOT.store(empty_root, Ordering::Release);
     // SAFETY: só `EL0VCTEN` fica ligado; o registrador existe em todo EL1.
@@ -48,12 +45,10 @@ pub unsafe fn init_user(empty_root: u64) {
     unsafe { asm!("msr tcr_el1, {}", "isb", in(reg) tcr, options(nostack, preserves_flags)) };
 }
 
-/// Faz o `TTBR0_EL1` desta CPU ser o da tarefa que vai rodar: `root == 0` é tarefa do kernel (a
-/// raiz vazia). Só escreve quando a raiz muda; sem ASID, trocar descarta o TLB local.
+/// Põe no `TTBR0_EL1` a raiz da tarefa que vai rodar (`0`: a raiz vazia); só escreve se mudou.
 ///
 /// # Safety
-/// EL1 com a IRQ mascarada, depois de `init_user` nesta CPU; `root` é a raiz de um espaço de
-/// usuário válido, só da metade baixa.
+/// EL1, mascarada, depois de `init_user` nesta CPU; `root` é de um espaço de usuário válido.
 pub unsafe fn switch_space(root: u64) {
     let target = if root == 0 {
         EMPTY_ROOT.load(Ordering::Acquire)
@@ -79,14 +74,10 @@ pub unsafe fn switch_space(root: u64) {
     cpu.active_root.store(target, Ordering::Relaxed);
 }
 
-/// Primeira volta a EL0: a pilha do kernel desta tarefa volta ao topo `kernel_top` (a próxima
-/// exceção de EL0 a usa), `SP_EL0` recebe `sp`, `ELR_EL1` recebe `entry`, `SPSR_EL1` é EL0t com
-/// `DAIF` limpo, `TPIDR_EL0` e `TPIDRRO_EL0` zeram e todo registrador vai a zero (`x0`/`x1` levam
-/// `arg0` e `arg1`). Nunca volta.
-///
+/// Primeira volta a EL0: `SP_EL1` no topo, EL0t com `DAIF` limpo, registradores zero (`x0` e `x1`
+/// levam `arg0` e `arg1`). Nunca volta.
 /// # Safety
-/// EL1h com a IRQ mascarada. `kernel_top` é o fim, alinhado a 16, da pilha desta tarefa; `entry`
-/// e `sp` são de usuário e `sp` é alinhado a 16 (pelo kernel).
+/// EL1h, mascarada. `kernel_top` é o topo da pilha desta tarefa; `entry` e `sp` são de usuário.
 pub unsafe fn enter_user(entry: u64, sp: u64, arg0: u64, arg1: u64, kernel_top: u64) -> ! {
     // SAFETY: o contrato da função; `eret` para EL0t é o fim de uma exceção sintética.
     unsafe {

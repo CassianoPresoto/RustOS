@@ -5,12 +5,13 @@
 > de syscall, handles, ABI nativa), como o primeiro programa chega à memória, e quais
 > decisões do dono o desenho aplica.
 
-**Estado: desenho aprovado no #9 (2026-11-18). Nada aqui está implementado.** A ABI de
+**Estado: desenho aprovado no #9 (2026-11-18). A fatia 4a está implementada ([abaixo](#a-fatia-4a-como-entrou)); as demais, não.** A ABI de
 syscall e o formato de executável são contrato que o mundo de fora enxerga (caso 6 do
 [`AGENTS.md`](../../AGENTS.md)), e crate novo em `core/` e pasta nova de primeiro nível são
 o caso 1; por isso o desenho nasceu num PR em Draft só com docs. O dono aprovou as nove
 [decisões pedidas](#as-decisões-do-dono) sem mudança. O código vem em PRs seguintes, e
-este capítulo passa a descritivo à medida que cada fatia entra.
+este capítulo passa a descritivo à medida que cada fatia entra: o que a 4a tornou verdade está
+em [A fatia 4a, como entrou](#a-fatia-4a-como-entrou), e o resto do texto continua sendo desenho.
 
 Fase 4 do [roadmap](08_roadmap.md). Pesquisa de origem, com as marcas de
 verificação: `syscalls-processes.md` (2026-11-17). O modelo de controle de acesso
@@ -30,7 +31,7 @@ que só diminuem, sem uid/gid no núcleo.
 
 ## Estado e escopo
 
-### O que o código de hoje já dá à fase
+### O que o código já dava à fase (antes da 4a)
 
 | Fato | Onde | Consequência |
 | --- | --- | --- |
@@ -54,7 +55,7 @@ número novo no [SDD 07](07_desempenho_e_recursos.md).
 
 | Fatia | Entrega | Pronto quando |
 | --- | --- | --- |
-| 4a | Entrada de syscall e saída para anel 3/EL0 nas duas ISAs; `PageFlags.user`; `Fault.from_user`; `#DB` com IST; cópia usuário↔kernel; espaço de **um** processo, sem objetos; **limpeza da pilha do kernel na volta ao usuário** (**paga** [DEBT-0059](../tech-debt/0059-estado-do-chacha20-derramado-na-pilha-no-x86.md)); a troca para o par `swapgs` e os MSRs de syscall em cada CPU; `nop`, `clock_get_monotonic`, `random_get`, `process_exit` e **`debug_write(ptr, len)` provisória, sem handle**; um programa embutido no kernel só para esta fatia | `hello` imprime de anel 3 e de EL0; falha de usuário mata o processo e o kernel segue (**paga** [DEBT-0012](../tech-debt/0012-excecao-de-usuario-so-para-a-cpu.md)) |
+| 4a (**feita**) | Entrada de syscall e saída para anel 3/EL0 nas duas ISAs; `PageFlags.user`; `Fault.from_user`; `#DB` com IST; cópia usuário↔kernel; espaço de **um** processo, sem objetos; **limpeza da pilha do kernel na volta ao usuário** (pagou a dívida do resíduo do ChaCha20 na pilha); a troca para o par `swapgs` e os MSRs de syscall em cada CPU; `nop`, `clock_get_monotonic`, `random_get`, `process_exit` e **`debug_write(ptr, len)` provisória, sem handle**; um programa embutido no kernel só para esta fatia | `hello` imprime de anel 3 e de EL0; falha de usuário mata o processo e o kernel segue (pagou a dívida da exceção de usuário só para a CPU) |
 | 4b | `core/cpio`, `core/elf`; a árvore de regiões em `core/mm/src/vmar.rs`, **interna ao kernel** (o carregador mapeia frames direto, sem objeto VMO nem VMAR e sem handle); módulo do Limine; `user/` (runtime e `init`); o xtask monta o initramfs | O `init` do initramfs roda, imprime pelo `debug_write` provisório e sai; o smoke exige a linha dele |
 | 4c | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (muda a assinatura da 4a: a ABI é provisória até aqui); página zero; ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; ***shootdown* de TLB** e parada de thread em outra CPU na morte do processo (**paga** [DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md)); o `init` recebe os handles pelo canal de boot | Um processo cria outro, que escreve no console por um handle que recebeu |
 | 4d | SIMD de usuário, canal de eventos do processo, teste de `xmm0`/`v0` entre processos | Dois processos preservam `xmm0`/`v0`; o culpado de uma falha chega ao pai (**paga** [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md)) |
@@ -64,6 +65,70 @@ número novo no [SDD 07](07_desempenho_e_recursos.md).
 **A ABI da 4a e da 4b é provisória.** Só `process_exit`, `nop`, `clock_get_monotonic` e
 `random_get` já têm a forma final; `debug_write` muda na 4c. A ABI nativa é experimental
 até o fim da fase 5, então a mudança não quebra contrato.
+
+## A fatia 4a, como entrou
+
+**Descritivo.** O que a 4a (PR `feat/phase4a-user-entry`) tornou verdade, nas duas ISAs. O resto do
+capítulo segue como desenho. Os números estão em
+[SDD 07](07_desempenho_e_recursos.md#syscall-nula-e-limpeza-da-pilha-fatia-4a).
+
+| Peça | Onde mora |
+| --- | --- |
+| Contrato numérico (`Syscall`, `Status`, `Rights`, `Handle` de 64 bits, `ProcessEvent`, mensagem de boot, `USER_MIN`, `USER_TOP`, filtro do `debug_write`) | `core/hal/src/abi.rs`, com teste de layout e de cada número |
+| `PageFlags.user`, `Fault.from_user`, `Handlers.syscall` e `Handlers.leave_user` | `core/hal/src/{paging,interrupt}.rs`; o mapeador recusa folha de usuário fora de `[USER_MIN, USER_TOP)` e folha de kernel na metade baixa |
+| `UserRange` e a metade de usuário das tabelas (`adopt_top_entries`, `release_user_half`) | `core/mm/src/{user,tables}.rs` |
+| x86_64: `SYSCALL` e `SYSRET`, `swapgs`, entrada paranoica de NMI, `#DF`, `#MC` e `#DB` (IST4), `usercopy`, `CpuPrefix`, `sysret` puro | `arch/x86_64/src/{traps,user,usercopy,prefix,sysret}.rs` |
+| aarch64: vetores de EL0, `SVC`, `eret`, `usercopy` com `ldtr`/`sttr`, `CNTKCTL_EL1`, `TTBR0_EL1`, `WXN` | `arch/aarch64/src/{exception,user,usercopy,mmu,prefix}.rs` |
+| Programa de usuário de teste (`global_asm!` em `arch/<isa>`, atrás da feature `selftest`) | `arch/<isa>/src/user_blob.rs` |
+| Processo, espaço de usuário, syscalls, limpeza da pilha | `kernel/src/{process,uspace,syscall,scrub}.rs`; o autoteste em `kernel/src/process/selftest.rs` |
+| `check-layers` com `user/` e `arch/<isa>-user` | `xtask/src/checks/layers.rs` (o teste de que o `kernel/` não liga `arch/x86_64-user` nasceu vermelho) |
+
+**O que a 4a faz, por ISA.**
+
+| | x86_64 | aarch64 |
+| --- | --- | --- |
+| Entrada | `SYSCALL` no `LSTAR`; `EFER.SCE`, `STAR`, `LSTAR` e `FMASK` gravados em cada CPU em `load_cpu`; o quadro é o mesmo `TrapFrame` de 22 palavras das exceções | `svc #0` no vetor 8; o quadro de 288 bytes ganhou `sp_el0` e `tpidr_el0` |
+| Pilha de entrada | `gs:[kernel_rsp]` e o `RSP0` da TSS desta CPU, escritos na troca para a tarefa de usuário | `SP_EL1`, que a primeira volta põe no topo da pilha da tarefa |
+| Saída | `SYSRET` se a conferência passa (`RCX == RIP`, `R11 == RFLAGS`, seletores, `RIP < USER_TOP`, sem `RF` nem `TF`), senão `IRETQ` | `eret` |
+| `swapgs` | Um por transição de anel, pelo `CS` salvo; NMI, `#DF`, `#MC` e `#DB` decidem pelo sinal de `IA32_GS_BASE` | não há |
+| Cópia | `rep movsb` entre `stac` e `clac` (só com SMAP), com *fixup* no `rip` da instrução | `ldtrb`/`sttrb` com o PAN ligado, com *fixup* no `elr` |
+| Espaço | `CR3` por processo, com as 256 entradas do kernel copiadas por ponteiro; sem PCID, só se escreve o `CR3` quando a raiz muda | `TTBR0_EL1` por processo, uma raiz vazia para tarefa de kernel, `EPD0` limpo, ASID 0 e `tlbi vmalle1` a cada troca de raiz |
+| Contador em usuário | `rdtsc` (`CR4.TSD = 0`) | `CNTKCTL_EL1.EL0VCTEN` |
+
+**Divergências do desenho, todas sem mudar contrato** (decisões do agente):
+
+| Decisão | O que ficou | Por quê |
+| --- | --- | --- |
+| Syscall roda mascarada | O despacho roda com a IRQ mascarada, como uma exceção | Nenhuma chamada da 4a bloqueia; a 4c liga a IRQ no despacho junto com `object_wait_one` |
+| `IRETQ` que falha | A saída para o usuário confere `RIP` e `RSP` canônicos no quadro e mata o processo se algum não for, em vez do *fixup* nos vetores 11, 12 e 13 | `RSP` não canônico é a única causa que o usuário controla; o *fixup* é a [DEBT-0077](../tech-debt/0077-iretq-sem-fixup-de-falha-fora-do-rip-e-do-rsp.md) |
+| `#DB` do usuário | O stub da IST4 faz `swapgs`, copia o quadro para a pilha da tarefa e segue como entrada normal; o processo morre na pilha da tarefa | Como o SDD manda; exercido pelo caso `fault_trap` (`TF` ligado) |
+| Pilha de falhas do aarch64 | O `vector_fault` lê o topo pelo `TPIDR_EL1` e guarda o `x0` no `TPIDRRO_EL0`; exceção síncrona de EL1h segue na pilha de falhas, sem o teste de estouro da pilha da tarefa | O `SP_EL0` agora é a pilha do usuário; a ordem do Linux fica na [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md) |
+| `T0SZ` do aarch64 | Fica em 16 (48 bits), o que o Limine deixa; o mapeador só mapeia abaixo de `USER_TOP` | Mudar para 17 não ganha nada, e o código de serial precoce já confere o 16 |
+| Limpeza da pilha | A volta ao usuário repinta a pilha do kernel abaixo do quadro com `STACK_PAINT`, varrendo até 128 bytes limpos; o `arch/` repinta os 256 bytes logo abaixo sem usar pilha | Custo medido; a heurística é a [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md) |
+| Onde mora o programa de teste | Blob de `global_asm!` em `arch/<isa>/src/user_blob.rs`, na seção `.text` do kernel, copiado para uma página de usuário em `0x40_0000` | O `asm!` só mora em `arch/` (regra 4 do guidelines 04) e o `kernel/` nunca liga `arch/<isa>-user` (regra 12); código de teste fica atrás da feature `selftest` |
+| `simd` | A tarefa de usuário nasce com `simd: true` | Sem área de estado, o `xmm0` e o `v0` vazariam entre tarefas; a 4d fecha o resto |
+| `kernel_half_in_sync` | `Process::load` confere que as 256 entradas altas da raiz nova são as da raiz do kernel e recusa o processo se não forem | Entrada nova do kernel depois da cópia dessincronizaria as raízes |
+| Filtro do `debug_write` | Cada linha sai com `[user] ` na frente | O usuário não imita uma linha `[rustos]` do smoke |
+
+**Medido na QEMU 11.1.3** (o que o desenho tinha como NÃO VERIFICADO e a pesquisa só tinha de fonte
+secundária):
+
+| Item | Resultado |
+| --- | --- |
+| PAN e `LDTR`/`STTR` (aarch64) | Com `PAN` ligado, a cópia por `ldtrb`/`sttrb` funciona (o `debug_write` do `hello` lê o buffer do usuário) e um `ldr` comum do kernel numa página de usuário dá falta de permissão em EL1. A rotina **não** abre a janela do PAN |
+| SMAP (x86_64) | Um `mov` comum do kernel numa página de usuário dá `#PF` de proteção; a cópia entre `stac` e `clac` funciona |
+| `WXN` sobre EL0 (aarch64) | Uma página de código de usuário mapeada de propósito como RWX (o mapeador foi desligado só nesse teste, que não está no código) executa sem o `WXN` e dá falta de instrução em EL0 com ele. O `WXN` vale para EL0. Ligado depois de `Vm::activate` em cada CPU |
+| `SVC` vindo de EL0 | `EC = 0x15`; o vetor 8 o despacha pelo `x8` |
+| Privilegiada em EL0 | `msr ttbr0_el1` dá `EC 0x18`, que o decodificador trata como instrução ilegal; `brk` de EL0 dá `EC 0x3C` e mata o processo |
+| `hlt` e `TF` em anel 3 | `hlt` dá `#GP`; `popf` com `TF` dá `#DB` na IST4, com o processo morto na pilha da tarefa |
+| `SYSRET` | Passa o autoteste inteiro; o `IRETQ` fica de reserva e se pode ligar e desligar pelo autoteste (número no SDD 07) |
+
+**O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs): o `hello` em cada CPU
+ativa (`debug_write`, `clock_get_monotonic`, `random_get`, `process_exit`; o número desconhecido e
+`thread_exit` devolvem `NotSupported` e o processo segue); leitura de
+página do kernel; instrução privilegiada; `TF` ou `brk`; `sp` inválido (o kernel não cai ao voltar);
+a limpeza da pilha (2 KiB plantados na pilha do kernel somem com a limpeza e aparecem sem ela).
+Depois de cada falha o kernel segue e o caso seguinte roda.
 
 ### Divergências em relação ao roadmap
 
@@ -243,7 +308,7 @@ torna `XN` também a página gravável de EL0; o nome `EL0VCTEN`; e um `ERET` co
 
 | Passo | O quê |
 | --- | --- |
-| Vetores 8 a 11 | Hoje só param ([DEBT-0012](../tech-debt/0012-excecao-de-usuario-so-para-a-cpu.md)). Passam a salvar o quadro na `SP_EL1` da tarefa (a exceção vinda de EL0 usa `SP_EL1`) e a despachar por `EC` |
+| Vetores 8 a 11 | Antes da 4a só paravam. Passam a salvar o quadro na `SP_EL1` da tarefa (a exceção vinda de EL0 usa `SP_EL1`) e a despachar por `EC` |
 | `SP_EL0` | Na entrada de EL0 o quadro guarda o `SP_EL0` do usuário; a saída o restaura. **Nada do kernel usa `SP_EL0` depois disso** (o kernel roda em EL1h) |
 | Pilha de falhas | **O invariante "`SP_EL0` é sempre a pilha de falhas" é falso:** entre a entrada de EL0 e o prólogo que guarda `SP_EL0`, ele é o do usuário, e o `vector_fault` do [SDD 15](15_tarefas_e_preempcao.md) (`msr spsel, #0` e empilhar) empilharia na pilha do usuário. O desenho **adota a ordem do Linux**: toda exceção síncrona ou SError de EL1h entra **na pilha da tarefa** (`SP_EL1`), com o teste de estouro de pilha do `kernel_ventry` (**verificado**: `add sp, sp, x0` e `sub x0, sp, x0`, sem registrador livre, e `tbnz` no bit `THREAD_SHIFT`); **só no estouro** vai para a pilha de falhas (o `__bad_stack`, que guarda `x0` em `tpidr_el0`/`tpidrro_el0`). O teste por bit do `sp` exige a pilha alinhada ao dobro do tamanho: pilha de 32 KiB em 64 KiB de endereço (custo só de janela, não de memória), ou comparar o `sp` com o limite guardado na área por CPU |
 | Por que a ordem muda | O `vector_fault` de hoje também serve o `brk` que **volta** (`exception.rs`, [SDD 10](10_interrupcoes.md)) e passa a servir a falta recuperável do `usercopy`. Quem volta não pode empilhar numa pilha de falhas que a próxima falha reinicia do topo. Com a ordem do Linux, `brk`, `usercopy` e IRQ usam o mesmo caminho: a pilha da tarefa |
@@ -1008,7 +1073,7 @@ mesmo mecanismo serve a qualquer pai: ele escreve a mensagem e passa a ponta do 
 
 ## Falhas de usuário
 
-Hoje toda exceção não recuperável para a CPU ([DEBT-0012](../tech-debt/0012-excecao-de-usuario-so-para-a-cpu.md)). O desenho muda o destino de quem veio de usuário.
+Antes da 4a toda exceção não recuperável parava a CPU. O desenho muda o destino de quem veio de usuário.
 
 | Distinção | Como |
 | --- | --- |
@@ -1139,12 +1204,13 @@ usuário, então mexer no `init` não recompila o kernel.
 
 ### Linhas que o smoke passa a exigir
 
-Proposta; o texto final entra com o código. Em inglês, como toda saída serial.
+Em inglês, como toda saída serial. As da 4a valem hoje, no modo de teste; o boot normal as proíbe.
 
 | Linha | Fatia |
 | --- | --- |
-| `[rustos] user: entered ring3/el0` | 4a |
+| `[rustos] user: entered ring3/el0` (a primeira syscall do boot; o texto é o mesmo nas duas ISAs) | 4a |
 | `[rustos] user: fault contained (pid N)` | 4a |
+| `[rustos] user self-test: ok` (os casos acima) | 4a |
 | `[rustos] user: init loaded (N segments)` | 4b |
 | `[rustos] mitigations: kpti=… ` | 4e |
 | `[rustos] user: self-test ok` (handles, SIMD, falha, canal) | 4d |
@@ -1195,9 +1261,9 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 
 | Dívida | O que a fase faz |
 | --- | --- |
-| [DEBT-0012](../tech-debt/0012-excecao-de-usuario-so-para-a-cpu.md) Exceção de usuário só para a CPU | **Paga** na 4a (distinguir a origem, matar o processo) e fecha na 4d (canal de eventos) |
+| Dívida 0012, exceção de usuário só para a CPU | **Paga na 4a**: a origem se distingue pelo `CS` (x86_64) ou pelo grupo do vetor (aarch64), o processo morre e o kernel segue; o canal de eventos fecha na 4d |
 | [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md) SIMD sem trap | **Paga** na 4d: `simd: true` em toda thread de usuário |
-| [DEBT-0059](../tech-debt/0059-estado-do-chacha20-derramado-na-pilha-no-x86.md) Estado do ChaCha20 derramado na pilha | O gatilho é "a primeira volta ao usuário": **entra e é paga na 4a**. Limpa a pilha do kernel na saída para o usuário, como o Linux (`STACKLEAK_ERASE_NOCLOBBER` no retorno de syscall do x86 e `stackleak_erase_on_task_stack` em `ret_to_user` do arm64, ambos **verificados** nos `entry`). Mede o custo no `null_syscall` com e sem a limpeza; se pesar, só limpa a pilha que a chamada usou de fato (a marca d'água de `first_unpainted`, [SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)) |
+| Dívida 0059, estado do ChaCha20 derramado na pilha | **Paga na 4a**: a volta ao usuário repinta a pilha do kernel abaixo do quadro, até 128 bytes de pilha limpa (a heurística é a [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md)); custo medido no laço de syscall nula, com e sem a limpeza ([SDD 07](07_desempenho_e_recursos.md#syscall-nula-e-limpeza-da-pilha-fatia-4a)) |
 | [DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md) Kernel sem *shootdown* de TLB | O gatilho (espaço de usuário compartilhado entre núcleos) dispara. **Entra e é paga na 4c**, quando há thread em outra CPU e `unmap`: vetor novo de IPI no x86_64 sobre o mecanismo que já existe, `tlbi ...is` no aarch64 ([seção](#shootdown-de-tlb-debt-0055)). A regra de geração de PCID/ASID é da 4e |
 | [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md) Zerar página no x86 sem medida em hardware | O zerar entra no caminho da **falta de página de usuário**. A 4f mede a falta (primeiro toque, página zero, COW) nas duas ISAs; o do x86_64 só decide `stosq` contra `stosb` sob KVM ou metal (o gatilho da dívida): sob TCG a 4f registra o número e **deixa a dívida aberta** |
 | [DEBT-0054](../tech-debt/0054-heap-com-lock-global.md) Heap com lock global | O gatilho dispara (4c, processos criados em N núcleos). Medir no `bench`; pagar se a disputa passar de 10% |
@@ -1205,9 +1271,10 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 | [DEBT-0035](../tech-debt/0035-sve-sme-e-amx-sem-estado-por-tarefa.md) SVE, SME e AMX | O gatilho dispara, mas a fase **não liga** nada: o acesso trapeia e o processo morre. Reescrever o gatilho no PR da 4d |
 | [DEBT-0019](../tech-debt/0019-aleatorio-sem-fonte-de-hardware-fraco.md) Aleatório fraco | O ASLR é o primeiro consumidor de segurança: em CPU sem fonte de hardware o ASLR é fraco, e o boot o diz |
 | Dívida 0022, endereço do kernel no log (paga no #14) | O `ProcessEvent` e o `debug_write` seguem a mesma regra: nenhum endereço do kernel sai; o `Fault` leva só endereço de usuário |
-| [DEBT-0023](../tech-debt/0023-aarch64-sem-wxn.md) aarch64 sem `WXN` | O gatilho dispara (primeiro mapeamento de usuário). Ligar na 4a, junto com `PageFlags.user`, se o Arm ARM confirmar o efeito sobre EL0 |
-| Dívida 0037, pilha sem medida de pico (paga no #19: 16 KiB pelo pico medido) e [DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) | O gatilho da 0070 dispara na 4a: remede o pico com syscall e falta de página de usuário (a linha `stacks:` e o gate de 75% já existem) antes de manter os 16 KiB |
+| Dívida 0023, aarch64 sem `WXN` | **Paga na 4a**: o teste na QEMU confirmou o efeito sobre EL0 (uma página RWX de usuário deixa de executar com o `WXN`); a linha `protections:` do aarch64 ganhou `wxn` |
+| Dívida 0037, pilha sem medida de pico (paga no #19: 16 KiB pelo pico medido) e [DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) | A 4a remediu com syscall e falta fatal: 2,0 KiB e 1,6 KiB de 16 (`release`). Os 16 KiB ficam; a 0070 segue aberta até a 4c e a 4f medirem handles, canais e a falta resolvida |
 | [DEBT-0052](../tech-debt/0052-afinidade-so-no-spawn.md) Afinidade só no `spawn` | Não dispara: a ABI nativa não tem afinidade |
+| **Abertas pela 4a:** [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md) (limpeza da pilha até 128 bytes limpos), [DEBT-0077](../tech-debt/0077-iretq-sem-fixup-de-falha-fora-do-rip-e-do-rsp.md) (`iretq` sem *fixup*), [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md) (EL1h na pilha de falhas), [DEBT-0079](../tech-debt/0079-ac-aberto-na-irq-no-meio-da-copia-de-usuario.md) (`AC` na IRQ da cópia); [DEBT-0072](../tech-debt/0072-pilhas-de-excecao-sem-medida-permanente.md) agora inclui a IST4 | A 4a fecha os itens dela |
 | **A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados (4c; gatilho: o primeiro programa que os produza, ou os grupos de recursos da fase 9); imagem de usuário sem ASLR (4b; [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
 
 **Pagas antes da fase:** 0011 (GIC e timer só na CPU 0), 0018 (frames sem cache por CPU), 0036
@@ -1313,7 +1380,7 @@ thread, leitura e escrita do contexto de outra thread e uma chamada de retomada,
 decisão de AMX e SVE que a escolha adia. **A escolha é reversível só com esse trabalho**: o
 canal de eventos da fase 4 vira o início dele (a mensagem de `Fault` já leva o que o sinal
 precisa), mas a fase 5 paga a suspensão e a retomada. O canal paga a
-[DEBT-0012](../tech-debt/0012-excecao-de-usuario-so-para-a-cpu.md). **O que muda:**
+a dívida 0012, paga na 4a. **O que muda:**
 `hal::Fault.from_user`; `hal::abi::ProcessEvent`; `kernel/src/process.rs`; o último argumento
 de `process_create`.
 
@@ -1397,7 +1464,7 @@ Só o que sobrou; cada item é pré-requisito da fatia que o usa.
 
 | Item | Fatia |
 | --- | --- |
-| **ARM ARM** (as páginas do developer.arm.com não renderizam sem JavaScript; os campos de registrador acima vêm do Linux): o `imm16` do SVC em `ISS[15:0]`; a tabela de `AP[2:1]` por nível de exceção; a regra do PAN com `LDTR`/`STTR`; o efeito do `WXN` sobre EL0; um `ERET` com estado ilegal; a versão e o efeito do `UAO`; o nome `EL0VCTEN` | 4a, 4e |
+| **ARM ARM** (as páginas do developer.arm.com não renderizam sem JavaScript; os campos de registrador acima vêm do Linux): o `imm16` do SVC em `ISS[15:0]`; a tabela de `AP[2:1]` por nível de exceção; um `ERET` com estado ilegal; a versão e o efeito do `UAO`; o nome `EL0VCTEN`. **Feitos na 4a, medidos na QEMU, não na ARM ARM:** a regra do PAN com `LDTR`/`STTR` e o efeito do `WXN` sobre EL0 ([A fatia 4a](#a-fatia-4a-como-entrou)) | 4a, 4e |
 | **Intel SDM** em PDF (só o espelho foi lido): o texto sobre *CPUID faulting* (`MSR` `0x140`); se a entrada de exceção limpa `NT` (o `IRETQ` do kernel com `NT = 1` dá `#GP`) | 4a |
 | Layout inicial da pilha do processo no aarch64, em fonte que não seja o `binfmt_elf.c` do Linux | 4b |
 | Limine: se o `trunk` de `limine-protocol` é o da 12.10.0 (conferir a revisão do pedido de módulo e da resposta no binário em uso) | 4b |

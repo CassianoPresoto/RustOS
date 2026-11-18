@@ -99,12 +99,10 @@ impl Default for CpuTables {
 static IDT: Table<[IdtEntry; IDT_LEN]> = Table(UnsafeCell::new([IdtEntry::MISSING; IDT_LEN]));
 static HANDLERS: AtomicPtr<Handlers> = AtomicPtr::new(ptr::null_mut());
 
-// Cada stub ocupa 16 bytes: o gate do vetor `v` aponta para `stubs + 16 * v`.
-// A entrada comum empilha os registradores na ordem de `TrapFrame`. Com o `CS` salvo em anel 3 o
-// `GS` ainda é o do usuário: um `swapgs` na entrada e outro na saída. NMI, `#DF`, `#MC` e `#DB`
-// podem cair em qualquer instrução (até antes do `swapgs` da `SYSCALL`): o sinal de
-// `IA32_GS_BASE` diz de que lado o `GS` está. A saída para o usuário limpa a pilha do kernel
-// e confere `RIP` e `RSP` canônicos, porque um `iretq` que falha já estaria com o `GS` trocado.
+// Cada stub ocupa 16 bytes: o gate do vetor `v` aponta para `stubs + 16 * v`. `CS` em anel 3 pede
+// `swapgs` na entrada e na saída; NMI, `#DF`, `#MC` e `#DB` decidem pelo sinal de `IA32_GS_BASE`.
+// A saída para o usuário limpa a pilha do kernel e exige `RIP` e `RSP` canônicos, porque um
+// `iretq` que falhasse já teria o `GS` do usuário.
 global_asm!(
     r#"
     .section .text.rustos_isr, "ax"
