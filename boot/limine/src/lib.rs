@@ -11,12 +11,17 @@ use core::ptr;
 use core::sync::atomic::Ordering;
 
 use rustos_hal::{
-    BootInfo, BootTimeline, BootloaderId, Channel, CpuDescriptor, FramebufferInfo, KernelImage,
-    MemoryRegion, PhysAddr, RegionKind, VirtAddr,
+    BootInfo, BootModule, BootTimeline, BootloaderId, Channel, CpuDescriptor, FramebufferInfo,
+    KernelImage, MemoryRegion, PAGE_SIZE, PhysAddr, RegionKind, VirtAddr,
 };
 
 pub use protocol::{BASE_REVISION, MpInfo};
-use protocol::{Framebuffer, MemmapEntry};
+use protocol::{File, Framebuffer, MemmapEntry};
+
+/// Maior endereço físico que as duas ISAs endereçam (52 bits).
+const PHYS_LIMIT: u64 = 1 << 52;
+/// Maior `string` de módulo que o kernel guarda; uma maior vira vazia.
+const MODULE_STRING_MAX: usize = 256;
 
 /// Entrada de um núcleo secundário: recebe o `MpInfo` do próprio núcleo (`RDI` ou `X0`).
 pub type CpuEntry = unsafe extern "C" fn(info: *const MpInfo) -> !;
@@ -153,6 +158,14 @@ impl BootInfo for LimineBoot {
         self.cpus.iter().map(move |info| cpu_descriptor(info, bsp))
     }
 
+    fn modules(&self) -> impl Iterator<Item = BootModule<'_>> + '_ {
+        // SAFETY: as respostas seguem válidas enquanto a memória do bootloader não é reaproveitada.
+        let response = unsafe { requests::modules() };
+        // SAFETY: o Limine garante `module_count` ponteiros, nulos ou de `limine_file` válidos.
+        let files = response.into_iter().flat_map(|r| unsafe { r.files() });
+        files.filter_map(|file| module_info(file, self.direct_map_offset, self.entries))
+    }
+
     fn framebuffer(&self) -> Option<FramebufferInfo> {
         // SAFETY: as respostas seguem válidas enquanto a memória do bootloader não é reaproveitada.
         let response = unsafe { requests::framebuffer() }?;
@@ -160,6 +173,42 @@ impl BootInfo for LimineBoot {
         let framebuffers = unsafe { response.framebuffers() };
         framebuffers.first().and_then(|fb| framebuffer_info(fb))
     }
+}
+
+/// Um módulo do Limine para o do núcleo. `None` se a faixa não é a de um arquivo carregado.
+fn module_info(file: &File, hhdm: u64, entries: &[&MemmapEntry]) -> Option<BootModule<'static>> {
+    let (start, len) = module_range(file.address.addr() as u64, file.size, hhdm, entries)?;
+    // SAFETY: o Limine entrega `string` nula ou C terminada em zero, na memória das respostas.
+    let string = unsafe { c_str(file.string) };
+    Some(BootModule {
+        start: PhysAddr::new(start),
+        len,
+        string: string
+            .filter(|text| text.len() <= MODULE_STRING_MAX)
+            .unwrap_or(""),
+    })
+}
+
+/// A faixa física `(início, tamanho)` de um módulo, a partir do endereço no HHDM que o Limine
+/// deu. Recusa endereço nulo ou abaixo do HHDM, desalinhado, tamanho zero, faixa que transborda
+/// ou passa de 52 bits, e faixa que toca RAM do alocador (o Limine promete que não toca).
+fn module_range(virt: u64, size: u64, hhdm: u64, entries: &[&MemmapEntry]) -> Option<(u64, u64)> {
+    if virt == 0 || size == 0 {
+        return None;
+    }
+    let start = virt.checked_sub(hhdm)?;
+    let end = start.checked_add(size)?;
+    if !start.is_multiple_of(PAGE_SIZE) || end > PHYS_LIMIT {
+        return None;
+    }
+    let touches_ram = entries.iter().any(|entry| {
+        let ram = matches!(
+            entry.kind,
+            protocol::MEMMAP_USABLE | protocol::MEMMAP_BOOTLOADER_RECLAIMABLE
+        );
+        ram && entry.base < end && start < entry.base.saturating_add(entry.length)
+    });
+    (!touches_ram).then_some((start, size))
 }
 
 /// Só 32 bpp em RGB com canais de 8 bits; outro formato fica sem tela.
@@ -283,6 +332,88 @@ mod tests {
         assert_eq!(
             cpu_descriptor(&other, 3).token,
             ptr::from_ref(&other).addr()
+        );
+    }
+
+    const HHDM: u64 = 0xffff_8000_0000_0000;
+
+    fn entry(base: u64, length: u64, kind: u64) -> MemmapEntry {
+        MemmapEntry { base, length, kind }
+    }
+
+    /// Módulo de `size` bytes em `phys`, entre RAM `Usable` antes e depois.
+    fn range(phys: u64, size: u64) -> Option<(u64, u64)> {
+        let ram = [
+            entry(0, 0x20_0000, protocol::MEMMAP_USABLE),
+            entry(
+                0x80_0000,
+                0x100_0000,
+                protocol::MEMMAP_BOOTLOADER_RECLAIMABLE,
+            ),
+            entry(
+                0x40_0000,
+                0x40_0000,
+                protocol::MEMMAP_EXECUTABLE_AND_MODULES,
+            ),
+        ];
+        module_range(HHDM + phys, size, HHDM, &ram.each_ref().map(|entry| entry))
+    }
+
+    #[test]
+    fn accepts_a_page_aligned_module_outside_ram() {
+        assert_eq!(range(0x40_0000, 512), Some((0x40_0000, 512)));
+        assert_eq!(range(0x7f_f000, 0x1000), Some((0x7f_f000, 0x1000)));
+    }
+
+    #[test]
+    fn rejects_module_addresses_the_bootloader_cannot_have_given() {
+        assert_eq!(module_range(0, 512, HHDM, &[]), None);
+        assert_eq!(module_range(HHDM - 0x1000, 512, HHDM, &[]), None);
+        assert_eq!(range(0x40_0010, 512), None);
+    }
+
+    #[test]
+    fn rejects_empty_or_overflowing_modules() {
+        assert_eq!(range(0x40_0000, 0), None);
+        assert_eq!(range(0x40_0000, u64::MAX), None);
+        assert_eq!(range(0x40_0000, PHYS_LIMIT), None);
+        assert_eq!(module_range(!0xfff, 0x2000, 0, &[]), None);
+    }
+
+    #[test]
+    fn rejects_a_module_that_overlaps_allocator_memory() {
+        assert_eq!(range(0x1f_f000, 0x2000), None);
+        assert_eq!(range(0x7f_f000, 0x2000), None);
+        assert_eq!(range(0x10_0000, 0x1000), None);
+    }
+
+    fn file(address: u64, size: u64, string: &'static core::ffi::CStr) -> File {
+        protocol::test_file(address, size, string.as_ptr())
+    }
+
+    #[test]
+    fn translates_a_module_with_its_string() {
+        let module = module_info(&file(HHDM + 0x40_0000, 100, c"initramfs"), HHDM, &[]);
+        let module = module.expect("módulo válido");
+        assert_eq!((module.start, module.len), (PhysAddr::new(0x40_0000), 100));
+        assert_eq!(module.string, "initramfs");
+    }
+
+    #[test]
+    fn a_module_string_that_is_null_or_too_long_is_empty() {
+        let mut null = file(HHDM + 0x40_0000, 100, c"");
+        null.string = core::ptr::null();
+        assert_eq!(module_info(&null, HHDM, &[]).unwrap().string, "");
+        let long = c"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\
+            0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\
+            0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\
+            0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0";
+        assert_eq!(long.count_bytes(), MODULE_STRING_MAX + 1);
+        assert_eq!(
+            module_info(&file(HHDM + 0x40_0000, 1, long), HHDM, &[])
+                .unwrap()
+                .string,
+            ""
         );
     }
 

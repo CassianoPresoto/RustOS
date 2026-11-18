@@ -21,7 +21,7 @@ pub mod paging;
 pub mod redact;
 
 pub use addr::{PhysAddr, VirtAddr};
-pub use boot::{BootInfo, BootTimeline, BootloaderId, CpuDescriptor, KernelImage};
+pub use boot::{BootInfo, BootModule, BootTimeline, BootloaderId, CpuDescriptor, KernelImage};
 pub use clock::TickScale;
 pub use cmdline::{BootParams, EarlyPanic};
 pub use console::Console;

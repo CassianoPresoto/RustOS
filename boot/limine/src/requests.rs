@@ -4,8 +4,8 @@
 use crate::protocol::{
     BASE_REVISION, BOOTLOADER_INFO_ID, BaseRevision, BootloaderInfoResponse, EXECUTABLE_ADDRESS_ID,
     EXECUTABLE_CMDLINE_ID, ExecutableAddressResponse, ExecutableCmdlineResponse, FRAMEBUFFER_ID,
-    FramebufferResponse, HHDM_ID, HhdmResponse, MEMMAP_ID, MP_REQUEST_X2APIC, Marker,
-    MemmapResponse, MpRequest, MpResponse, PERFORMANCE_ID, PerformanceResponse,
+    FramebufferResponse, HHDM_ID, HhdmResponse, MEMMAP_ID, MODULE_ID, MP_REQUEST_X2APIC, Marker,
+    MemmapResponse, ModuleResponse, MpRequest, MpResponse, PERFORMANCE_ID, PerformanceResponse,
     REQUESTS_END_MARKER, REQUESTS_START_MARKER, Request,
 };
 
@@ -44,6 +44,10 @@ static EXECUTABLE_ADDRESS: Request<ExecutableAddressResponse> = Request::new(EXE
 #[used]
 #[cfg_attr(target_os = "none", unsafe(link_section = ".requests"))]
 static EXECUTABLE_CMDLINE: Request<ExecutableCmdlineResponse> = Request::new(EXECUTABLE_CMDLINE_ID);
+
+#[used]
+#[cfg_attr(target_os = "none", unsafe(link_section = ".requests"))]
+static MODULE: Request<ModuleResponse> = Request::new(MODULE_ID);
 
 /// O x2APIC só existe no x86_64; no aarch64 o bit não significa nada.
 #[used]
@@ -109,6 +113,13 @@ pub unsafe fn executable_cmdline() -> Option<&'static ExecutableCmdlineResponse>
 pub unsafe fn framebuffer() -> Option<&'static FramebufferResponse> {
     // SAFETY: repassada a quem chama.
     unsafe { FRAMEBUFFER.response() }
+}
+
+/// # Safety
+/// Ver `Request::response`.
+pub unsafe fn modules() -> Option<&'static ModuleResponse> {
+    // SAFETY: repassada a quem chama.
+    unsafe { MODULE.response() }
 }
 
 /// # Safety
