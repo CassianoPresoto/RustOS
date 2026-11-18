@@ -88,8 +88,8 @@ impl MmuControl for Aarch64Mmu {
         // SAFETY: as tabelas do kernel são conferidas sem W+X; ligar `WXN` não muda nenhuma
         // permissão delas, só trava o que um erro futuro criasse.
         unsafe {
-            asm!("msr sctlr_el1, {}", "isb", in(reg) sctlr, options(nostack, preserves_flags))
-        };
+            asm!("msr sctlr_el1, {}", "isb", in(reg) sctlr, options(nostack, preserves_flags));
+        }
     }
 }
 

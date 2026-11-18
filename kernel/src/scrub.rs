@@ -34,19 +34,13 @@ static MEASURING: AtomicBool = AtomicBool::new(true);
 /// O maior fundo que a pilha de uma tarefa de usuário alcançou na volta ao usuário, em bytes.
 static DEEPEST: AtomicUsize = AtomicUsize::new(0);
 
-#[cfg_attr(
-    not(feature = "selftest"),
-    allow(dead_code, reason = "só o modo de teste desliga a limpeza")
-)]
+#[cfg(feature = "selftest")]
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
     crate::platform::set_stack_clean(on);
 }
 
-#[cfg_attr(
-    not(feature = "selftest"),
-    allow(dead_code, reason = "só o modo de teste desliga as medidas")
-)]
+#[cfg(feature = "selftest")]
 pub fn set_measuring(on: bool) {
     MEASURING.store(on, Ordering::Relaxed);
 }
@@ -55,10 +49,7 @@ pub fn measuring() -> bool {
     MEASURING.load(Ordering::Relaxed)
 }
 
-#[cfg_attr(
-    not(feature = "selftest"),
-    allow(dead_code, reason = "lido só pelo modo de teste")
-)]
+#[cfg(feature = "selftest")]
 pub fn deepest() -> usize {
     DEEPEST.load(Ordering::Relaxed)
 }

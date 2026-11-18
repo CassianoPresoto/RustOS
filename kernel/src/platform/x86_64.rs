@@ -702,14 +702,17 @@ pub fn copy_to_user(range: UserRange, src: &[u8]) -> bool {
 }
 
 /// Esta ISA tem saída rápida de syscall (`SYSRET`) que se liga e desliga.
+#[cfg(feature = "selftest")]
 pub const HAS_FAST_RETURN: bool = true;
 
 /// Liga ou desliga a saída por `SYSRET` (o `IRETQ` é sempre o caminho de reserva).
+#[cfg(feature = "selftest")]
 pub fn set_fast_return(on: bool) {
     rustos_arch_x86_64::set_sysret(on);
 }
 
 /// Liga ou desliga a limpeza da pilha do kernel na volta ao usuário (o `arch/` pula o gancho).
+#[cfg(feature = "selftest")]
 pub fn set_stack_clean(on: bool) {
     rustos_arch_x86_64::set_scrub(on);
 }

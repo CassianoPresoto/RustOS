@@ -221,7 +221,7 @@ fn terminate(event: ProcessEvent) -> ! {
     // SAFETY: `raw` é o `Box::into_raw` de `spawn`, guardado na tarefa e tirado dela agora.
     let process = unsafe { Box::from_raw(ptr::with_exposed_provenance_mut::<Process>(raw)) };
     let pid = process.pid;
-    let cpu = crate::percpu::pinned(|cpu| cpu.index());
+    let cpu = crate::percpu::pinned(crate::percpu::PerCpu::index);
     process.space.destroy();
     if event.kind == event_kind::EXIT {
         kprintln!(
