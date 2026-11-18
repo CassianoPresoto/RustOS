@@ -534,7 +534,8 @@ Medido na QEMU 11.1.3 num Mac com Apple Silicon: aarch64 em HVF, x86_64 em TCG (
 - A leitura custa o décimo da escrita porque não aloca nem zera. O aarch64 gasta 0,15 µs só para entrar na exceção, achar a região, mapear a página zero e voltar.
 - No x86_64 o primeiro toque custa o triplo da cópia da página zero, embora as duas aloquem e zerem um frame. **Hipótese, não medida:** o primeiro laço toca memória da máquina que o host da QEMU ainda não paginou (a primeira escrita num frame novo do convidado é uma falta do host); a cópia reaproveita frames que o primeiro laço já tocou. Não afeta o aarch64 em HVF.
 - O IPI de ida e volta de 8 µs bate com o `ipi round trip` de 8 a 10 µs da seção de SMP deste capítulo (o mesmo TCG): o custo é a QEMU entregar a interrupção à outra CPU, não o `invlpg`. Só vale para comparar o RustOS consigo mesmo ([DEBT-0122](../tech-debt/0122-shootdown-sem-medida-em-kvm-nem-lote.md)).
-- O controle do teste (a parte remota desligada) deixa a tradução velha viva no x86_64 em TCG e **não** a deixa no aarch64 em HVF: a propagação do `tlbi` local no HVF é do hardware, e o gate é só o caso com a invalidação ligada.
+- O controle do teste (a parte remota desligada) deixa a tradução velha viva no x86_64 em TCG e no aarch64 em TCG (`RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx`, o último passo do `make pr`) e **não** a deixa no aarch64 em HVF: a propagação do `tlbi` local no HVF é do hardware, e o gate é só o caso com a invalidação ligada.
+- **aarch64 em TCG** (uma execução, a do `make pr`): primeiro toque 13,4 µs, leitura 3,1 µs, cópia da página zero 25,9 µs e 4,0 µs por invalidação. A cópia custa 8 vezes o primeiro toque porque o `tlbi ...is` esvazia o TLB de software de todas as CPUs da QEMU; no HVF o mesmo `tlbi` custa 0,13 a 0,21 µs.
 
 **Memória do menor processo (o `init`), antes e depois**, linha `user: init load` (`make smoke`, as duas ISAs dão o mesmo):
 

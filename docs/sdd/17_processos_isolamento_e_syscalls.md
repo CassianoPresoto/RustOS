@@ -334,7 +334,7 @@ A cópia usuário↔kernel resolve do mesmo jeito (`Handlers.copy_fault`): um `d
 | A página zero nasce no primeiro uso | `ZERO_FRAME` por `compare_exchange` | O boot normal não a usa, e duas CPUs que a criam juntas ficam com uma só |
 | `.bss` preguiçoso só em segmento gravável | `eager = ceil((lead + filesz) / 4096)` páginas | Uma página que mistura arquivo e `.bss` já tem o arquivo; segmento só de leitura com cauda zero é raro |
 | Sem lock por espaço na falta | Uma thread por processo | [DEBT-0120](../tech-debt/0120-falta-de-pagina-sem-lock-por-espaco.md): o gatilho é o primeiro `thread_create` |
-| O controle do teste de *shootdown* é só informação | Sem a parte remota a tradução velha sobrevive: **sim** no x86_64 (TCG), **não** no aarch64 em HVF | No HVF o hardware pode propagar o `tlbi` local; o gate é só o caso com a invalidação ligada |
+| O controle do teste de *shootdown* é só informação | Sem a parte remota a tradução velha sobrevive: **sim** no x86_64 (TCG) e no aarch64 em TCG, **não** no aarch64 em HVF | No HVF o hardware pode propagar o `tlbi` local; o gate é só o caso com a invalidação ligada |
 
 **O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs; linha `user self-test:` com `fault resolver`, `lazy program` e `tlb shootdown`):
 
