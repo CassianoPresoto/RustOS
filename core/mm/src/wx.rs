@@ -2,6 +2,8 @@
 //! mesmo tempo (guidelines 09), cada seção da imagem tem a permissão que o linker
 //! script deu, e a metade baixa e o alias da imagem no mapa direto não existem.
 
+use core::fmt;
+
 use rustos_hal::{Mapping, PAGE_SIZE, PageFlags};
 
 /// Menor endereço que o kernel usa nas duas ISAs (o do `TTBR1_EL1` com 48 bits; no
@@ -20,7 +22,7 @@ pub struct Section {
     pub flags: PageFlags,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Violation {
     /// Página gravável e executável.
     WriteExecute(u64),
@@ -36,6 +38,21 @@ pub enum Violation {
     ImageAlias(u64),
     /// A faixa `.data.rel.ro` não contém a tabela relocada que o kernel plantou nela.
     RelroMissing,
+}
+
+/// Os endereços saem em hexadecimal, o que o filtro do log reconhece (SDD 09).
+impl fmt::Debug for Violation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WriteExecute(virt) => write!(f, "WriteExecute({virt:#x})"),
+            Self::ExecuteOutsideText(virt) => write!(f, "ExecuteOutsideText({virt:#x})"),
+            Self::SectionFlags(name, virt) => write!(f, "SectionFlags({name:?}, {virt:#x})"),
+            Self::SectionUnmapped(name) => write!(f, "SectionUnmapped({name:?})"),
+            Self::LowerHalf(virt) => write!(f, "LowerHalf({virt:#x})"),
+            Self::ImageAlias(virt) => write!(f, "ImageAlias({virt:#x})"),
+            Self::RelroMissing => f.write_str("RelroMissing"),
+        }
+    }
 }
 
 /// Recebe as folhas, em qualquer ordem, e diz no fim se alguma regra falhou.
@@ -214,6 +231,19 @@ mod tests {
             checker.visit(mapping);
         }
         checker.finish()
+    }
+
+    #[test]
+    fn violations_print_their_addresses_in_hex() {
+        use std::format;
+        assert_eq!(
+            format!("{:?}", Violation::WriteExecute(0xffff_8000_0000_1000)),
+            "WriteExecute(0xffff800000001000)"
+        );
+        assert_eq!(
+            format!("{:?}", Violation::SectionFlags(".text", 0x1000)),
+            "SectionFlags(\".text\", 0x1000)"
+        );
     }
 
     #[test]

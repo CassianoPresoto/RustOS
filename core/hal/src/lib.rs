@@ -6,6 +6,7 @@
 
 pub mod addr;
 pub mod boot;
+pub mod cmdline;
 pub mod console;
 pub mod cpu;
 pub mod display;
@@ -15,9 +16,11 @@ pub mod interrupt;
 pub mod io;
 pub mod memory;
 pub mod paging;
+pub mod redact;
 
 pub use addr::{PhysAddr, VirtAddr};
 pub use boot::{BootInfo, BootTimeline, BootloaderId, CpuDescriptor, KernelImage};
+pub use cmdline::{BootParams, EarlyPanic};
 pub use console::Console;
 pub use cpu::{Cpu, CpuLocal, Ipi, IpiKind, MAX_CPUS};
 pub use display::{Channel, FramebufferInfo};

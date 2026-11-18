@@ -69,7 +69,8 @@ pub use stack::{Continuation, call_on_stack};
 pub use sysreg::{features as cpu_features, rdtsc};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use traps::{
-    CpuTables, IstStacks, breakpoint, install as install_traps, load_cpu as load_cpu_tables,
+    CpuTables, IstStacks, breakpoint, install as install_traps,
+    install_early as install_early_traps, load_cpu as load_cpu_tables,
 };
 
 /// Base da COM1 no PC.

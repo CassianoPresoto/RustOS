@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use rustos_hal::{BootInfo, Cpu, Fault, FaultKind, Handlers, Irq, MAX_CPUS};
 use rustos_sync::ByteRing;
 
+use crate::addr::Addr;
 use crate::memory::Memory;
 use crate::percpu::PerCpu;
 use crate::sync::bump;
@@ -161,13 +162,23 @@ fn on_fault(fault: &Fault) {
         return;
     }
     panic::begin();
-    console::print_panic(format_args!(
-        "[rustos] fault: {} at pc {:#x} (code {:#x})\n",
-        Described(fault.kind),
-        fault.pc.as_u64(),
-        fault.code
-    ));
+    console::print_panic(format_args!("{}", FaultLine(fault)));
     platform::cpu().halt_forever();
+}
+
+/// A linha de relatório de uma exceção que para o kernel.
+pub struct FaultLine<'a>(pub &'a Fault);
+
+impl core::fmt::Display for FaultLine<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        writeln!(
+            f,
+            "[rustos] fault: {} at pc {} (code {:#x})",
+            Described(self.0.kind),
+            Addr(self.0.pc.as_u64()),
+            self.0.code
+        )
+    }
 }
 
 fn on_irq(irq: Irq) {
@@ -209,8 +220,8 @@ impl core::fmt::Display for Described {
                 present,
             } => write!(
                 f,
-                "page fault at {:#x} ({}, {}, {})",
-                address.as_u64(),
+                "page fault at {} ({}, {}, {})",
+                Addr(address.as_u64()),
                 if execute {
                     "execute"
                 } else if write {
