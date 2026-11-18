@@ -34,6 +34,13 @@ pub mod redistributor {
 
     pub const CTLR_RWP: u32 = 1 << 3;
     pub const TYPER_AFFINITY_SHIFT: u32 = 32;
+    /// `GICR_TYPER.VLPIS` (bit 1): o frame é de GICv4, com `VLPI_base` e uma página reservada
+    /// a mais (4 quadros de 64 KiB em vez de 2).
+    pub const TYPER_VLPIS: u64 = 1 << 1;
+    /// `GICR_TYPER.Last` (bit 4): é o último redistribuidor da região.
+    pub const TYPER_LAST: u64 = 1 << 4;
+    /// Tamanho de um redistribuidor GICv3 (`RD_base` e `SGI_base`).
+    pub const FRAME_SIZE: usize = 0x2_0000;
     pub const WAKER_PROCESSOR_SLEEP: u32 = 1 << 1;
     pub const WAKER_CHILDREN_ASLEEP: u32 = 1 << 2;
 }

@@ -16,6 +16,10 @@ buddy só vê a dupla liberação quando o frame sai da pilha (`FrameError::Doub
 vindo de `deallocate` cheio ou de `flush`), longe do chamador que errou. Se o frame
 for entregue duas vezes antes disso, dois donos usam o mesmo frame.
 
+O kernel liga o cache por CPU desde o SMP ([SDD 12](../sdd/12_memoria_fisica_e_heap.md)), e por isso
+`Frames::verify_used` de um frame só devolve `Ok` sem conferir: o heap zera a página antes
+de devolvê-la, e a dupla liberação de um frame solto zeraria memória que outro já pegou.
+
 ## Por que foi aceito
 
 Conferir é varrer a pilha, O(`CAP`), e o caminho quente do cache é O(1) por

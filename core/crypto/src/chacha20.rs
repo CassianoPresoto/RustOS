@@ -1,6 +1,8 @@
 //! ChaCha20 do RFC 8439: bloco de 64 bytes e keystream. Sem estado entre chamadas.
 //! O contador é `u32` e nunca dá a volta: passar de 2^32 blocos é erro, não repetição.
 
+use crate::wipe::wipe;
+
 /// Tamanho da chave em bytes.
 pub const KEY_LEN: usize = 32;
 /// Tamanho do nonce em bytes.
@@ -20,17 +22,33 @@ fn word_at(bytes: &[u8], index: usize) -> u32 {
     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 
-fn initial_state(key: &[u8; KEY_LEN], counter: u32, nonce: &[u8; NONCE_LEN]) -> [u32; 16] {
-    let mut state = [0_u32; 16];
-    state[..4].copy_from_slice(&CONSTANTS);
-    for i in 0..8 {
-        state[4 + i] = word_at(key, i);
+/// As 16 palavras do estado, ou do estado depois das rodadas. Carrega a chave: não é `Copy`
+/// nem `Clone` (cada cópia seria mais uma a zerar) e o `Drop` a zera.
+struct Words([u32; 16]);
+
+impl Words {
+    const fn zero() -> Self {
+        Self([0; 16])
     }
-    state[12] = counter;
-    for i in 0..3 {
-        state[13 + i] = word_at(nonce, i);
+
+    /// Monta o estado inicial no lugar: devolver `Words` por valor deixaria uma cópia da
+    /// chave no quadro de quem o monta.
+    fn load(&mut self, key: &[u8; KEY_LEN], counter: u32, nonce: &[u8; NONCE_LEN]) {
+        self.0[..4].copy_from_slice(&CONSTANTS);
+        for i in 0..8 {
+            self.0[4 + i] = word_at(key, i);
+        }
+        self.0[12] = counter;
+        for i in 0..3 {
+            self.0[13 + i] = word_at(nonce, i);
+        }
     }
-    state
+}
+
+impl Drop for Words {
+    fn drop(&mut self) {
+        wipe(&mut self.0);
+    }
 }
 
 #[inline]
@@ -49,33 +67,47 @@ fn quarter_round(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
     s[b] = (s[b] ^ s[c]).rotate_left(7);
 }
 
-/// 20 rodadas sobre `state` e a soma final com ele (RFC 8439, seção 2.3).
-fn permute(state: &[u32; 16]) -> [u32; 16] {
-    let mut x = *state;
+/// 20 rodadas sobre `state` e a soma final com ele (RFC 8439, seção 2.3), em `out`.
+/// O trabalho é feito em `out`, que é de quem chama e é zerado por ele: sem cópia local.
+fn permute(state: &Words, out: &mut Words) {
+    let x = &mut out.0;
+    x.copy_from_slice(&state.0);
     for _ in 0..10 {
-        quarter_round(&mut x, 0, 4, 8, 12);
-        quarter_round(&mut x, 1, 5, 9, 13);
-        quarter_round(&mut x, 2, 6, 10, 14);
-        quarter_round(&mut x, 3, 7, 11, 15);
-        quarter_round(&mut x, 0, 5, 10, 15);
-        quarter_round(&mut x, 1, 6, 11, 12);
-        quarter_round(&mut x, 2, 7, 8, 13);
-        quarter_round(&mut x, 3, 4, 9, 14);
+        quarter_round(x, 0, 4, 8, 12);
+        quarter_round(x, 1, 5, 9, 13);
+        quarter_round(x, 2, 6, 10, 14);
+        quarter_round(x, 3, 7, 11, 15);
+        quarter_round(x, 0, 5, 10, 15);
+        quarter_round(x, 1, 6, 11, 12);
+        quarter_round(x, 2, 7, 8, 13);
+        quarter_round(x, 3, 4, 9, 14);
     }
-    for (word, start) in x.iter_mut().zip(state) {
+    for (word, start) in x.iter_mut().zip(&state.0) {
         *word = word.wrapping_add(*start);
     }
-    x
 }
 
 /// O bloco de 64 bytes da função ChaCha20 (RFC 8439, seção 2.3).
 pub fn block(key: &[u8; KEY_LEN], counter: u32, nonce: &[u8; NONCE_LEN]) -> [u8; BLOCK_LEN] {
-    let words = permute(&initial_state(key, counter, nonce));
     let mut out = [0_u8; BLOCK_LEN];
-    for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+    block_into(key, counter, nonce, &mut out);
+    out
+}
+
+/// `block` escrevendo em `out`, que é de quem chama: o `Rng` o zera, sem cópia de retorno.
+pub(crate) fn block_into(
+    key: &[u8; KEY_LEN],
+    counter: u32,
+    nonce: &[u8; NONCE_LEN],
+    out: &mut [u8; BLOCK_LEN],
+) {
+    let mut state = Words::zero();
+    state.load(key, counter, nonce);
+    let mut words = Words::zero();
+    permute(&state, &mut words);
+    for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(&words.0) {
         chunk.copy_from_slice(&word.to_le_bytes());
     }
-    out
 }
 
 fn blocks_fit(counter: u32, len: usize) -> bool {
@@ -83,12 +115,13 @@ fn blocks_fit(counter: u32, len: usize) -> bool {
     u64::from(counter) + blocks <= 1 << 32
 }
 
-fn apply<const XOR: bool>(state: &mut [u32; 16], data: &mut [u8]) {
+fn apply<const XOR: bool>(state: &mut Words, data: &mut [u8]) {
+    let mut words = Words::zero();
     for chunk in data.chunks_mut(BLOCK_LEN) {
-        let words = permute(state);
-        state[12] = state[12].wrapping_add(1);
+        permute(state, &mut words);
+        state.0[12] = state.0[12].wrapping_add(1);
         for (i, piece) in chunk.chunks_mut(4).enumerate() {
-            let ks = words[i].to_le_bytes();
+            let ks = words.0[i].to_le_bytes();
             for (byte, k) in piece.iter_mut().zip(ks) {
                 *byte = if XOR { *byte ^ k } else { k };
             }
@@ -107,7 +140,9 @@ pub fn xor_keystream(
     if !blocks_fit(counter, data.len()) {
         return Err(CounterOverflow);
     }
-    apply::<true>(&mut initial_state(key, counter, nonce), data);
+    let mut state = Words::zero();
+    state.load(key, counter, nonce);
+    apply::<true>(&mut state, data);
     Ok(())
 }
 
@@ -122,7 +157,9 @@ pub fn keystream(
     if !blocks_fit(counter, out.len()) {
         return Err(CounterOverflow);
     }
-    apply::<false>(&mut initial_state(key, counter, nonce), out);
+    let mut state = Words::zero();
+    state.load(key, counter, nonce);
+    apply::<false>(&mut state, out);
     Ok(())
 }
 
@@ -134,7 +171,9 @@ pub(crate) fn fill_unchecked(
     out: &mut [u8],
 ) {
     debug_assert!(blocks_fit(counter, out.len()));
-    apply::<false>(&mut initial_state(key, counter, nonce), out);
+    let mut state = Words::zero();
+    state.load(key, counter, nonce);
+    apply::<false>(&mut state, out);
 }
 
 #[cfg(test)]
@@ -249,5 +288,36 @@ mod tests {
         assert_ne!(data, original);
         xor_keystream(&key, 5, &nonce, &mut data).unwrap();
         assert_eq!(data, original);
+    }
+
+    #[test]
+    fn the_state_has_a_destructor_that_wipes_it() {
+        assert!(core::mem::needs_drop::<Words>());
+        let mut state = Words::zero();
+        state.load(&[0xA5; KEY_LEN], 7, &[0x5A; NONCE_LEN]);
+        assert!(state.0.iter().any(|&word| word != 0));
+        wipe(&mut state.0);
+        assert_eq!(state.0, [0; 16]);
+    }
+
+    #[test]
+    fn load_puts_constants_key_counter_and_nonce_in_the_rfc_order() {
+        let key: [u8; KEY_LEN] = core::array::from_fn(|i| i.to_le_bytes()[0]);
+        let mut state = Words::zero();
+        state.load(&key, 1, &[0, 0, 0, 9, 0, 0, 0, 0x4a, 0, 0, 0, 0]);
+        assert_eq!(state.0[..4], CONSTANTS);
+        assert_eq!(state.0[4], 0x0302_0100);
+        assert_eq!(state.0[11], 0x1f1e_1d1c);
+        assert_eq!(state.0[12], 1);
+        assert_eq!(state.0[13..], [0x0900_0000, 0x4a00_0000, 0]);
+    }
+
+    #[test]
+    fn block_into_gives_the_same_bytes_as_block_and_overwrites_the_buffer() {
+        let key = [3_u8; KEY_LEN];
+        let nonce = [4_u8; NONCE_LEN];
+        let mut out = [0xFF_u8; BLOCK_LEN];
+        block_into(&key, 2, &nonce, &mut out);
+        assert_eq!(out, block(&key, 2, &nonce));
     }
 }

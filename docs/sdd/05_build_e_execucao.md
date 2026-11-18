@@ -32,12 +32,12 @@ Os dois alvos são Tier 2 com `core` pré-compilado: não há `build-std` nem ni
 | `make image` | `image` | Monta `target/esp/<isa>/`: `EFI/BOOT/<loader>`, `EFI/BOOT/limine.conf`, `boot/rustos` |
 | `make run` | `run` | Sobe na QEMU: a tela numa janela, o shell e a serial no terminal (`-serial mon:stdio`); Ctrl-A X sai |
 | `make smoke` | `smoke` | Sobe sem tela, lê a serial até `[rustos] boot ok`, pânico ou 120 s; imprime as linhas do kernel e o tempo de parede. Exige também as linhas `protections:`, `w^x: ok` e `reclaimed:` |
-| `make screenshot CMDS="fetch;mem"` | `screenshot -- fetch mem` | Sobe sem janela, digita cada comando no shell pela serial, captura a tela pelo `screendump` do monitor da QEMU e grava `target/screenshots/<isa>.png`. Comando que começa com `keys:` vai pelo teclado da máquina (`sendkey`), em qcodes da QEMU: `keys: e c h o spc semicolon ret` |
+| `make screenshot CMDS="fetch;mem"` | `screenshot -- fetch mem` | Sobe sem janela, digita cada comando no shell pela serial e espera o prompt voltar (até 30 s: o `bench` leva alguns segundos), captura a tela pelo `screendump` do monitor da QEMU e grava `target/screenshots/<isa>.png`. Comando que começa com `keys:` vai pelo teclado da máquina (`sendkey`), em qcodes da QEMU: `keys: e c h o spc semicolon ret` |
 | `make font-preview` | `font-preview` | Desenha todos os glifos da fonte própria em `target/font-preview.png` |
 | `make size` | `size` | Lê o ELF e soma `text`, `rodata`, `data`, `bss` |
 | `make check` | `check-layers`, `check-comments`, `check-docs` | Mais `cargo fmt --check` e `cargo clippy -D warnings` no host e nos dois alvos |
 | `make test` | — | `cargo test` dos membros padrão (todos menos o kernel) |
-| `make pr` | — | `check` + `test` + `smoke` nas duas ISAs |
+| `make pr` | — | `check` + `test` + `smoke` nas duas ISAs, mais o aarch64 em TCG com `RUSTOS_CPU=a64fx` (bloco de `DC ZVA` de 256 bytes, [DEBT-0060](../tech-debt/0060-recuo-do-zerar-sem-cobertura-no-smoke.md)) |
 
 `A` é `x86_64` (padrão), `aarch64` ou `all`; `P` é `dev` (padrão), `release` ou
 `release-small`. No `make`: `ARCH=` e `PROFILE=`.
@@ -69,9 +69,11 @@ Sem rede de propósito: a placa padrão da `virt` (virtio-net) carrega a option 
 `efi-virtio.rom` do iPXE, que o Ubuntu só instala com o pacote `ipxe-qemu`, e a
 QEMU sai antes do boot sem ela. TCG é sempre a reserva (`-accel <nativo> -accel tcg`).
 
-`RUSTOS_ACCEL=tcg|hvf|kvm` troca a lista inteira por esse acelerador, sem reserva
+**Núcleos:** a QEMU sobe com `-smp 4`; `RUSTOS_SMP=N` troca o número (o kernel guarda estado para 8, `MAX_CPUS` de `core/hal`; o resto fica parado). O `make smoke` exige `[rustos] cpus: N online` com esse N. No TCG, neste QEMU 11.1.3 em Apple Silicon, os vCPUs do x86_64 rodam em threads do hospedeiro (observado: 10 threads e cerca de 280% de CPU durante o `bench`); `RUSTOS_ACCEL=tcg-multi` força `-accel tcg,thread=multi`.
+
+`RUSTOS_ACCEL=tcg|tcg-multi|hvf|kvm` troca a lista inteira por esse acelerador, sem reserva
 (`xtask/src/arch.rs`): serve para rodar o TCG no Mac, o caminho do CI (que não
-tem HVF): `RUSTOS_ACCEL=tcg make smoke ARCH=aarch64`. Valor desconhecido é ignorado, com aviso. O `gic-version=3` é fixo porque, sem ele, a
+tem HVF): `RUSTOS_ACCEL=tcg make smoke ARCH=aarch64`. Valor desconhecido é ignorado, com aviso. `RUSTOS_CPU=<modelo>` troca o `-cpu max` (por exemplo `RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx make smoke ARCH=aarch64`, que tem `DC ZVA` de 256 bytes). O `gic-version=3` é fixo porque, sem ele, a
 `virt` escolhe a versão pelo acelerador (TCG: v2; HVF com o vGIC da Apple: v3).
 
 O firmware é procurado nos

@@ -6,10 +6,15 @@ pub const VECTOR_TIMER: u8 = 0x20;
 pub const VECTOR_KEYBOARD: u8 = 0x21;
 pub const VECTOR_SERIAL: u8 = 0x24;
 pub const VECTOR_SPURIOUS: u8 = 0xFF;
+/// IPIs: refazer a decisão de escalonamento e parar a CPU (pânico em outro núcleo).
+pub const VECTOR_RESCHEDULE: u8 = 0xFD;
+pub const VECTOR_STOP: u8 = 0xFE;
 
 pub const ID: usize = 0x20;
 pub const EOI: usize = 0xB0;
 pub const SPURIOUS: usize = 0xF0;
+pub const ICR_LOW: usize = 0x300;
+pub const ICR_HIGH: usize = 0x310;
 pub const LVT_TIMER: usize = 0x320;
 pub const TIMER_INITIAL: usize = 0x380;
 pub const TIMER_CURRENT: usize = 0x390;
@@ -39,10 +44,31 @@ pub const fn x2apic_msr(offset: usize) -> u32 {
     MSR_X2APIC_BASE + (offset >> 4) as u32
 }
 
+/// ICR (SDM vol. 3A, seção 11.6.1): entrega fixa, destino físico, nível "assert", borda.
+const ICR_ASSERT: u32 = 1 << 14;
+/// Bit de "envio pendente" do ICR no xAPIC; no x2APIC ele deixou de existir.
+const ICR_DELIVERY_PENDING: u32 = 1 << 12;
+/// Atalho de destino "todos menos eu" (bits 19:18 do ICR).
+const ICR_ALL_BUT_SELF: u32 = 0b11 << 18;
+/// Voltas de espera pelo envio anterior no xAPIC antes de desistir.
+const ICR_POLL_LIMIT: u32 = 1_000_000;
+
 /// Acesso aos registradores do Local APIC pelo deslocamento do modo xAPIC.
 pub trait ApicRegisters {
     fn read(&self, offset: usize) -> u32;
     fn write(&self, offset: usize, value: u32);
+
+    /// Escreve o ICR: no xAPIC são dois registradores de 32 bits, o alto (destino em
+    /// 31:24) primeiro; o x2APIC troca por uma escrita de 64 bits.
+    fn write_icr(&self, destination: u32, low: u32) {
+        self.write(ICR_HIGH, destination << 24);
+        self.write(ICR_LOW, low);
+    }
+
+    /// O ICR ainda entrega o IPI anterior (só o xAPIC tem esse bit).
+    fn icr_pending(&self) -> bool {
+        self.read(ICR_LOW) & ICR_DELIVERY_PENDING != 0
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -102,6 +128,26 @@ impl<R: ApicRegisters> LocalApic<R> {
             .write(LVT_TIMER, LVT_TSC_DEADLINE | u32::from(VECTOR_TIMER));
     }
 
+    fn send_icr(&self, destination: u32, low: u32) {
+        for _ in 0..ICR_POLL_LIMIT {
+            if !self.regs.icr_pending() {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        self.regs.write_icr(destination, low);
+    }
+
+    /// IPI de entrega fixa, vetor `vector`, à CPU de LAPIC ID `destination`.
+    pub fn send_ipi(&self, destination: u32, vector: u8) {
+        self.send_icr(destination, ICR_ASSERT | u32::from(vector));
+    }
+
+    /// O mesmo IPI a todas as CPUs menos esta (atalho do ICR, sem destino).
+    pub fn send_ipi_all_but_self(&self, vector: u8) {
+        self.send_icr(0, ICR_ASSERT | ICR_ALL_BUT_SELF | u32::from(vector));
+    }
+
     pub fn stop_timer(&self) {
         self.regs.write(TIMER_INITIAL, 0);
         self.regs.write(LVT_TIMER, LVT_MASKED);
@@ -126,6 +172,7 @@ mod tests {
             match offset {
                 TIMER_CURRENT => self.current.get(),
                 ID => self.id.get(),
+                ICR_LOW => 0,
                 _ => panic!("leitura inesperada em {offset:#x}"),
             }
         }
@@ -205,6 +252,43 @@ mod tests {
         assert_eq!(apic.id(false), 3);
         regs.id.set(3);
         assert_eq!(apic.id(true), 3);
+    }
+
+    #[test]
+    fn ipi_writes_destination_then_vector_in_the_xapic_layout() {
+        let regs = FakeRegs::default();
+        LocalApic::new(&regs).send_ipi(3, VECTOR_RESCHEDULE);
+        assert_eq!(
+            *regs.writes.borrow(),
+            [(ICR_HIGH, 3 << 24), (ICR_LOW, 0x4000 | 0xFD)]
+        );
+    }
+
+    #[test]
+    fn broadcast_ipi_uses_the_all_but_self_shorthand() {
+        let regs = FakeRegs::default();
+        LocalApic::new(&regs).send_ipi_all_but_self(VECTOR_STOP);
+        assert_eq!(regs.writes.borrow()[1], (ICR_LOW, 0xC_0000 | 0x4000 | 0xFE));
+    }
+
+    #[test]
+    fn x2apic_icr_register_is_msr_830() {
+        assert_eq!(x2apic_msr(ICR_LOW), 0x830);
+    }
+
+    #[test]
+    fn ipi_vectors_do_not_collide_with_the_others() {
+        let all = [
+            VECTOR_TIMER,
+            VECTOR_KEYBOARD,
+            VECTOR_SERIAL,
+            VECTOR_RESCHEDULE,
+            VECTOR_STOP,
+            VECTOR_SPURIOUS,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            assert!(all[i + 1..].iter().all(|b| a != b));
+        }
     }
 
     #[test]

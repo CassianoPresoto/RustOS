@@ -47,7 +47,7 @@ código.
 | W^X no kernel, NX em dado | Injetar e executar código no kernel | 2 | Ligado. O mapa direto usa 2 MiB e nunca é executável; a imagem tem uma página de 4 KiB por permissão. O número de TLB espera o metal ([SDD 13](13_memoria_virtual.md)) | [kernel self-protection](https://docs.kernel.org/security/self-protection.html) |
 | Aleatório do kernel: semente de RDSEED (x86_64) ou RNDR (aarch64), gerador ChaCha20 com *fast key erasure* (`core/crypto`) | Previsibilidade de endereço, chave e canário | 2 | Estado de 40 bytes; `next_u64` 67 ns e bloco de 4 KiB a 960 MB/s no host, escalar (Apple M5); no alvo (aarch64, HVF, `release`) 636 a 694 MB/s e 37 us por reposição ([SDD 07](07_desempenho_e_recursos.md)) | [RFC 8439](https://www.rfc-editor.org/rfc/rfc8439.html) (ChaCha20), [RFC 7693](https://www.rfc-editor.org/rfc/rfc7693.html) (BLAKE2b), [Bernstein, 2017](https://blog.cr.yp.to/20170723-random.html) (fast key erasure), [`random.c` do Linux](https://github.com/torvalds/linux/blob/master/drivers/char/random.c) (referência); RDSEED e RNDR conforme o Linux e a QEMU (seção abaixo; o Intel SDM e o Arm ARM não foram lidos). CPU sem os dois: jitter do contador, fraco ([DEBT-0019](../tech-debt/0019-aleatorio-sem-fonte-de-hardware-fraco.md)) |
 | KASLR | Endereço fixo do kernel facilitando ROP | 2 | Ligado: +3 a 6 KiB (1,8% a 6,6%) de imagem, boot sem diferença mensurável. Base e mapa direto sorteados pelo Limine; o endereço aparece no log ([DEBT-0022](../tech-debt/0022-endereco-do-kernel-no-log-de-boot.md)) | [x86_64 mm](https://docs.kernel.org/arch/x86/x86_64/mm.html); PROTOCOL.md do Limine, *Memory Layout at Entry* |
-| Zerar memória ao liberar | Vazar dado de um processo para outro | 2 | Ligado por padrão. Host, cache quente: cerca de 7 ns por KiB. No alvo (aarch64, HVF, `release`): +2 ns até 64 B, +38 a 40 ns em 1 KiB, +160 ns na página, cerca de 39 ns por KiB (SDD 07, [DEBT-0020](../tech-debt/0020-zerar-pagina-pelo-memset-generico.md)). Política `KernelHeap::set_zero_on_free` | [kernel-parameters](https://www.kernel.org/doc/html/latest/admin-guide/kernel-parameters.html) (`init_on_free`) |
+| Zerar memória ao liberar | Vazar dado de um processo para outro | 2 | Ligado por padrão. Host, cache quente: cerca de 7 ns por KiB. No alvo (aarch64, HVF, `release`): +2 ns até 64 B; com `DC ZVA` a partir de 512 B, a página custa cerca de 22 ns (eram 130 com o `memset`), 5,5 ns por KiB (SDD 07). Política `KernelHeap::set_zero_on_free` | [kernel-parameters](https://www.kernel.org/doc/html/latest/admin-guide/kernel-parameters.html) (`init_on_free`) |
 | Estado FPU/SIMD salvo eager na troca de contexto (x86_64) | LazyFP (CVE-2018-3665): leitura especulativa dos registradores da tarefa anterior antes do #NM, o que vazou até chaves de round do AES-NI. Verificado do Sandy Bridge ao Skylake | 3 | Sem penalidade conhecida segundo o relato do achado (Cyberus). Medir aqui: `XSAVEOPT` por troca (SDD 07). Segundo o Cyberus, versões do Linux a partir da 4.9 não são afetadas | [Cyberus](https://www.cyberus-technology.de/post/intel-lazyfp-vulnerability-exploiting-lazy-fpu-state-switching), [Red Hat CVE-2018-3665](https://access.redhat.com/security/cve/CVE-2018-3665); [commit ca6938a1 (outubro de 2016, janela da 4.9, "x86/fpu: Hard-disable lazy FPU mode"; a mensagem diz que o eager já era o padrão desde a 4.6)](https://github.com/torvalds/linux/commit/ca6938a1cd8a1c5e861a99b67f84ac166fc2b9e7); o aviso Intel SA-00145, que recomenda eager, foi lido só por resumo de busca (não verificado) |
 | Estado FPSIMD salvo eager na troca de contexto (aarch64) | Nada que seja defesa: o LazyFP é da Intel. O motivo é simplicidade e custo (512 B sempre salvos, sem trap por tarefa); a pesquisa recomenda assim e não mediu a alternativa | 3 | A medir | [Linux `fpsimd.c`](https://raw.githubusercontent.com/torvalds/linux/master/arch/arm64/kernel/fpsimd.c): o Linux também não trapeia o FPSIMD: marca `TIF_FOREIGN_FPSTATE` e recarrega ao voltar ao usuário se outra tarefa ocupou a CPU |
 | `CR4.TSD = 0` (`rdtsc` liberado em modo usuário), com opção por processo para bloquear | Nada: é abrir mão de uma defesa. `rdtsc` em usuário é fonte de temporizador fino para canal lateral; o Linux também deixa liberado e oferece `PR_SET_TSC` por thread | 4 | Jogos e benchmarks leem o contador; bloquear custa um #GP por leitura e a troca do bit por processo. A medir. Opção por processo: decisão da fase 4 (o equivalente do `PR_SET_TSC` é interface, caso 6 do `AGENTS.md`) | [Intel `rdtsc` (SDM espelhado)](https://www.felixcloutier.com/x86/rdtsc) (secundária); `cpu/common.c` e `process.c` do Linux. Em aarch64, o acesso de EL0 ao contador (`CNTKCTL_EL1`): não verificado |
@@ -101,7 +101,8 @@ ele terminar, então o par (chave, nonce, contador) nunca se repete.
 | `fill_bytes(out)` | Um pedido: o bloco 0 com a chave atual dá a **chave nova** (primeiros 32 bytes) e os primeiros 32 bytes da saída; os blocos 1 em diante, ainda com a chave velha, dão o resto. A chave velha é substituída e o bloco 0 é zerado |
 | `next_u64()` | `fill_bytes` de 8 bytes, em little-endian: um bloco por chamada |
 | `reseed(entropy)` | `chave = BLAKE2b-256(chave = chave antiga, mensagem = entropy)` e zera o contador. A entrada nunca apaga o que a chave já sabia |
-| `new(seed)` | `reseed(seed)` sobre uma chave de zeros; a semente tem qualquer tamanho, inclusive vazia (então é tão fraca quanto ela) |
+| `new(seed)` | `reseed(seed)` sobre uma chave de zeros (`unseeded()`); a semente tem qualquer tamanho, inclusive vazia (então é tão fraca quanto ela) |
+| `unseeded()` | Chave de zeros, previsível: só para semear no lugar com `reseed`, sem a chave passar por uma cópia na pilha (o `random::init` do kernel) |
 | `bytes_since_seed()` | Bytes entregues desde o último `new` ou `reseed`: o kernel decide por ele quando reabastecer |
 
 Duas propriedades que o desenho dá e os testes conferem:
@@ -122,7 +123,9 @@ Duas propriedades que o desenho dá e os testes conferem:
 | **`reseed` usa BLAKE2b com chave, não o hash da entrada** | A chave antiga entra na conta: entropia ruim não piora o que já era bom, e entropia boa conserta o que era ruim. Como o Linux, que mistura as fontes com BLAKE2s e deriva a chave da saída (`extract_entropy`) |
 | **Sem contabilidade de entropia** no crate | Quanto vale cada fonte é política do kernel; o crate só conta bytes entregues |
 | **Sem `Clone`, `Copy` nem `Debug` derivado.** `Debug` escreve `<redacted>` ([guidelines 09](../guidelines/09_seguranca.md)); `Drop` zera a chave | Duas cópias do estado entregariam a mesma saída duas vezes |
-| **Zerar usa `core::hint::black_box`**, sem `unsafe` | Melhor esforço: o Rust não garante que escrita sem leitura sobreviva à otimização, e `write_volatile` exige `unsafe`, proibido em `core/` |
+| **O estado do ChaCha20 também não é `Copy`**: `chacha20::Words` (16 palavras, privado) tem `Drop` que o zera. O `[u32; 16]` de antes era `Copy`, e cada passagem por valor deixava uma cópia | Tipo `Copy` multiplica as cópias sem o código dizer; sem `Copy`, o compilador move em vez de copiar e o `Drop` roda uma vez por valor |
+| **O estado é montado e consumido no lugar**: `Words::load` escreve num `Words` de quem chama, `permute(&state, &mut out)` trabalha em `out`, e `keyed_256` e `block_into` escrevem no buffer de quem chama | Devolver `[T; N]` por valor, em `opt-level` baixo, deixa o original no quadro de quem montou: no `release-small` o autoteste de resíduo achava uma cópia a mais |
+| **Zerar usa `core::hint::black_box` e `compiler_fence`**, sem `unsafe` | Melhor esforço: a documentação do `std` não garante o `black_box`, e ele não desfaz cópias feitas antes do `wipe` (o `memcpy` de um move deixa a chave para trás). O `zeroize` usa `write_volatile`, que exige `unsafe`, proibido em `core/` (AGENTS, caso 5). Sem `unsafe`, é o melhor possível; o autoteste de pilha no alvo compensa |
 | **ARX puro, sem tabela indexada por segredo**: o ChaCha20 e o BLAKE2b só somam, rodam e fazem XOR. O índice da `SIGMA` do BLAKE2b é público | Sem acesso à memória nem desvio que dependam da chave |
 
 ### O que o kernel faz
@@ -160,7 +163,39 @@ precisa estar de pé para a linha `random bench:`).
    `next_u64` repete a mistura do item 1 e 2. O número vem da medição (SDD 07). Não há
    reposição por tempo.
 6. **Higiene:** o buffer de 64 bytes do hardware e os 32 do jitter são zerados com
-   `rustos_crypto::wipe` ao sair de `replenish`.
+   `rustos_crypto::wipe` ao sair de `replenish`. O gerador é semeado no lugar, no `static`
+   (`Rng::unseeded` e `reseed`), sem passar por uma cópia do `Rng` na pilha.
+7. **Resíduo na pilha, medido** (`random::stack_residue`, a linha `[rustos] key residue:`
+   do boot). Enche com `0x5A` os 2 560 bytes abaixo do quadro, semeia um gerador do heap com
+   a chave conhecida de `Rng::new(&[])`, atende um pedido e conta, nos 2 KiB abaixo de um
+   local do quadro, os trechos de 16 bytes iguais às constantes do ChaCha20 (`expand
+   32-byte k`, que antecedem a chave no estado) e à chave antiga. Números por ISA e perfil:
+   SDD 07; depois, 0 e 0 nos seis.
+   - **É heurística que depende do código gerado**: imprime `FAILED` e o boot segue; o
+     `make smoke` reprova pelo `FAILED`.
+   - **Roda com a IRQ mascarada.** A IRQ cai na pilha da tarefa e empilha o quadro abaixo
+     do `sp`, exatamente na faixa varrida: com ela ligada, a sonda dava `0 of 4` ao acaso
+     (smoke do x86_64 no CI, TCG lento) e um resíduo real podia sumir antes da leitura.
+   - **Sonda de sensibilidade.** Uma segunda passada planta 4 estados falsos no quadro do
+     primeiro callee e exige achá-los (`probe 4 of 4`). Sem ela, a varredura tinha uma zona
+     cega nos cerca de 64 bytes logo abaixo do `sp` (o quadro da própria varredura caía
+     ali): com `count_windows` fora de linha a sonda dá `0 of 4` no x86_64 `release`.
+     **Limite:** a sonda só pega essa regressão onde o quadro da varredura cai sobre o
+     plantio. Com `count_windows` fora de linha, ela reprova no x86_64 `dev` e `release`,
+     mas passa no aarch64 (os três perfis) e no x86_64 `release-small`. Não dá falso
+     "achou": exige exatamente 4, e uma passada sem plantio dá `0 of 4`.
+   - **O que cobre:** `Words` e o `Rng` semeado com zero (a chave de `Rng::new(&[])`),
+     não a chave real de `replenish` nem o `gather_jitter`.
+   - **O que não vê:** o estado de trabalho no meio das rodadas, sem padrão reconhecível.
+     No aarch64 o `permute` não o derrama (só salva registradores do chamador); no x86_64
+     `release` guarda poucas palavras num quadro de 40 bytes, e `Rng::new` e
+     `gather_jitter` devolvem por valor ([DEBT-0059](../tech-debt/0059-estado-do-chacha20-derramado-na-pilha-no-x86.md)).
+   - **O `v` do BLAKE2b** (`compress`) passou a ser zerado como o `m`: dava para reconstruir
+     o `h` anterior a partir dele. Custo no host: 4 MiB de 1 595–1 606 para 1 554–1 578 MB/s
+     (-2%), BLAKE2b-256 com chave de 191 para 200–202 ns (+5%), `reseed` de 164–167 para
+     172–173 ns. O `v` não tem padrão que a varredura reconheça: tirar o `wipe(&mut v)` não
+     muda a linha do boot. Quem confere é a desmontagem (`memset` de 128 B no aarch64,
+     `rep stosl` ou `movq $0` no x86_64), lida na revisão do PR.
 
 O que se observou rodando, com `-cpu max` salvo nota: x86_64 em TCG, `rdseed`; x86_64
 com `-cpu Haswell` (sem `RDSEED`), `rdrand`; x86_64 com `-cpu qemu64` (sem os dois),

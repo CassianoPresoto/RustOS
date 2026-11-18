@@ -7,7 +7,9 @@ pub mod descriptor;
 pub mod esr;
 pub mod features;
 pub mod intid;
+pub mod sgi;
 pub mod time;
+pub mod zero_plan;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod context;
@@ -26,11 +28,15 @@ mod mmio;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod mmu;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+mod percpu;
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod protection;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod stack;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod timer;
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub mod zero;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use context::{Context, switch};
@@ -39,9 +45,13 @@ pub use cpu::Aarch64Cpu;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use entropy::Aarch64Entropy;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub use gic_cpu::Aarch64Ipi;
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use mmio::MmioBus;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use mmu::{Aarch64Mmu, DirectMapTables, active_root, prepare_space};
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub use percpu::Aarch64CpuLocal;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use stack::{Continuation, call_on_stack};
 

@@ -104,13 +104,20 @@ impl Arch {
             })
     }
 
+    /// Núcleos da máquina: `RUSTOS_SMP`, com 4 de padrão. O kernel guarda estado por CPU para
+    /// até 8; os que passam disso ficam parados.
+    pub fn cpus() -> usize {
+        parse_cpus(std::env::var("RUSTOS_SMP").ok().as_deref())
+    }
+
     /// Máquina, CPU, firmware e aceleração; o disco e a serial ficam com quem chama.
     pub fn qemu_machine_args(self, firmware: &str, esp: &str) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
         let mut push = |items: &[&str]| args.extend(items.iter().map(|&item| item.to_owned()));
+        push(&["-smp", &Self::cpus().to_string()]);
         match self {
             Self::X86_64 => {
-                push(&["-machine", "q35", "-cpu", "max", "-m", "256M"]);
+                push(&["-machine", "q35", "-cpu", &Self::cpu_model(), "-m", "256M"]);
                 push(&[
                     "-drive",
                     &format!("if=pflash,format=raw,readonly=on,file={firmware}"),
@@ -123,7 +130,7 @@ impl Arch {
                     "-machine",
                     "virt,gic-version=3",
                     "-cpu",
-                    "max",
+                    &Self::cpu_model(),
                     "-m",
                     "256M",
                     "-bios",
@@ -147,13 +154,43 @@ impl Arch {
         args
     }
 
-    /// `RUSTOS_ACCEL` (`tcg`, `hvf` ou `kvm`) manda; sem ela, aceleração de
+    /// `RUSTOS_CPU` escolhe o modelo de CPU da QEMU (`a64fx` tem `DC ZVA` de 256 bytes);
+    /// sem ela, `max`.
+    fn cpu_model() -> String {
+        choose_cpu(std::env::var("RUSTOS_CPU").ok().as_deref())
+    }
+
+    /// `RUSTOS_ACCEL` (`tcg`, `tcg-multi`, `hvf` ou `kvm`) manda; sem ela, aceleração de
     /// hardware quando host e alvo coincidem, com TCG sempre como reserva.
     fn accelerators(self) -> Vec<&'static str> {
         let forced = std::env::var("RUSTOS_ACCEL").ok();
         let same_isa = std::env::consts::ARCH == self.name();
         let kvm = std::path::Path::new("/dev/kvm").exists();
         choose_accelerators(forced.as_deref(), std::env::consts::OS, same_isa, kvm)
+    }
+}
+
+fn choose_cpu(forced: Option<&str>) -> String {
+    forced
+        .filter(|cpu| !cpu.is_empty())
+        .unwrap_or("max")
+        .to_owned()
+}
+
+/// `RUSTOS_SMP` como número de núcleos; vazio ou inválido vale o padrão, com aviso se inválido.
+fn parse_cpus(value: Option<&str>) -> usize {
+    const DEFAULT: usize = 4;
+    match value.map(str::trim) {
+        None | Some("") => DEFAULT,
+        Some(text) => match text.parse::<usize>() {
+            Ok(count) if count >= 1 => count,
+            _ => {
+                eprintln!(
+                    "xtask: RUSTOS_SMP=`{text}` inválida (um número de 1 em diante); usando {DEFAULT}"
+                );
+                DEFAULT
+            }
+        },
     }
 }
 
@@ -167,10 +204,13 @@ fn choose_accelerators(
 ) -> Vec<&'static str> {
     match forced {
         Some("tcg") => return vec!["tcg"],
+        Some("tcg-multi") => return vec!["tcg,thread=multi"],
         Some("hvf") => return vec!["hvf"],
         Some("kvm") => return vec!["kvm"],
         Some(other) => {
-            eprintln!("xtask: RUSTOS_ACCEL=`{other}` desconhecida (tcg, hvf, kvm); ignorada");
+            eprintln!(
+                "xtask: RUSTOS_ACCEL=`{other}` desconhecida (tcg, tcg-multi, hvf, kvm); ignorada"
+            );
         }
         None => {}
     }
@@ -185,6 +225,13 @@ fn choose_accelerators(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cpu_model_defaults_to_max_and_can_be_forced() {
+        assert_eq!(choose_cpu(None), "max");
+        assert_eq!(choose_cpu(Some("")), "max");
+        assert_eq!(choose_cpu(Some("a64fx")), "a64fx");
+    }
 
     #[test]
     fn parses_all_into_both_arches() {
@@ -231,6 +278,29 @@ mod tests {
         assert_eq!(
             choose_accelerators(Some("kvm"), "macos", true, false),
             ["kvm"]
+        );
+    }
+
+    #[test]
+    fn smp_defaults_to_four_and_accepts_a_count() {
+        assert_eq!(parse_cpus(None), 4);
+        assert_eq!(parse_cpus(Some("")), 4);
+        assert_eq!(parse_cpus(Some("2")), 2);
+        assert_eq!(parse_cpus(Some(" 8 ")), 8);
+    }
+
+    #[test]
+    fn smp_ignores_what_is_not_a_positive_number() {
+        assert_eq!(parse_cpus(Some("0")), 4);
+        assert_eq!(parse_cpus(Some("muitos")), 4);
+        assert_eq!(parse_cpus(Some("-1")), 4);
+    }
+
+    #[test]
+    fn tcg_multi_asks_for_one_host_thread_per_vcpu() {
+        assert_eq!(
+            choose_accelerators(Some("tcg-multi"), "macos", false, false),
+            ["tcg,thread=multi"]
         );
     }
 

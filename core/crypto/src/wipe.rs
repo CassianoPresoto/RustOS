@@ -1,8 +1,11 @@
+use core::sync::atomic::{Ordering, compiler_fence};
+
 /// Zera `buf` de um jeito que o otimizador não pode descartar como "morto".
 /// Sem isso a chave copiada para a pilha sobrevive depois do uso.
 pub fn wipe<T: Copy + Default>(buf: &mut [T]) {
     buf.fill(T::default());
-    core::hint::black_box(buf);
+    core::hint::black_box(&mut *buf);
+    compiler_fence(Ordering::SeqCst);
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@
 
 | Métrica | Como | Valor hoje (QEMU, 256 MiB) |
 | --- | --- | --- |
-| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 235 680 / 147 492 bytes · aarch64: 202 941 / 132 025 bytes (fase 3 com o EEVDF no kernel: +24 584 / +12 136 (x86_64) e +20 520 / +11 824 (aarch64) sobre o mesmo kernel com o rodízio; `.data` do `SCHED`, 3 968 bytes; o resto é a política, o `i128` do EEVDF e a medida da política no `bench`). Antes, a fase 3 só com o rodízio, tarefas, preempção, estado de SIMD, timer de um tiro e `ps` e `bench`: 211 096 / 135 356 e 182 421 / 120 201, medidos de novo no commit anterior (+26 763 / +13 856 e +29 440 / +16 956 sobre a fase 2, que a linha a seguir descreve). Antes, a fase 2 depois da revisão do PR 5: 184 093 / 121 404 e 153 101 / 103 129 (`.data.rel.ro` só leitura, caminhada única em `core/mm`, bit de livre no slab). Antes da revisão: 183 669 / 120 004 e 155 889 / 102 021. Antes: com buddy, heap e gerador, 166 544 / 106 095 e 136 292 / 88 364; antes do buddy, 133 304 / 88 735 e 105 448 / 71 508; na fase 0.5, 100 541 / 61 725 e 86 500 / 59 952. O PIE do KASLR custa 3 289 / 5 581 (x86_64) e 5 361 / 6 265 (aarch64), de 1,8% a 6,6% ([SDD 13](13_memoria_virtual.md)) |
+| Kernel carregado | `make size PROFILE=release` / `release-small` | x86_64: 308 512 / 185 532 bytes · aarch64: 259 725 / 166 869 bytes (o SMP da fase 3 custou +47 024 / +26 512 e +38 148 / +25 088 sobre os 261 488 / 159 020 e 221 577 / 141 781 que seguem, sem ele: fila por CPU, migração, IPI, pânico, cache de frames e o `bench` de SMP; o `.bss` do SMP é de poucos KiB, porque a política de cada CPU vem do heap). Antes do SMP: x86_64: 261 488 / 159 020 bytes · aarch64: 221 577 / 141 781 bytes (sobre 250 448 / 155 388 e 213 693 / 138 573 da `main` `85ae25e`, mesmo comando: +11 040 / +3 632 e +7 884 / +3 208. É o zerar por `DC ZVA`, o autoteste de faixas e a linha `zero bench:`, mais o resíduo de chave (`Words`, o autoteste `key residue:` com a sonda e o `next_u64` do `random bench:`); boa parte é a formatação das duas linhas de medida). Antes, fase 3 com o EEVDF no kernel: +24 584 / +12 136 (x86_64) e +20 520 / +11 824 (aarch64) sobre o mesmo kernel com o rodízio; `.data` do `SCHED`, 3 968 bytes; o resto é a política, o `i128` do EEVDF e a medida da política no `bench`). Antes, a fase 3 só com o rodízio, tarefas, preempção, estado de SIMD, timer de um tiro e `ps` e `bench`: 211 096 / 135 356 e 182 421 / 120 201, medidos de novo no commit anterior (+26 763 / +13 856 e +29 440 / +16 956 sobre a fase 2, que a linha a seguir descreve). Antes, a fase 2 depois da revisão do PR 5: 184 093 / 121 404 e 153 101 / 103 129 (`.data.rel.ro` só leitura, caminhada única em `core/mm`, bit de livre no slab). Antes da revisão: 183 669 / 120 004 e 155 889 / 102 021. Antes: com buddy, heap e gerador, 166 544 / 106 095 e 136 292 / 88 364; antes do buddy, 133 304 / 88 735 e 105 448 / 71 508; na fase 0.5, 100 541 / 61 725 e 86 500 / 59 952. O PIE do KASLR custa 3 289 / 5 581 (x86_64) e 5 361 / 6 265 (aarch64), de 1,8% a 6,6% ([SDD 13](13_memoria_virtual.md)) |
 | Memória livre depois do boot (o "pronto quando" da fase 2) | `frames:` do boot (QEMU 256 MiB, `dev`) e `mem` | x86_64: 63 811 frames (249,3 MiB, 97,4% da RAM), antes 52 321 (204,4 MiB) · aarch64: 63 237 (247,0 MiB, 96,5%), antes 54 991 (214,8 MiB). Devolvido: 46 432 e 33 424 KiB |
 | Tabelas de página do kernel | `vm:` do boot | 60 a 64 KiB (x86_64) e 44 a 48 KiB (aarch64) com 2 MiB no mapa direto; 548 e 536 KiB só com 4 KiB. Varia com o deslocamento sorteado do mapa direto |
 | Grade do terminal | 8 bytes por célula (`size_of::<Cell>()`), em frames contíguos | x86_64 1280x800: 158x47 células, 59 408 bytes (15 frames) · aarch64 1024x768: 126x45, 45 360 bytes (12 frames) |
@@ -20,14 +20,17 @@
 | Shell | `size_of::<Shell<256, 32>>()`, na pilha do `kmain` | 8 880 bytes |
 | Metadado de memória física | `BuddyAllocator::words_needed` (SDD 12): um bitmap por ordem com resumo hierárquico; é o `metadata` da linha `frames:` do boot e o `frame meta` do `mem` | 16 704 bytes para 65 094 frames (x86_64) e 16 504 para 64 396 (aarch64): 2,05 bits por frame, 0,008% da RAM; 2,03 bits por frame em 4 GiB ou mais. O bitmap de antes, que saiu do kernel: 8 144 e 8 056 bytes |
 | Heap do kernel | `heap::self_test` e a linha `heap` do `mem` | Metadado de 64 bytes por slab, dentro da página, com o mapa de livres de 1 bit por objeto (SDD 12). Zerar ao liberar ligado: custo abaixo |
+| Zerar página | linha `zero bench:` do boot (`heap::zero_benchmark`), `make smoke ARCH=… PROFILE=release` | aarch64 HVF: 4 KiB em 20 a 38 ns (antes 124 a 169), 1 KiB em 13 a 16 (antes 36 a 47); x86_64 TCG: 1,1 µs por 4 KiB, sem mudança (tabela no heap, acima) |
 | Aleatório no kernel | linha `random bench:` do boot (`random::benchmark`): 32 blocos de 4 KiB com `Rng::fill_bytes` e uma reposição completa, com o relógio da fase 1 | aarch64 sob HVF, `release`: 636 a 694 MB/s e 36 a 38 us por reposição (tabela abaixo) |
 | Boot até o kernel | linha `boot timeline` (pedido *bootloader performance* do Limine) | Limine: 52 ms (aarch64, HVF) / 350 ms (x86_64, TCG) |
 | Pilha de falhas (aarch64) | `Memory::map_stack`: 4 páginas mapeadas e uma de guarda, por CPU; é o `SP_EL0` do EL1h (SDD 15) | 16 384 bytes de RAM, mais as tabelas de página que faltarem |
-| Custo por tarefa | SDD 15, "Custo por tarefa": `SCHED`, `Context`, pilha e área de FPU/SIMD | ~250 bytes de tabela e política (3 968 de `SCHED` com 16 slots); 8 (x86_64) ou 104 (aarch64) de `Context`; 32 768 de pilha (mais as tabelas de página); 832 (x86_64 da QEMU, `xsaveopt` com AVX) ou 528 (aarch64) de FPU/SIMD, só da tarefa que usa |
+| Custo por CPU | SDD 15, "Custo por tarefa e por CPU": `PerCpu`, a política no heap, a pilha e as pilhas de exceção | ~500 bytes de `PerCpu` (`.bss`, por CPU possível) mais 3 680 de política no heap por CPU que entra no escalonador; núcleo secundário: 32 KiB de pilha mais 48 KiB de IST (x86_64) ou 16 KiB de pilha de falhas (aarch64); cache de frames: 256 bytes |
+| Custo por tarefa | SDD 15, "Custo por tarefa e por CPU": `Slot`, `Context`, pilha e área de FPU/SIMD | ~140 bytes de `Slot` e 96 de entidade na política justa; 8 (x86_64) ou 104 (aarch64) de `Context`; 32 768 de pilha (mais as tabelas de página); 832 (x86_64 da QEMU, `xsaveopt` com AVX) ou 528 (aarch64) de FPU/SIMD, só da tarefa que usa |
 | Troca de contexto | `bench` e a linha `switch:`: ping-pong de `unpark`/`park` entre duas tarefas, ns por troca, aquecimento e melhor de 3 | aarch64 HVF `release`, com o EEVDF: 99 a 116 ns no boot e 131 a 164 no comando; com o rodízio eram 42 e 77 a 84 (tabela abaixo); x86_64 e aarch64 em TCG só para comparar o RustOS consigo mesmo |
 | Jitter de acordar | `bench`: `agora − pedido` depois de `sleep_until`, 200 amostras | aarch64 HVF, com o EEVDF: 0,49 a 0,52 ms (ociosa em `wfi`) e 4,1 µs (CPU ocupada) de média; igual ao do rodízio (tabela abaixo) |
 | Timer (aarch64) | linha `timer:` do boot; `CNTV` com `CVAL` absoluto, 100 Hz só até `task::init`; depois não há tique periódico (linha `idle:`) | 50 tiques em 497 ms (HVF) e 488 ms (TCG) no autoteste; ociosa com o EEVDF: 2 IRQs do timer em 50 ms, contra 5 a 100 Hz (HVF, TCG e x86_64 iguais). No x86_64 com o contador do APIC (sem TSC-deadline) a ociosa ainda acorda a cada ~69 s, o que a contagem de 32 bits a 62,5 MHz alcança; no aarch64 e no TSC-deadline o prazo é de uma hora |
 | Estado do gerador aleatório | `size_of::<Rng>()` (teste em `core/crypto/src/rng.rs`) | 40 bytes: chave de 32 e contador de 8 |
+| Resíduo de chave na pilha | linha `key residue:` do boot (`random::stack_residue`), `make smoke ARCH=all PROFILE=dev\|release\|release-small` | 0 estados do ChaCha20 e 0 cópias da chave nas duas ISAs e nos três perfis; antes, de 0 a 2 e de 1 a 3 (tabela abaixo, no gerador) |
 | Código de `core/crypto` | `.text` do crate sem LTO, com todas as funções públicas (`llvm-size`); no kernel, com LTO, só entra o que se usa | `release`: 8 202 (x86_64) e 7 866 (aarch64) bytes · `release-small`: 6 216 e 7 349 bytes |
 | Vazão de ChaCha20, BLAKE2b e do gerador | `cargo run --release -p rustos-crypto --example bench`, no host (Apple M5, `rustc` 1.100.0), melhor de 15 rodadas, sem SIMD (o compilador não vetorizou: o resultado com `-vectorize-loops=false -vectorize-slp=false` é o mesmo) | Ver tabela abaixo. **Números do host**; os do alvo estão abaixo |
 | Escalonador (`core/sched`) | `cargo test --release -p rustos-sched bench -- --ignored --nocapture --test-threads=1` (`core/sched/src/bench.rs`), no host | Host: `pick_next` do EEVDF em 41 a 136 ns com 8 a 512 tarefas; 96 bytes por tarefa ([SDD 14](14_escalonador.md)). No alvo (`bench`, 8 prontas): `pick_next` 34 a 35 ns e `tick` 2 ns no aarch64 HVF; 320 e 36 ns em TCG; 670 a 730 e 85 a 89 ns no x86_64 em TCG (tabela abaixo) |
@@ -122,13 +125,45 @@ dentro da faixa:
 | Alvo | Perfil | ChaCha20 | Reposição | Vale? |
 | --- | --- | --- | --- | --- |
 | aarch64, HVF (sem RNDR: jitter) | `dev` | 421 a 470 MB/s | 37 a 40 us | sim |
-| aarch64, HVF | `release` | 636 a 694 MB/s | 36 a 38 us | sim |
+| aarch64, HVF | `release` | 574 a 747 MB/s (636 a 694 antes do resíduo de chave) | 31 a 40 us | sim |
 | aarch64, HVF | `release-small` | 317 MB/s | 40 a 42 us | sim |
 | aarch64, TCG (`rndrrs`) | `dev` | 79 MB/s | 170 us | não: TCG |
 | x86_64, TCG (`rdseed`) | `dev` | 39 a 40 MB/s | 278 a 291 us | não: TCG |
 
 O `release` do alvo faz 70% do host (965 MB/s). A reposição de 37 us é quase toda o
 jitter (inferência: o `reseed` de 32 bytes custa 162 ns no host).
+
+**Zerar o resíduo de chave (custo e prova).** Mesmos comandos de antes e de depois (o "antes" é a `main`): o
+`example bench` no host e a linha `random bench:` do boot (`next_u64` é a média de 20 000
+pedidos de 8 bytes, com o gerador local de `benchmark`).
+
+| Medida | Antes | Depois |
+| --- | --- | --- |
+| Host, `xor_keystream` de 4 MiB | 879 a 907 MB/s | 822 a 837 MB/s (-7%) |
+| Host, `fill_bytes` de 4 KiB | 925 a 941 MB/s | 857 a 864 MB/s (-8%) |
+| Host, bloco de 64 B | 55 a 58 ns | 56 a 60 ns |
+| Host, `next_u64` | 67 a 68 ns | 69 a 72 ns (+3%) |
+| Host, `reseed` de 32 B | 166 a 168 ns | 168 a 169 ns |
+| aarch64 HVF `release`, `next_u64` (11 boots) | 70 a 92 ns | 85 a 104 ns |
+| aarch64 HVF `release`, ChaCha20 (11 boots) | 684 a 897 MB/s | 574 a 747 MB/s |
+| aarch64 HVF `release`, reposição | 29 a 38 us | 28 a 37 us |
+| x86_64 TCG `release`, `next_u64` | 759 a 798 ns | 471 a 492 ns |
+| x86_64 TCG `release`, ChaCha20 | 62 a 64 MB/s | 90 a 94 MB/s |
+
+No host o custo é de 3% a 8% na vazão (o `Words` com `Drop` e o `permute` em `out`, em vez
+de devolver 64 bytes por valor). No HVF as faixas se sobrepõem, mas a de depois desce (574 a 747 contra 684 a 897 MB/s): o custo é
+de uns 10% a 15% e o ruído é do tamanho dele (inferência). O TCG do
+x86_64 ficou mais rápido, o que é o código gerado e não vale como número de hardware.
+
+Prova de que as cópias saíram: a linha `[rustos] key residue:` (`random::stack_residue`,
+[SDD 09](09_seguranca.md)). Estados do ChaCha20 e cópias da chave achados nos 2 KiB abaixo do
+quadro, antes e depois:
+
+| Perfil | aarch64 antes | x86_64 antes | Depois (as duas ISAs) |
+| --- | --- | --- | --- |
+| `dev` | 1 e 2 | 0 e 1 | 0 e 0 |
+| `release` | 1 e 1 | 1 e 1 | 0 e 0 |
+| `release-small` | 2 e 3 | 1 e 1 | 0 e 0 |
 
 **Limite de reposição: `RESEED_BYTES` = 4 MiB.** O `release` gera 4 MiB em 6,1 ms
 (a 690 MB/s) e a reposição custa 37 us: 0,6% (0,3% no `release-small`). Com 1 MiB
@@ -196,10 +231,59 @@ medir em metal ou com KVM/HVF.
 | 4096 B (1 página) | 45 a 49 ns | 205 a 210 ns | +160 ns |
 | 8192 B (2 páginas) | 35 a 38 ns | 323 a 330 ns | +290 ns |
 
-São cerca de 39 ns por KiB, 5x o piso do host: o `memset` do alvo é o suspeito
-([DEBT-0020](../tech-debt/0020-zerar-pagina-pelo-memset-generico.md)). Para objetos
-até 64 bytes o custo é de 2 a 3 ns, e a política fica ligada (SDD 09). A medida usou um
-patch temporário no autoteste do heap, que não entrou no código. O x86_64 só roda em TCG aqui, sem número que valha.
+São cerca de 39 ns por KiB, 5x o piso do host. A causa, no código do alvo (`llvm-objdump`
+do `memset` do kernel em aarch64): o laço principal é um `str x, [x], #8`, uma gravação de 8
+bytes por volta, sem `stp` nem SIMD. Para objetos até 64 bytes o custo é de 2 a 3 ns, e a
+política fica ligada (SDD 09). A medida usou um patch temporário no autoteste do heap, que
+não entrou no código. O x86_64 só roda em TCG aqui, sem número que valha.
+
+#### Zerar pelo `arch/` (a dívida do `memset`, paga no aarch64)
+
+`DirectMap::zero` manda ao `arch/` a faixa de 512 bytes ou mais, com início e tamanho
+múltiplos de 64: `DC ZVA` em blocos inteiros e `STP` nas pontas e quando o `DCZID_EL0.DZP`
+proíbe (SDD 13, "Zerar"). Comando: a linha `zero bench:` do boot (`heap::zero_benchmark`),
+`make smoke ARCH=aarch64 PROFILE=release`. Cada coluna é o melhor de 3 rodadas de 4 000
+repetições. aarch64 sob HVF, bloco do `DC ZVA` de 64 bytes, `DZP` limpo. O "par" é
+`Vec::with_capacity(4096)` e o `drop`, com zerar ao liberar ligado.
+
+**O "antes" não é um comando separado.** Vem do mesmo `zero_benchmark`, com o limiar de
+512 bytes do `DirectMap::zero` elevado à mão para tudo ir ao `memset`, e foi tirado do
+código: não há chave que o reproduza. O revisor do PR refez o A/B por conta própria e achou
+ganho de 2,7 a 8x.
+
+**Bimodal.** O 4 KiB cai em duas faixas, e a de cima aparece em cerca de um boot de cada
+quatro: em 12 boots (11 com saída) ficou em 17,9 a 21 ns em oito, e em 42 a 55 ns em três; 1 KiB
+foi de 12,2 a 16,4 ns (o revisor viu até 45,2). O `memset` tinha a mesma oscilação (124 a
+131 ou 168 a 170). Pior caso medido do `DC ZVA`: 54,6 ns por 4 KiB, ainda 2,3x melhor que o
+melhor do `memset`. A causa não foi investigada (inferência: o escalonamento dos núcleos do
+Apple sob o HVF).
+
+| ns | 1 KiB | 4 KiB quente | 4 KiB em 1 MiB | par alocar+liberar 4 KiB |
+| --- | --- | --- | --- | --- |
+| Antes (`memset`) | 36 a 47 (típico 37) | 124 a 169 (típico 130) | 123 a 167 | 186 a 243 (típico 187) |
+| Depois (`DC ZVA`, `DCZID_EL0` lido a cada chamada) | 12 a 16 | 18 a 55 (típico 20) | 18 a 27 | 102 a 133 |
+| Só laço de `STP` (`DZP` forçado, tirado depois) | 11 a 12 | 39 a 41 | 38 a 39 | — |
+
+Ler o `DCZID_EL0` a cada chamada (é por CPU, como o Linux faz em cada `clear_page`) não
+mudou o número: 4 KiB mínimo de 17,0 (lido uma vez) para 17,9 ns.
+
+A página custa 6,5x menos no caso típico (130 para 20 ns, de 32 para 5 ns por KiB), e o par
+de 4 KiB cai a metade. O laço de `STP` sozinho já leva a maior parte do ganho (gravar 16 bytes por
+instrução em vez de 8); o `DC ZVA` soma cerca de 30% em cima dele, que é o caminho de
+recuo e funciona. Abaixo de 512 bytes o `DC ZVA` perde para o `memset` (128 B: 6,9 contra
+5,1 ns; 256 B: 12,0 contra 9,6 ns; 64 B empata, 2 a 3 ns), por isso o limiar. Os 1 KiB
+batem no piso fixo de uns 10 ns do primeiro `DC ZVA`.
+
+**x86_64, em TCG, sem mudança.** O `memset` do `compiler_builtins` do x86_64 sem a feature
+`ermsb` já é `rep stosq` no corpo (`library/compiler-builtins/.../mem/x86_64.rs`,
+`set_bytes`), a variante que o Linux escolhe sem ERMS (`clear_page_rep`,
+`arch/x86/lib/clear_page_64.S`). O `rep stosb` com ERMS, que o Linux usa com ERMS
+(`clear_page_erms`), mediu 8 772 a 9 207 ns por 4 KiB contra 1 089 a 1 156 ns do `stosq`,
+8x pior, mas isso é o QEMU executar `rep stosb` um byte por vez, não a CPU: a medida em TCG
+não decide nada. A QEMU anuncia ERMS com `-cpu max`, então escolher `stosb` por CPUID pioraria
+o TCG sem número de hardware que o pague. Não entrou ([DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)).
+Número do x86_64 hoje, o mesmo antes e depois: 1 KiB 290 a 310 ns, 4 KiB 1,1 µs, par de
+4 KiB 2,0 µs.
 
 ### Escalonador (fase 3, medido no host; o alvo está acima)
 
@@ -249,6 +333,40 @@ usa.
 prontas e uma tarefa que roda 0,2 ms e dorme 5 ms, timer de um tiro: espera média de
 2,5 µs com fatia de 0,1 ms e 863 µs com fatia de 6 ms; no pior caso espera algumas
 fatias, não o ciclo todo.
+
+### SMP: troca entre núcleos, IPI, escala e contenção (fase 3, 2ª onda)
+
+Como se mede: `make screenshot ARCH=… PROFILE=release CMDS="bench;bench"` (a PNG mostra o último), as linhas
+`switch:`, `scale:` e `alloc storm:` do boot (`make smoke PROFILE=release`, esforço curto) e `RUSTOS_SMP=1|2|4`. Mesmo código
+em `kernel/src/bench.rs` ([SDD 15](15_tarefas_e_preempcao.md), "Medidas"). QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB, `-smp 4`.
+**Aceleração:** o aarch64 roda em **HVF** (hardware: vale como latência); o x86_64 só roda em **TCG**, e o aarch64 também em TCG com
+`RUSTOS_ACCEL=tcg`. Neste QEMU os vCPUs do TCG rodam em threads do hospedeiro, também no x86_64 (observado, não conferido no código do QEMU: 10 threads e cerca de 280% de CPU durante o `bench`).
+**O hospedeiro estava carregado por outro processo pesado (um outro QEMU) durante parte das rodadas**: a escala e a contenção do TCG oscilam
+entre rodadas; abaixo vão as rodadas típicas e, onde a oscilação foi grande, o intervalo.
+
+| Medida | aarch64 HVF | aarch64 TCG | x86_64 TCG |
+| --- | --- | --- | --- |
+| Troca na mesma CPU (ping-pong, ns por troca) | 64–73 (boot), 141 (`bench`); com `-smp 1`, 73–80; kernel da 1ª onda hoje: 81 e 109 | 1 039 | 1 494–1 617 |
+| Troca com SIMD (idem) | 83–89 (boot), 133 (`bench`) | 1 065 | 1 860–1 991 |
+| Troca **entre CPUs** (cada passagem de vez é um acordar remoto por IPI) | 5 400–6 040 | 4 675 | 4 394–4 747 |
+| IPI de ida e volta | 10 300–10 700 | 9 080 | 8 029–9 074 |
+| Escala, 8 tarefas de 10 ms (ms): 1 / 2 / 4 CPUs | 76,3 / 41,7 (1,8x) / 22,0 (3,4x) | 14,5 / 8,5 (1,7x) / 4,7 (3,1x), esforço curto de 2 ms | 1,0x / 1,5x / 1,4x a 1,5x no `bench`; 1,0x / 1,8x / 3,3x no esforço curto, quando o hospedeiro estava livre |
+| `pick_next` e `tick` da política (ns) | 35–48 e 2 | 419 e 43 | 644–679 e 86–87 |
+
+Leitura:
+
+- **A troca na mesma CPU não piorou com a fila por CPU**: no HVF o `-smp 1` do kernel novo (73–80 ns) e o kernel da 1ª onda medido hoje (81–109 ns) ficam na mesma faixa; contadores de uma CPU só deixaram de usar
+  `lock xadd` (`sync::bump`), o que pesa no TCG. A faixa de 99 a 164 ns do SDD da 1ª onda era de outra rodada.
+- **Acordar em outra CPU custa de 40 a 80 vezes uma troca local no HVF** (5,4 a 6 µs contra 70 a 140 ns): é o IPI, que no HVF é uma escrita em `ICC_SGI1R_EL1` que sai para o hipervisor, e a saída de `wfi`. O IPI de ida e volta (cerca de 10,5 µs) é o dobro dessa troca remota.
+  Não há número publicado confiável para comparar: a pesquisa não achou fonte primária do custo de IPI ([pesquisa de escalonador](#números-das-pesquisas-e-o-grau-de-verificação)).
+- **A escala é de 3,4x em 4 núcleos no HVF** (8 tarefas de 10 ms: 76 ms em 1 CPU, 22 ms em 4; o ideal é 19 ms): o resto é spawn, o `wait` e os IPIs. O TCG do aarch64 dá 3,1x.
+  No x86_64 em TCG a escala mede o hospedeiro, não o kernel: com o hospedeiro livre deu 3,3x (esforço curto), com ele carregado ficou em 1,4x a 1,5x; o `scale:` do boot do x86_64 oscila entre uma coisa e outra ([DEBT-0041](../tech-debt/0041-escalonador-do-x86-sem-medida-fora-do-tcg.md)).
+- **Contenção da memória, 4 CPUs alocando e devolvendo 4 frames por volta** (aarch64 HVF, 20 000 voltas por CPU): **17,9 ms e 16 tentativas que acharam o lock preso** com o buddy sob lock, **0,8 ms e nenhuma** com o cache por CPU: 22 vezes mais rápido, e é por isso que o
+  cache está ligado ([SDD 12](12_memoria_fisica_e_heap.md)). No aarch64 TCG (2 000 voltas): 21,3 ms (158 516 disputas) contra 2,1 ms. No x86_64 TCG com 2 vCPUs: 14,4 ms (30 448) contra 1,6 ms; com 1 vCPU, 5,5 contra 1,6 ms; com 4 vCPUs, **não se
+    reproduziu**: o esforço curto deu 299 ms contra 127 ms, mas o `bench` completo deu 237 a 291 ms contra 1 266 a 1 306 ms (cache mais lento, sem disputa nenhuma). Medido de novo com o hospedeiro livre, o cache ganhou de 10 a 13 vezes (215 contra 22 ms, 218 contra 16 ms), tanto no TCG padrão quanto com `tcg-multi`: a anomalia era o hospedeiro carregado ([DEBT-0041](../tech-debt/0041-escalonador-do-x86-sem-medida-fora-do-tcg.md)).
+- **O heap tem um lock só e disputa**: a tempestade de objetos de 64 bytes deu 3,3 ms (17 tentativas presas) no HVF, e o `bench` fecha com contenção acumulada de milhares de tentativas no lock do heap ([DEBT-0054](../tech-debt/0054-heap-com-lock-global.md)). Fila de execução: 277 a 279 tentativas em tudo o que o `bench` faz; console: 0.
+- **Migração:** o autoteste de SMP (8 tarefas, 40 ms) faz de 117 a 150 migrações em 565 a 631 voltas no x86_64 (TCG) e de 1 145 a 1 648 em 5 551 a 6 217 no aarch64 (HVF), 16 vezes sem falha.
+- **Memória do SMP:** ver a linha "Custo por CPU" acima. O cache de frames segura até 124 KiB por CPU fora do buddy.
 
 ### Para onde foi o tamanho do kernel
 

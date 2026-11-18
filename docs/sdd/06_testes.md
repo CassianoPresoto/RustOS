@@ -37,7 +37,10 @@ cargo test --release -p rustos-mm bench -- --ignored --nocapture --test-threads=
 | `arch/*/src/pte.rs`, `descriptor.rs` | A codificação: ida e volta de cada `PageFlags`, e o `PageFormat` que distingue tabela, folha grande e entrada vazia |
 | `core/mm/src/ranges.rs` | Só aritmética: cabeça e cauda desalinhadas, virtual e físico que discordam no alinhamento, região menor que 2 MiB, regiões adjacentes, sobrepostas e vazias |
 | `core/mm/src/wx.rs` | Lista de `Mapping` montada à mão: W+X, seção com permissão trocada, alias da imagem no mapa direto, metade baixa |
-| `boot/limine` | Layout das structs contra `limine.h` (`size_of`, `offset_of`), tradução dos tipos de região e do formato do framebuffer |
+| `boot/limine` | Layout das structs contra `limine.h` (`size_of`, `offset_of`), inclusive o pedido e a resposta de MP nas duas ISAs, tradução dos tipos de região e do formato do framebuffer |
+| `arch/x86_64/src/lapic.rs`, `arch/aarch64/src/sgi.rs` | O ICR (destino, vetor, atalho "todos menos eu") e o valor de `ICC_SGI1R_EL1` (afinidade, INTID, `IRM`, faixa `RS`), com `ApicRegisters` falso |
+| `drivers/gicv3` | Os frames do GICR percorridos até `Last` (frames de GICv3 e de GICv4), a SGI habilitada antes do `ISENABLER` |
+| `core/sched/src/migration.rs` | Duas filas, 200 sementes: a tarefa está em exatamente uma, o lag viaja, a corrente recusa `detach` ([SDD 14](14_escalonador.md)) |
 | `core/mm/src/heap.rs` | `FakeMemory: FrameMemory`, uma faixa de palavras que derruba o teste em acesso fora dela, desalinhado ou abaixo da base |
 | `core/shell` | `Host` falso e um terminal VT mínimo (`testing.rs`) que confere prompt, linha e cursor depois de cada tecla, nas duas regras de última coluna |
 | `core/term` | Fuzz determinístico (xorshift, 300 mil bytes por tamanho de grade) que confere cursor, região e anel; o mesmo fluxo em bloco e byte a byte dá a mesma grade. Um segundo fuzz, com tela alternativa e histórico, mistura trocas de tela, `ED 3`, conjuntos G0/G1, tabulação e rolagem da visão a bytes soltos e a CSI bem formado, e confere também o histórico e a visão |
@@ -54,9 +57,15 @@ ou em 120 s. O marcador é a constante `BOOT_OK_MARKER` do kernel e `BOOT_OK` do
 xtask: os dois mudam juntos. O kernel só imprime o marcador se os autotestes de
 frame, de heap (`heap self-test`), de W^X (`w^x: ok`), de interrupção e de tarefas
 (`task self-test`: preempção e estado de SIMD por tarefa, [SDD 15](15_tarefas_e_preempcao.md))
-passarem; o `smoke` exige a linha `task self-test: ok`. O de
+passarem; o `smoke` exige a linha `task self-test: ok`, a `smp self-test: ok` (migração entre núcleos, [SDD 15](15_tarefas_e_preempcao.md)) e `cpus: N online`, com o N que a QEMU recebeu (`-smp`). O de
 W^X percorre as tabelas novas ([SDD 13](13_memoria_virtual.md)); `fault text` no shell
 confere que a CPU recusa a escrita em `.text`.
+
+Duas linhas do boot são medida e heurística, não gate: `key residue:` (varredura da pilha
+atrás de cópias da chave, com uma sonda que planta 4 estados e exige achá-los; [SDD 09](09_seguranca.md))
+e `zero bench:` ([SDD 07](07_desempenho_e_recursos.md)). O kernel as imprime e segue;
+o `smoke` reprova o `FAILED` de qualquer linha. O autoteste do heap confere que o zerar
+rápido mexe só na faixa pedida ([SDD 13](13_memoria_virtual.md), "Zerar").
 
 ## Andar 3b — tela
 

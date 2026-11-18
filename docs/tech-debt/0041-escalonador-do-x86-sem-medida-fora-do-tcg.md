@@ -16,6 +16,8 @@ No x86_64 o `pick_next` do EEVDF custa de 670 a 730 ns e a troca de contexto de 
 de 128 bits custa muito mais ali do que custaria a instrução `div` de hardware. O número
 não diz nada sobre uma CPU x86_64 de verdade, e a política não foi medida em nenhuma.
 
+Com vários núcleos (SMP), o TCG executa os vCPUs em threads do hospedeiro neste QEMU 11.1.3 (MTTCG, observado: 10 threads e cerca de 280% de CPU durante o `bench`), mas o que ele mede de escala, IPI e contenção depende da carga do hospedeiro e não vale para metal: a escala em 4 núcleos oscilou de 1,0x a 3,3x entre rodadas com outro processo pesado na máquina. Com 4 vCPUs, a tempestade de alocação do `bench` completo mediu o cache de frames por CPU **mais lento** que o lock do buddy (1 266 ms contra 237 ms), contra 22 vezes mais rápido no HVF e 9 vezes no TCG com 2 vCPUs; a causa não foi achada. Medido de novo com o hospedeiro mais livre, **o cache voltou a ganhar de 10 a 13 vezes** (215 e 218 ms contra 21,8 e 16,2 ms no `bench`; 22 contra 1,8 ms no boot), no TCG padrão e com `RUSTOS_ACCEL=tcg-multi`, sem diferença entre os dois: a anomalia era do hospedeiro carregado, não do cache. A escala do x86_64 em `release` ficou plana (1,0x, 1,0x e 1,1x) nas duas variantes.
+
 ## Por que foi aceito
 
 Só há QEMU sem KVM neste host (macOS em Apple Silicon): o x86_64 roda sempre em TCG

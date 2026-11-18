@@ -31,6 +31,7 @@ Os pedidos ficam em `boot/limine/src/requests.rs`, nas seções `.requests_start
 | Bootloader performance | Marcos de reset, início do Limine e entrega ao kernel, em µs | linha omitida |
 | Executable address | Base física e virtual da imagem (com o sorteio do KASLR), para o kernel mapear cada seção | `BootError::MissingKernelAddress`, pânico |
 | Framebuffer | O primeiro framebuffer linear: endereço no HHDM, tamanho, pitch e máscaras de cor. Só 32 bpp RGB com canais de 8 bits é aceito | sem tela; a serial continua |
+| MP | Os núcleos: identificador de hardware (LAPIC ID ou `MPIDR`) e o `goto_address` de cada um. No x86_64 o pedido liga o bit de x2APIC. A presença do pedido faz o Limine acordar os núcleos secundários e estacioná-los | sem resposta o kernel roda numa CPU |
 
 O Limine mapeia o framebuffer no HHDM com o cache certo para vídeo:
 write-combining (`PAT[5]`) no x86_64 e `MAIR_EL1.Attr1` no aarch64 (PROTOCOL.md,
@@ -77,15 +78,17 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
    (8 bytes por célula), pinta o fundo e a barra do topo, e passa a receber tudo o
    que vai para a serial.
 6. `interrupts::init` liga exceções, controlador de interrupção, timer e a IRQ da
-   serial ([SDD 10](10_interrupcoes.md)) e destrava as interrupções da CPU no fim.
+   serial ([SDD 10](10_interrupcoes.md)) e destrava as interrupções da CPU no fim. Em seguida
+   `smp::start` sobe os núcleos secundários ([abaixo](#núcleos-secundários)).
    Com ela a GDT do Limine sai de uso no x86_64. O timer fica armado para o primeiro
    tique, de um tiro; o tique periódico acaba quando `task::init` liga o escalonador
    ([SDD 15](15_tarefas_e_preempcao.md)).
 7. `Memory::reclaim_bootloader` devolve ao buddy as regiões `BootloaderReclaimable`.
 8. `random::init` semeia o gerador ([SDD 09](09_seguranca.md)).
 9. Relatório (com `kernel base:`, `reclaimed:`, `vm:`, `protections:`, `random:` e
-   `random bench:`), autoteste de um frame (escreve e relê pelo mapa direto), autoteste
-   do heap, `w^x:` (percorre as tabelas), autoteste de exceção e de timer.
+   `random bench:` e `key residue:`, o autoteste de resíduo de chave na pilha), autoteste
+   de um frame (escreve e relê pelo mapa direto), autoteste do heap, `zero bench:` (a
+   medida de zerar), `w^x:` (percorre as tabelas), autoteste de exceção e de timer.
    `task::init` adota a execução atual como a tarefa `init`, cria a ociosa e liga
    FPU/SIMD (`fpu:`, `sched:`); o autoteste de preempção e de estado de SIMD
    (`task self-test:`) e as medidas curtas (`switch:`) rodam, e vem `[rustos] boot ok`.
@@ -94,6 +97,22 @@ fase 1 do [roadmap](08_roadmap.md) instala os vetores; o aarch64 está em
    vazia; a ociosa dorme em `hlt`/`wfi` quando ninguém está pronto.
 
 Pânico antes do passo 4 não aparece em lugar nenhum (DEBT-0005).
+
+## Núcleos secundários
+
+O pedido MP faz o Limine acordar cada núcleo e estacioná-lo. O kernel o solta depois de `interrupts::init` e **antes** de `reclaim_bootloader`:
+o núcleo ainda anda na pilha e nas tabelas do Limine até trocar as dele.
+
+1. **Antes de soltar** (`smp::start`, na CPU de boot): para cada núcleo que não é o de boot, até `MAX_CPUS` (8; o resto fica parado, com aviso), mapeia a pilha de 32 KiB
+   (`Memory::map_stack`) e o que a ISA pede (`platform::prepare_secondary`: 3 pilhas IST e a GDT/TSS no x86_64; a pilha de falhas no aarch64), grava o índice e o `hw_id`, e
+   escreve `extra_argument` (o índice) e depois `goto_address`, com release (`boot_limine::start_cpu`).
+2. **A entrada** (`ap_entry`, `RDI`/`X0` = `MpInfo`), ainda na pilha do Limine: instala o `PerCpu` (`GS` ou `TPIDR_EL1`), liga as proteções de hardware e **só então** troca para as tabelas do kernel
+   (`platform::secondary_early`; no aarch64, o atributo de dispositivo do `MAIR` também). A pilha do Limine segue mapeada: o mapa direto do kernel tem o mesmo deslocamento do HHDM.
+3. **Na pilha própria** (`ap_main`): vetores e controlador de interrupção, timer e FPU/SIMD (`platform::secondary_init`, [SDD 10](10_interrupcoes.md)); marca-se online e espera `smp::release`.
+4. **O BSP espera** todos ficarem online (3 s no máximo, ou 4 bilhões de voltas se `now_ns` não responder; o que não respondeu entra em `failed` e em `silent`). **Com um núcleo `silent`, `reclaim_bootloader` não roda** (`reclaim: skipped`): ele ainda pode estar na pilha ou nas tabelas do Limine, e a memória não volta ao alocador. O núcleo que falhou no próprio init, já na pilha dele, não entra em `silent` e imprime `[rustos] cpus: N online`. O `make smoke` exige essa linha com o número de núcleos que pediu.
+5. **O escalonador** (`task::init`, na CPU de boot) termina, `smp::release` solta o portão e cada núcleo entra em `task::run_secondary`: a execução dele vira a ociosa, e ele passa a receber tarefas ([SDD 15](15_tarefas_e_preempcao.md)).
+
+Falha de um núcleo (sem `MpInfo`, init que erra) deixa `cpus: FAILED mask 0x…` e o boot falha. Sem resposta de MP, o kernel roda numa CPU.
 
 ## Memória virtual
 
@@ -117,7 +136,7 @@ timer e fontes, está no [SDD 10](10_interrupcoes.md).
 
 ## Saída de referência
 
-QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB, perfil `dev` (a base e o mapa direto mudam a cada boot):
+QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB, `-smp 4`, perfil `dev`, x86_64 em TCG (a base e o mapa direto mudam a cada boot):
 
 ```text
 [rustos] RustOS 0.1.0 (x86_64)
@@ -130,18 +149,24 @@ QEMU 11.1.3 no macOS (Apple Silicon), 256 MiB, perfil `dev` (a base e o mapa dir
 [rustos] screen: 1280x800, grid 158x47
 [rustos] protections: +wp +nx +smep +smap +umip
 [rustos] vm: direct map at 0xffff846840000000 in 122 2M and 2475 4K pages, 64 KiB of tables, stack 64 KiB
+[rustos] cpus: 4 online (found 4, limit 8)
 [rustos] random: rdseed
-[rustos] random bench: chacha20 39 MB/s, reseed 288 us
+[rustos] random bench: chacha20 39 MB/s, reseed 288 us, next_u64 1034.1 ns
+[rustos] key residue: 0 chacha states, 0 key copies on the stack, probe 4 of 4: ok
 [rustos] frame self-test: ok
 [rustos] heap self-test: ok
+[rustos] zero bench: 1 KiB 307.9 ns, 4 KiB 1087.3 ns, 4 KiB over 1 MiB 1191.9 ns, 4 KiB alloc+free 2996.5 ns
 [rustos] w^x: ok (64968 pages)
 [rustos] exception self-test: ok
 [rustos] timer: 100 Hz, 5 ticks in 37 ms ok
 [rustos] fpu: xsaveopt, 832 bytes per task, x87 sse avx
-[rustos] sched: fifo+eevdf, 700 us base slice, 16 tasks max, timer one-shot
+[rustos] sched: fifo+eevdf per cpu, 700 us base slice, 24 tasks max, 4 cpus, timer one-shot
 [rustos] idle: 2 timer irqs in 50 ms (tickless)
 [rustos] task self-test: ok (simd state intact, 27 switches)
-[rustos] switch: 1134 ns (1438 with simd), pick_next 730 ns, tick 89 ns, wake: mean 1303751 ns, max 2009743 ns, 20 samples
+[rustos] smp self-test: ok (592 turns, 125 migrations)
+[rustos] switch: 3205 ns (3565 with simd, 10389 cross-core), ipi round trip 7799 ns, pick_next 1333 ns, tick 200 ns, wake: mean 1730865 ns, max 9005193 ns, 20 samples
+[rustos] scale: 8 tasks, 1 cpu: 15186 us, 2 cpu: 8539 us, 4 cpu: 4656 us
+[rustos] alloc storm: 4 cpus x 2000, frames locked 44717 us (51927 contended), cached 5379 us (0), heap 15298 us (11502)
 [rustos] boot ok
 ```
 

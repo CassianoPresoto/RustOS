@@ -1,6 +1,7 @@
 //! PC x86_64: COM1 por porta de E/S, GDT/IDT próprias, Local APIC, I/O APIC e
 //! relógio pelo TSC calibrado contra o PIT.
 
+use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -10,13 +11,16 @@ pub use rustos_arch_x86_64::fpu::{
     AREA_ALIGN as FPU_AREA_ALIGN, restore as fpu_restore, save as fpu_save,
 };
 use rustos_arch_x86_64::ioapic::{IOAPIC_BASE, IoApic};
-use rustos_arch_x86_64::lapic::{VECTOR_KEYBOARD, VECTOR_SERIAL, VECTOR_SPURIOUS, VECTOR_TIMER};
+use rustos_arch_x86_64::lapic::{
+    VECTOR_KEYBOARD, VECTOR_RESCHEDULE, VECTOR_SERIAL, VECTOR_SPURIOUS, VECTOR_STOP, VECTOR_TIMER,
+};
 use rustos_arch_x86_64::pic;
 use rustos_arch_x86_64::pit::{self, Pit, Reading};
 use rustos_arch_x86_64::{
-    ApicAccess, ApicMode, COM1, IstStacks, MmioBus, PIC_MASTER, PIC_SLAVE, PIT_PORTS, PortBus,
-    Protections, TimerMode, X86Cpu, X86Entropy, X86Mmu, active_root, arm_oneshot, arm_tsc_deadline,
-    breakpoint, cpu_features, detect_apic, enable_protections, install_traps, publish_apic, rdtsc,
+    ApicAccess, ApicMode, COM1, CpuTables, IstStacks, MmioBus, PIC_MASTER, PIC_SLAVE, PIT_PORTS,
+    PortBus, Protections, TimerMode, X86Cpu, X86CpuLocal, X86Entropy, X86Ipi, X86Mmu, active_root,
+    arm_oneshot, arm_tsc_deadline, breakpoint, cpu_features, detect_apic, enable_protections,
+    enable_secondary_apic, install_traps, load_cpu_tables, local_apic_id, publish_apic, rdtsc,
     require_features, set_timer_mode, xstate,
 };
 pub use rustos_arch_x86_64::{Context, call_on_stack, switch};
@@ -24,7 +28,8 @@ use rustos_arch_x86_64::{DirectMapTables, pte::X86Format};
 use rustos_driver_i8042::I8042;
 use rustos_driver_uart16550::{DIVISOR_115200, Uart16550};
 use rustos_hal::{
-    BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, PAGE_SIZE, PageMapper, PhysAddr,
+    BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, MmuControl, PAGE_SIZE, PageMapper,
+    PhysAddr,
 };
 use rustos_mm::PageTables;
 use rustos_sync::SpinLock;
@@ -133,6 +138,15 @@ pub fn harden() {
     publish_protections(unsafe { enable_protections() });
 }
 
+/// Zera `[ptr, ptr + len)` com o `memset` do alvo, que já é `rep stosq` (DEBT-0058).
+///
+/// # Safety
+/// `ptr` e `len` múltiplos de 64; a faixa é memória gravável do kernel, sem outro acesso.
+pub unsafe fn zero_aligned(ptr: *mut u8, len: usize) {
+    // SAFETY: o contrato desta função.
+    unsafe { ptr.write_bytes(0, len) };
+}
+
 pub fn cpu() -> X86Cpu {
     // SAFETY: o Limine entrega o kernel em ring 0, e ele nunca sai de lá.
     unsafe { X86Cpu::new() }
@@ -175,8 +189,9 @@ pub fn init_interrupts(
     };
     let guard = stacks.double_fault.as_u64() - (IST_STACK_PAGES + 1) * PAGE_SIZE;
     GUARD_PAGE.store(guard, Ordering::Relaxed);
-    // SAFETY: ring 0 no boot com IF desligado; as pilhas vêm de `map_stack`.
-    unsafe { install_traps(stacks, handlers) };
+    let tables = Box::leak(Box::new(CpuTables::new()));
+    // SAFETY: ring 0 no boot com IF desligado; as pilhas vêm de `map_stack`; só esta CPU usa `tables`.
+    unsafe { install_traps(stacks, handlers, tables) };
     READY.store(true, Ordering::Release);
 
     mask_legacy_pic();
@@ -360,6 +375,8 @@ pub fn irq_source(irq: Irq) -> IrqSource {
         Ok(VECTOR_TIMER) => IrqSource::Timer,
         Ok(VECTOR_SERIAL) => IrqSource::Serial,
         Ok(VECTOR_KEYBOARD) => IrqSource::Keyboard,
+        Ok(VECTOR_RESCHEDULE) => IrqSource::Reschedule,
+        Ok(VECTOR_STOP) => IrqSource::Stop,
         Ok(VECTOR_SPURIOUS) => IrqSource::Spurious,
         _ => IrqSource::Unknown,
     }
@@ -420,4 +437,86 @@ pub fn trigger(test: FaultTest) -> bool {
         }
     }
     true
+}
+
+pub fn cpu_local() -> X86CpuLocal {
+    // SAFETY: o kernel roda em ring 0.
+    unsafe { X86CpuLocal::new() }
+}
+
+/// O IPI desta CPU.
+///
+/// # Safety
+/// O Local APIC desta CPU já foi publicado: só há outra CPU para receber depois disso.
+pub unsafe fn ipi() -> X86Ipi {
+    // SAFETY: o contrato desta função.
+    unsafe { X86Ipi::new() }
+}
+
+/// O identificador que o IPI usa para esta CPU: o LAPIC ID.
+pub fn local_hw_id() -> u64 {
+    local_apic_id().map_or(0, u64::from)
+}
+
+/// O identificador de uma CPU como o bootloader o dá, no formato do IPI: o LAPIC ID já é o dele.
+pub const fn ipi_target(boot_hw_id: u64) -> u64 {
+    boot_hw_id
+}
+
+/// A raiz das tabelas que esta CPU usa agora: a das tabelas do kernel, depois de `Vm::activate`.
+pub fn kernel_root() -> PhysAddr {
+    // SAFETY: ring 0 com paginação de 4 níveis.
+    unsafe { active_root() }
+}
+
+/// O que uma CPU secundária precisa antes de rodar: pilhas IST, GDT e TSS só dela.
+#[derive(Debug)]
+pub struct SecondaryResources {
+    ist: IstStacks,
+    tables: &'static mut CpuTables,
+}
+
+/// Aloca o que a CPU secundária usa; roda na CPU de boot, antes de soltá-la.
+pub fn prepare_secondary(
+    memory: &mut Memory,
+    mapper: &mut PlatformSpace,
+) -> Result<SecondaryResources, PlatformError> {
+    let ist = IstStacks {
+        double_fault: ist_stack(memory, mapper)?,
+        nmi: ist_stack(memory, mapper)?,
+        machine_check: ist_stack(memory, mapper)?,
+    };
+    Ok(SecondaryResources {
+        ist,
+        tables: Box::leak(Box::new(CpuTables::new())),
+    })
+}
+
+/// A primeira coisa de uma CPU secundária, ainda na pilha do Limine: as proteções de
+/// hardware e as tabelas do kernel, na mesma ordem da CPU de boot.
+pub fn secondary_early(root: PhysAddr) {
+    // SAFETY: ring 0; o kernel não lê nem executa memória de usuário.
+    let _ = unsafe { enable_protections() };
+    X86Mmu.activate(root);
+}
+
+/// GDT, TSS e IDT, Local APIC, timer e FPU/SIMD desta CPU secundária.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "o recurso é entregue a esta CPU e não volta"
+)]
+pub fn secondary_init(resources: SecondaryResources) -> Result<(), PlatformError> {
+    // SAFETY: ring 0 com IF desligado, depois de `install_traps` na CPU de boot; as pilhas e as
+    // tabelas são só desta CPU.
+    unsafe { load_cpu_tables(resources.ist, resources.tables) };
+    // SAFETY: ring 0, depois de `publish_apic` na CPU de boot, que escolheu o modo pelo CPUID.
+    if !unsafe { enable_secondary_apic() } {
+        return Err(PlatformError::MissingFeature("apic"));
+    }
+    set_timer_mode(if TSC_DEADLINE.load(Ordering::Relaxed) {
+        TimerMode::TscDeadline
+    } else {
+        TimerMode::OneShot
+    });
+    fpu_init().map(|_| ())
 }

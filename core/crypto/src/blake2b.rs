@@ -149,6 +149,7 @@ impl Blake2b {
             self.h[i] ^= v[i] ^ v[i + 8];
         }
         wipe(&mut m);
+        wipe(&mut v);
     }
 }
 
@@ -204,12 +205,10 @@ pub fn hash(out: &mut [u8], key: &[u8], data: &[u8]) -> Result<(), Error> {
     state.finalize(out)
 }
 
-/// BLAKE2b-256 com chave de 32 bytes: o `reseed` do gerador. Não falha, porque
+/// BLAKE2b-256 com chave de 32 bytes em `out`: o `reseed` do gerador. Não falha, porque
 /// os dois tamanhos estão dentro da faixa.
-pub(crate) fn keyed_256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
+pub(crate) fn keyed_256(key: &[u8; 32], data: &[u8], out: &mut [u8; 32]) {
     let mut state = Blake2b::init(32, key);
     state.update(data);
-    let mut out = [0_u8; 32];
-    state.finish_into(&mut out);
-    out
+    state.finish_into(out);
 }

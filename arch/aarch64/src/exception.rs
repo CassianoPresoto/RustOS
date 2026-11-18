@@ -141,6 +141,21 @@ pub unsafe fn install(
         return Err(InstallError::NotOnEl1h);
     }
     HANDLERS.store(ptr::from_ref(handlers).cast_mut(), Ordering::Release);
+    // SAFETY: o contrato desta função vale para a CPU de boot.
+    unsafe { install_secondary(stack_top) }
+}
+
+/// Instala os vetores e a pilha de falhas desta CPU; os handlers já são os de `install`.
+/// # Safety
+/// Em EL1h com interrupções mascaradas, depois de `install` na CPU de boot. `stack_top` é
+/// o fim, alinhado a 16 bytes, de uma pilha mapeada que só as falhas desta CPU usam.
+pub unsafe fn install_secondary(stack_top: VirtAddr) -> Result<(), InstallError> {
+    let selected: u64;
+    // SAFETY: leitura de registrador de estado em EL1, sem efeito colateral.
+    unsafe { asm!("mrs {}, spsel", out(reg) selected, options(nomem, nostack, preserves_flags)) };
+    if selected & 1 == 0 {
+        return Err(InstallError::NotOnEl1h);
+    }
     // SAFETY: `SP_EL0` só se escreve com `SPSel` em 0; sem acesso à pilha entre as
     // trocas, e com `SPSel` voltando a 1 o `sp` do kernel é o de antes.
     unsafe {

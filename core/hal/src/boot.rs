@@ -46,6 +46,16 @@ impl KernelImage {
     }
 }
 
+/// Um núcleo que o bootloader entregou, o de boot incluído.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CpuDescriptor {
+    /// LAPIC ID no x86_64; afinidade do `MPIDR_EL1` (Aff3..Aff0 sem os bits de controle) no aarch64.
+    pub hw_id: u64,
+    pub is_boot: bool,
+    /// Identificador opaco do núcleo no bootloader, para soltá-lo.
+    pub token: usize,
+}
+
 pub trait BootInfo {
     fn memory_regions(&self) -> impl Iterator<Item = MemoryRegion> + '_;
 
@@ -61,6 +71,9 @@ pub trait BootInfo {
 
     /// Base física e virtual da imagem do kernel.
     fn kernel_image(&self) -> Option<KernelImage>;
+
+    /// Os núcleos do bootloader; vazio se ele não respondeu ao pedido de MP.
+    fn cpus(&self) -> impl Iterator<Item = CpuDescriptor> + '_;
 }
 
 #[cfg(test)]
