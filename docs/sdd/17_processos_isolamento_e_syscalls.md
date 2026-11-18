@@ -108,6 +108,9 @@ capítulo segue como desenho. Os números estão em
 | Onde mora o programa de teste | Blob de `global_asm!` em `arch/<isa>/src/user_blob.rs`, na seção `.text` do kernel, copiado para uma página de usuário em `0x40_0000` | O `asm!` só mora em `arch/` (regra 4 do guidelines 04) e o `kernel/` nunca liga `arch/<isa>-user` (regra 12); código de teste fica atrás da feature `selftest` |
 | `simd` | A tarefa de usuário nasce com `simd: true` | Sem área de estado, o `xmm0` e o `v0` vazariam entre tarefas; a 4d fecha o resto |
 | `kernel_half_in_sync` | `Process::load` confere que as 256 entradas altas da raiz nova são as da raiz do kernel e recusa o processo se não forem | Entrada nova do kernel depois da cópia dessincronizaria as raízes |
+| `AC` do usuário (x86_64) | Toda entrada vinda do anel 3 faz `clac` depois do `swapgs`, se a CPU tem SMAP (sem SMAP, `clac` é `#UD`); a entrada por `SYSCALL` já tem o `AC` no `FMASK`. A QEMU limpa o `AC` na IRQ mas não na exceção, e o teste pega a exceção | O usuário liga `AC` por `popf`; sem o `clac`, o tratador e a tarefa de kernel retomada rodariam com o SMAP desarmado |
+| Falta na cópia | O *fixup* só vale se o endereço da falta está abaixo de `USER_TOP`; falta em endereço do kernel durante a cópia é fatal | Um erro do kernel não vira `OutOfRange` |
+| Código de usuário no aarch64 | Escrever página executável pelo mapa direto faz `dc cvau`, `ic ivau`, `dsb ish`, `isb` (`arch/aarch64/src/cache.rs`) | O `CTR_EL0` do HVF é `IDC=1`, `DIC=0`: sem isso o usuário podia executar bytes velhos |
 | Filtro do `debug_write` | Só ASCII imprimível, `\n` e `\t` passam; todo outro byte (inclusive os de UTF-8, que escondem o CSI de 8 bits, U+2028 e o bidi) vira `?`; cada linha sai com `[user] ` na frente e a saída sempre termina em `\n`. O xtask só aceita marcador do kernel no **começo** da linha (`[rustos] …`, sem `\r`) | O usuário não imita uma linha `[rustos]` do smoke nem encerra o boot cedo com um `[rustos] boot ok` no meio da linha dele |
 
 **Medido na QEMU 11.1.3** (o que o desenho tinha como NÃO VERIFICADO e a pesquisa só tinha de fonte
@@ -126,7 +129,7 @@ secundária):
 **O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs): o `hello` em cada CPU
 ativa (`debug_write`, `clock_get_monotonic`, `random_get`, `process_exit`; o número desconhecido e
 `thread_exit` devolvem `NotSupported` e o processo segue); leitura de
-página do kernel; instrução privilegiada; `TF` ou `brk`; `sp` inválido (o kernel não cai ao voltar);
+página do kernel; instrução privilegiada com `AC` ligado (o `#GP` chega ao kernel com `AC` limpo); `TF` ou `brk`; `sp` inválido (o kernel não cai ao voltar); `NT` e `AC` ligados por `popf` com syscalls e IRQ durante 8 ms (o processo sobrevive e o kernel nunca roda com `AC`); ponteiro de usuário não mapeado em `debug_write` (`OutOfRange`, o processo segue);
 a limpeza da pilha (2 KiB plantados na pilha do kernel somem com a limpeza e aparecem sem ela).
 Depois de cada falha o kernel segue e o caso seguinte roda.
 

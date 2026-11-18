@@ -13,9 +13,7 @@ pub const fn line_sizes(ctr: u64) -> (usize, usize) {
     (line_bytes(ctr, 16), line_bytes(ctr, 0))
 }
 
-/// Deixa `[start, start + len)` (endereço do kernel) visível como instrução em todas as CPUs:
-/// limpa o dado até o ponto de unificação, invalida a instrução, `dsb` e `isb`.
-///
+/// Deixa `[start, start + len)` (endereço do kernel) visível como instrução em todas as CPUs.
 /// # Safety
 /// EL1; a faixa está mapeada e legível.
 pub unsafe fn sync_icache(start: usize, len: usize) {
