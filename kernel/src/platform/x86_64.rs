@@ -711,6 +711,10 @@ pub fn ac_set() -> bool {
 
 /// Faltas de cópia recuperadas e quantas rodaram o tratador com `AC` ligado.
 #[cfg(feature = "selftest")]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "mesma assinatura em todas as ISAs"
+)]
 pub fn copy_fixup_stats() -> Option<(usize, usize)> {
     Some(rustos_arch_x86_64::usercopy::fixup_stats())
 }
