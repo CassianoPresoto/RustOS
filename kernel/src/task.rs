@@ -562,7 +562,7 @@ fn idle_loop() -> ! {
 }
 
 fn now() -> u64 {
-    platform::now_ns().unwrap_or(0)
+    platform::sched_clock_ns().unwrap_or(0)
 }
 
 /// A CPU `thief` puxa uma tarefa pronta da CPU mais carregada, se ela tem pelo menos `gap`

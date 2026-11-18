@@ -2,15 +2,18 @@
 //! A frequência vem de `CNTFRQ_EL0` em tempo de execução; nenhuma constante.
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crate::time::{ns_to_ticks, ticks_to_ns};
+use crate::time::{TickScale, ns_to_ticks};
 
 /// `CNTV_CTL_EL0`: `ENABLE` ligado, `IMASK` desligado.
 const CTL_ENABLE: u64 = 1;
 
 static FREQUENCY_HZ: AtomicU64 = AtomicU64::new(0);
 static EPOCH_TICKS: AtomicU64 = AtomicU64::new(0);
+/// `TickScale` da frequência, em dois atômicos: `now_ns` não divide.
+static SCALE_MULT: AtomicU64 = AtomicU64::new(0);
+static SCALE_SHIFT: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimerError {
@@ -32,6 +35,9 @@ pub unsafe fn start() -> Result<u64, TimerError> {
         return Err(TimerError::NoFrequency);
     }
     FREQUENCY_HZ.store(frequency, Ordering::Relaxed);
+    let (mult, shift) = TickScale::new(frequency).map_or((0, 0), TickScale::parts);
+    SCALE_MULT.store(mult, Ordering::Relaxed);
+    SCALE_SHIFT.store(shift, Ordering::Relaxed);
     let now = counter();
     EPOCH_TICKS.store(now, Ordering::Relaxed);
     // Desarmado: o comparador no futuro distante, antes de o timer ligar.
@@ -68,15 +74,31 @@ fn write_deadline(deadline: u64) {
     unsafe { asm!("msr cntv_cval_el0, {}", in(reg) deadline, options(nostack, preserves_flags)) };
 }
 
+fn scale() -> TickScale {
+    TickScale::from_parts(
+        SCALE_MULT.load(Ordering::Relaxed),
+        SCALE_SHIFT.load(Ordering::Relaxed),
+    )
+}
+
 /// Nanossegundos desde `start`; `None` antes dele.
 pub fn now_ns() -> Option<u64> {
     let elapsed = counter().wrapping_sub(EPOCH_TICKS.load(Ordering::Relaxed));
-    ticks_to_ns(elapsed, FREQUENCY_HZ.load(Ordering::Relaxed))
+    let scale = scale();
+    (!scale.is_zero()).then(|| scale.convert(elapsed))
+}
+
+/// `now_ns` sem o `isb`: a leitura pode sair até algumas dezenas de ns antes das instruções
+/// anteriores. Serve ao relógio do escalonador, que tolera isso (SDD 15); medida pede `now_ns`.
+pub fn sched_clock_ns() -> Option<u64> {
+    let elapsed = counter_nosync().wrapping_sub(EPOCH_TICKS.load(Ordering::Relaxed));
+    let scale = scale();
+    (!scale.is_zero()).then(|| scale.convert(elapsed))
 }
 
 /// Nanossegundos que `ticks` do `CNTVCT_EL0` valem; zero antes de `start`.
 pub fn counter_to_ns(ticks: u64) -> u64 {
-    ticks_to_ns(ticks, FREQUENCY_HZ.load(Ordering::Relaxed)).unwrap_or(0)
+    scale().convert(ticks)
 }
 
 /// `CNTVCT_EL0`, em ticks de `CNTFRQ_EL0`.
@@ -85,6 +107,16 @@ pub fn counter() -> u64 {
     // SAFETY: o `isb` impede a leitura de subir antes das instruções anteriores.
     unsafe {
         asm!("isb", "mrs {}, cntvct_el0", out(reg) ticks, options(nomem, nostack, preserves_flags));
+    };
+    ticks
+}
+
+/// `CNTVCT_EL0` sem o `isb`: sem ordem contra as instruções vizinhas.
+fn counter_nosync() -> u64 {
+    let ticks: u64;
+    // SAFETY: só lê o contador virtual, legal em EL1.
+    unsafe {
+        asm!("mrs {}, cntvct_el0", out(reg) ticks, options(nomem, nostack, preserves_flags));
     };
     ticks
 }

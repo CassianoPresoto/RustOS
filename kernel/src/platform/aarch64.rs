@@ -287,6 +287,11 @@ pub fn now_ns() -> Option<u64> {
     timer::now_ns()
 }
 
+/// `now_ns` do escalonador: sem o `isb` no aarch64 (SDD 15, "Tempo").
+pub fn sched_clock_ns() -> Option<u64> {
+    timer::sched_clock_ns()
+}
+
 /// Contador virtual (`CNTVCT_EL0`): o relógio da semente de reserva.
 pub fn cycles() -> u64 {
     timer::counter()

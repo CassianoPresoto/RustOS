@@ -15,7 +15,8 @@ pub use aarch64::{
     fpu_area_bytes, fpu_init, fpu_init_area, fpu_read_probe, fpu_restore, fpu_save,
     fpu_write_probe, harden, hardware_entropy, has_keyboard, init_interrupts, ipi, ipi_target,
     irq_source, kernel_root, keyboard_event, local_hw_id, new_space, now_ns, prepare_secondary,
-    protections, secondary_early, secondary_init, serial_irq_done, switch, timer_mode, trigger,
+    protections, sched_clock_ns, secondary_early, secondary_init, serial_irq_done, switch,
+    timer_mode, trigger,
 };
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::{
@@ -24,7 +25,8 @@ pub use x86_64::{
     fpu_area_bytes, fpu_init, fpu_init_area, fpu_read_probe, fpu_restore, fpu_save,
     fpu_write_probe, harden, hardware_entropy, has_keyboard, init_interrupts, ipi, ipi_target,
     irq_source, kernel_root, keyboard_event, local_hw_id, new_space, now_ns, prepare_secondary,
-    protections, secondary_early, secondary_init, serial_irq_done, switch, timer_mode, trigger,
+    protections, sched_clock_ns, secondary_early, secondary_init, serial_irq_done, switch,
+    timer_mode, trigger,
 };
 
 #[cfg(target_arch = "aarch64")]
