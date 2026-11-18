@@ -10,16 +10,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::arch::Arch;
-use crate::cargo::Profile;
-use crate::{image, png, workspace};
+use crate::cargo::{self, Profile};
+use crate::{image, leak, png, workspace};
 
 /// Igual ao `BOOT_OK_MARKER` do kernel; os dois mudam juntos.
 const BOOT_OK: &str = "[rustos] boot ok";
 const PANIC: &str = "[rustos] panic";
 /// Linhas que o kernel imprime quando um autoteste ou o boot falha.
 const FATAL: [&str; 3] = ["[rustos] fault:", "[rustos] interrupts:", "FAILED"];
-/// Endereço em que os linker scripts põem o kernel. Com o KASLR ligado, o Limine
-/// carrega em outro lugar e a linha `kernel base:` nunca mostra este (SDD 13).
+/// A linha em que o kernel diz que a imagem foi sorteada, sem dizer onde está (SDD 13).
+const KASLR_ON: &str = "[rustos] kaslr: on";
+/// Com `debug-addrs` o kernel imprime a base; com o KASLR ligado ela nunca é a do linker script.
 const LINK_BASE: &str = "kernel base: 0xffffffff80000000 ";
 /// Linhas que todo boot precisa ter (guidelines 09): as proteções de hardware, o
 /// W^X conferido nas tabelas de página, a memória que o bootloader devolveu e a
@@ -251,12 +252,14 @@ fn report(arch: Arch, outcome: Outcome, log: &str) -> Result<(), String> {
                 let reason = format!("boot sem `{online}`: nem todos os núcleos subiram");
                 return Err(failure(arch, &reason, log));
             }
-            if log.contains(LINK_BASE) {
-                return Err(failure(
-                    arch,
-                    "kernel na base do linker: KASLR desligado",
-                    log,
-                ));
+            if !log.contains(KASLR_ON) || log.contains(LINK_BASE) {
+                return Err(failure(arch, "KASLR desligado: sem `kaslr: on`", log));
+            }
+            if !cargo::features().iter().any(|name| name == "debug-addrs")
+                && let Some(address) = leak::find_kernel_address(log)
+            {
+                let reason = format!("endereço do kernel no log: `{address}` (SDD 09)");
+                return Err(failure(arch, &reason, log));
             }
             println!(
                 "xtask: smoke {} ok em {} ms (relógio de parede, firmware incluso)",

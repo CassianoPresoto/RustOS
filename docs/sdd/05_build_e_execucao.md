@@ -31,7 +31,7 @@ Os dois alvos são Tier 2 com `core` pré-compilado: não há `build-std` nem ni
 | `make build` | `build --arch A --profile P` | Compila `rustos-kernel` para o alvo da ISA |
 | `make image` | `image` | Monta `target/esp/<isa>/`: `EFI/BOOT/<loader>`, `EFI/BOOT/limine.conf`, `boot/rustos` |
 | `make run` | `run` | Sobe na QEMU: a tela numa janela, o shell e a serial no terminal (`-serial mon:stdio`); Ctrl-A X sai |
-| `make smoke` | `smoke` | Sobe sem tela, lê a serial até `[rustos] boot ok`, pânico ou 120 s; imprime as linhas do kernel e o tempo de parede. Exige também as linhas `protections:`, `w^x: ok` e `reclaimed:` |
+| `make smoke` | `smoke` | Sobe sem tela, lê a serial até `[rustos] boot ok`, pânico ou 120 s; imprime as linhas do kernel e o tempo de parede. Exige também as linhas `protections:`, `w^x: ok`, `reclaimed:` e `kaslr: on`, e reprova endereço do kernel no log |
 | `make screenshot CMDS="fetch;mem"` | `screenshot -- fetch mem` | Sobe sem janela, digita cada comando no shell pela serial e espera o prompt voltar (até 30 s: o `bench` leva alguns segundos), captura a tela pelo `screendump` do monitor da QEMU e grava `target/screenshots/<isa>.png`. Comando que começa com `keys:` vai pelo teclado da máquina (`sendkey`), em qcodes da QEMU: `keys: e c h o spc semicolon ret` |
 | `make font-preview` | `font-preview` | Desenha todos os glifos da fonte própria em `target/font-preview.png` |
 | `make size` | `size` | Lê o ELF e soma `text`, `rodata`, `data`, `bss` |
@@ -68,6 +68,8 @@ A resolução vem do `limine.conf` (`resolution:`), por ISA em
 Sem rede de propósito: a placa padrão da `virt` (virtio-net) carrega a option ROM
 `efi-virtio.rom` do iPXE, que o Ubuntu só instala com o pacote `ipxe-qemu`, e a
 QEMU sai antes do boot sem ela. TCG é sempre a reserva (`-accel <nativo> -accel tcg`).
+
+**Features do kernel:** `RUSTOS_FEATURES=a,b` vira `--features a,b` em todo build do xtask. `debug-addrs` imprime endereço cru ([SDD 09](09_seguranca.md#endereços-do-kernel-no-log)).
 
 **Núcleos:** a QEMU sobe com `-smp 4`; `RUSTOS_SMP=N` troca o número (o kernel guarda estado para 8, `MAX_CPUS` de `core/hal`; o resto fica parado). O `make smoke` exige `[rustos] cpus: N online` com esse N. No TCG, neste QEMU 11.1.3 em Apple Silicon, os vCPUs do x86_64 rodam em threads do hospedeiro (observado: 10 threads e cerca de 280% de CPU durante o `bench`); `RUSTOS_ACCEL=tcg-multi` força `-accel tcg,thread=multi`.
 

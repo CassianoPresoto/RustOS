@@ -9,6 +9,7 @@ use core::ptr;
 use rustos_hal::PhysAddr;
 use rustos_mm::{FrameMemory, KernelHeap};
 
+use crate::addr::Addr;
 use crate::frames::Frames;
 use crate::platform;
 use crate::sync::IrqLock;
@@ -136,14 +137,20 @@ unsafe impl GlobalAlloc for KernelAllocator {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let mut slot = HEAP.lock();
         let Some(state) = slot.as_mut() else {
-            panic!("heap: dealloc de {ptr:p} sem heap instalado");
+            panic!(
+                "heap: dealloc de {} sem heap instalado",
+                Addr(ptr.addr() as u64)
+            );
         };
         let phys = PhysAddr::new(ptr.expose_provenance() as u64 - state.offset);
         let result = state.heap.deallocate(phys, layout, &mut state.frames);
         state.used_bytes = state.used_bytes.saturating_sub(layout.size() as u64);
         drop(slot);
         if let Err(error) = result {
-            panic!("heap: dealloc de {ptr:p} com {layout:?} falhou: {error:?}");
+            panic!(
+                "heap: dealloc de {} com {layout:?} falhou: {error:?}",
+                Addr(ptr.addr() as u64)
+            );
         }
     }
 }

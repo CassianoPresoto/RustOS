@@ -49,6 +49,21 @@ pub fn kernel_path(root: &Path, arch: Arch, profile: Profile) -> PathBuf {
         .join("rustos")
 }
 
+/// `RUSTOS_FEATURES`: features do kernel separadas por vírgula (`debug-addrs`, `panic-tests`).
+pub fn features() -> Vec<String> {
+    parse_features(std::env::var("RUSTOS_FEATURES").ok().as_deref())
+}
+
+fn parse_features(value: Option<&str>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|feature| !feature.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 pub fn build_kernel(root: &Path, arch: Arch, profile: Profile) -> Result<PathBuf, String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     workspace::run(
@@ -61,14 +76,34 @@ pub fn build_kernel(root: &Path, arch: Arch, profile: Profile) -> Result<PathBuf
                 "--target",
                 arch.target(),
             ])
-            .args(["--profile", profile.name()]),
+            .args(["--profile", profile.name()])
+            .args(feature_args(&features())),
     )?;
     Ok(kernel_path(root, arch, profile))
+}
+
+fn feature_args(features: &[String]) -> Vec<String> {
+    if features.is_empty() {
+        return Vec::new();
+    }
+    vec!["--features".to_owned(), features.join(",")]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn features_come_from_a_comma_list() {
+        assert_eq!(parse_features(None).len(), 0);
+        assert_eq!(parse_features(Some(" , ")).len(), 0);
+        assert_eq!(parse_features(Some("a, b,")), ["a", "b"]);
+        assert_eq!(
+            feature_args(&["a".to_owned(), "b".to_owned()]),
+            ["--features", "a,b"]
+        );
+        assert_eq!(feature_args(&[]).len(), 0);
+    }
 
     #[test]
     fn dev_profile_lives_in_debug_dir() {

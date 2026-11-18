@@ -231,8 +231,8 @@ GiB do topo (x86_64: `0xffffffffd42e8000`, `0xffffffffda099000`, `0xffffffff9aee
 `0xffffffffec001000`, `0xffffffffce237000`, `0xffffffffc9e68000`), e o deslocamento do
 mapa direto também (`0xffff831f80000000`, `0xffff9c6cc0000000`...). A fonte da aleatoriedade
 é a do Limine, não o gerador do kernel ([DEBT-0019](../tech-debt/0019-aleatorio-sem-fonte-de-hardware-fraco.md)
-não se aplica). O endereço impresso no boot vaza a base para quem lê a serial
-([DEBT-0022](../tech-debt/0022-endereco-do-kernel-no-log-de-boot.md)).
+não se aplica). O boot não imprime a base: só `kaslr: on` ([SDD 09](09_seguranca.md#endereços-do-kernel-no-log));
+`RUSTOS_FEATURES=debug-addrs` a mostra.
 
 **Por causa do sorteio do mapa direto, as janelas de dispositivos e de pilhas não têm
 endereço fixo.** Com o endereço fixo da fase 1 (entradas 510 e 509), o mapa direto sorteado

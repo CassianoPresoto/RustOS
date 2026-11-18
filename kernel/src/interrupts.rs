@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use rustos_hal::{BootInfo, Cpu, Fault, FaultKind, Handlers, Irq, MAX_CPUS};
 use rustos_sync::ByteRing;
 
+use crate::addr::Addr;
 use crate::memory::Memory;
 use crate::percpu::PerCpu;
 use crate::sync::bump;
@@ -162,9 +163,9 @@ fn on_fault(fault: &Fault) {
     }
     panic::begin();
     console::print_panic(format_args!(
-        "[rustos] fault: {} at pc {:#x} (code {:#x})\n",
+        "[rustos] fault: {} at pc {} (code {:#x})\n",
         Described(fault.kind),
-        fault.pc.as_u64(),
+        Addr(fault.pc.as_u64()),
         fault.code
     ));
     platform::cpu().halt_forever();
@@ -209,8 +210,8 @@ impl core::fmt::Display for Described {
                 present,
             } => write!(
                 f,
-                "page fault at {:#x} ({}, {}, {})",
-                address.as_u64(),
+                "page fault at {} ({}, {}, {})",
+                Addr(address.as_u64()),
                 if execute {
                     "execute"
                 } else if write {

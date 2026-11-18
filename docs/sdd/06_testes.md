@@ -57,7 +57,7 @@ ou em 120 s. O marcador é a constante `BOOT_OK_MARKER` do kernel e `BOOT_OK` do
 xtask: os dois mudam juntos. O kernel só imprime o marcador se os autotestes de
 frame, de heap (`heap self-test`), de W^X (`w^x: ok`), de interrupção e de tarefas
 (`task self-test`: preempção e estado de SIMD por tarefa, [SDD 15](15_tarefas_e_preempcao.md))
-passarem; o `smoke` exige a linha `task self-test: ok`, a `smp self-test: ok` (migração entre núcleos, [SDD 15](15_tarefas_e_preempcao.md)) e `cpus: N online`, com o N que a QEMU recebeu (`-smp`). O de
+passarem; o `smoke` exige a linha `task self-test: ok`, a `smp self-test: ok` (migração entre núcleos, [SDD 15](15_tarefas_e_preempcao.md)) e `cpus: N online`, com o N que a QEMU recebeu (`-smp`). Exige `kaslr: on` e reprova endereço do kernel (`0xffff…`) em linha `[rustos]` ([SDD 09](09_seguranca.md#endereços-do-kernel-no-log)). O de
 W^X percorre as tabelas novas ([SDD 13](13_memoria_virtual.md)); `fault text` no shell
 confere que a CPU recusa a escrita em `.text`.
 

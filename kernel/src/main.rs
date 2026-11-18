@@ -9,6 +9,7 @@ extern crate alloc;
 #[cfg(not(target_os = "none"))]
 compile_error!("o kernel só compila para alvos bare-metal: use `cargo xtask build`");
 
+mod addr;
 mod bench;
 mod boot;
 #[macro_use]
@@ -32,6 +33,7 @@ mod vm;
 use alloc::boxed::Box;
 
 use rustos_boot_limine::LimineBoot;
+use rustos_hal::redact;
 use rustos_hal::{BootInfo, PAGE_SIZE};
 use rustos_shell::DisplayInfo;
 
@@ -79,6 +81,7 @@ extern "C" fn kmain() -> ! {
     if let Err(error) = memory::Memory::place_windows(&vm.occupied()) {
         panic!("address windows: {error:?}");
     }
+    addr::set_direct(vm.occupied()[0]);
     vm.activate();
     let top = match memory.map_stack(vm.space_mut(), KERNEL_STACK_PAGES) {
         Ok(top) => top,
@@ -145,7 +148,7 @@ fn boot_kernel(handoff: Handoff) -> ! {
     };
     let source = random::init(&boot_marks(&boot, &memory, entry_cycles));
     report(&boot, &memory, display, reclaimed);
-    report_vm(&vm, boot.direct_map_offset());
+    report_vm(&vm);
     let cpus_ok = cpus.is_none_or(report_cpus);
     report_random(source);
     report_key_residue();
@@ -306,10 +309,23 @@ fn boot_marks(boot: &impl BootInfo, memory: &memory::Memory, entry_cycles: u64) 
     ]
 }
 
-fn report_vm(vm: &vm::Vm, direct_map_offset: u64) {
+/// Diz se a imagem foi sorteada e o teto de entropia, sem dizer onde ela está (SDD 09).
+fn report_kaslr(virtual_base: u64) {
+    let (start, end) = vm::image_range();
+    if virtual_base == redact::LINK_BASE {
+        kprintln!("[rustos] kaslr: off, image at the link address");
+    } else {
+        kprintln!(
+            "[rustos] kaslr: on, image slid by up to {} bits (4 KiB steps in 2 GiB)",
+            redact::slide_bits(end - start)
+        );
+    }
+}
+
+fn report_vm(vm: &vm::Vm) {
     let stats = vm.stats();
     kprintln!(
-        "[rustos] vm: direct map at {direct_map_offset:#x} in {} 2M and {} 4K pages, {} KiB of tables, stack {} KiB",
+        "[rustos] vm: direct map in {} 2M and {} 4K pages, {} KiB of tables, stack {} KiB",
         stats.large_pages,
         stats.small_pages,
         (stats.table_frames * PAGE_SIZE) >> 10,
@@ -422,6 +438,8 @@ fn report(
         );
     }
     if let Some(image) = boot.kernel_image() {
+        report_kaslr(image.virtual_base.as_u64());
+        #[cfg(feature = "debug-addrs")]
         kprintln!(
             "[rustos] kernel base: {:#x} (physical {:#x})",
             image.virtual_base.as_u64(),

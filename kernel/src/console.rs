@@ -5,6 +5,7 @@ use core::fmt::{self, Write};
 
 use rustos_hal::{ByteSource, Console, KeyEvent};
 
+use crate::addr;
 use crate::memory::Memory;
 use crate::panic;
 use crate::platform::PlatformConsole;
@@ -32,12 +33,13 @@ pub fn print(args: fmt::Arguments<'_>) {
     {
         let mut serial = SERIAL.lock();
         let mut screen = SCREEN.lock();
-        Both {
+        let both = Both {
             serial: serial.as_mut(),
             screen: screen.as_mut(),
-        }
-        .write_fmt(args)
-        .ok();
+        };
+        addr::scrubbed(both, |out| {
+            out.write_fmt(args).ok();
+        });
     }
     flush();
 }
@@ -116,12 +118,16 @@ pub fn print_panic(args: fmt::Arguments<'_>) {
     if let Some(mut guard) = SERIAL.try_lock()
         && let Some(serial) = guard.as_mut()
     {
-        Writer(serial).write_fmt(args).ok();
+        addr::scrubbed(Writer(serial), |out| {
+            out.write_fmt(args).ok();
+        });
     }
     if let Some(mut guard) = SCREEN.try_lock()
         && let Some(screen) = guard.as_mut()
     {
-        ScreenWriter(screen).write_fmt(args).ok();
+        addr::scrubbed(ScreenWriter(screen), |out| {
+            out.write_fmt(args).ok();
+        });
         screen.render();
     }
 }

@@ -8,6 +8,7 @@ mod cargo;
 mod checks;
 mod font_preview;
 mod image;
+mod leak;
 mod limine;
 mod manifest;
 mod png;

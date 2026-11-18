@@ -15,6 +15,7 @@ pub mod interrupt;
 pub mod io;
 pub mod memory;
 pub mod paging;
+pub mod redact;
 
 pub use addr::{PhysAddr, VirtAddr};
 pub use boot::{BootInfo, BootTimeline, BootloaderId, CpuDescriptor, KernelImage};
