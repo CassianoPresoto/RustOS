@@ -19,7 +19,7 @@ Pintar 48 KiB por CPU no x86_64 e 16 KiB no aarch64 custa tempo de boot em todas
 
 ## Gatilho
 
-A 4a mudar o papel dessas pilhas (IST4 do `#DB`, pilha de falhas só no estouro, SDD 17, na branch `docs/phase4-design`), ou o primeiro `#DF` ou NMI real.
+A 4a mudar o papel dessas pilhas (IST4 do `#DB`, pilha de falhas só no estouro, [SDD 17](../sdd/17_processos_isolamento_e_syscalls.md#o-que-a-fase-entrega-por-fatia)), ou o primeiro `#DF` ou NMI real.
 
 ## Como pagar
 
