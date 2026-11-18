@@ -20,7 +20,11 @@ debug-addrs = []
 panic-tests = []
 # Modo de teste: autotestes e medidas do boot (`rustos.selftest=1`) e o `bench` do shell (SDD 05).
 # Fora da `release-small`: sem ela o kernel os recusa e a imagem não os carrega.
-selftest = ["rustos-shell/bench"]
+selftest = [
+    "rustos-shell/bench",
+    "rustos-arch-x86_64/selftest",
+    "rustos-arch-aarch64/selftest",
+]
 
 [dependencies]
 rustos-hal.workspace = true

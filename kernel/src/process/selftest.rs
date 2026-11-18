@@ -1,0 +1,201 @@
+//! O autoteste de usuário (só na imagem com a feature `selftest`): o programa embutido no kernel
+//! roda em anel 3 ou EL0 nos casos `hello`, falha contida e laço de syscall nula, e a limpeza da
+//! pilha do kernel na volta ao usuário se confere por um resíduo plantado (SDD 17, fatia 4a).
+
+use core::hint::black_box;
+use core::ptr;
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+
+use rustos_hal::abi::{ProcessEvent, event_kind, fault_kind};
+
+use super::{Program, fault_peak, last_event, spawn};
+use crate::frames::Frames;
+use crate::platform::user_blob::{Case, image, offset};
+use crate::{platform, scrub, task};
+
+/// Quanto o autoteste espera um processo acabar, e o passo da espera.
+const WAIT_NS: u64 = 15_000_000_000;
+const POLL_NS: u64 = 1_000_000;
+/// Chamadas `nop` do laço de medida. O TCG do x86_64 é lento: só compara o RustOS consigo mesmo.
+const LOOP_CALLS: u64 = if cfg!(target_arch = "x86_64") {
+    20_000
+} else {
+    200_000
+};
+const RUNS: usize = 5;
+
+/// Um endereço do kernel que o processo tenta ler: a página existe e é do kernel.
+static KERNEL_PROBE: u64 = 0x5253_5441_434b_2121;
+
+/// Palavras que `plant` deixa na pilha e `scan` procura: 2 KiB.
+const PLANTED_WORDS: usize = 256;
+const MAGIC: u64 = 0x4b45_5953_5441_5445;
+const OFF: u8 = 0;
+const PLANT_NEXT: u8 = 1;
+const SCAN_NEXT: u8 = 2;
+static PROBE: AtomicU8 = AtomicU8::new(OFF);
+static FOUND: AtomicUsize = AtomicUsize::new(0);
+
+/// O gancho do `nop`: na primeira chamada planta um padrão fundo na pilha do kernel, na segunda
+/// varre a mesma profundidade. Sem a limpeza na volta ao usuário o padrão ainda está lá.
+pub fn on_nop() {
+    match PROBE.load(Ordering::Relaxed) {
+        PLANT_NEXT => {
+            plant();
+            PROBE.store(SCAN_NEXT, Ordering::Relaxed);
+        }
+        SCAN_NEXT => {
+            FOUND.store(scan(), Ordering::Relaxed);
+            PROBE.store(OFF, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+}
+
+#[inline(never)]
+fn plant() {
+    let mut marks = [MAGIC; PLANTED_WORDS];
+    black_box(&mut marks);
+}
+
+/// Conta as palavras do padrão na pilha abaixo da própria função.
+#[inline(never)]
+fn scan() -> usize {
+    let probe = 0_u64;
+    let here = ptr::from_ref(&probe).expose_provenance();
+    let (low, high) = (here - PLANTED_WORDS * 8, here - 256);
+    (low..high)
+        .step_by(8)
+        .filter(|&address| {
+            // SAFETY: a faixa está na pilha desta tarefa, mapeada, abaixo do quadro que lê.
+            unsafe { ptr::with_exposed_provenance::<u64>(address).read_volatile() == MAGIC }
+        })
+        .count()
+}
+
+/// Roda um caso até o processo acabar e devolve o evento dele.
+fn run_case(
+    frames: Frames,
+    offset_of_map: u64,
+    case: Case,
+    arg0: u64,
+    affinity: u32,
+) -> Option<(u32, ProcessEvent)> {
+    let program = Program {
+        code: image(),
+        entry_offset: offset(case),
+        arg0,
+    };
+    let (id, pid) = spawn(frames, offset_of_map, program, affinity).ok()?;
+    let deadline = platform::now_ns()? + WAIT_NS;
+    while !task::has_exited(id) {
+        let now = platform::now_ns()?;
+        if now > deadline {
+            return None;
+        }
+        task::sleep_until(now + POLL_NS);
+    }
+    last_event().filter(|(last, _)| *last == pid)
+}
+
+fn exited_with(result: Option<(u32, ProcessEvent)>, code: i64) -> bool {
+    result.is_some_and(|(_, event)| event.kind == event_kind::EXIT && event.code == code)
+}
+
+fn faulted(result: Option<(u32, ProcessEvent)>) -> Option<ProcessEvent> {
+    result
+        .map(|(_, event)| event)
+        .filter(|event| event.kind == event_kind::FAULT)
+}
+
+/// Nanossegundos por chamada, em décimos, de `RUNS` execuções do laço; a mediana.
+fn median_tenths_ns(frames: Frames, map_offset: u64) -> Option<u64> {
+    let mut samples = [0_u64; RUNS];
+    for sample in &mut samples {
+        let (_, event) = run_case(frames, map_offset, Case::NullLoop, LOOP_CALLS, 0)?;
+        if event.kind != event_kind::EXIT {
+            return None;
+        }
+        let ns = platform::cycles_to_ns(event.code.cast_unsigned());
+        *sample = ns * 10 / LOOP_CALLS;
+    }
+    samples.sort_unstable();
+    Some(samples[RUNS / 2])
+}
+
+/// O resíduo achado depois de plantar na primeira chamada e varrer na segunda.
+fn residue(frames: Frames, map_offset: u64) -> Option<usize> {
+    FOUND.store(usize::MAX, Ordering::Relaxed);
+    PROBE.store(PLANT_NEXT, Ordering::Relaxed);
+    run_case(frames, map_offset, Case::NullLoop, 16, 0)?;
+    PROBE.store(OFF, Ordering::Relaxed);
+    Some(FOUND.load(Ordering::Relaxed)).filter(|&found| found != usize::MAX)
+}
+
+/// O `hello` roda e sai com 0 em cada CPU ativa: a entrada de syscall e o espaço de usuário de
+/// cada núcleo (os MSRs de `SYSCALL` ou o `TTBR0_EL1`) são conferidos um a um.
+fn hello_on_every_cpu(frames: Frames, map_offset: u64) -> bool {
+    let active = task::active_cpus();
+    (0..rustos_hal::MAX_CPUS)
+        .filter(|cpu| active >> cpu & 1 != 0)
+        .all(|cpu| {
+            let result = run_case(frames, map_offset, Case::Hello, 0, 1 << cpu);
+            exited_with(result, 0)
+        })
+}
+
+/// Os casos do programa embutido. `false` se algum falhou.
+pub fn self_test(frames: Frames, map_offset: u64) -> bool {
+    let hello = hello_on_every_cpu(frames, map_offset);
+    let probe = ptr::addr_of!(KERNEL_PROBE).expose_provenance() as u64;
+    let kernel = faulted(run_case(frames, map_offset, Case::FaultMemory, probe, 0));
+    let kernel_ok = kernel.is_some_and(|event| event.fault_kind == fault_kind::PAGE_FAULT);
+    let privileged = faulted(run_case(frames, map_offset, Case::FaultPrivileged, 0, 0)).is_some();
+    let trap = faulted(run_case(frames, map_offset, Case::FaultTrap, 0, 0)).is_some();
+    let stack = faulted(run_case(frames, map_offset, Case::FaultBadStack, 0, 0)).is_some();
+    let (syscall_depth, fault_depth) = (scrub::deepest(), fault_peak());
+    scrub::set_measuring(false);
+    let clean_found = residue(frames, map_offset);
+    scrub::set_enabled(false);
+    let dirty_found = residue(frames, map_offset);
+    let off = median_tenths_ns(frames, map_offset);
+    scrub::set_enabled(true);
+    let on = median_tenths_ns(frames, map_offset);
+    let slow_return = platform::HAS_FAST_RETURN.then(|| {
+        platform::set_fast_return(false);
+        let slow = median_tenths_ns(frames, map_offset);
+        platform::set_fast_return(true);
+        slow
+    });
+    scrub::set_measuring(true);
+    let scrub_ok = clean_found == Some(0) && dirty_found.is_some_and(|found| found > 0);
+    if let (Some(on), Some(off)) = (on, off) {
+        kprintln!(
+            "[rustos] user: null syscall {}.{} ns with the stack clean, {}.{} ns without ({LOOP_CALLS} calls, median of {RUNS})",
+            on / 10,
+            on % 10,
+            off / 10,
+            off % 10
+        );
+    }
+    if let Some(Some(slow)) = slow_return {
+        kprintln!(
+            "[rustos] user: null syscall {}.{} ns leaving by iretq instead of sysret",
+            slow / 10,
+            slow % 10
+        );
+    }
+    kprintln!(
+        "[rustos] user: stack clean left {} marked words, {} without it; kernel stack depth {} B on syscall, {} B on fault",
+        clean_found.unwrap_or(usize::MAX),
+        dirty_found.unwrap_or(usize::MAX),
+        syscall_depth,
+        fault_depth
+    );
+    let ok = hello && kernel_ok && privileged && trap && scrub_ok && on.is_some() && off.is_some();
+    kprintln!(
+        "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, stack clean {scrub_ok})",
+        if ok { "ok" } else { "FAILED" }
+    );
+    ok
+}

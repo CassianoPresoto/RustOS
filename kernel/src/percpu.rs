@@ -2,7 +2,7 @@
 //! `TPIDR_EL1` (aarch64). Estado por CPU vem antes de lock global (guidelines 05).
 
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use rustos_hal::{Cpu, CpuLocal, MAX_CPUS};
 
@@ -15,7 +15,9 @@ use crate::{frames, platform};
 #[derive(Debug)]
 #[repr(C, align(64))]
 pub struct PerCpu {
-    block: AtomicUsize,
+    /// O prefixo que o `arch/` define: o endereço do próprio bloco primeiro (`gs:[0]`), depois o
+    /// que a entrada de syscall e de exceção lê pelo `GS` ou pelo `TPIDR_EL1`.
+    pub arch: platform::CpuPrefix,
     index: AtomicU32,
     /// LAPIC ID ou afinidade do `MPIDR`: o destino de um IPI.
     hw_id: AtomicU64,
@@ -69,7 +71,7 @@ impl Stats {
 impl PerCpu {
     const fn new() -> Self {
         Self {
-            block: AtomicUsize::new(0),
+            arch: platform::CpuPrefix::new(),
             index: AtomicU32::new(0),
             hw_id: AtomicU64::new(0),
             in_irq: AtomicBool::new(false),
@@ -140,7 +142,7 @@ pub fn install(index: usize) {
     cpu.index
         .store(u32::try_from(index).unwrap_or(0), Ordering::Relaxed);
     let block = ptr::from_ref(cpu).expose_provenance();
-    cpu.block.store(block, Ordering::Relaxed);
+    cpu.arch.set_block(block);
     platform::cpu_local().install(block);
 }
 

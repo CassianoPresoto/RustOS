@@ -42,6 +42,8 @@ static HANDLERS: Handlers = Handlers {
     fault: on_fault,
     irq: on_irq,
     preempt: task::preempt,
+    syscall: crate::syscall::dispatch,
+    leave_user: crate::scrub::leave_user,
 };
 /// Período do tique de boot, antes de o escalonador ligar; depois dele não há tique periódico.
 const TICK_NS: u64 = 1_000_000_000 / platform::TIMER_HZ as u64;
@@ -152,6 +154,9 @@ fn push_input(byte: u8) {
 }
 
 fn on_fault(fault: &Fault) {
+    if fault.from_user {
+        crate::process::user_fault(fault);
+    }
     if fault.kind.is_recoverable() {
         BREAKPOINTS.fetch_add(1, Ordering::Relaxed);
         return;

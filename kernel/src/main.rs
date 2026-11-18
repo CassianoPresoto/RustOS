@@ -25,8 +25,10 @@ mod memory;
 mod panic;
 mod percpu;
 mod platform;
+mod process;
 mod random;
 mod screen;
+mod scrub;
 #[cfg(feature = "selftest")]
 mod selftest;
 #[cfg(not(feature = "selftest"))]
@@ -35,8 +37,10 @@ mod selftest;
 mod smp;
 mod stack;
 mod sync;
+mod syscall;
 mod system;
 mod task;
+mod uspace;
 mod vm;
 
 use alloc::boxed::Box;
@@ -262,7 +266,7 @@ fn report_tasks(boot: &impl BootInfo, memory: &memory::Memory, selftest: bool) -
         }
     };
     smp::release();
-    !selftest || selftest::after_tasks(summary)
+    !selftest || selftest::after_tasks(summary, memory.frames, boot.direct_map_offset())
 }
 
 /// O que o boot tem de impredizível: contadores de ciclo e os tempos do bootloader.

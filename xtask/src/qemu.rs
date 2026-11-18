@@ -82,7 +82,7 @@ const BENCH_REFUSED: &str = "bench: not in this build";
 
 /// O que só o modo de teste imprime: se uma destas faltar, a linha de comando se perdeu e o
 /// boot que passou foi o normal.
-const SELFTEST_LINES: [(&str, &str); 12] = [
+const SELFTEST_LINES: [(&str, &str); 15] = [
     ("[rustos] frame self-test: ok", "o autoteste de frame"),
     ("[rustos] heap self-test: ok", "o autoteste do heap"),
     ("[rustos] exception self-test: ok", "o autoteste de exceção"),
@@ -95,6 +95,18 @@ const SELFTEST_LINES: [(&str, &str); 12] = [
     ("[rustos] scale: ", "a medida de escala"),
     ("[rustos] alloc storm: ", "a medida de contenção da memória"),
     ("[rustos] stacks: ", "a medida e a prova de pilha"),
+    (
+        "[rustos] user: entered ring3/el0",
+        "a entrada do primeiro programa em anel 3 ou EL0",
+    ),
+    (
+        "[rustos] user: fault contained (pid ",
+        "a falha de usuário que mata só o processo",
+    ),
+    (
+        "[rustos] user self-test: ok",
+        "o autoteste dos casos de usuário",
+    ),
 ];
 /// O que o boot normal confere, além do que o `REQUIRED` tem de comum aos dois modos.
 const NORMAL_LINES: [(&str, &str); 2] = [

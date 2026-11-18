@@ -16,6 +16,8 @@ use rustos_arch_x86_64::lapic::{
 };
 use rustos_arch_x86_64::pic;
 use rustos_arch_x86_64::pit::{self, Pit, Reading};
+#[cfg(feature = "selftest")]
+pub use rustos_arch_x86_64::user_blob;
 use rustos_arch_x86_64::{
     ApicAccess, ApicMode, COM1, CpuTables, IstStacks, MmioBus, PIC_MASTER, PIC_SLAVE, PIT_PORTS,
     PortBus, Protections, TimerMode, X86Cpu, X86CpuLocal, X86Entropy, X86Ipi, X86Mmu, active_root,
@@ -23,7 +25,7 @@ use rustos_arch_x86_64::{
     enable_secondary_apic, install_early_traps, install_traps, load_cpu_tables, local_apic_id,
     publish_apic, rdtsc, require_features, set_timer_mode, xstate,
 };
-pub use rustos_arch_x86_64::{Context, call_on_stack, switch};
+pub use rustos_arch_x86_64::{Context, CpuPrefix, call_on_stack, switch};
 use rustos_arch_x86_64::{DirectMapTables, pte::X86Format};
 use rustos_driver_i8042::I8042;
 use rustos_driver_uart16550::{DIVISOR_115200, Uart16550};
@@ -31,7 +33,7 @@ use rustos_hal::{
     BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, MmuControl, PAGE_SIZE, PageMapper,
     PhysAddr, TickScale,
 };
-use rustos_mm::PageTables;
+use rustos_mm::{PageTables, UserRange};
 use rustos_sync::SpinLock;
 
 use super::{FpuSummary, PlatformError, Protection};
@@ -84,7 +86,7 @@ pub unsafe fn new_space(
 /// Frequência do tique do timer.
 pub const TIMER_HZ: u32 = 100;
 
-/// Páginas de cada pilha de exceção (#DF, NMI, #MC); a de guarda fica abaixo.
+/// Páginas de cada pilha de exceção (#DF, NMI, #MC, #DB); a de guarda fica abaixo.
 const IST_STACK_PAGES: u64 = 4;
 /// Calibração pelo PIT (SDD 10, DEBT-0066): fecha em 400 ppm, aceita o que houver aos 5 ms se
 /// mais tempo não chega lá, para em 20 ms, recusa acima de 1% e desiste do PIT parado em 300 M ciclos.
@@ -238,6 +240,7 @@ pub fn init_interrupts(
         double_fault: ist_stack(memory, &mut mapper)?,
         nmi: ist_stack(memory, &mut mapper)?,
         machine_check: ist_stack(memory, &mut mapper)?,
+        debug: ist_stack(memory, &mut mapper)?,
     };
     let guard = stacks.double_fault.as_u64() - (IST_STACK_PAGES + 1) * PAGE_SIZE;
     GUARD_PAGE.store(guard, Ordering::Relaxed);
@@ -577,6 +580,7 @@ pub fn prepare_secondary(
         double_fault: ist_stack(memory, mapper)?,
         nmi: ist_stack(memory, mapper)?,
         machine_check: ist_stack(memory, mapper)?,
+        debug: ist_stack(memory, mapper)?,
     };
     Ok(SecondaryResources {
         ist,
@@ -611,4 +615,96 @@ pub fn secondary_init(resources: SecondaryResources) -> Result<(), PlatformError
         TimerMode::OneShot
     });
     fpu_init().map(|_| ())
+}
+
+/// A raiz do kernel e o que o usuário precisa antes da primeira tarefa. Uma vez, depois de
+/// `Vm::activate`; o x86_64 não aloca nada.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "mesma assinatura em todas as ISAs"
+)]
+pub fn user_init(_frames: &mut impl FrameSource) -> Result<(), MapError> {
+    rustos_arch_x86_64::set_kernel_root(kernel_root().as_u64());
+    Ok(())
+}
+
+/// O que cada CPU faz antes de rodar tarefa de usuário: no x86_64, nada (`load_cpu` já ligou o
+/// `SYSCALL`).
+pub fn user_cpu_init() {}
+
+/// Troca o espaço de endereçamento desta CPU para o da tarefa que vai rodar; `root` zero é
+/// tarefa do kernel. Com a IRQ mascarada.
+pub fn switch_space(root: u64, kernel_stack_top: u64) {
+    // SAFETY: o chamador mascara a IRQ, `root` é de um espaço montado por `new_user_space` (com a
+    // metade do kernel) e o topo é o da pilha da tarefa.
+    unsafe { rustos_arch_x86_64::switch_space(root, kernel_stack_top) };
+}
+
+/// Primeira volta ao anel 3. Nunca volta.
+///
+/// # Safety
+/// Contrato de `rustos_arch_x86_64::enter_user`: IRQ mascarada, `switch_space` já feito para
+/// esta tarefa, e `entry`/`sp` de usuário.
+pub unsafe fn enter_user(entry: u64, sp: u64, arg0: u64, arg1: u64, _kernel_top: u64) -> ! {
+    // SAFETY: o contrato desta função.
+    unsafe { rustos_arch_x86_64::enter_user(entry, sp, arg0, arg1) }
+}
+
+/// Espaço de usuário novo: raiz própria com a metade do kernel copiada por ponteiro.
+///
+/// # Safety
+/// Contrato de `new_space`, e a CPU já está nas tabelas do kernel (`kernel_root`).
+pub unsafe fn new_user_space(
+    frames: &mut impl FrameSource,
+    direct_map_offset: u64,
+) -> Result<PlatformSpace, MapError> {
+    // SAFETY: o contrato desta função.
+    let mut space = unsafe { new_space(frames, direct_map_offset) }?;
+    space.adopt_top_entries(kernel_root(), KERNEL_TOP_ENTRIES);
+    Ok(space)
+}
+
+/// As entradas de nível alto do kernel: a metade de cima da raiz.
+const KERNEL_TOP_ENTRIES: core::ops::Range<usize> = 256..512;
+
+/// A raiz do espaço tem a mesma metade do kernel que a raiz do kernel. Entrada nova do kernel
+/// depois da cópia dessincronizaria as raízes.
+pub fn kernel_half_in_sync(space: &PlatformSpace) -> bool {
+    space.top_entries_match(kernel_root(), KERNEL_TOP_ENTRIES)
+}
+
+/// Copia `dst.len()` bytes de `range` (usuário) para `dst`. `false` se uma página faltou.
+pub fn copy_from_user(range: UserRange, dst: &mut [u8]) -> bool {
+    assert_eq!(
+        range.len(),
+        dst.len() as u64,
+        "copy_from_user: tamanhos diferentes"
+    );
+    // SAFETY: `dst` é memória do kernel do tamanho da faixa e a faixa é de usuário (`UserRange`).
+    let missing = unsafe {
+        rustos_arch_x86_64::usercopy::copy_from_user(dst.as_mut_ptr(), range.addr(), dst.len())
+    };
+    missing == 0
+}
+
+/// Copia `src` para `range` (usuário). `false` se uma página faltou.
+pub fn copy_to_user(range: UserRange, src: &[u8]) -> bool {
+    assert_eq!(
+        range.len(),
+        src.len() as u64,
+        "copy_to_user: tamanhos diferentes"
+    );
+    // SAFETY: `src` é memória do kernel do tamanho da faixa e a faixa é de usuário (`UserRange`).
+    let missing = unsafe {
+        rustos_arch_x86_64::usercopy::copy_to_user(range.addr(), src.as_ptr(), src.len())
+    };
+    missing == 0
+}
+
+/// Esta ISA tem saída rápida de syscall (`SYSRET`) que se liga e desliga.
+pub const HAS_FAST_RETURN: bool = true;
+
+/// Liga ou desliga a saída por `SYSRET` (o `IRETQ` é sempre o caminho de reserva).
+pub fn set_fast_return(on: bool) {
+    rustos_arch_x86_64::set_sysret(on);
 }
