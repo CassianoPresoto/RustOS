@@ -147,7 +147,7 @@ impl<'a> Terminal<'a> {
 
     /// Cria o terminal sobre `cells`; `None` se a fatia for curta, o tamanho for 0,
     /// `rows` passar de `MAX_ROWS` ou `cols` de `MAX_COLS`. A grade começa em branco e
-    /// toda suja, sem tela alternativa nem histórico (`with_alternate`, `with_history`).
+    /// toda suja, sem tela alternativa nem histórico (`set_alternate`, `set_history`).
     pub fn new(cells: &'a mut [Cell], cols: usize, rows: usize) -> Option<Self> {
         let needed = Self::cells_needed(cols, rows);
         if cols == 0 || rows == 0 || rows > MAX_ROWS || cols > MAX_COLS || cells.len() < needed {
@@ -192,25 +192,28 @@ impl<'a> Terminal<'a> {
         })
     }
 
-    /// Entrega a memória da tela alternativa (`?47`, `?1047`, `?1049`): `cells_needed`
-    /// células, que passam a branco. `None` se a fatia for curta. Sem ela esses modos
-    /// não fazem nada.
-    pub fn with_alternate(mut self, alt: &'a mut [Cell]) -> Option<Self> {
+    /// Entrega a memória da tela alternativa (`?47`, `?1047`, `?1049`) a qualquer
+    /// momento: `cells_needed` células, que passam a branco. `false`, sem mudar nada,
+    /// se a fatia for curta ou se a alternativa estiver ativa (a principal está em
+    /// `other`). Sem fatia, esses modos não fazem nada.
+    pub fn set_alternate(&mut self, alt: &'a mut [Cell]) -> bool {
         let needed = Self::cells_needed(self.cols, self.rows);
-        if alt.len() < needed {
-            return None;
+        if self.alt_active || alt.len() < needed {
+            return false;
         }
         alt[..needed].fill(Cell::BLANK);
         self.other = alt;
-        Some(self)
+        self.other_ring = 0;
+        true
     }
 
-    /// Entrega a memória do histórico de rolagem: cabem `len / cols` linhas, e a mais
-    /// antiga sai quando enche. Fatia menor que uma linha deixa o histórico desligado.
-    #[must_use]
-    pub fn with_history(mut self, cells: &'a mut [Cell]) -> Self {
+    /// Entrega a memória do histórico de rolagem a qualquer momento: cabem
+    /// `len / cols` linhas, a mais antiga sai quando enche. O histórico começa vazio,
+    /// o que já havia se perde e a visão volta à tela viva. Fatia menor que uma linha
+    /// deixa o histórico desligado.
+    pub fn set_history(&mut self, cells: &'a mut [Cell]) {
+        self.set_view(0);
         self.history = History::new(cells, self.cols);
-        self
     }
 
     /// Número de colunas.
@@ -246,6 +249,11 @@ impl<'a> Terminal<'a> {
             col: self.col,
             visible: self.modes & MODE_CURSOR_VISIBLE != 0 && self.view == 0,
         }
+    }
+
+    /// Há memória para a tela alternativa (`set_alternate`).
+    pub fn has_alternate(&self) -> bool {
+        self.alt_available()
     }
 
     /// A tela alternativa está ativa.
@@ -324,6 +332,22 @@ impl<'a> Terminal<'a> {
     /// Bytes da tecla para o programa; respeita DECCKM nas setas, Home e End.
     pub fn encode_key(&self, key: Key, out: &mut [u8; 8]) -> usize {
         key::encode(key, self.modes & MODE_APP_CURSOR != 0, out)
+    }
+
+    /// Trata uma tecla do teclado: `ScrollBack` e `ScrollForward` rolam a visão em
+    /// meia tela e não geram byte; qualquer outra volta à tela viva e vira bytes
+    /// (`encode_key`). Devolve quantos bytes foram para `out`.
+    pub fn press(&mut self, key: Key, out: &mut [u8; 8]) -> usize {
+        let page = (self.rows / 2).max(1);
+        match key {
+            Key::ScrollBack => self.scroll_view_back(page),
+            Key::ScrollForward => self.scroll_view_forward(page),
+            _ => {
+                self.snap_to_live();
+                return self.encode_key(key, out);
+            }
+        }
+        0
     }
 
     /// Alimenta o terminal. O estado do parser atravessa chamadas: UTF-8 e sequências

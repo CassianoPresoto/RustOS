@@ -14,11 +14,9 @@ macro_rules! full {
         let mut alt = vec![Cell::BLANK; Terminal::cells_needed($cols, $rows)];
         let mut hist = vec![Cell::BLANK; Terminal::history_cells_needed($cols, $lines)];
         #[allow(unused_mut, reason = "nem todo teste escreve no terminal")]
-        let mut $t = Terminal::new(&mut main, $cols, $rows)
-            .unwrap()
-            .with_alternate(&mut alt)
-            .unwrap()
-            .with_history(&mut hist);
+        let mut $t = Terminal::new(&mut main, $cols, $rows).unwrap();
+        assert!($t.set_alternate(&mut alt));
+        $t.set_history(&mut hist);
     };
 }
 

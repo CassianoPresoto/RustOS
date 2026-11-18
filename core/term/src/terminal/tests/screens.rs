@@ -194,8 +194,10 @@ fn without_alternate_memory_the_modes_change_nothing_but_the_cursor_slot() {
 fn a_short_alternate_slice_is_refused() {
     let mut main = vec![Cell::BLANK; 24];
     let mut alt = vec![Cell::BLANK; 23];
-    let t = Terminal::new(&mut main, 8, 3).unwrap();
-    assert!(t.with_alternate(&mut alt).is_none());
+    let mut t = Terminal::new(&mut main, 8, 3).unwrap();
+    assert!(!t.set_alternate(&mut alt));
+    t.write(b"\x1b[?47h");
+    assert!(!t.is_alternate());
 }
 
 #[test]
@@ -208,10 +210,8 @@ fn the_alternate_slice_starts_blank_whatever_it_held() {
         };
         24
     ];
-    let mut t = Terminal::new(&mut main, 8, 3)
-        .unwrap()
-        .with_alternate(&mut alt)
-        .unwrap();
+    let mut t = Terminal::new(&mut main, 8, 3).unwrap();
+    assert!(t.set_alternate(&mut alt));
     t.write(b"\x1b[?47h");
     assert!(screen(&t).iter().all(String::is_empty));
 }
@@ -466,9 +466,8 @@ fn without_history_memory_scrolling_back_does_nothing() {
 fn history_slice_shorter_than_a_line_disables_it() {
     let mut main = vec![Cell::BLANK; 12];
     let mut hist = vec![Cell::BLANK; 3];
-    let mut t = Terminal::new(&mut main, 4, 3)
-        .unwrap()
-        .with_history(&mut hist);
+    let mut t = Terminal::new(&mut main, 4, 3).unwrap();
+    t.set_history(&mut hist);
     numbered(&mut t, 9);
     assert_eq!(t.history_len(), 0);
 }
@@ -842,4 +841,199 @@ fn decrc_in_origin_mode_keeps_the_cursor_inside_the_region() {
     assert_eq!(pos(&t), (4, 2));
     t.write(b"\x1b[1;2r\x1b8");
     assert_eq!(pos(&t), (1, 2));
+}
+
+// ---- memória entregue depois do `new` ----
+
+#[test]
+fn the_alternate_slice_is_refused_while_the_alternate_screen_is_active() {
+    full!(t, 4, 2, 0);
+    t.write(b"main\x1b[?47h");
+    let mut other = vec![Cell::BLANK; 8];
+    assert!(!t.set_alternate(&mut other));
+    t.write(b"alt\x1b[?47l");
+    assert_eq!(screen(&t), ["main", ""]);
+}
+
+#[test]
+fn a_new_alternate_slice_replaces_the_old_one_from_the_main_screen() {
+    full!(t, 4, 2, 0);
+    t.write(b"\x1b[?47hold\x1b[?47l");
+    let mut fresh = vec![Cell::BLANK; 8];
+    assert!(t.set_alternate(&mut fresh));
+    t.write(b"\x1b[?47h");
+    assert_eq!(screen(&t), ["", ""]);
+}
+
+#[test]
+fn history_attached_late_starts_empty_and_keeps_the_screen() {
+    term!(t, 4, 3);
+    numbered(&mut t, 6);
+    assert_eq!(t.history_len(), 0);
+    let mut hist = vec![Cell::BLANK; 4 * 5];
+    t.set_history(&mut hist);
+    assert_eq!((t.history_len(), t.history_capacity()), (0, 5));
+    assert_eq!(screen(&t), ["4", "5", "6"]);
+    t.write(b"\r\n7\r\n8");
+    assert_eq!(t.history_len(), 2);
+    assert_eq!(scrolled(&mut t, 2), ["4", "5", "6"]);
+}
+
+#[test]
+fn replacing_the_history_returns_the_view_to_the_live_screen() {
+    full!(t, 4, 3, 10);
+    numbered(&mut t, 6);
+    t.scroll_view_back(2);
+    let mut hist = vec![Cell::BLANK; 8];
+    t.set_history(&mut hist);
+    assert_eq!((t.view_offset(), t.history_len()), (0, 0));
+    assert_eq!(screen(&t), ["4", "5", "6"]);
+}
+
+// ---- teclas que rolam e teclas que voltam à tela viva ----
+
+fn press(t: &mut Terminal<'_>, key: Key) -> Vec<u8> {
+    let mut out = [0u8; 8];
+    let n = t.press(key, &mut out);
+    out[..n].to_vec()
+}
+
+#[test]
+fn scroll_keys_move_the_view_by_half_a_screen_and_send_nothing() {
+    full!(t, 4, 6, 20);
+    numbered(&mut t, 20);
+    assert_eq!(press(&mut t, Key::ScrollBack), Vec::<u8>::new());
+    assert_eq!(t.view_offset(), 3);
+    press(&mut t, Key::ScrollBack);
+    assert_eq!(t.view_offset(), 6);
+    press(&mut t, Key::ScrollForward);
+    assert_eq!(t.view_offset(), 3);
+    assert_eq!(press(&mut t, Key::ScrollForward), Vec::<u8>::new());
+    assert_eq!(t.view_offset(), 0);
+}
+
+#[test]
+fn a_page_is_at_least_one_line() {
+    full!(t, 4, 1, 5);
+    numbered(&mut t, 4);
+    press(&mut t, Key::ScrollBack);
+    assert_eq!(t.view_offset(), 1);
+}
+
+#[test]
+fn any_other_key_returns_to_the_live_screen_and_is_encoded() {
+    full!(t, 4, 4, 20);
+    numbered(&mut t, 12);
+    for (key, bytes) in [
+        (Key::Char('a'), &b"a"[..]),
+        (Key::Enter, b"\r"),
+        (Key::PageUp, b"\x1b[5~"),
+        (Key::Up, b"\x1b[A"),
+    ] {
+        t.scroll_view_back(3);
+        assert_eq!(press(&mut t, key), bytes, "{key:?}");
+        assert_eq!(t.view_offset(), 0, "{key:?}");
+    }
+}
+
+#[test]
+fn keys_without_bytes_still_return_to_the_live_screen() {
+    full!(t, 4, 4, 20);
+    numbered(&mut t, 12);
+    t.scroll_view_back(3);
+    assert_eq!(press(&mut t, Key::F(13)), Vec::<u8>::new());
+    assert_eq!(t.view_offset(), 0);
+}
+
+#[test]
+fn scroll_keys_do_nothing_on_the_alternate_screen_and_pass_no_bytes() {
+    full!(t, 4, 4, 20);
+    numbered(&mut t, 12);
+    t.write(ALT_ON);
+    assert_eq!(press(&mut t, Key::ScrollBack), Vec::<u8>::new());
+    assert_eq!(t.view_offset(), 0);
+}
+
+#[test]
+fn press_respects_the_application_cursor_mode() {
+    full!(t, 4, 4, 0);
+    t.write(b"\x1b[?1h");
+    assert_eq!(press(&mut t, Key::Up), b"\x1bOA");
+}
+
+// ---- parâmetros enormes e fatias folgadas ----
+
+#[test]
+fn csi_with_huge_parameters_stays_inside_the_grid() {
+    const FINALS: &[u8] = b"IZSTLMrHfGdAB@PXCDEFJK";
+    const PARAMS: &[&str] = &["65535", "65534", "0", "1", "2", "3", "99999", "70000"];
+    let mut rng = XorShift(0x5EED_0000_FFFF_0001);
+    for (cols, rows, lines, slack) in [
+        (1, 1, 0, 0),
+        (3, 2, 1, 17),
+        (80, 24, 5, 3),
+        (7, 256, 0, 40),
+        (512, 4, 2, 1),
+    ] {
+        let mut main = vec![Cell::BLANK; Terminal::cells_needed(cols, rows) + slack];
+        let mut alt = vec![Cell::BLANK; Terminal::cells_needed(cols, rows) + slack];
+        let mut hist = vec![Cell::BLANK; Terminal::history_cells_needed(cols, lines) + slack];
+        let mut t = Terminal::new(&mut main, cols, rows).unwrap();
+        assert!(t.set_alternate(&mut alt));
+        t.set_history(&mut hist);
+        for _ in 0..20_000 {
+            let mut seq = b"\x1b[".to_vec();
+            for index in 0..rng.next() % 3 {
+                if index > 0 {
+                    seq.push(b';');
+                }
+                let pick = usize::try_from(rng.next()).unwrap() % PARAMS.len();
+                seq.extend_from_slice(PARAMS[pick].as_bytes());
+            }
+            seq.push(FINALS[usize::try_from(rng.next()).unwrap() % FINALS.len()]);
+            if rng.next().is_multiple_of(4) {
+                seq.extend_from_slice(b"text\r\n\n");
+            }
+            t.write(&seq);
+            check_invariants(&t);
+            t.scroll_view_back(usize::MAX);
+            check_invariants(&t);
+            t.snap_to_live();
+            assert!(t.take_dirty().all(|row| row < rows));
+        }
+    }
+}
+
+#[test]
+fn the_largest_parameters_do_the_obvious_thing() {
+    full!(t, 5, 4, 3);
+    numbered(&mut t, 3);
+    t.write(b"\x1b[65535S");
+    assert_eq!(screen(&t), ["", "", "", ""]);
+    assert_eq!(t.history_len(), 3);
+    t.write(b"\x1b[65535T\x1b[65535L\x1b[65535M");
+    assert_eq!(screen(&t), ["", "", "", ""]);
+    t.write(b"\x1b[65535;65535r");
+    assert_eq!((t.scroll_top, t.scroll_bottom), (0, 3));
+    t.write(b"\x1b[65535I");
+    assert_eq!(pos(&t), (2, 4));
+    t.write(b"\x1b[65535Z");
+    assert_eq!(pos(&t), (2, 0));
+}
+
+#[test]
+fn slices_larger_than_needed_are_used_only_up_to_the_grid() {
+    let mut main = vec![Cell::BLANK; 12 + 9];
+    let mut alt = vec![Cell::BLANK; 12 + 9];
+    let mut hist = vec![Cell::BLANK; 4 * 2 + 3];
+    let mut t = Terminal::new(&mut main, 4, 3).unwrap();
+    assert!(t.set_alternate(&mut alt));
+    t.set_history(&mut hist);
+    assert_eq!(t.history_capacity(), 2);
+    numbered(&mut t, 7);
+    t.write(ALT_ON);
+    numbered(&mut t, 5);
+    t.write(ALT_OFF);
+    assert_eq!(screen(&t), ["5", "6", "7"]);
+    assert_eq!(scrolled(&mut t, 9), ["3", "4", "5"]);
 }
