@@ -16,14 +16,18 @@ pub const PHDR_LEN: usize = 56;
 /// Maior tabela de program headers aceita, em bytes.
 pub const MAX_PHDR_TABLE: u64 = 65_536;
 
+/// `p_flags`: executável.
 pub const PF_X: u32 = 1;
+/// `p_flags`: gravável.
 pub const PF_W: u32 = 2;
+/// `p_flags`: legível.
 pub const PF_R: u32 = 4;
 
+/// `e_machine` do x86_64.
 pub const EM_X86_64: u16 = 62;
+/// `e_machine` do aarch64.
 pub const EM_AARCH64: u16 = 183;
 
-const PHDR_SIZE: u64 = 56;
 const ET_EXEC: u16 = 2;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
@@ -111,15 +115,20 @@ pub enum Error {
 /// Um `PT_LOAD` já validado.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Segment {
+    /// Endereço virtual do primeiro byte do segmento (não é da página).
     pub vaddr: u64,
+    /// Bytes do segmento na memória, `.bss` incluído.
     pub memsz: u64,
+    /// Posição do primeiro byte do segmento no arquivo.
     pub offset: u64,
+    /// Bytes que vêm do arquivo; `filesz <= memsz`.
     pub filesz: u64,
-    /// `PF_R`, `PF_W` e `PF_X`; nunca W com X.
+    /// Só `PF_R`, `PF_W` e `PF_X`, nunca W com X.
     pub flags: u32,
 }
 
 impl Segment {
+    /// Segmento vazio, para preencher o array da `Image`.
     pub const EMPTY: Self = Self {
         vaddr: 0,
         memsz: 0,
@@ -127,6 +136,10 @@ impl Segment {
         filesz: 0,
         flags: 0,
     };
+
+    pub fn readable(&self) -> bool {
+        self.flags & PF_R != 0
+    }
 
     pub fn writable(&self) -> bool {
         self.flags & PF_W != 0
@@ -136,7 +149,24 @@ impl Segment {
         self.flags & PF_X != 0
     }
 
-    /// Os `p_filesz` bytes do segmento em `file`; o resto até `memsz` é zero.
+    /// Intervalo virtual `[início, fim)` do segmento arredondado à página: o que
+    /// o carregador mapeia. Satura em vez de estourar se `page_size` não for o
+    /// dos `Limits` com que a imagem foi validada.
+    pub fn page_range(&self, page_size: u64) -> (u64, u64) {
+        let mask = page_size.wrapping_sub(1);
+        let end = self.vaddr.saturating_add(self.memsz);
+        (self.vaddr & !mask, end.saturating_add(mask) & !mask)
+    }
+
+    /// Onde `vaddr` cai dentro da sua página: quantos bytes da primeira página
+    /// vêm antes do primeiro byte do segmento.
+    pub fn page_offset(&self, page_size: u64) -> u64 {
+        self.vaddr & page_size.wrapping_sub(1)
+    }
+
+    /// Os `p_filesz` bytes do segmento em `file`, que valem a partir de `vaddr`
+    /// (não do início da página). O chamador zera o começo da primeira página
+    /// antes de `vaddr` e a cauda de `filesz` até `memsz`.
     pub fn file_bytes<'a>(&self, file: &'a [u8]) -> Option<&'a [u8]> {
         let start = usize::try_from(self.offset).ok()?;
         let end = usize::try_from(self.offset.checked_add(self.filesz)?).ok()?;
@@ -147,6 +177,7 @@ impl Segment {
 /// O que o carregador precisa de um executável válido.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Image {
+    /// Endereço virtual da primeira instrução.
     pub entry: u64,
     loads: [Segment; MAX_LOADS],
     load_count: usize,
@@ -212,7 +243,7 @@ pub fn parse(file: &[u8], limits: &Limits) -> Result<Image, Error> {
             memsz: phdr.memsz,
             offset: phdr.offset,
             filesz: phdr.filesz,
-            flags: phdr.flags,
+            flags: phdr.flags & (PF_R | PF_W | PF_X),
         };
         entry_ok |= segment.executable()
             && header.entry >= segment.vaddr
@@ -272,14 +303,16 @@ fn check_load(phdr: &Phdr, file_len: usize, limits: &Limits) -> Result<(u64, u64
 /// Endereço da tabela de program headers na memória, se ela cabe inteira no
 /// conteúdo de arquivo de `segment`.
 fn phdr_address(segment: &Segment, header: &Header) -> Option<u64> {
-    let table_end = header
-        .phoff
-        .checked_add(u64::from(header.phnum) * PHDR_SIZE)?;
+    let table_end = header.phoff.checked_add(table_bytes(header.phnum))?;
     let file_end = segment.offset.checked_add(segment.filesz)?;
     if header.phoff < segment.offset || table_end > file_end {
         return None;
     }
     segment.vaddr.checked_add(header.phoff - segment.offset)
+}
+
+fn table_bytes(phnum: u16) -> u64 {
+    u64::from(phnum) * PHDR_LEN as u64
 }
 
 struct Header {
@@ -327,7 +360,7 @@ impl Header {
 
     /// Offset da tabela no arquivo, depois de conferir tamanho e limites.
     fn table(&self, file_len: usize) -> Result<usize, Error> {
-        let size = u64::from(self.phnum) * PHDR_SIZE;
+        let size = table_bytes(self.phnum);
         if size == 0 || size > MAX_PHDR_TABLE {
             return Err(Error::BadPhdrTableSize);
         }

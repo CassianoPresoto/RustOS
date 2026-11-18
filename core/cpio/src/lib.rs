@@ -78,6 +78,7 @@ struct Header {
 }
 
 impl<'a> Reader<'a> {
+    /// Começa no byte 0 de `archive`, onde o primeiro cabeçalho tem de estar.
     pub fn new(archive: &'a [u8]) -> Self {
         Self {
             archive,

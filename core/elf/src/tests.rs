@@ -18,7 +18,7 @@ fn limits() -> Limits {
 }
 
 #[derive(Clone, Copy)]
-struct P {
+struct ProgramHeader {
     kind: u32,
     flags: u32,
     offset: u64,
@@ -28,8 +28,8 @@ struct P {
     align: u64,
 }
 
-fn load(flags: u32, offset: u64, vaddr: u64, filesz: u64, memsz: u64) -> P {
-    P {
+fn load(flags: u32, offset: u64, vaddr: u64, filesz: u64, memsz: u64) -> ProgramHeader {
+    ProgramHeader {
         kind: PT_LOAD,
         flags,
         offset,
@@ -51,7 +51,7 @@ struct Elf {
     phoff: u64,
     phentsize: u16,
     phnum: Option<u16>,
-    phdrs: Vec<P>,
+    phdrs: Vec<ProgramHeader>,
     len: usize,
 }
 
@@ -122,7 +122,7 @@ fn refused(elf: &Elf) -> Error {
     elf.parse().expect_err("devia recusar")
 }
 
-fn with_load(index: usize, change: impl FnOnce(&mut P)) -> Elf {
+fn with_load(index: usize, change: impl FnOnce(&mut ProgramHeader)) -> Elf {
     let mut elf = base();
     change(&mut elf.phdrs[index]);
     elf
@@ -130,7 +130,7 @@ fn with_load(index: usize, change: impl FnOnce(&mut P)) -> Elf {
 
 fn with_extra(kind: u32) -> Elf {
     let mut elf = base();
-    elf.phdrs.push(P {
+    elf.phdrs.push(ProgramHeader {
         kind,
         flags: 0,
         offset: 0,
@@ -327,7 +327,7 @@ fn ignores_note_phdr_gnu_stack_relro_and_unknown_types() {
 #[test]
 fn ignored_types_are_not_validated() {
     let mut elf = with_extra(0x6474_e551);
-    elf.phdrs[3] = P {
+    elf.phdrs[3] = ProgramHeader {
         kind: 0x6474_e551,
         flags: PF_R | PF_W | PF_X,
         offset: u64::MAX,
@@ -408,25 +408,21 @@ fn refuses_empty_load() {
 
 #[test]
 fn refuses_vaddr_overflow() {
-    for (vaddr, memsz) in [
-        (u64::MAX, 1),
-        (u64::MAX - 5, 10),
-        (1 << 63, 1 << 63),
-        (u64::MAX - 0x20, 0x10),
-        (u64::MAX - 0xfff, 0x10),
-    ] {
+    let cases = [
+        (u64::MAX, 1, Error::VaddrOverflow),
+        (u64::MAX - 5, 10, Error::VaddrOverflow),
+        (1 << 63, 1 << 63, Error::VaddrOverflow),
+        (u64::MAX - 0x20, 0x10, Error::VaddrOverflow),
+        (u64::MAX - 0xfff, 0x10, Error::VaddrOverflow),
+        (USER_TOP + 1, 0x10, Error::OutOfUserRange),
+    ];
+    for (vaddr, memsz, expected) in cases {
         let elf = with_load(2, |p| {
             p.vaddr = vaddr;
             p.memsz = memsz;
             p.filesz = 0x10.min(memsz);
             p.offset = 0x3000 + (vaddr & 0xfff);
         });
-        let expected =
-            if vaddr.checked_add(memsz).is_none() || (vaddr + memsz).checked_add(0xfff).is_none() {
-                Error::VaddrOverflow
-            } else {
-                Error::OutOfUserRange
-            };
         assert_eq!(refused(&elf), expected, "{vaddr:#x}+{memsz:#x}");
     }
 }
@@ -851,4 +847,103 @@ fn real_elf_as_position_independent_is_refused() {
     let mut bytes = real(REAL_X86_64, REAL_X86_64_LEN);
     bytes[16] = 3;
     assert_eq!(parse(&bytes, &limits()), Err(Error::BadType));
+}
+
+#[test]
+fn flags_keep_only_the_rwx_bits() {
+    let elf = with_load(1, |p| p.flags = PF_R | 0x0ff0_0000 | 0xf000_0000);
+    let segment = elf.parse().unwrap().loads()[1];
+    assert_eq!(segment.flags, PF_R);
+    assert!(segment.readable() && !segment.writable() && !segment.executable());
+    let elf = with_load(2, |p| p.flags = PF_R | PF_W | 0x0010_0000);
+    let segment = elf.parse().unwrap().loads()[2];
+    assert_eq!(segment.flags, PF_R | PF_W);
+    assert!(segment.readable() && segment.writable());
+}
+
+#[test]
+fn page_range_and_offset_round_outwards() {
+    let elf = with_load(2, |p| {
+        p.vaddr = 0x40_3010;
+        p.offset = 0x3010;
+        p.filesz = 0;
+        p.memsz = 0x2000;
+    });
+    let segment = elf.parse().unwrap().loads()[2];
+    assert_eq!(segment.page_range(PAGE), (0x40_3000, 0x40_6000));
+    assert_eq!(segment.page_offset(PAGE), 0x10);
+    let aligned = base().parse().unwrap().loads()[2];
+    assert_eq!(aligned.page_range(PAGE), (0x40_3000, 0x40_5000));
+    assert_eq!(aligned.page_offset(PAGE), 0);
+    let tiny = Segment {
+        vaddr: 0x40_3fff,
+        memsz: 1,
+        ..Segment::EMPTY
+    };
+    assert_eq!(tiny.page_range(PAGE), (0x40_3000, 0x40_4000));
+    assert_eq!(tiny.page_range(1), (0x40_3fff, 0x40_4000));
+    let huge = Segment {
+        vaddr: u64::MAX,
+        memsz: u64::MAX,
+        ..Segment::EMPTY
+    };
+    assert_eq!(huge.page_range(0), (0, 0));
+    assert_eq!(huge.page_range(PAGE), (!0xfff, !0xfff));
+}
+
+#[test]
+fn file_bytes_start_at_vaddr_not_at_the_page() {
+    let mut elf = base();
+    elf.phdrs[2] = load(PF_R | PF_W, 0x3010, 0x40_3010, 0x8, 0x1000);
+    let mut bytes = elf.build();
+    bytes[0x300f] = 0x11;
+    bytes[0x3010] = 0x5a;
+    let segment = parse(&bytes, &limits()).unwrap().loads()[2];
+    assert_eq!(segment.page_offset(PAGE), 0x10);
+    let data = segment.file_bytes(&bytes).unwrap();
+    assert_eq!(data.len(), 8);
+    assert_eq!(data[0], 0x5a);
+}
+
+#[test]
+fn limits_are_checked_after_rounding_to_the_page() {
+    // O segmento termina em 0x40_3010, antes de `user_top`, mas a página dele vai a 0x40_4000.
+    let mut elf = base();
+    elf.phdrs[2] = load(PF_R | PF_W, 0x3000, 0x40_3000, 0x10, 0x10);
+    let mut tight = limits();
+    tight.user_top = 0x40_3800;
+    assert_eq!(parse(&elf.build(), &tight), Err(Error::OutOfUserRange));
+    tight.user_top = 0x40_4000;
+    assert!(parse(&elf.build(), &tight).is_ok());
+    // O segmento começa em 0x40_0900, depois de `user_min`, mas a página dele começa em 0x40_0000.
+    let mut elf = base();
+    elf.phdrs[0] = load(PF_R | PF_X, 0x900, 0x40_0900, 0x1010, 0x1010);
+    elf.entry = 0x40_1000;
+    let mut tight = limits();
+    tight.user_min = 0x40_0800;
+    assert_eq!(parse(&elf.build(), &tight), Err(Error::OutOfUserRange));
+    tight.user_min = 0x40_0000;
+    assert!(parse(&elf.build(), &tight).is_ok());
+}
+
+#[test]
+fn phdr_address_at_the_edges_of_the_load() {
+    // A tabela vai de 64 a 232 no arquivo.
+    let at = |offset: u64, filesz: u64| {
+        let mut elf = base();
+        elf.phdrs[0] = load(
+            PF_R | PF_X,
+            offset,
+            0x40_0000 + offset,
+            filesz,
+            filesz.max(0x1010),
+        );
+        elf.entry = 0x40_0000 + offset;
+        elf.parse().unwrap().phdr
+    };
+    assert_eq!(at(64, 0x1010), Some(0x40_0040));
+    assert_eq!(at(65, 0x1010), None);
+    assert_eq!(at(0, 232), Some(0x40_0040));
+    assert_eq!(at(0, 231), None);
+    assert_eq!(at(0, 233), Some(0x40_0040));
 }

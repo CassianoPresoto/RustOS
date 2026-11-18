@@ -121,6 +121,8 @@ entrada hostil vira `Error` (enum, uma variante por regra), nunca pânico. Todo 
 de tamanho e de offset é `checked_*`. Os testes de host ([SDD 06](06_testes.md)) têm um
 caso por regra de recusa, as truncações em todos os comprimentos e os campos nos extremos.
 
+Nenhum dos dois está em `[workspace.dependencies]` ainda: o primeiro consumidor (o carregador da 4b, no `kernel/`) acrescenta a entrada junto com a dependência.
+
 **`core/cpio`** (`Reader`, `Entry`, `find`). Regras do `newc` como no
 [early-userspace buffer format](https://docs.kernel.org/driver-api/early-userspace/buffer-format.html):
 magic `070701`, 13 campos de 8 dígitos hexadecimais, cabeçalho de 110 bytes, registro e
@@ -160,6 +162,7 @@ capítulo 18 mudar. As regras são a tabela "Validação, regra por regra" do ca
 | `PT_LOAD` sem R | Recusado também quando só W, só X ou nenhum |
 | Tipos ignorados | `PT_NULL`, `PT_NOTE`, `PT_PHDR`, `PT_GNU_*` e os desconhecidos não são validados |
 | Sem nenhum `PT_LOAD` | `EntryNotExecutable` |
+| `Segment` | `flags` guarda só `PF_R`, `PF_W` e `PF_X` (os bits de SO e de processador de `p_flags` saem). `page_range(page)` dá o intervalo virtual arredondado à página e `page_offset(page)` o deslocamento de `vaddr` na página. `file_bytes` começa em `vaddr`, não no início da página: o chamador zera o começo da primeira página e a cauda até `memsz` |
 
 `EI_OSABI` tem de ser `ELFOSABI_NONE` (0). **Achado nos testes:** o `rust-lld` grava
 `ELFOSABI_GNU` (3) quando o programa tem um `#[used]` (seção com `SHF_GNU_RETAIN`); o mesmo

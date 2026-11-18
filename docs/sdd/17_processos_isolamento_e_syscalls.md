@@ -323,7 +323,7 @@ acrescenta** mapeamentos depois do boot. A fase 4 **remove** mapeamentos de usu�
 
 Uma constante só (47 bits) para as duas ISAs mantém o carregador, os testes e o
 `core/mm` sem `cfg` por arquitetura. `USER_MIN`, `USER_TOP` e `PAGE_SIZE` moram em
-`hal::abi`, porque `arch/`, `core/mm` e `core/elf` os usam. **Verificado** ([x86_64 mm](https://docs.kernel.org/arch/x86/x86_64/mm.html)): o
+`hal::abi`, porque `arch/` e `core/mm` os usam (o `core/elf` recebe os limites do chamador, sem depender do `hal`). **Verificado** ([x86_64 mm](https://docs.kernel.org/arch/x86/x86_64/mm.html)): o
 usuário do Linux vai de 0 a `0x00007fffffffefff` com 4 KiB de buraco em
 `0x00007ffffffff000`. **Verificado** ([arm64 memory](https://docs.kernel.org/arch/arm64/memory.html)): `TTBR0` para o
 usuário, `TTBR1` para o kernel, seleção pelo bit 55; faixa padrão de 48 bits.
@@ -1321,7 +1321,7 @@ de `process_create`.
 
 #### Decisão 7 — crates novos em `core/`
 
-`core/elf` e `core/object` dependem só do `hal`; `core/cpio`, de nada. A ABI é módulo do `hal`,
+`core/elf` e `core/cpio` não dependem de nada; `core/object` depende só do `hal`. A ABI é módulo do `hal`,
 não crate (um `core/abi` quebraria a regra 2 do guidelines 03: caso 3). **O que muda:**
 `Cargo.toml` (`[workspace]`, `[workspace.dependencies]`, `default-members`);
 [SDD 03](03_mapa_de_codigo.md); testes no host (ELF e cpio inválidos, propriedade dos
