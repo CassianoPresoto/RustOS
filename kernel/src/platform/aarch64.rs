@@ -361,6 +361,17 @@ pub fn hardware_entropy() -> Option<PlatformEntropy> {
     Aarch64Entropy::detect()
 }
 
+/// O clamp do Spectre v1: `index` se `index < size`, senão 0, com a máscara de `arch/`.
+#[inline]
+pub fn array_index_nospec(index: usize, size: usize) -> usize {
+    index & rustos_arch_aarch64::array_index_mask_nospec(index, size)
+}
+
+/// `MIDR_EL1` e os registradores de identificação das mitigações.
+pub fn mitigation_features() -> rustos_arch_aarch64::mitigation::MitigationFeatures {
+    protection::mitigation_features()
+}
+
 /// As proteções de hardware desta ISA e se ficaram ligadas: `pan` e `wxn`.
 pub fn protections() -> &'static [Protection] {
     const fn pair(pan: bool, wxn: bool) -> [Protection; 2] {

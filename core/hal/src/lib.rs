@@ -18,6 +18,8 @@ pub mod input;
 pub mod interrupt;
 pub mod io;
 pub mod memory;
+pub mod mitigation;
+pub mod nospec;
 pub mod paging;
 pub mod redact;
 

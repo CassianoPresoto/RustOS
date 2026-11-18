@@ -2,6 +2,8 @@
 //! Chave desconhecida ou valor inválido é ignorado: o boot nunca falha por causa dela.
 //! As chaves e o que cada uma liga estão no SDD 04.
 
+use crate::mitigation::KptiPolicy;
+
 /// Onde `rustos.panic_early` derruba o boot, para provar que o pânico sai sem console.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EarlyPanic {
@@ -30,6 +32,8 @@ pub struct BootParams {
     pub early_panic: Option<EarlyPanic>,
     /// `rustos.selftest=1`: o boot roda os autotestes e os benchmarks completos.
     pub selftest: bool,
+    /// `kpti=on|off|auto`: o que o relatório diz que o KPTI faria (SDD 17).
+    pub kpti: KptiPolicy,
 }
 
 impl BootParams {
@@ -42,6 +46,9 @@ impl BootParams {
                     params.early_panic = EarlyPanic::from_value(value);
                 }
                 Some(("rustos.selftest", value)) => params.selftest = value == "1",
+                Some(("kpti", value)) => {
+                    params.kpti = KptiPolicy::from_value(value).unwrap_or_default();
+                }
                 _ => {}
             }
         }
@@ -98,6 +105,26 @@ mod tests {
         ] {
             assert!(!BootParams::parse(line).selftest, "{line:?}");
         }
+    }
+
+    #[test]
+    fn the_kpti_key_picks_the_policy_and_an_invalid_value_means_auto() {
+        assert_eq!(BootParams::parse("").kpti, KptiPolicy::Auto);
+        for (line, expected) in [
+            ("kpti=on", KptiPolicy::On),
+            ("quiet kpti=off rustos.selftest=1", KptiPolicy::Off),
+            ("kpti=auto", KptiPolicy::Auto),
+            ("kpti=on kpti=off", KptiPolicy::Off),
+            ("kpti=off kpti=x", KptiPolicy::Auto),
+            ("kpti=", KptiPolicy::Auto),
+            ("kpti=ON", KptiPolicy::Auto),
+            ("kpti", KptiPolicy::Auto),
+            ("xkpti=on", KptiPolicy::Auto),
+            ("rustos.kpti=on", KptiPolicy::Auto),
+        ] {
+            assert_eq!(BootParams::parse(line).kpti, expected, "{line:?}");
+        }
+        assert!(BootParams::parse("kpti=on rustos.selftest=1").selftest);
     }
 
     #[test]

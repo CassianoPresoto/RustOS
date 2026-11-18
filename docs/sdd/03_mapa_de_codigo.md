@@ -41,7 +41,7 @@
 │       ├── panic.rs            # pânico: o primeiro núcleo para os outros por IPI, toma o console e escreve; o dono refaz o relatório se panicar de novo; `fault cpu` e, com `panic-tests`, os outros `fault`
 │       └── platform/           # um módulo por ISA: ARCH, PlatformConsole, cpu(), console()
 ├── core/                       # o centro do hexágono: no_std, forbid(unsafe_code), testado no host
-│   ├── hal/                    # rustos-hal: as portas (traits), os tipos de fronteira, `abi` (o contrato de syscall: números, `Status`, `Rights`, `Handle`, `ProcessEvent`) e `redact` (endereço no log), `clock` (`TickScale`, ticks para ns) e `cmdline` (a linha de comando do kernel), puros
+│   ├── hal/                    # rustos-hal: as portas (traits), os tipos de fronteira, `abi` (o contrato de syscall: números, `Status`, `Rights`, `Handle`, `ProcessEvent`) e `redact` (endereço no log), `clock` (`TickScale`, ticks para ns) `cmdline` (a linha de comando do kernel), `mitigation` (vulnerabilidades e a linha do boot) e `nospec` (o clamp de índice), puros
 │   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow, WxChecker, PageTables (a caminhada de 4 níveis das duas ISAs), first_unpainted e lowest_dirty_below (a marca d'água da pilha e a varredura da limpeza), `UserRange` (faixa de usuário conferida), `runs`/`coalesce` (2 MiB ou 4 KiB no mapa direto), `vmar` (árvore de regiões do espaço de usuário: reserva, alocação com ASLR, `unmap`, a decisão da falta de página; SDD 17) e `asid` (gerador de PCID/ASID com geração entre CPUs; SDD 17); porta FrameMemory e trait FrameAllocator (SDD 12, SDD 13)
 │   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) Rng (fast key erasure) e a semente de reserva por jitter
 │   ├── sched/                  # rustos-sched: trait Scheduler, TaskId, RunQueue; RoundRobin, Eevdf (treap de prazos), Fifo e Composite (teto de 95% para o tempo real); sim, property e bench só em teste (SDD 14; o kernel usa o `Composite`)
@@ -133,6 +133,7 @@ EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_es
 | Programa de usuário, o runtime dele, o `_start` e o stub de syscall | `user/` (programa e `rt`); `arch/<isa>-user` (o `asm!`) |
 | Comando do shell embutido | `core/shell/`; o dado do sistema chega pela porta `Host` |
 | Tema, barra do topo, como a grade vira pixel | `kernel/src/screen.rs` |
+| Vulnerabilidade de CPU, mitigação e a linha `mitigations:` | a decodificação do CPUID e dos registradores e a regra do Linux em `arch/<isa>/src/mitigation.rs` (puro); o tipo `Vulns`, a política `kpti=` e o texto da linha em `core/hal/src/mitigation.rs`; o clamp de índice em `core/hal/src/nospec.rs` (a `CSDB` do aarch64 em `arch/aarch64/src/nospec.rs`); a linha em `kernel/src/mitigation.rs` |
 | Contrato que o núcleo precisa do hardware | trait em `core/hal` |
 | Instrução privilegiada, registrador de sistema, formato de tabela de página | `arch/<isa>/`; a parte pura (codificação, caminhada) em módulo sem `asm!`, testável no host |
 | Protocolo de bootloader | `boot/<protocolo>/` |

@@ -25,8 +25,12 @@ const LINK_BASE: &str = "kernel base: 0xffffffff80000000 ";
 /// Linhas que todo boot precisa ter (guidelines 09): as proteções de hardware, o
 /// W^X conferido nas tabelas de página, a memória que o bootloader devolveu e a
 /// preempção com o estado de SIMD por tarefa.
-const REQUIRED: [(&str, &str); 6] = [
+const REQUIRED: [(&str, &str); 7] = [
     ("[rustos] protections:", "a linha de proteções de hardware"),
+    (
+        "[rustos] mitigations:",
+        "a linha de mitigações de CPU (vulnerabilidades e o que o kernel liga)",
+    ),
     (
         "[rustos] w^x: ok",
         "a conferência de W^X das tabelas de página",
@@ -85,7 +89,11 @@ const BENCH_REFUSED: &str = "bench: not in this build";
 
 /// O que só o modo de teste imprime: se uma destas faltar, a linha de comando se perdeu e o
 /// boot que passou foi o normal.
-const SELFTEST_LINES: [(&str, &str); 21] = [
+const SELFTEST_LINES: [(&str, &str); 22] = [
+    (
+        "[rustos] cpu features: ",
+        "os recursos de CPU das mitigações",
+    ),
     (
         "[rustos] user: entered ring3/el0",
         "a entrada do primeiro programa em anel 3 ou EL0",

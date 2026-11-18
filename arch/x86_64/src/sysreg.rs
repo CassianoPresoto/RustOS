@@ -4,6 +4,7 @@ use core::arch::asm;
 use core::arch::x86_64::{__cpuid_count, _rdtsc};
 
 use crate::features::{Features, Leaves};
+use crate::mitigation::{MSR_ARCH_CAPABILITIES, MitigationFeatures, MitigationLeaves};
 
 pub const MSR_EFER: u32 = 0xC000_0080;
 /// `IA32_STAR`, `IA32_LSTAR` e `IA32_FMASK` (`msr-index.h` do Linux).
@@ -129,4 +130,46 @@ pub fn features() -> Features {
         leaf7_ecx: leaf7.ecx,
         ext_edx: ext.edx,
     })
+}
+
+/// O CPUID das mitigações e, só se ele anunciar, o `IA32_ARCH_CAPABILITIES`.
+///
+/// # Safety
+/// Ring 0: o `rdmsr` do `IA32_ARCH_CAPABILITIES` só roda quando o CPUID anuncia o MSR.
+pub unsafe fn mitigation_features() -> MitigationFeatures {
+    let basic = __cpuid_count(0, 0);
+    let leaf1 = __cpuid_count(1, 0);
+    let leaf7 = if basic.eax >= 7 {
+        __cpuid_count(7, 0)
+    } else {
+        __cpuid_count(0, 0)
+    };
+    let max_ext = __cpuid_count(0x8000_0000, 0).eax;
+    let ext8 = if max_ext >= 0x8000_0008 {
+        __cpuid_count(0x8000_0008, 0)
+    } else {
+        leaf7
+    };
+    let ext21 = if max_ext >= 0x8000_0021 {
+        __cpuid_count(0x8000_0021, 0)
+    } else {
+        leaf7
+    };
+    // As folhas ausentes devolvem lixo aqui; `from_leaves` as descarta pelo `max_basic` e `max_ext`.
+    let features = MitigationFeatures::from_leaves(MitigationLeaves {
+        max_basic: basic.eax,
+        vendor: [basic.ebx, basic.edx, basic.ecx],
+        leaf1_eax: leaf1.eax,
+        leaf1_ecx: leaf1.ecx,
+        leaf7_ebx: leaf7.ebx,
+        leaf7_edx: leaf7.edx,
+        max_ext,
+        ext8_ebx: ext8.ebx,
+        ext21_eax: ext21.eax,
+    });
+    if !features.arch_capabilities {
+        return features;
+    }
+    // SAFETY: o CPUID anunciou o MSR, e o chamador está em ring 0.
+    features.with_arch_capabilities(unsafe { rdmsr(MSR_ARCH_CAPABILITIES) })
 }
