@@ -447,6 +447,41 @@ o kernel real troca o `Mutex` do teste pelo `IrqLock`; serve para comparar o Rus
 do kernel pode chegar ao dobro pela capacidade); `Message` **224 bytes**; `Channel` (par de pontas,
 16 mensagens por ponta inline) **7 256 bytes**, ocupados ou não ([DEBT-0091](../tech-debt/0091-fila-do-canal-com-armazenamento-inline.md)).
 
+### Processo mínimo e carregador do init (fatia 4b)
+
+Medido na QEMU 11.1.3 num Mac com Apple Silicon: aarch64 em HVF, x86_64 em TCG (só se compara o RustOS consigo mesmo). `make smoke`
+no modo de teste (a linha `user: init load`), `release-small` com `RUSTOS_SELFTEST=1`. O `init` roda só no modo de teste
+([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)).
+
+| Medida | x86_64 (TCG) | aarch64 (HVF) |
+| --- | --- | --- |
+| Tamanho do `init` (`release-small`, arquivo ELF) | 17 600 bytes | 14 632 bytes |
+| Segmentos do `init` (`PT_LOAD`) | 3: R (cabeçalhos e `.rodata`), RX (5 135 bytes de código), RW | 2 |
+| Frames do menor processo | **32** (128 KiB): 20 de dados (4 de imagem, 16 de pilha), 7 de tabelas (raiz, mais três níveis para a imagem e três para a pilha) e 5 do kernel (pilha da tarefa de 4 páginas, mais o que o heap guarda: a área de FPU, o `Process` e as 32 regiões, 1 KiB) | **31**: 19 de dados, 7 de tabelas, 5 do kernel |
+| Tempo do `cpio` até a entrada em usuário | 3 a 6 ms (o código do carregador roda frio no TCG; mais o acordar de outra CPU) | 22 a 41 µs |
+| Tempo do `cpio` até a primeira syscall | 3,3 a 6,3 ms | 23 a 42 µs |
+| Fase `init` do boot de teste (carregar, rodar, imprimir, sair e esperar) | 10 a 13 ms | 1,3 a 1,8 ms (a maior parte é a linha na serial e na tela) |
+| `big` (1,3 MiB de arquivo, 2,3 MiB mapeados) | sai com 0 | sai com 0 |
+
+Os 16 frames da pilha são metade do menor processo: eles saem com a falta de página resolvida ([DEBT-0085](../tech-debt/0085-pilha-de-usuario-mapeada-inteira.md)).
+
+**`boot time:` do boot normal, antes e depois: sem mudança**, porque o boot normal não lança o `init`. `release-small`, 3 boots em cada lado: aarch64
+**2 ms antes e 2 ms depois** (`2 ms`, `2 ms`, `2 ms` em cada); x86_64 em TCG **34, 39 e 42 ms antes; 31, 40 e 60 ms depois** (o TCG oscila de um boot para o
+outro, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md), e o caminho do boot normal não mudou).
+**O experimento** com o `init` no boot normal (descartado): aarch64 de 2 para 4 a 7 ms, x86_64 em TCG de 34-42 para 38-42 ms com a fase `init` em 10 a 13 ms.
+
+**`make size`, `release-small`, antes e depois.** O carregador e o código de usuário ficam fora da imagem enquanto o `init` só roda no modo de teste:
+
+| | x86_64 antes | x86_64 depois | aarch64 antes | aarch64 depois |
+| --- | --- | --- | --- | --- |
+| `text` | 127 991 | 128 007 | 115 820 | 115 844 |
+| `rodata` | 33 101 | 33 149 | 28 669 | 28 781 |
+| `data` | 18 434 | 18 482 | 18 216 | 18 288 |
+| `bss` | 15 841 | 15 841 | 14 624 | 14 624 |
+| carregado | 195 367 | 195 479 | 177 329 | 177 537 |
+
+(a diferença, de 0,06% e 0,12% do carregado, não foi investigada: o carregador, o `Vmar` e o código de usuário não entram na imagem). **Com o carregador alcançável do boot normal** (o experimento acima), o carregado foi para 205 447 bytes no x86_64 (+10 080) e 187 145 no aarch64 (+9 816); é o custo que a 4c paga quando o `init` entrar no boot normal.
+
 ### Escalonador (fase 3, medido no host; o alvo está acima)
 
 Comando: `cargo test --release -p rustos-sched bench -- --ignored --nocapture

@@ -5,13 +5,13 @@
 > de syscall, handles, ABI nativa), como o primeiro programa chega à memória, e quais
 > decisões do dono o desenho aplica.
 
-**Estado: desenho aprovado no #9 (2026-11-18). A fatia 4a está implementada ([abaixo](#a-fatia-4a-como-entrou)); da 4c só o crate puro `core/object` ([abaixo](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)); as demais, não.** A ABI de
+**Estado: desenho aprovado no #9 (2026-11-18). As fatias 4a ([abaixo](#a-fatia-4a-como-entrou)) e 4b ([abaixo](#a-fatia-4b-como-entrou)) estão implementadas; da 4c só o crate puro `core/object` ([abaixo](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)); as demais, não.** A ABI de
 syscall e o formato de executável são contrato que o mundo de fora enxerga (caso 6 do
 [`AGENTS.md`](../../AGENTS.md)), e crate novo em `core/` e pasta nova de primeiro nível são
 o caso 1; por isso o desenho nasceu num PR em Draft só com docs. O dono aprovou as nove
 [decisões pedidas](#as-decisões-do-dono) sem mudança. O código vem em PRs seguintes, e
-este capítulo passa a descritivo à medida que cada fatia entra: o que a 4a tornou verdade está
-em [A fatia 4a, como entrou](#a-fatia-4a-como-entrou), e o resto do texto continua sendo desenho.
+este capítulo passa a descritivo à medida que cada fatia entra: o que a 4a e a 4b tornaram verdade está
+em [A fatia 4a, como entrou](#a-fatia-4a-como-entrou) e [A fatia 4b, como entrou](#a-fatia-4b-como-entrou), e o resto do texto continua sendo desenho.
 
 Fase 4 do [roadmap](08_roadmap.md). Pesquisa de origem, com as marcas de
 verificação: `syscalls-processes.md` (2026-11-17). O modelo de controle de acesso
@@ -56,7 +56,7 @@ número novo no [SDD 07](07_desempenho_e_recursos.md).
 | Fatia | Entrega | Pronto quando |
 | --- | --- | --- |
 | 4a (**feita**) | Entrada de syscall e saída para anel 3/EL0 nas duas ISAs; `PageFlags.user`; `Fault.from_user`; `#DB` com IST; cópia usuário↔kernel; espaço de **um** processo, sem objetos; **limpeza da pilha do kernel na volta ao usuário** (pagou a dívida do resíduo do ChaCha20 na pilha); a troca para o par `swapgs` e os MSRs de syscall em cada CPU; `nop`, `clock_get_monotonic`, `random_get`, `process_exit` e **`debug_write(ptr, len)` provisória, sem handle**; um programa embutido no kernel só para esta fatia | `hello` imprime de anel 3 e de EL0; falha de usuário mata o processo e o kernel segue (pagou a dívida da exceção de usuário só para a CPU) |
-| 4b | `core/cpio`, `core/elf`; a árvore de regiões em `core/mm/src/vmar.rs`, **interna ao kernel** (o carregador mapeia frames direto, sem objeto VMO nem VMAR e sem handle); módulo do Limine; `user/` (runtime e `init`); o xtask monta o initramfs | O `init` do initramfs roda, imprime pelo `debug_write` provisório e sai; o smoke exige a linha dele |
+| 4b (**feita**) | `core/cpio`, `core/elf`; a árvore de regiões em `core/mm/src/vmar.rs`, **interna ao kernel** (o carregador mapeia frames direto, sem objeto VMO nem VMAR e sem handle); módulo do Limine; `user/` (runtime e `init`); o xtask monta o initramfs | O `init` do initramfs roda, imprime pelo `debug_write` provisório e sai; o smoke exige a linha dele (**no modo de teste**: [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)) |
 | 4c | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (muda a assinatura da 4a: a ABI é provisória até aqui); página zero; ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; ***shootdown* de TLB** e parada de thread em outra CPU na morte do processo (**paga** [DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md)); o `init` recebe os handles pelo canal de boot | Um processo cria outro, que escreve no console por um handle que recebeu |
 | 4d | SIMD de usuário, canal de eventos do processo, teste de `xmm0`/`v0` entre processos | Dois processos preservam `xmm0`/`v0`; o culpado de uma falha chega ao pai (**paga** [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md)) |
 | 4e | KPTI, PCID/ASID com a regra de geração entre CPUs, mitigações de CPU ([seção](#mitigações-de-cpu)), relatório no boot | Linha `mitigations:` no boot; custo de cada uma medida |
@@ -213,6 +213,59 @@ morte da ponta) confere, a cada 25 operações, o conteúdo das tabelas, o `hand
 objeto, a morte das pontas, as filas e `own_in_queue`. Ao fim, fechar todas as tabelas **não**
 zera as contagens que estão em ciclos entre filas: é o limite documentado e a
 [DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md).
+
+## A fatia 4b, como entrou
+
+**Descritivo.** O que a 4b (PR `feat/phase4b-init`) tornou verdade, nas duas ISAs. Os números estão em
+[SDD 07](07_desempenho_e_recursos.md#processo-mínimo-e-carregador-do-init-fatia-4b).
+
+| Peça | Onde mora |
+| --- | --- |
+| Auxv (`AT_*`), `StartInfo`, `InitialStack` (monta `argc`, `argv`, `envp`, auxv e `AT_RANDOM` no topo da pilha, `sp` alinhado a 16) e o teto de `p_memsz` de um executável (`EXEC_MAX_LOADS_BYTES`, 64 MiB) | `core/hal/src/abi.rs`, com teste de layout e de cada tag |
+| Carregador: acha o arquivo (`core/cpio`), valida (`core/elf`, com os `Limits` de `hal::abi`), copia e mapeia cada `PT_LOAD`, registra as regiões no `Vmar` (`core/mm`) e monta a pilha com guarda e topo sorteado | `kernel/src/loader.rs` |
+| `Source::{Elf, Flat}` (o `Flat` é o blob da 4a, atrás de `selftest`), `Spawned`, a árvore de regiões em `Process` | `kernel/src/process.rs` |
+| `UserSpace::map_at` (o `p_vaddr` do segmento não é de página: o começo da primeira página e a cauda ficam zero) e `SpaceStats` | `kernel/src/uspace.rs` |
+| O lançamento do `init`, a espera e a conferência do código de saída | `kernel/src/init.rs` (só com `selftest`) |
+| `_start` (alinha o `sp`, zera o frame pointer, chama `rustos_user_main(pilha, handle)`) e o stub de `syscall`/`svc` | `arch/{x86_64,aarch64}-user` |
+| Ponto de entrada em Rust, leitor do auxv (`Env`), `println!`, wrappers seguros das syscalls da 4a, pânico, alocador de avanço | `user/rt` (o único `unsafe` de usuário) |
+| `init` (`forbid(unsafe_code)`) e `big` (programa de teste de 1,3 MiB) | `user/init`, `user/tests/big` |
+| Linker scripts | `user/link/{x86_64,aarch64}.ld` |
+| `cargo xtask user`, o initramfs da imagem (`init`, mais `big` com `selftest`), as linhas do smoke | `xtask/src/{user,image,initramfs,qemu}.rs` |
+
+**O que o `init` confere** (e sai com 0 se tudo bate): `argc` é 0; `sp` alinhado a 16; handle de boot `0` (não há handle até a 4c);
+`AT_PAGESZ` 4096; `AT_ENTRY` igual ao endereço do `_start`; `AT_PHDR` aponta para uma tabela de `AT_PHENT = 56` com ao menos
+dois `PT_LOAD`; `AT_HWCAP` e `AT_HWCAP2` zero; `AT_RANDOM` presente e não zerado; `clock_get_monotonic` positivo e não
+decrescente; `random_get` de 16 bytes diferentes dos de `AT_RANDOM`. Imprime uma linha, `init: ok (...)`, que o smoke exige com o
+prefixo `[user] `.
+
+**Divergências do desenho** (decisões do agente, nenhuma muda contrato):
+
+| Decisão | O que ficou | Por quê |
+| --- | --- | --- |
+| O `init` só roda no modo de teste | O boot normal não o lança; o `release-small` não carrega o carregador ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)) | Na 4b o `init` é um autoteste, e o guidelines 05 manda o que roda tarefa para o modo de teste. Experimento com ele no boot normal: +1 a 3 ms no aarch64 em HVF (2 ms para 4–7) e cerca de +10 ms no x86_64 em TCG, sem ganho para o usuário. O boot normal sem initramfs ou sem `init` segue como antes |
+| `-C code-model=small` com `-C lto=off` no x86_64 | O `core` pré-compilado do alvo vem em `code-model=kernel`; com o LTO fat dos perfis `release`/`release-small` o LLVM recusa o módulo (`linking module flags 'Code Model': IDs have conflicting values`, `failed to load bitcode`). O `xtask user` liga `-C lto=off` no x86_64 ([DEBT-0084](../tech-debt/0084-usuario-do-x86-sem-lto-por-causa-do-code-model.md)) | O `small` é a decisão aprovada; o `init` custa 17 600 bytes sem LTO contra 15 176 com o modelo `kernel` e LTO. **O item "Por ler" do `small` fecha**: o `big` (1,3 MiB de arquivo, 2,3 MiB mapeados, `.rodata`, `.data` com cauda de 400 bytes e `.bss` de 1 MiB) liga em `0x40_0000` e roda nas duas ISAs. O `small` e o `kernel` geram o mesmo código a 4 MiB (17 920 bytes nos dois, sem LTO), então o teste continua sem distingui-los |
+| Layout do linker | Cabeçalhos e `.rodata` no primeiro `PT_LOAD` (R), `.text` (RX) numa página a partir de `0x40_1000`, `.data` e `.bss` (RW) juntos num `PT_LOAD` com `-z norelro`; `AT_PHDR` aponta `0x40_0040` | O primeiro `PT_LOAD` com os cabeçalhos faz o `AT_PHDR` existir; sem `norelro` o `.bss` virava um `PT_LOAD` de `p_filesz` 0 |
+| Pilha | 16 páginas mapeadas na criação, com uma página de guarda abaixo e outra acima e o início sorteado com `aslr_base` na janela `[0x6000_0000_0000, 0x7000_0000_0000)` (28 bits de página, o intervalo cheio); a imagem fica em endereço fixo ([DEBT-0083](../tech-debt/0083-imagem-de-usuario-sem-aslr.md)). Mapeada inteira, porque não há falta resolvida ([DEBT-0085](../tech-debt/0085-pilha-de-usuario-mapeada-inteira.md)) | Decisão 5 e o desenho de pilha; o `mmap_base` fica para a 4c |
+| Capacidade da árvore | 32 regiões por processo (`REGION_CAPACITY`, 1 KiB de heap) | No máximo 16 `PT_LOAD` mais a pilha, com folga para a 4c; [DEBT-0075](../tech-debt/0075-vmar-com-capacidade-fixa-de-regioes.md) |
+| Teto de `p_memsz` | `EXEC_MAX_LOADS_BYTES = 64 MiB` em `hal::abi` | O "ex.: 64 MiB" da tabela de validação |
+| Auxv e pilha inicial em `hal::abi` | O kernel (`InitialStack::build`) e o `user/rt` (`Env::from_stack`) partilham as tags, e o teste do `rt` lê o que o `build` monta | Um lado só não deriva do outro |
+| `debug_write` por linha | `println!` formata a linha num buffer de 512 bytes e faz uma `debug_write`; o kernel põe `[user] ` em cada chamada | Peça por peça viraria uma linha por pedaço |
+| `rt` testado no host | `make test` roda `cargo test --package rustos-user-rt` (o auxv, o `println!` e o alocador); `default-members` segue sem `user/` e sem `arch/*-user` | Os crates só compilam o asm para o alvo bare-metal; o `make clippy` os confere nos dois alvos |
+| Os casos de falha da 4a | Ficam no blob de `global_asm!` do `arch/<isa>`, atrás de `selftest`; só o `big` é programa em `user/tests/` ([DEBT-0086](../tech-debt/0086-casos-de-falha-de-usuario-no-blob-do-kernel.md)) | Cada caso pede `asm!`, que o usuário em Rust seguro não tem |
+| `rdx` na entrada | O `enter_user` do x86_64 zera todo registrador menos `rdi` e `rsi` desde a 4a; a 4b o torna contrato (o caso `hello` do blob confere `rdx == 0` na primeira instrução) | O psABI o lê como ponteiro de `atexit`: uma libc o registraria |
+| `#[used]` | O `user/rt` não usa `#[used]` ([DEBT-0074](../tech-debt/0074-elf-recusa-osabi-gnu-do-used.md)); o `init` sai com `EI_OSABI = 0` | — |
+
+**Conflito do `x0` com a glibc (para a fase 5 decidir).** A ABI põe o handle de boot em `rdi`/`x0`. No x86_64 a
+glibc lê `rdx` como `atexit` e o RustOS o zera; no aarch64 a glibc lê o `x0` do mesmo jeito (`rtld_fini`), e o RustOS ali põe o
+handle. Uma libc glibc rodando como programa nativo registraria o handle como função de saída. O musl ignora o `x0` e só lê `argc` e
+`argv`. A 4b entrega `0` e não conflita; quando o handle for diferente de zero (4c), a fase 5 escolhe: outro registrador no aarch64
+(por exemplo `x1`), ou o adaptador Linux zerar o `x0` antes de entregar o controle a uma glibc. Fonte: a pesquisa de 2026-11-18
+sobre a pilha inicial (`sysdeps/aarch64/start.S` da glibc e `crt1.c` do musl, **secundária**; o layout de `envp` e do auxv no aarch64
+fora do Linux segue **NÃO VERIFICADO**).
+
+**O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs), além dos casos da 4a: o `init` carrega (`init loaded (N
+segments)`: 3 no x86_64, 2 no aarch64), roda, imprime `[user] init: ok (...)` e sai com 0 (`pid 1 exited (code 0`); o `big` sai com 0 e os
+frames voltam; o carregador recusa o arquivo cortado, o de outra máquina, o sem magic e o vazio sem deixar frame para trás.
 
 ## Entrada de syscall por ISA
 
@@ -483,9 +536,9 @@ Só o `init`, carregado pelo kernel, usa a janela de pilha dedicada. Um filho ca
 pelo `user/rt` mapeia a pilha como mais um mapeamento `ANY`, que cai na região do
 `mmap_base`; as guardas são páginas que ele deixa sem mapear.
 
-Os valores de `mmap_base` e da janela da pilha (por exemplo, base de mapeamento
-num intervalo de 1 TiB acima de 64 GiB, janela da pilha de 1 TiB terminando em
-`0x7000_0000_0000`) são constantes a fixar no PR de código.
+A janela da pilha ficou fixada na 4b: o início da pilha cai num intervalo de 1 TiB
+(`[0x6000_0000_0000, 0x7000_0000_0000)`, 28 bits de página) e a pilha ocupa as 16 páginas seguintes, com uma guarda de cada lado. O
+valor do `mmap_base` (por exemplo, um intervalo de 1 TiB acima de 64 GiB) é constante a fixar no PR da 4c.
 
 ### ASLR: quantos bits
 
@@ -913,8 +966,8 @@ O contrato de como um programa **começa**, igual para o `init` e para qualquer 
 | --- | --- | --- |
 | Modo | CPL 3; `CS` e `SS` de usuário; `RFLAGS = 0x202` | EL0t; `DAIF` limpo |
 | `arg0`, `arg1` | `rdi`, `rsi` (os argumentos de `thread_create`) | `x0`, `x1` |
-| Handle de boot | `process_create` **move** o `bootstrap` para a tabela do filho como o **primeiro handle, de valor `1`**. Quem chama `thread_create` passa `arg0` (o `user/rt` passa `1`); para o `init`, o kernel põe `arg0 = 1` | idem |
-| Demais registradores | Zero | Zero |
+| Handle de boot | `process_create` **move** o `bootstrap` para a tabela do filho como o **primeiro handle, de valor `1`**. Quem chama `thread_create` passa `arg0` (o `user/rt` passa `1`); para o `init`, o kernel põe `arg0 = 1` (**na 4b, `0`**: ainda não há handle) | idem |
+| Demais registradores | Zero, **`rdx` inclusive** (o psABI o lê como ponteiro de `atexit`) | Zero (a glibc lê o `x0` como `rtld_fini`: [conflito](#a-fatia-4b-como-entrou)) |
 | Pilha | `rsp = sp` de `thread_create`, **alinhado a 16 na entrada**: o psABI diz "guaranteed to be 16-byte aligned at process entry" (**verificado**, [x86-64 psABI](https://github.com/hjl-tools/x86-psABI), `low-level-sys-info.tex`) | `SP_EL0 = sp`, `sp mod 16 = 0` ("The stack must be quad-word aligned", **verificado**, [AAPCS64](https://github.com/ARM-software/abi-aa)) |
 | Conteúdo da pilha | O `init`: o kernel monta `argc = 0`, `argv`, `envp` e o [auxv](#auxv-mínimo). Filho: quem o criou (o `user/rt` do pai) monta o que quiser; o `user/rt` do filho lê o auxv se houver | idem |
 | SIMD | Estado inicial do [SDD 15](15_tarefas_e_preempcao.md): `FCW` `0x037F`, `MXCSR` `0x1F80` | V0–V31, `FPSR`, `FPCR` zerados |
@@ -1153,6 +1206,8 @@ por permissão, `-z max-page-size=0x1000`):
 | x86_64, `-C relocation-model=pic` ou `pie`, `code-model=small` | Liga, mas o executável cresce (13 344 contra 8 848 bytes): tem GOT; é o caminho da decisão 5 |
 | aarch64, `-C code-model=small -C relocation-model=static` | Compila e liga; `adrp`/`ldr`, entrada `0x40_0000`. Sem a flag, o padrão do alvo já é `static` |
 
+**Na 4b** (medido nas duas ISAs com o `init` e o `big`): o `small` com a lista completa liga e roda; o LTO fat falha no x86_64 com o `core` pré-compilado em `kernel` e o `xtask` desliga o LTO ali ([DEBT-0084](../tech-debt/0084-usuario-do-x86-sem-lto-por-causa-do-code-model.md)); a lista de flags é `-C relocation-model=static`, `-C code-model=small` e `-C lto=off` (x86_64), `-C strip=debuginfo`, `-C link-arg=-T<script>`, `-zmax-page-size=0x1000` e `-znorelro`.
+
 Precedência de `rustflags` (**verificado** na doc do Cargo, `config.md`, **e testado** com
 `cargo build -v`): são **quatro fontes mutuamente exclusivas**, e vale a primeira que existir:
 `CARGO_ENCODED_RUSTFLAGS`, `RUSTFLAGS`, `target.<triple>.rustflags` (e `target.<cfg>.rustflags`),
@@ -1233,7 +1288,7 @@ Como o módulo cai em `KernelAndModules`, ele **fica fora do mapa direto** ([SDD
 | --- | --- |
 | `boot/limine` | **Feito (4b, peça do módulo).** Novo pedido de módulo; `hal::BootInfo` ganha `modules()` (porta nova no `hal`, decisão do agente) e devolve `BootModule { start, len, string }`; o `BootRecord` copia os três |
 | `kernel/src/vm.rs` | **Feito.** `Vm::map_initramfs` mapeia a faixa do módulo de `string` `initramfs` só leitura e NX, numa janela própria (a terceira, de 1 GiB, depois das de dispositivos e de pilhas; [SDD 13](13_memoria_virtual.md#o-módulo-initramfs)); o W^X confere. Sem módulo, o boot segue |
-| Initramfs provisório | **Provisório**: até o `init` existir, o `xtask image` põe no cpio só o arquivo de teste `hello.txt` (`hello from the initramfs`), que o autoteste do kernel lê com o `core/cpio` e confere (`initramfs: 1 files, N bytes`, [SDD 04](04_boot.md)). Na 4b o `init` toma o lugar dele |
+| Conteúdo do initramfs | **Feito (4b).** O `xtask image` monta `target/initramfs/<isa>.image.cpio` com o `init` e, na imagem com `selftest`, o `big`; o autoteste lê o cpio e confere que os dois são ELF (`initramfs: 2 files, N bytes`, [SDD 04](04_boot.md)). O `hello.txt` provisório saiu |
 | Initramfs como VMO | **A partir da 4c** (na 4b o kernel só mapeia a faixa e lê o `init` dela): o arquivo vira um **VMO físico** (frames que já existem, sem zerar) com `READ`, `MAP`, `DUPLICATE`, `TRANSFER`, e vai ao `init` pelo canal de boot |
 | Devolver ao buddy | Quando o último handle do VMO fechar, devolver os frames do módulo. Que o protocolo permita reusar a memória `Executable/Modules` que não é da imagem **NÃO VERIFICADO** (o PROTOCOL.md não diz); enquanto isso o initramfs **fica residente**: [DEBT-0080](../tech-debt/0080-initramfs-residente-sem-devolver-os-frames.md) |
 
@@ -1320,12 +1375,12 @@ O adaptador Linux da fase 5 traduz o `Fault` em sinal.
 
 | Crate | Pasta | O que faz | `unsafe` | Depende de |
 | --- | --- | --- | --- | --- |
-| `rustos-elf` **(novo)** | `core/elf` | Validação e leitura de ELF64: `&[u8]` para `Image { entry, loads, phdr }`; o chamador passa `Limits` (ISA e faixa do usuário) | proibido | nada |
-| `rustos-cpio` **(novo)** | `core/cpio` | Leitor `newc`, iterador sem alocação | proibido | nada |
+| `rustos-elf` **(novo; ligado ao `kernel/` na 4b)** | `core/elf` | Validação e leitura de ELF64: `&[u8]` para `Image { entry, loads, phdr }`; o chamador passa `Limits` (ISA e faixa do usuário) | proibido | nada |
+| `rustos-cpio` **(novo; ligado ao `kernel/` na 4b)** | `core/cpio` | Leitor `newc`, iterador sem alocação | proibido | nada |
 | `rustos-object` **(novo, feito na 4c, parte pura)** | `core/object` | `HandleTable<T, S>`, regras de direito, duplicar, substituir e transferir, contagem de handles, fila do canal, sinais ([seção](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) | proibido | `rustos-hal` |
 | ABI (números, `Status`, direitos, constantes de layout, `ProcessEvent`, mensagem de boot) | `core/hal/src/abi.rs` (**módulo, não crate**) | O contrato com o programa de usuário, a "primeira porta de entrada" do [SDD 02](02_arquitetura.md) | proibido | nada |
-| `rustos-user-rt` **(novo)** | `user/rt` | Runtime dos programas: ponto de entrada em Rust, `panic`, alocador mínimo, leitor de auxv, carregador de ELF de usuário | **mínimo, com `// SAFETY:`**: `GlobalAlloc`, a leitura do auxv e `#[unsafe(no_mangle)]` o exigem; nenhum `asm!` | `hal` (a ABI), `elf`, `cpio`, `arch-<isa>-user` |
-| `rustos-user-init` e programas de teste **(novos)** | `user/init`, `user/tests/*` | O `init`, o teste de falha, o de SIMD, o de syscall nula | proibido (`forbid(unsafe_code)`; o `unsafe` fica no `user/rt`) | `user-rt` |
+| `rustos-user-rt` **(novo, feito na 4b)** | `user/rt` | Runtime dos programas: ponto de entrada em Rust, `panic`, alocador mínimo, leitor de auxv, carregador de ELF de usuário | **mínimo, com `// SAFETY:`**: `GlobalAlloc`, a leitura do auxv e `#[unsafe(no_mangle)]` o exigem; nenhum `asm!` | `hal` (a ABI), `elf`, `cpio`, `arch-<isa>-user` |
+| `rustos-user-init` e programas de teste **(novos; na 4b, `user/init` e `user/tests/big`)** | `user/init`, `user/tests/*` | O `init`, o teste de falha, o de SIMD, o de syscall nula | proibido (`forbid(unsafe_code)`; o `unsafe` fica no `user/rt`) | `user-rt` |
 | `rustos-arch-x86_64-user`, `rustos-arch-aarch64-user` **(novos)** | `arch/x86_64-user`, `arch/aarch64-user` | **Todo o `asm!` do lado do usuário:** `_start` (alinha o `rsp`, zera o frame pointer e chama o `main` do `user/rt`), os stubs de `syscall`/`svc`, `rdtsc`/`cntvct` e `xmm0`/`v0` do teste | permitido | `rustos-hal` |
 
 O `_start` precisa de `asm!` (o alinhamento do `rsp`, e nenhuma função Rust nasce sem
@@ -1369,9 +1424,9 @@ Sem crate novo (decisão do agente, [`AGENTS.md`](../../AGENTS.md)):
 
 | Passo | Comando | O quê |
 | --- | --- | --- |
-| 1 | `cargo xtask user --arch A` (proposta) | Compila cada crate de `user/` com a lista inteira de flags de usuário em `CARGO_ENCODED_RUSTFLAGS` (as do `config.toml` **não** somam: [linker e alvo](#o-que-muda-no-linker-e-no-alvo)) e `--target-dir target/user/<isa>` |
+| 1 | `cargo xtask user --arch A [--profile P]` (**feito na 4b**, `xtask/src/user.rs`; compila `init` e `big`) | Compila cada crate de `user/` com a lista inteira de flags de usuário em `CARGO_ENCODED_RUSTFLAGS` (as do `config.toml` **não** somam: [linker e alvo](#o-que-muda-no-linker-e-no-alvo)) e `--target-dir target/user/<isa>` |
 | 2 | `cargo xtask initramfs --arch A [--out caminho] [nome=]arquivo...` | Escreve `target/initramfs/<isa>.cpio` em `newc`, com um escritor em Rust puro em `xtask/src/initramfs.rs` (o `xtask` não depende de crate do workspace, regra 6, então não reaproveita o `core/cpio`), sem o binário `cpio` do host. Recebe `(nome, bytes, modo)`; a linha de comando põe o modo `0755`. Grava `070701`, os 13 campos em 8 dígitos hexadecimais, o nome com NUL, os dados e o `TRAILER!!!`; nome e dados alinham a 4 bytes a partir do início do arquivo, que não é preenchido até 512. Campos fixos: `c_ino` sequencial a partir de 1, `c_mtime`, `uid`, `gid`, `dev`, `rdev` e `c_chksum` em 0, `c_nlink` 1; a mesma entrada dá o mesmo arquivo, byte a byte. Recusa nome vazio, com NUL, repetido ou com componente vazio, `.` ou `..` (isso pega `/` inicial, `./` e `/` final), o nome `TRAILER!!!` inteiro (o leitor o toma como o fim; `a/TRAILER!!!` vale), nome de 4096 bytes ou mais, dado de 4 GiB ou mais, 2^32 arquivos ou mais e modo com bit fora de `0o7777`. **Não gera diretórios**: o leitor compara o nome inteiro (`bin/sh` é um nome) e o `init` é plano. Testado contra bytes de ouro escritos à mão, todos os restos de nome módulo 4, arquivo vazio e grande, e, só em desenvolvimento, contra o `bsdcpio` (`cpio -it` e `cpio -idv` listam e extraem os mesmos bytes) |
-| 3 | `cargo xtask image` | **Feito para o cpio provisório.** Gera `target/initramfs/<isa>.provisional.cpio` (`initramfs::write_provisional`, só o `hello.txt`), o copia para `boot/initramfs.cpio` na ESP e acrescenta ao `limine.conf` `module_path: boot():/boot/initramfs.cpio` e `module_string: initramfs`. Na 4b o conteúdo passa a vir do `cargo xtask user` |
+| 3 | `cargo xtask image` | **Feito (4b).** Compila os programas (o `init` e, se o kernel tem `selftest`, o `big`), gera `target/initramfs/<isa>.image.cpio` (`initramfs::write_image`), o copia para `boot/initramfs.cpio` na ESP e acrescenta ao `limine.conf` `module_path: boot():/boot/initramfs.cpio` e `module_string: initramfs`. O kernel não depende dos programas |
 | 4 | `make smoke` | Exige as linhas novas ([abaixo](#linhas-que-o-smoke-passa-a-exigir)) |
 
 A ordem de build é usuário, initramfs, imagem; o kernel **não** depende dos programas de
@@ -1379,14 +1434,14 @@ usuário, então mexer no `init` não recompila o kernel.
 
 ### Linhas que o smoke passa a exigir
 
-Em inglês, como toda saída serial. As da 4a valem hoje, no modo de teste; o boot normal as proíbe.
+Em inglês, como toda saída serial. As da 4a e da 4b valem hoje, no modo de teste; o boot normal as proíbe (o `init` só roda no modo de teste, [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)).
 
 | Linha | Fatia |
 | --- | --- |
 | `[rustos] user: entered ring3/el0` (a primeira syscall do boot; o texto é o mesmo nas duas ISAs) | 4a |
 | `[rustos] user: fault contained (pid N)` | 4a |
 | `[rustos] user self-test: ok` (os casos acima) | 4a |
-| `[rustos] user: init loaded (N segments)` | 4b |
+| `[rustos] user: init loaded (N segments)`, `[rustos] user: pid 1 exited (code 0,` e, do `init`, `[user] init: ok` | 4b |
 | `[rustos] mitigations: kpti=… ` | 4e |
 | `[rustos] user: self-test ok` (handles, SIMD, falha, canal) | 4d |
 
@@ -1450,7 +1505,7 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 | Dívida 0037, pilha sem medida de pico (paga no #19: 16 KiB pelo pico medido) e [DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) | A 4a remediu com syscall e falta fatal: 2,0 KiB e 1,6 KiB de 16 (`release`). Os 16 KiB ficam; a 0070 segue aberta até a 4c e a 4f medirem handles, canais e a falta resolvida |
 | [DEBT-0052](../tech-debt/0052-afinidade-so-no-spawn.md) Afinidade só no `spawn` | Não dispara: a ABI nativa não tem afinidade |
 | **Abertas pela 4a:** [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md) (limpeza da pilha até 128 bytes limpos), [DEBT-0077](../tech-debt/0077-iretq-sem-fixup-de-falha-fora-do-rip-e-do-rsp.md) (`iretq` sem *fixup*), [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md) (EL1h na pilha de falhas); [DEBT-0081](../tech-debt/0081-debug-write-de-512-bytes-com-a-irq-mascarada.md) (`debug_write` com a IRQ mascarada) e [DEBT-0082](../tech-debt/0082-sem-lfence-depois-do-swapgs-condicional.md) (sem `lfence` depois do `swapgs`); [DEBT-0072](../tech-debt/0072-pilhas-de-excecao-sem-medida-permanente.md) agora inclui a IST4 | A 4a fecha os itens dela |
-| **A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md), registrada com o `core/object`); imagem de usuário sem ASLR (4b; [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
+| **A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md), registrada com o `core/object`); imagem de usuário sem ASLR (4b; [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois), registrada: [DEBT-0083](../tech-debt/0083-imagem-de-usuario-sem-aslr.md)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
 
 **Pagas antes da fase:** 0011 (GIC e timer só na CPU 0), 0018 (frames sem cache por CPU), 0036
 (estado de troca global) e 0039 (escalonador de uma CPU), no #13; 0020 (zerar página pelo `memset`) e
@@ -1599,6 +1654,8 @@ lista acima por não serem dos seis casos; cada uma diz o que a faria subir ao d
 | **KPTI** | Só em CPU vulnerável (detecção: `IA32_ARCH_CAPABILITIES.RDCL_NO`, bit 0, **verificado** em `msr-index.h`; mais uma lista de CPUs imunes, **NÃO VERIFICADO**), com chave de override `kpti=on\|off\|auto` na linha de comando do Limine (para medir as duas configurações). Sem informação, vulnerável. O [SDD 08](08_roadmap.md) e o [SDD 09](09_seguranca.md) já dizem "só em CPU vulnerável" | Se o dono quiser sempre ligado, a 4e perde a detecção e o override; o resto não muda |
 | **Framebuffer e entrada** | Ficam na fase 5, onde o [SDD 08](08_roadmap.md#decisões-futuras-casos-do-agentsmd) já os lista. O desenho deixa o caminho (VMO físico com política de cache no `vmar_map`; teclado por canal) | A interface é caso 6 quando chegar; nada a decidir na fase 4 |
 | **Alvo de compilação dos programas** | Os mesmos alvos `*-unknown-none`, com `-C code-model=small` (x86_64) e `-C relocation-model=static`, linker script próprio e `--target-dir` separado ([SDD 05](05_build_e_execucao.md): sem nightly nem `build-std`). **Testado** com `rustc 1.100.0` nos dois alvos: compila e liga em `0x40_0000` ([o linker e o alvo](#o-que-muda-no-linker-e-no-alvo)). **Mudança de plano:** as quatro fontes de `rustflags` do Cargo são **exclusivas**, então o xtask passa a lista inteira por `CARGO_ENCODED_RUSTFLAGS` e as flags do `.cargo/config.toml` (o `pie` do kernel) não somam | O risco que sobra é `code-model` em programa maior (o teste mínimo não distingue `small` de `kernel`). Se um alvo JSON virar necessário, exige `build-std`: **volta ao dono** (ferramenta de build nova, caso 2) |
+| **Init só no modo de teste (4b)** | Ver [A fatia 4b](#a-fatia-4b-como-entrou) e [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md) | Se o dono quiser o `init` no boot normal já na 4b, é chamar `init::run` do boot e aceitar +10 ms no TCG do x86_64 |
+| **`code-model=small` sem LTO no x86_64 (4b)** | `-C lto=off` na lista de flags | Se o dono preferir o modelo `kernel` com LTO, tira-se as duas flags ([DEBT-0084](../tech-debt/0084-usuario-do-x86-sem-lto-por-causa-do-code-model.md)) |
 | **`arch/<isa>-user`** | Crates de adaptador do lado do usuário (`asm!` de `syscall`/`svc`, de `_start`, de `xmm0`/`v0` do teste). Cabem nas regras 4 e 8 do guidelines 03 (adaptador, crate numa pasta existente) | — |
 | **Árvore de regiões em vetor ordenado, de capacidade fixa** | `core/mm/src/vmar.rs` ([seção](#a-árvore-de-regiões-coremmsrcvmarrs)): vetor ordenado em armazenamento do chamador, 32 bytes por região, guarda como marca da região, `unmap` que apara e parte, `Placement::Lowest` e `Random` | Registrada como [DEBT-0075](../tech-debt/0075-vmar-com-capacidade-fixa-de-regioes.md): se o primeiro processo real passar de umas centenas de regiões, o `memmove` de `reserve` e `unmap` (1,1 µs com 4 096) pede uma árvore; o desenho muda por trás da mesma API |
 | **ASID/PCID sem liberação individual** | `core/mm/src/asid.rs` ([seção](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)): o índice só volta no esgotamento; `flush_pending` por CPU no lugar da `generation_seen` | Se a 4e medir esgotamento frequente, o remédio é largura maior ou menos PCID por processo, não `release`. O lock em toda troca é a [DEBT-0076](../tech-debt/0076-asid-sem-caminho-rapido-sem-lock.md) |
@@ -1643,8 +1700,8 @@ Só o que sobrou; cada item é pré-requisito da fatia que o usa.
 | --- | --- |
 | **ARM ARM** (as páginas do developer.arm.com não renderizam sem JavaScript; os campos de registrador acima vêm do Linux): o `imm16` do SVC em `ISS[15:0]`; a tabela de `AP[2:1]` por nível de exceção; um `ERET` com estado ilegal; a versão e o efeito do `UAO`; o nome `EL0VCTEN`. **Feitos na 4a, medidos na QEMU, não na ARM ARM:** a regra do PAN com `LDTR`/`STTR` e o efeito do `WXN` sobre EL0 ([A fatia 4a](#a-fatia-4a-como-entrou)) | 4a, 4e |
 | **Intel SDM** em PDF (só o espelho foi lido): o texto sobre *CPUID faulting* (`MSR` `0x140`); se a entrada de exceção limpa `NT` (o `IRETQ` do kernel com `NT = 1` dá `#GP`) | 4a |
-| Layout inicial da pilha do processo no aarch64, em fonte que não seja o `binfmt_elf.c` do Linux | 4b |
-| `-C code-model=small` com um programa de usuário **maior** que o mínimo (o teste não distingue `small` de `kernel`) | 4b |
+| Layout inicial da pilha do processo no aarch64, em fonte que não seja o `binfmt_elf.c` do Linux (a pesquisa de 2026-11-18: o sysvabi64 da Arm **não trata** da pilha inicial; glibc e musl só leem `argc` e `argv` e se apoiam no Linux) | 4b (**segue NÃO VERIFICADO**; o RustOS usa a ordem do Linux) |
+| `-C code-model=small` com um programa de usuário **maior** que o mínimo (o teste não distingue `small` de `kernel`) | 4b (**feito**: o `big` roda nas duas ISAs; com LTO o `small` não liga, [DEBT-0084](../tech-debt/0084-usuario-do-x86-sem-lto-por-causa-do-code-model.md)) |
 | Custo de `array_index_nospec`, IBPB, eIBRS, limpeza de buffers e KPTI: medir; STIBP e SSBD: ler as páginas | 4e |
 
 Levantamento de novembro de 2026.
