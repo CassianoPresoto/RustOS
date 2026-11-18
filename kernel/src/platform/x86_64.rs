@@ -20,8 +20,8 @@ use rustos_arch_x86_64::{
     ApicAccess, ApicMode, COM1, CpuTables, IstStacks, MmioBus, PIC_MASTER, PIC_SLAVE, PIT_PORTS,
     PortBus, Protections, TimerMode, X86Cpu, X86CpuLocal, X86Entropy, X86Ipi, X86Mmu, active_root,
     arm_oneshot, arm_tsc_deadline, breakpoint, cpu_features, detect_apic, enable_protections,
-    enable_secondary_apic, install_traps, load_cpu_tables, local_apic_id, publish_apic, rdtsc,
-    require_features, set_timer_mode, xstate,
+    enable_secondary_apic, install_early_traps, install_traps, load_cpu_tables, local_apic_id,
+    publish_apic, rdtsc, require_features, set_timer_mode, xstate,
 };
 pub use rustos_arch_x86_64::{Context, call_on_stack, switch};
 use rustos_arch_x86_64::{DirectMapTables, pte::X86Format};
@@ -41,6 +41,15 @@ use crate::memory::{Memory, map_device};
 pub const ARCH: &str = "x86_64";
 
 pub type PlatformConsole = Uart16550<PortBus>;
+/// No PC a serial precoce não precisa de memória: o tipo existe só para a assinatura ser a mesma.
+#[derive(Debug)]
+pub struct EarlyScratch;
+
+impl EarlyScratch {
+    pub const fn new() -> Self {
+        Self
+    }
+}
 pub type PlatformEntropy = X86Entropy;
 /// Espaço de endereçamento: as tabelas de 4 níveis atrás do `CR3`.
 pub type PlatformSpace = PageTables<X86Format, DirectMapTables, X86Mmu>;
@@ -151,6 +160,37 @@ pub fn cpu() -> X86Cpu {
     // SAFETY: o Limine entrega o kernel em ring 0, e ele nunca sai de lá.
     unsafe { X86Cpu::new() }
 }
+
+/// Vetores mínimos sobre a GDT do Limine: exceção do começo do boot sai pela serial.
+pub fn early_init(handlers: &'static Handlers, _scratch: &mut EarlyScratch) {
+    // SAFETY: ring 0 com IF zerado, na entrada do `kmain`; a GDT do Limine está carregada.
+    unsafe { install_early_traps(handlers) };
+}
+
+/// A COM1 como o firmware a deixou: sem programar, sem lock.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "mesma assinatura em todas as ISAs"
+)]
+pub fn early_console() -> Option<PlatformConsole> {
+    // SAFETY: só o console e o pânico usam a COM1, e o pânico para os outros antes de escrever.
+    Some(Uart16550::new(unsafe { PortBus::new(COM1) }))
+}
+
+/// No PC a COM1 é porta de E/S: não há o que mapear.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "mesma assinatura em todas as ISAs"
+)]
+pub fn early_serial_map(
+    _space: &mut impl PageMapper,
+    _frames: &mut impl FrameSource,
+) -> Result<(), MapError> {
+    Ok(())
+}
+
+/// Nada a trocar no PC.
+pub fn early_serial_switch(_scratch: &mut EarlyScratch) {}
 
 #[allow(
     clippy::unnecessary_wraps,

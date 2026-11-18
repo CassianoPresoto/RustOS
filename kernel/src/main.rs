@@ -9,10 +9,12 @@ extern crate alloc;
 #[cfg(not(target_os = "none"))]
 compile_error!("o kernel só compila para alvos bare-metal: use `cargo xtask build`");
 
+mod addr;
 mod bench;
 mod boot;
 #[macro_use]
 mod console;
+mod early;
 mod fmt;
 mod frames;
 mod heap;
@@ -32,6 +34,7 @@ mod vm;
 use alloc::boxed::Box;
 
 use rustos_boot_limine::LimineBoot;
+use rustos_hal::redact;
 use rustos_hal::{BootInfo, PAGE_SIZE};
 use rustos_shell::DisplayInfo;
 
@@ -54,15 +57,28 @@ struct Handoff {
 
 #[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
+    // Fica nesta pilha até `early_serial_switch`: a MMU lê as tabelas dele (aarch64).
+    let mut early_scratch = platform::EarlyScratch::new();
+    early::init(&mut early_scratch);
     let entry_cycles = platform::cycles();
     percpu::install(0);
     percpu::mark_boot_online();
-    // Até o console existir, pânico não aparece em lugar nenhum (DEBT-0005).
     // SAFETY: primeira coisa na entrada; nada reaproveitou a memória do bootloader.
     let limine = match unsafe { LimineBoot::from_bootloader() } {
         Ok(boot) => boot,
         Err(error) => panic!("boot protocol: {error:?}"),
     };
+    #[cfg(feature = "panic-tests")]
+    let params = {
+        // SAFETY: a memória das respostas ainda não foi reaproveitada.
+        let line = unsafe { limine.command_line() };
+        rustos_hal::BootParams::parse(line.unwrap_or(""))
+    };
+    #[cfg(feature = "panic-tests")]
+    {
+        early::test_point(params, rustos_hal::EarlyPanic::Entry);
+        early::test_point(params, rustos_hal::EarlyPanic::Fault);
+    }
     // SAFETY: chamada única; as regiões utilizáveis estão livres e no mapa direto.
     let mut memory = match unsafe { memory::Memory::init(&limine) } {
         Ok(memory) => memory,
@@ -79,7 +95,14 @@ extern "C" fn kmain() -> ! {
     if let Err(error) = memory::Memory::place_windows(&vm.occupied()) {
         panic!("address windows: {error:?}");
     }
+    addr::set_direct(vm.occupied()[0]);
+    if let Err(error) = platform::early_serial_map(vm.space_mut(), &mut memory.frames) {
+        panic!("early serial: {error:?}");
+    }
     vm.activate();
+    platform::early_serial_switch(&mut early_scratch);
+    #[cfg(feature = "panic-tests")]
+    early::test_point(params, rustos_hal::EarlyPanic::Activated);
     let top = match memory.map_stack(vm.space_mut(), KERNEL_STACK_PAGES) {
         Ok(top) => top,
         Err(error) => panic!("kernel stack: {error:?}"),
@@ -145,7 +168,7 @@ fn boot_kernel(handoff: Handoff) -> ! {
     };
     let source = random::init(&boot_marks(&boot, &memory, entry_cycles));
     report(&boot, &memory, display, reclaimed);
-    report_vm(&vm, boot.direct_map_offset());
+    report_vm(&vm);
     let cpus_ok = cpus.is_none_or(report_cpus);
     report_random(source);
     report_key_residue();
@@ -306,10 +329,23 @@ fn boot_marks(boot: &impl BootInfo, memory: &memory::Memory, entry_cycles: u64) 
     ]
 }
 
-fn report_vm(vm: &vm::Vm, direct_map_offset: u64) {
+/// Diz se a imagem foi sorteada e o teto de entropia, sem dizer onde ela está (SDD 09).
+fn report_kaslr(virtual_base: u64) {
+    let (start, end) = vm::image_range();
+    if virtual_base == redact::LINK_BASE {
+        kprintln!("[rustos] kaslr: off, image at the link address");
+    } else {
+        kprintln!(
+            "[rustos] kaslr: on, image slid by up to {} bits (4 KiB steps in 2 GiB)",
+            redact::slide_bits(end - start)
+        );
+    }
+}
+
+fn report_vm(vm: &vm::Vm) {
     let stats = vm.stats();
     kprintln!(
-        "[rustos] vm: direct map at {direct_map_offset:#x} in {} 2M and {} 4K pages, {} KiB of tables, stack {} KiB",
+        "[rustos] vm: direct map in {} 2M and {} 4K pages, {} KiB of tables, stack {} KiB",
         stats.large_pages,
         stats.small_pages,
         (stats.table_frames * PAGE_SIZE) >> 10,
@@ -422,6 +458,8 @@ fn report(
         );
     }
     if let Some(image) = boot.kernel_image() {
+        report_kaslr(image.virtual_base.as_u64());
+        #[cfg(feature = "debug-addrs")]
         kprintln!(
             "[rustos] kernel base: {:#x} (physical {:#x})",
             image.virtual_base.as_u64(),

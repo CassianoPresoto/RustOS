@@ -80,6 +80,7 @@ impl Memory {
     pub fn place_windows(occupied: &[(u64, u64)]) -> Result<(), MemoryError> {
         let base = free_top_level_slot(occupied).ok_or(MemoryError::NoAddressSpace)?;
         let stacks = VirtAddr::new(base.as_u64() + WINDOW_LEN);
+        crate::addr::set_windows(base.as_u64(), WINDOW_LEN);
         *DEVICES.lock() = AddressWindow::new(base, WINDOW_LEN);
         *STACKS.lock() = AddressWindow::new(stacks, WINDOW_LEN);
         Ok(())

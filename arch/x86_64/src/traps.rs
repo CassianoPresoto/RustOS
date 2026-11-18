@@ -218,6 +218,26 @@ pub unsafe fn install(ist: IstStacks, handlers: &'static Handlers, tables: &'sta
     unsafe { load_cpu(ist, tables) };
 }
 
+/// IDT mínima sobre a GDT do bootloader, sem IST nem APIC; `install` a substitui.
+///
+/// # Safety
+/// Ring 0 com IF zerado, na entrada do kernel, com a GDT do bootloader carregada.
+pub unsafe fn install_early(handlers: &'static Handlers) {
+    HANDLERS.store(ptr::from_ref(handlers).cast_mut(), Ordering::Release);
+    let selector: u16;
+    // SAFETY: ler `CS` não tem efeito colateral.
+    unsafe { asm!("mov {0:x}, cs", out(reg) selector, options(nomem, nostack, preserves_flags)) };
+    let stubs = ptr::addr_of!(rustos_isr_stubs).addr() as u64;
+    let mut idt = [IdtEntry::MISSING; IDT_LEN];
+    for (vector, entry) in (0..=u8::MAX).zip(idt.iter_mut()) {
+        *entry = IdtEntry::interrupt_in(stubs + 16 * u64::from(vector), 0, selector);
+    }
+    // SAFETY: única escrita da IDT, com a CPU de boot sozinha e IF zerado.
+    unsafe { IDT.0.get().write(idt) };
+    // SAFETY: IDT completa e estática, com a GDT do bootloader ainda carregada.
+    unsafe { load_idt() };
+}
+
 /// Carrega a GDT, a TSS e a IDT (já montada por `install`) numa CPU secundária.
 ///
 /// # Safety

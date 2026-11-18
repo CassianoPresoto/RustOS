@@ -18,6 +18,8 @@
 │       ├── frames.rs           # alocador de frames global (IrqLock), o cache de frames por CPU na frente do buddy e o handle Frames
 │       ├── heap.rs             # GlobalAlloc sobre KernelHeap, DirectMap (FrameMemory) e o autoteste
 │       ├── random.rs           # gerador global: semente de hardware ou jitter, reposição
+│       ├── addr.rs             # Addr (`kernel+0x…`) e o filtro de literais `0x…` do log; as regiões que ele nomeia (imagem, mapa direto, janelas); feature `debug-addrs`
+│       ├── early.rs            # vetores mínimos e serial sem lock para o pânico e a exceção antes do console (e com o lock preso); `panic-tests`: pontos de falha da linha de comando
 │       ├── console.rs          # console global e kprintln!: serial e tela
 │       ├── screen.rs           # tela: framebuffer + grade do term + desenho do gfx, tema e barra
 │       ├── interrupts.rs       # IRQ do timer (o que o escalonador pede: acordar, fim de fatia, próximo disparo), fila de entrada e o relatório de falha
@@ -28,10 +30,10 @@
 │       ├── task.rs             # tarefas do kernel: tabela, uma fila por CPU sobre o `Composite` de `core/sched`, spawn/yield/sleep/park/exit, migração, IPI de reescalonar e a preempção (SDD 15)
 │       ├── bench.rs            # autotestes de SIMD e de SMP; troca de contexto (mesma CPU e entre CPUs), IPI de ida e volta, escala, contenção da memória e jitter de acordar
 │       ├── fmt.rs              # texto formatado em buffer fixo
-│       ├── panic.rs            # pânico: o primeiro núcleo para os outros por IPI, toma o console e escreve
+│       ├── panic.rs            # pânico: o primeiro núcleo para os outros por IPI, toma o console e escreve; o dono refaz o relatório se panicar de novo
 │       └── platform/           # um módulo por ISA: ARCH, PlatformConsole, cpu(), console()
 ├── core/                       # o centro do hexágono: no_std, forbid(unsafe_code), testado no host
-│   ├── hal/                    # rustos-hal: as portas (traits) e os tipos de fronteira
+│   ├── hal/                    # rustos-hal: as portas (traits), os tipos de fronteira e `redact` (endereço no log) e `cmdline` (a linha de comando do kernel), puros
 │   ├── mm/                     # rustos-mm: BuddyAllocator, FrameCache, KernelHeap (slabs), summarize/find_free_block, AddressWindow, WxChecker, PageTables (a caminhada de 4 níveis das duas ISAs), `runs`/`coalesce` (2 MiB ou 4 KiB no mapa direto); porta FrameMemory e trait FrameAllocator (SDD 12, SDD 13)
 │   ├── crypto/                 # rustos-crypto: ChaCha20 (RFC 8439), BLAKE2b (RFC 7693) Rng (fast key erasure) e a semente de reserva por jitter
 │   ├── sched/                  # rustos-sched: trait Scheduler, TaskId, RunQueue; RoundRobin, Eevdf (treap de prazos), Fifo e Composite (teto de 95% para o tempo real); sim, property e bench só em teste (SDD 14; o kernel usa o `Composite`)
@@ -42,7 +44,7 @@
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set, conta disputas, `force_unlock` para o pânico)
 ├── arch/                       # adaptadores de ISA: o único lugar com asm!
 │   ├── x86_64/                 # X86Cpu, X86CpuLocal (GS), X86Ipi (ICR), PortBus, X86Mmu e DirectMapTables (`invlpg`, `CR3`, memória das tabelas), X86Entropy, GDT/TSS por CPU e IDT única, APIC (periódico → um tiro/TSC-deadline), PIT, troca de pilha, `Context`/`switch`, `fpu`; módulos puros (pte com `X86Format`, segments, fault, lapic, ioapic, pit, clock, xstate) testados no host
-│   └── aarch64/                # Aarch64Cpu, Aarch64CpuLocal (TPIDR_EL1), Aarch64Ipi (SGI), MmioBus, Aarch64Mmu e DirectMapTables (TTBR1), Aarch64Entropy; vetores (EL1h), ICC_*, CNTV de um tiro, PAN, `Context`/`switch` e `fpu`;
+│   └── aarch64/                # Aarch64Cpu, Aarch64CpuLocal (TPIDR_EL1), Aarch64Ipi (SGI), MmioBus, Aarch64Mmu e DirectMapTables (TTBR1), `early` (a PL011 por TTBR0 antes das tabelas próprias), Aarch64Entropy; vetores (EL1h), ICC_*, CNTV de um tiro, PAN, `Context`/`switch` e `fpu`;
 │                               # puros: descriptor (com `Aarch64Format`), esr, time, intid, sgi, features
 ├── boot/
 │   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 (inclusive MP) escrito aqui → hal::BootInfo

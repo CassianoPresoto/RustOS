@@ -13,6 +13,8 @@ use crate::console::{self, Sink};
 use crate::heap;
 use crate::interrupts;
 use crate::memory::Memory;
+#[cfg(feature = "panic-tests")]
+use crate::panic;
 use crate::platform;
 use crate::random;
 use crate::task::{self, State};
@@ -131,6 +133,16 @@ impl<B: BootInfo> Host for System<'_, B> {
             FaultTest::PageFault => interrupts::FaultTest::PageFault,
             FaultTest::WriteText => interrupts::FaultTest::WriteText,
             FaultTest::CpuPanic => return bench::panic_on_other_cpu(),
+            #[cfg(feature = "panic-tests")]
+            FaultTest::ConsoleLock => return console::fault_while_locked(),
+            #[cfg(feature = "panic-tests")]
+            FaultTest::NestedPanic => panic::nested_test(),
+            #[cfg(feature = "panic-tests")]
+            FaultTest::Simultaneous => return panic::simultaneous_test(),
+            #[cfg(not(feature = "panic-tests"))]
+            FaultTest::ConsoleLock | FaultTest::NestedPanic | FaultTest::Simultaneous => {
+                return false;
+            }
         };
         platform::trigger(kind)
     }

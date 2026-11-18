@@ -16,6 +16,8 @@ mod context;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod cpu;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub mod early;
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod entropy;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod exception;

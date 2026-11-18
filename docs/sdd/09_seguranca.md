@@ -46,7 +46,7 @@ código.
 | PXN/UXN nas tabelas próprias (aarch64) | Kernel executar página de usuário; usuário executar página do kernel | 2 (ligado: toda folha com UXN, dado com PXN) | Desprezível (não lido nesta rodada) | Arm ARM (não lido nesta rodada) |
 | W^X no kernel, NX em dado | Injetar e executar código no kernel | 2 | Ligado. O mapa direto usa 2 MiB e nunca é executável; a imagem tem uma página de 4 KiB por permissão. O número de TLB espera o metal ([SDD 13](13_memoria_virtual.md)) | [kernel self-protection](https://docs.kernel.org/security/self-protection.html) |
 | Aleatório do kernel: semente de RDSEED (x86_64) ou RNDR (aarch64), gerador ChaCha20 com *fast key erasure* (`core/crypto`) | Previsibilidade de endereço, chave e canário | 2 | Estado de 40 bytes; `next_u64` 67 ns e bloco de 4 KiB a 960 MB/s no host, escalar (Apple M5); no alvo (aarch64, HVF, `release`) 636 a 694 MB/s e 37 us por reposição ([SDD 07](07_desempenho_e_recursos.md)) | [RFC 8439](https://www.rfc-editor.org/rfc/rfc8439.html) (ChaCha20), [RFC 7693](https://www.rfc-editor.org/rfc/rfc7693.html) (BLAKE2b), [Bernstein, 2017](https://blog.cr.yp.to/20170723-random.html) (fast key erasure), [`random.c` do Linux](https://github.com/torvalds/linux/blob/master/drivers/char/random.c) (referência); RDSEED e RNDR conforme o Linux e a QEMU (seção abaixo; o Intel SDM e o Arm ARM não foram lidos). CPU sem os dois: jitter do contador, fraco ([DEBT-0019](../tech-debt/0019-aleatorio-sem-fonte-de-hardware-fraco.md)) |
-| KASLR | Endereço fixo do kernel facilitando ROP | 2 | Ligado: +3 a 6 KiB (1,8% a 6,6%) de imagem, boot sem diferença mensurável. Base e mapa direto sorteados pelo Limine; o endereço aparece no log ([DEBT-0022](../tech-debt/0022-endereco-do-kernel-no-log-de-boot.md)) | [x86_64 mm](https://docs.kernel.org/arch/x86/x86_64/mm.html); PROTOCOL.md do Limine, *Memory Layout at Entry* |
+| KASLR | Endereço fixo do kernel facilitando ROP | 2 | Ligado: +3 a 6 KiB (1,8% a 6,6%) de imagem, boot sem diferença mensurável. Base e mapa direto sorteados pelo Limine; o log não traz o endereço ([seção abaixo](#endereços-do-kernel-no-log)) | [x86_64 mm](https://docs.kernel.org/arch/x86/x86_64/mm.html); PROTOCOL.md do Limine, *Memory Layout at Entry* |
 | Zerar memória ao liberar | Vazar dado de um processo para outro | 2 | Ligado por padrão. Host, cache quente: cerca de 7 ns por KiB. No alvo (aarch64, HVF, `release`): +2 ns até 64 B; com `DC ZVA` a partir de 512 B, a página custa cerca de 22 ns (eram 130 com o `memset`), 5,5 ns por KiB (SDD 07). Política `KernelHeap::set_zero_on_free` | [kernel-parameters](https://www.kernel.org/doc/html/latest/admin-guide/kernel-parameters.html) (`init_on_free`) |
 | Estado FPU/SIMD salvo eager na troca de contexto (x86_64) | LazyFP (CVE-2018-3665): leitura especulativa dos registradores da tarefa anterior antes do #NM, o que vazou até chaves de round do AES-NI. Verificado do Sandy Bridge ao Skylake | 3 | Sem penalidade conhecida segundo o relato do achado (Cyberus). Medir aqui: `XSAVEOPT` por troca (SDD 07). Segundo o Cyberus, versões do Linux a partir da 4.9 não são afetadas | [Cyberus](https://www.cyberus-technology.de/post/intel-lazyfp-vulnerability-exploiting-lazy-fpu-state-switching), [Red Hat CVE-2018-3665](https://access.redhat.com/security/cve/CVE-2018-3665); [commit ca6938a1 (outubro de 2016, janela da 4.9, "x86/fpu: Hard-disable lazy FPU mode"; a mensagem diz que o eager já era o padrão desde a 4.6)](https://github.com/torvalds/linux/commit/ca6938a1cd8a1c5e861a99b67f84ac166fc2b9e7); o aviso Intel SA-00145, que recomenda eager, foi lido só por resumo de busca (não verificado) |
 | Estado FPSIMD salvo eager na troca de contexto (aarch64) | Nada que seja defesa: o LazyFP é da Intel. O motivo é simplicidade e custo (512 B sempre salvos, sem trap por tarefa); a pesquisa recomenda assim e não mediu a alternativa | 3 | A medir | [Linux `fpsimd.c`](https://raw.githubusercontent.com/torvalds/linux/master/arch/arm64/kernel/fpsimd.c): o Linux também não trapeia o FPSIMD: marca `TIF_FOREIGN_FPSTATE` e recarrega ao voltar ao usuário se outra tarefa ocupou a CPU |
@@ -73,6 +73,50 @@ código.
 | Boot verificado e medido | Kernel ou bootloader trocados | 12 | Tempo de boot a medir | [TPM 2.0](https://trustedcomputinggroup.org/resource/tpm-library-specification/) |
 
 Levantamento de novembro de 2026.
+
+## Endereços do kernel no log
+
+Quem lê o log não aprende onde o KASLR pôs a imagem, o mapa direto nem o heap. A regra vale
+para o boot, o relatório de `fault` e o pânico, na serial e na tela.
+
+| O quê | Como aparece |
+| --- | --- |
+| Base da imagem | Não aparece. `[rustos] kaslr: on, image slid by up to N bits (4 KiB steps in 2 GiB)`, ou `kaslr: off` se a base é a do linker script |
+| Mapa direto | Só o tamanho (`vm: direct map in N 2M and M 4K pages`) |
+| `pc` do `fault`, endereço do page fault, ponteiro do heap | `Addr`: `kernel+0x1234` na imagem (confere com `nm` no ELF), `direct+0x40` no mapa direto, `mmio+…` e `stack+…` nas janelas, `<kernel>` em qualquer outro endereço da metade alta; o resto (metade baixa, `-1`) sai como veio |
+| Mensagem do pânico e do `kprintln!` | Passa por um filtro (`Scrubber`, `core/hal::redact`) que troca todo literal `0x…` de endereço do kernel pela mesma forma. É a rede para `{:p}`, `{:#x}` e o `Debug` de `VirtAddr`; o código novo usa `Addr` (o `Debug` dele escreve como o `Display`) |
+| Saída do shell | Sem filtro: é o que o usuário pediu (`random` imprime um `u64` qualquer) |
+
+**O que o filtro não pega.** Só o literal com prefixo `0x`, de até 32 dígitos (zeros à esquerda valem; mais de 16 dígitos
+significativos não é `u64` e sai como veio). Escapam o hexadecimal sem prefixo (`{:x}`), o decimal, o binário e o octal, e o
+endereço que um tipo escreva por conta própria sem `Addr` nem `0x`; por isso o tipo que carrega endereço escreve em
+hexadecimal com prefixo (`Violation`, `VirtAddr`) e o review confere o resto. Decimal de 19 dígitos ou mais acima de `i64::MAX` não é tratado.
+`HIGH_HALF` (`0xffff_8000_0000_0000`) supõe paginação de 4 níveis, como o resto do kernel. `direct+0x…` é o endereço
+**físico** do objeto do heap (o mapa direto soma um deslocamento fixo), não um deslocamento do KASLR. Custo do filtro, medido
+no host em `release` (`cargo test --release -p rustos-hal -- --ignored --nocapture`, uma linha típica do boot): 94 a 97 ns e 11
+chamadas a `write_str` por linha, contra 110 ns e 15 antes de o `0` só abrir candidato quando o `x` vem junto no mesmo pedaço
+(a linha tem 9 pedaços; no kernel, cada chamada vira um desenho da tela).
+
+**O teto de entropia vem do Limine, não do kernel.** Em `common/lib/elf.c` (`elf64_load`, lido em
+2026-11-17) o sorteio é `rand32() & ~(max_align - 1)` somado à base do linker, e o Limine tenta
+de novo se a imagem passa do topo: a base cai nos 2 GiB do topo, em passos do maior `p_align` do ELF
+(4 KiB aqui, o que as medidas do [SDD 13](13_memoria_virtual.md) confirmam). Com a imagem de
+cerca de 180 KiB o teto é `floor(log2((2 GiB - imagem) / 4 KiB))`, 18 bits. É um teto do desenho: o
+kernel não vê o sorteio, só o resultado, e `slide == 0` (um boot em 2^18) sai como `kaslr: off`.
+
+**O que o Linux faz.** `%p` imprime um hash com chave por boot (`ptr_to_id` em `lib/vsprintf.c`; `no_hash_pointers`
+na linha de comando o desliga, com um aviso) e `kptr_restrict` zera `%pK` para quem não tem
+`CAP_SYSLOG`. No `arm64`, `kaslr_init` só diz `KASLR enabled`; no x86_64, `dump_kernel_offset` imprime `Kernel Offset: 0x…` no pânico
+(`arch/x86/kernel/setup.c`). O RustOS escolheu o deslocamento dentro da região em vez do hash: dá para depurar com o `nm` do
+ELF sem revelar a base, e o `Addr` de dois logs do mesmo boot continua comparável.
+
+**Depuração.** `RUSTOS_FEATURES=debug-addrs make run` (feature `debug-addrs` do kernel) imprime
+o endereço cru, o `kernel base: 0x… (physical 0x…)` e desliga o filtro. Fora do padrão: entrega o KASLR.
+O `make smoke` com ela só confere que a base não é a do linker script.
+
+**Como se verifica.** O `make smoke` exige a linha `kaslr: on` e reprova qualquer literal `0x…` entre
+`0xffff_8000_0000_0000` e `0xffff_ffff_ffff_0000` do primeiro `[rustos]` em diante, o corpo do pânico e a saída do shell incluídos (`xtask/src/leak.rs`, com
+teste); o `make smoke-panic` roda `mem`, `ps` e `fetch` e passa a saída pelo mesmo conferidor. O corte de cima deixa passar `-1`/`u64::MAX`, e a de baixo, endereço de usuário e máscara.
 
 ## Aleatório do kernel
 

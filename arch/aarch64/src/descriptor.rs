@@ -151,6 +151,16 @@ mod tests {
     }
 
     #[test]
+    fn a_2_mib_device_block_is_a_leaf_that_is_not_a_table() {
+        let entry = block_descriptor(PhysAddr::new(0x0900_0000), PageFlags::DEVICE);
+        assert_eq!(entry & BLOCK_ADDRESS, 0x0900_0000);
+        assert!(!is_table(entry));
+        assert_eq!((entry >> ATTR_INDEX_SHIFT) & 0b111, MAIR_DEVICE_INDEX);
+        assert_ne!(entry & PRIVILEGED_EXECUTE_NEVER, 0);
+        assert_eq!(0x0900_0000 % (1u64 << 21), 0);
+    }
+
+    #[test]
     fn data_page_is_inner_shareable_write_back() {
         let entry = page_descriptor(PhysAddr::new(0x4000_0000), PageFlags::DATA);
         assert_eq!((entry >> ATTR_INDEX_SHIFT) & 0b111, MAIR_NORMAL_INDEX);
