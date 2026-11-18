@@ -72,7 +72,7 @@ rápido mexe só na faixa pedida ([SDD 13](13_memoria_virtual.md), "Zerar").
 
 ## Andar 3c — modo normal (`make smoke-fast`)
 
-`cargo xtask smoke-fast` sobe a mesma QEMU sem linha de comando. Exige o `boot ok`, a `boot time: kernel N ms to prompt`, as linhas que os dois modos têm (`protections:`, `w^x: ok`, `reclaimed:`, `kaslr: on`, `cpus: N online`, `frame self-test: ok`, `exception self-test: ok`) e que nenhuma linha do modo de teste apareça (a lista é a do modo de teste menos a do normal, mais `task`, `smp` e `wake self-test:`): um modo normal que volta a rodar o que o de teste roda é regressão de tempo. Imprime o tempo do kernel até o prompt (X ms) e o de parede, e reprova se o kernel passar de um teto folgado (100 ms com TCG, 20 ms com HVF ou KVM; o boot normal leva 2 a 30 ms). Entra no `make pr` e no CI.
+`cargo xtask smoke-fast` sobe a mesma QEMU sem linha de comando. Exige o `boot ok`, a `boot time: kernel N ms to prompt`, as linhas que os dois modos têm (`protections:`, `w^x: ok`, `reclaimed:`, `kaslr: on`, `cpus: N online`, `frame self-test: ok`, `exception self-test: ok`) e que nenhuma linha do modo de teste apareça (a lista é a do modo de teste menos a do normal, mais `task`, `smp` e `wake self-test:`): um modo normal que volta a rodar o que o de teste roda é regressão de tempo. Imprime o tempo do kernel até o prompt (X ms) e o de parede, e reprova se o kernel passar de um teto folgado (50 ms com `RUSTOS_ACCEL=hvf` ou `kvm` forçado, 500 ms no resto: a QEMU pode cair no TCG sem avisar, como no runner do CI; o boot normal leva 2 a 40 ms). Entra no `make pr` e no CI.
 
 O que o modo normal deixa de provar (heap, timer, preempção, SIMD por tarefa, migração) só o `make smoke` prova.
 

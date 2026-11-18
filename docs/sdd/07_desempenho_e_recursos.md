@@ -36,7 +36,7 @@
 | Vazão de ChaCha20, BLAKE2b e do gerador | `cargo run --release -p rustos-crypto --example bench`, no host (Apple M5, `rustc` 1.100.0), melhor de 15 rodadas, sem SIMD (o compilador não vetorizou: o resultado com `-vectorize-loops=false -vectorize-slp=false` é o mesmo) | Ver tabela abaixo. **Números do host**; os do alvo estão abaixo |
 | Escalonador (`core/sched`) | `cargo test --release -p rustos-sched bench -- --ignored --nocapture --test-threads=1` (`core/sched/src/bench.rs`), no host | Host: `pick_next` do EEVDF em 41 a 136 ns com 8 a 512 tarefas; 96 bytes por tarefa ([SDD 14](14_escalonador.md)). No alvo (`bench`, 8 prontas): `pick_next` 34 a 35 ns e `tick` 2 ns no aarch64 HVF; 320 e 36 ns em TCG; 670 a 730 e 85 a 89 ns no x86_64 em TCG (tabela abaixo) |
 | Boot de parede | `make smoke-fast` (modo normal) e `make smoke` (modo de teste) | inclui firmware EDK2: 1,7 a 1,9 s (x86_64, TCG) e 5,2 s (aarch64, HVF) no modo normal, dominado pelo firmware; a tabela de [Tempo de boot](#tempo-de-boot) separa firmware, Limine e kernel |
-| Tempo do kernel até o prompt | linha `boot time:` do boot (`make smoke-fast ARCH=all PROFILE=release`) | modo normal: 24 a 35 ms (x86_64, TCG) e 2 ms (aarch64, HVF); antes, com os autotestes e medidas no caminho: 964 e 453 ms ([Tempo de boot](#tempo-de-boot)) |
+| Tempo do kernel até o prompt | linha `boot time:` do boot (`make smoke-fast ARCH=all PROFILE=release`) | modo normal: 25 a 31 ms (x86_64, TCG) e 2 ms (aarch64, HVF); antes, com os autotestes e medidas no caminho: 964 e 453 ms ([Tempo de boot](#tempo-de-boot)) |
 
 ### Troca de contexto e jitter de acordar (fase 3)
 
@@ -665,7 +665,7 @@ Diferenças de tempo entre linhas consecutivas da serial, `release`, um boot (a 
 | `frame self-test:` | 1,9 ms | 0,6 ms | sempre |
 | `w^x:` | 1,8 ms | 0,56 ms | sempre |
 | `exception self-test:` | 0,9 ms | 0,3 ms | sempre |
-| Calibração do PIT (x86_64) | 20 ms | não há | 5 a 20 ms (adaptativa, SDD 10) |
+| Calibração do PIT (x86_64) | 20 ms | não há | 5 ms (uma janela que fecha por incerteza, SDD 10) |
 | Primeiro `render` da tela cheia (x86_64) | ~15 ms | não medido | 0 |
 | Uma linha na serial, com tela | 1,0 ms | 0,45 ms | menos linhas no modo normal |
 | Uma linha na serial, sem tela | 0,3 ms | 0,38 ms | |
@@ -673,7 +673,7 @@ Diferenças de tempo entre linhas consecutivas da serial, `release`, um boot (a 
 | `reclaim_bootloader` | 0,3 ms | 2 µs | igual |
 | Zerar memória grande no boot | não há | não há | `Memory::init` leva 0,9 ms e o `Vm::build` 2,2 ms no x86_64; nenhum zera mais que a grade da tela |
 
-O que se mexeu, no x86_64 em TCG, com o kernel do modo normal medido depois de cada passo (um boot cada, host em silêncio; ms): autotestes e medidas atrás de `rustos.selftest=1`, 965 → 65; calibração do PIT em 5 ms e o primeiro `render` sem repintar a grade vazia, juntos, 65 → 38 (o PIT custa 15 por conta e o `render` inicial, ~15 observado na primeira linha impressa; a calibração depois ganhou o teto adaptativo de 20 ms, que em TCG devolve de 0 a 15 ms: mediana de 36 ms de kernel em 12 boots sob carga, [SDD 10](10_interrupcoes.md#calibração-pelo-pit-janela-adaptativa-de-5-a-20-ms)); menos linhas no boot normal e o `render` que junta células sem tinta, 38 → 26. O `wait_online` do SMP, o `reclaim` e a "memória grande" não estavam no caminho: 1 ms ou menos nas duas ISAs. A calibração do PIT e o redesenho só pesam em TCG; no aarch64 o boot normal já é 2 ms, e o que sobra é serial (cada byte escrito na PL011 é uma saída da VM) e `task::init`.
+O que se mexeu, no x86_64 em TCG, com o kernel do modo normal medido depois de cada passo (um boot cada, host em silêncio; ms): autotestes e medidas atrás de `rustos.selftest=1`, 965 → 65; calibração do PIT em 5 ms e o primeiro `render` sem repintar a grade vazia, juntos, 65 → 38 (o PIT custa 15 por conta e o `render` inicial, ~15 observado na primeira linha impressa; a calibração final (uma janela que fecha por incerteza) deu mediana de 26 ms de kernel em 12 boots, de 26 a 31, [SDD 10](10_interrupcoes.md#calibração-pelo-pit-uma-janela-que-cresce-até-fechar)); menos linhas no boot normal e o `render` que junta células sem tinta, 38 → 26. O `wait_online` do SMP, o `reclaim` e a "memória grande" não estavam no caminho: 1 ms ou menos nas duas ISAs. A calibração do PIT e o redesenho só pesam em TCG; no aarch64 o boot normal já é 2 ms, e o que sobra é serial (cada byte escrito na PL011 é uma saída da VM) e `task::init`.
 
 ### Comparação com o Linux (mesma QEMU)
 

@@ -110,11 +110,11 @@ O kernel tem dois modos, escolhidos pela linha de comando do Limine (`BootParams
 | Autotestes | frame, `w^x:` e exceção: os três juntos custam 3 ms no x86_64 em TCG (com as linhas) e 1 ms no aarch64 com HVF, e nada além deles exercita o que provam (o mapa direto, as tabelas ativas, a IDT/`VBAR` e o retorno da exceção) | os três, mais heap, resíduo de chave, timer, preempção com estado de SIMD e migração entre núcleos |
 | Medidas | nenhuma | `zero bench:`, `random bench:`, `idle:`, `switch:`, `scale:`, `alloc storm:` |
 | Linhas na serial | as que um gate confere (`kaslr:`, `reclaimed:`, `protections:`, `cpus:`, `w^x:`) ou que avisam (`random: jitter (weak)`) | todas |
-| Tempo no kernel (`release`) | 24 a 35 ms (x86_64, TCG) · 2 ms (aarch64, HVF) | 1,0 a 3,8 s conforme o binário (x86_64 em TCG, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md)) · 0,45 s (aarch64) |
+| Tempo no kernel (`release`) | 25 a 31 ms (x86_64, TCG) · 2 ms (aarch64, HVF) | 1,0 a 3,8 s conforme o binário (x86_64 em TCG, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md)) · 0,45 s (aarch64) |
 
 **Por que dois.** O que mais pesava no boot era espera de relógio e medida, não código de boot: `timer:` (50 ms), `idle:` (50 ms), `task self-test:` (80 ms), `smp self-test:` (140 ms), `switch:`/`scale:`/`alloc storm:` (110 ms no aarch64, 550 ms no x86_64) e, no x86_64 em TCG, o `heap self-test:` (12 ms), o `random bench:` (13 ms) e o `zero bench:` (50 ms). Prova que depende de janela de tempo, ou que mede, não vale a cada boot de quem só quer o shell; vale no `make smoke` e no CI. O que roda sempre é o que custa mil vezes menos e que nada mais exercita (a regra que fixa isso é proposta ao guidelines 05 em Draft separado, à espera do dono).
 
-**Cada linha é tempo.** Na serial da QEMU, uma linha custa de 0,3 ms (x86_64) a 0,4 ms (aarch64) e, com a tela, mais 0,7 ms no x86_64 em TCG (o redesenho da linha). Numa UART física de 115 200 baud seria 7 ms por linha de 80 bytes. O modo normal imprime 11 linhas (12 com o aviso de entropia fraca no aarch64), o de teste 31.
+**Cada linha é tempo.** Na serial da QEMU, uma linha custa de 0,3 ms (x86_64) a 0,4 ms (aarch64) e, com a tela, mais 0,7 ms no x86_64 em TCG (o redesenho da linha). Numa UART física de 115 200 baud seria 7 ms por linha de 80 bytes. O modo normal imprime 11 linhas (12 com o aviso de entropia fraca no aarch64 ou o de calibração do TSC no x86_64 em TCG), o de teste 31.
 
 **O `bench` do shell** é o mesmo nos dois modos e mede o que o boot de teste mede, com o esforço completo: troca de contexto, IPI, escala, tempestade de alocação, jitter de acordar e, desde esta mudança, o custo de zerar memória e o do gerador aleatório (`Host::micro_bench`).
 

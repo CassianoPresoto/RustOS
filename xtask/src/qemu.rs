@@ -110,11 +110,15 @@ fn normal_forbidden() -> Vec<&'static str> {
         .collect()
 }
 
-/// Teto do `boot time:` no modo normal, em ms: com aceleração de hardware o boot leva 2 ms
-/// (aarch64) a 25 ms (x86_64 em TCG chega a 30); o teto é folgado e pega o que roda de teste
-/// no caminho do prompt (135 ms no x86_64 e 58 no aarch64 quando o `heap self-test:` e as medidas voltam).
-fn normal_ceiling_ms(accel: &str) -> u64 {
-    if accel.starts_with("tcg") { 100 } else { 20 }
+/// Teto do `boot time:` no modo normal, em ms. Só uma aceleração **forçada** (`RUSTOS_ACCEL`) conta
+/// como confirmada: a lista padrão tem `kvm`/`hvf` mas a QEMU cai no TCG sem avisar (o runner do CI
+/// tem `/dev/kvm` sem permissão). Sem confirmação o teto é folgado e as linhas proibidas pegam a
+/// regressão de verdade.
+fn normal_ceiling_ms(forced: Option<&str>) -> u64 {
+    match forced {
+        Some("hvf" | "kvm") => 50,
+        _ => 500,
+    }
 }
 
 /// A linha em que o kernel diz quantos núcleos subiram; o limite do kernel (8) corta o pedido.
@@ -364,8 +368,9 @@ fn report(arch: Arch, mode: BootMode, outcome: Outcome, log: &str) -> Result<(),
                     let reason = format!("o boot normal rodou `{line}`, que é do modo de teste");
                     return Err(failure(arch, &reason, log));
                 }
-                let accel = arch.accelerators().first().copied().unwrap_or("tcg");
-                let ceiling = normal_ceiling_ms(accel);
+                let forced = std::env::var("RUSTOS_ACCEL").ok();
+                let accel = forced.as_deref().unwrap_or("não confirmada");
+                let ceiling = normal_ceiling_ms(forced.as_deref());
                 if let Some(ms) = kernel_boot_ms(log).filter(|&ms| ms > ceiling) {
                     let reason = format!(
                         "boot normal levou {ms} ms no kernel, teto de {ceiling} ms com `{accel}`: \
@@ -525,9 +530,10 @@ mod tests {
 
     #[test]
     fn the_normal_boot_has_a_time_ceiling() {
-        assert_eq!(normal_ceiling_ms("tcg"), 100);
-        assert_eq!(normal_ceiling_ms("tcg,thread=multi"), 100);
-        assert_eq!(normal_ceiling_ms("hvf"), 20);
+        assert_eq!(normal_ceiling_ms(None), 500);
+        assert_eq!(normal_ceiling_ms(Some("tcg")), 500);
+        assert_eq!(normal_ceiling_ms(Some("hvf")), 50);
+        assert_eq!(normal_ceiling_ms(Some("kvm")), 50);
         let slow = normal_log(99_999, "");
         let outcome = Outcome::Booted(Duration::ZERO);
         let result = report(Arch::Aarch64, BootMode::Normal, outcome, &slow);

@@ -28,7 +28,7 @@ resto do boot são iguais).
 ## Por que foi aceito
 
 Só o `make smoke` roda isso, e TCG não serve para número de latência (guidelines 05). O boot normal, que é o que o usuário vê, não depende
-disso (24 a 36 ms). Não se achou a causa.
+disso (25 a 31 ms). Não se achou a causa.
 
 ## Gatilho
 

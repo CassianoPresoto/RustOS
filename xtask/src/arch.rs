@@ -162,7 +162,7 @@ impl Arch {
 
     /// `RUSTOS_ACCEL` (`tcg`, `tcg-multi`, `hvf` ou `kvm`) manda; sem ela, aceleração de
     /// hardware quando host e alvo coincidem, com TCG sempre como reserva.
-    pub fn accelerators(self) -> Vec<&'static str> {
+    fn accelerators(self) -> Vec<&'static str> {
         let forced = std::env::var("RUSTOS_ACCEL").ok();
         let same_isa = std::env::consts::ARCH == self.name();
         let kvm = std::path::Path::new("/dev/kvm").exists();
