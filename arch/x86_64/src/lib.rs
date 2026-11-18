@@ -8,6 +8,7 @@ pub mod fault;
 pub mod features;
 pub mod ioapic;
 pub mod lapic;
+pub mod mitigation;
 pub mod pic;
 pub mod pit;
 pub mod prefix;
@@ -30,6 +31,8 @@ pub mod fpu;
 mod mmio;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod mmu;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+mod nospec;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod percpu;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -66,6 +69,8 @@ pub use mmio::MmioBus;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use mmu::{DirectMapTables, X86Mmu, active_root, require_features};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub use nospec::array_index_mask_nospec;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use percpu::X86CpuLocal;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use port::PortBus;
@@ -75,7 +80,7 @@ pub use protect::{Protections, enable as enable_protections};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use stack::{Continuation, call_on_stack};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub use sysreg::{features as cpu_features, rdtsc};
+pub use sysreg::{features as cpu_features, mitigation_features, rdtsc};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use traps::{
     CpuTables, IstStacks, breakpoint, install as install_traps,
