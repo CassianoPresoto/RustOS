@@ -64,7 +64,7 @@ pub use mmio::MmioBus;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use mmu::{Aarch64Mmu, DirectMapTables, active_root, prepare_space, wxn_active};
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub use nospec::csdb;
+pub use nospec::array_index_mask_nospec;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use percpu::Aarch64CpuLocal;
 pub use prefix::CpuPrefix;

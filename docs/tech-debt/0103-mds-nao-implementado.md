@@ -15,6 +15,10 @@ A linha `mitigations:` diz `mds off (not implemented)` na CPU Intel sem `MDS_NO`
 Linux (Skylake e anteriores, por exemplo). O kernel não executa `VERW` antes do `SYSRET`/`IRETQ`.
 O aarch64 não tem a vulnerabilidade.
 
+A linha só fala de MDS, e o mesmo `VERW` limpa o que o TAA, o MMIO obsoleto e o RFDS deixam
+vazar. O Linux marca TAA onde `!TAA_NO` e a CPU tem RTM ou `TSX_CTRL` (a Cascade Lake do dump do
+InstLatX64 tem RTM e `TAA_NO = 0`); o RustOS não detecta nem nomeia TAA, MMIO nem RFDS (DEBT-0106).
+
 ## Por que foi aceito
 
 A QEMU e o HVF não modelam a limpeza; só o metal prova que o `VERW` limpa. O custo de um `VERW` por

@@ -361,11 +361,10 @@ pub fn hardware_entropy() -> Option<PlatformEntropy> {
     Aarch64Entropy::detect()
 }
 
-/// O clamp do Spectre v1: a máscara, a barreira `CSDB` e só então o `AND` (`barrier.h` do arm64).
+/// O clamp do Spectre v1: `index` se `index < size`, senão 0, com a máscara de `arch/`.
 #[inline]
 pub fn array_index_nospec(index: usize, size: usize) -> usize {
-    let mask = rustos_hal::nospec::array_index_mask_nospec(index, size);
-    index & rustos_arch_aarch64::csdb(mask)
+    index & rustos_arch_aarch64::array_index_mask_nospec(index, size)
 }
 
 /// `MIDR_EL1` e os registradores de identificação das mitigações.

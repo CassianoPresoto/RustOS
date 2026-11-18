@@ -89,33 +89,37 @@ Como se mede: o mesmo da [seção anterior](#syscall-nula-e-limpeza-da-pilha-fat
 linha `user: null syscall`, `release`), cinco rodadas **alternadas** entre as variantes, cada
 número já a mediana de 5 dentro do autoteste. aarch64 sob **HVF** (`RUSTOS_ACCEL=hvf make smoke
 ARCH=aarch64 PROFILE=release`, QEMU 11.1.3, Apple M5); x86_64 em TCG, que só compara o RustOS
-consigo mesmo. As variantes: **A** a `main` (`Syscall::from_raw`, que percorre `Syscall::ALL`),
-**B** a tabela indexada pelo número, sem clamp, **C** a tabela com a máscara e sem a `CSDB`, **D** o
-que entra (tabela, máscara e `CSDB` no aarch64).
+consigo mesmo. As variantes: **A** a `main` (`Syscall::from_raw`, que percorre `Syscall::ALL`), **B** a tabela
+indexada pelo número, sem clamp, **D** a primeira versão do clamp (máscara aritmética do `hal` mais
+`CSDB`), **E** a que entra (a sequência do Linux em `asm!` em `arch/`: `cmp; sbb` no x86_64,
+`cmp; sbc; csdb` no aarch64).
 
-| Syscall nula, com a pilha limpa | A (`main`) | B (tabela) | C (tabela + máscara) | D (tabela + máscara + `CSDB`) |
+| Syscall nula, com a pilha limpa | A (`main`) | B (tabela) | D (máscara do `hal` + `CSDB`) | E (sequência do Linux) |
 | --- | --- | --- | --- | --- |
-| aarch64 HVF, `release`, 5 rodadas | 46,2 a 50,4 ns | 46,6 a 51,3 ns | 46,8 a 50,9 ns | **58,1 a 62,1 ns** |
-| x86_64 TCG, `release`, 5 rodadas | 413,7 a 421,0 ns | 424,5 a 546,6 ns (uma rodada de 546) | não medida (no x86_64 D é C) | **426,0 a 440,3 ns** |
+| aarch64 HVF, `release`, 5 rodadas | 46,3 a 47,0 ns | 47,3 a 47,6 ns | 57,8 a 60,0 ns | **57,3 a 57,7 ns** |
+| x86_64 TCG, `release`, 5 rodadas | 414,0 a 421,9 ns | 421,9 a 429,3 ns | não medida | **423,9 a 432,1 ns** |
 
-- **A máscara é de graça no aarch64** (C contra B: dentro do ruído, 0 a 1 ns), e **a `CSDB` custa
-  cerca de 12 ns** (D contra C: +25% na chamada nula, que sem a limpeza da pilha vai de 37 a 40 ns
-  para 49 ns). O número é do Apple M5; outros núcleos não foram medidos
-  ([DEBT-0105](../tech-debt/0105-clamp-do-spectre-v1-confere-o-assembly-a-mao.md)). **A `CSDB` fica**:
+- **No aarch64 a `CSDB` custa cerca de 10 ns** (E contra B: 57,5 contra 47,5 ns; a máscara `cmp; sbc`
+  sozinha não aparece, como na primeira medida, em que a variante sem `CSDB` ficou no ruído). É +21% na
+  chamada nula, que sem a limpeza da pilha vai de 37 para 48 ns. D e E não se distinguem: trocar a
+  aritmética do `hal` pela sequência do Linux não mudou o número. O valor é do Apple M5; outros núcleos não foram medidos
+  ([DEBT-0105](../tech-debt/0105-csdb-do-clamp-custa-10-ns-sem-o-requisito-lido.md)). **A `CSDB` fica**:
   o Linux a põe incondicional (`arch/arm64/include/asm/barrier.h`) e tirá-la sem ler o requisito é
   desligar segurança sem prova ([guidelines 09](../guidelines/09_seguranca.md)); este é o número que
   a prova pede.
 - **A tabela indexada custa o mesmo que o laço** para `nop`, a primeira entrada de `Syscall::ALL`
   (B contra A). Para as chamadas do fim da lista é mais barata, e não foi medida.
-- **x86_64 TCG:** D fica cerca de 15 ns (3,7% na mediana das cinco rodadas: 434,3 contra 418,9 ns) acima de A; é a emulação do `cmov`, do armazenamento e
-  da recarga do `black_box`, e a faixa do B mostra o quanto o TCG varia com o código.
+- **x86_64 TCG:** E fica cerca de 7 ns (1,6% na mediana das cinco rodadas: 425,1 contra 418,3 ns) acima de A, e a tabela sozinha (B) já está uns 10 ns acima; a diferença é a do código que o TCG emula, e a faixa do B
+  (acima do E) mostra o quanto ele varia com o layout.
 - **Boot normal:** `make smoke-fast ARCH=all PROFILE=release`, 5 boots, linha `boot time:`: x86_64
-  25 a 26 ms antes e 26 a 27 depois; aarch64 2 a 3 ms antes e 2 a 3 depois. A linha `mitigations:` e a
-  leitura do CPUID e do MSR não aparecem acima do arredondamento.
-- **Tamanho** (`make size`, `carregado`, sobre a `main` `c42f274`): `release` x86_64 371 635 para 376 615
-  bytes (+4 980) e aarch64 314 265 para 317 161 (+2 896); `release-small` x86_64 195 367 para 197 647
-  (+2 280) e aarch64 177 329 para 179 401 (+2 072). É a detecção, as listas, a formatação da linha e a
-  tabela de despacho (536 bytes de `.rodata`). O `.bss` não mudou.
+  25 a 26 ms antes e 27 depois (cinco vezes 27); aarch64 2 a 3 ms antes e 2 a 3 depois. A linha
+  `mitigations:`, o CPUID de cada um dos 4 núcleos e a leitura do MSR custam cerca de 1 ms no x86_64 em
+  TCG (o CPUID é emulado) e não aparecem no aarch64.
+- **Tamanho** (`make size`, `carregado`, sobre a `main` `c42f274`): `release` x86_64 371 635 para 377 307
+  bytes (+5 672) e aarch64 314 265 para 318 053 (+3 788); `release-small` x86_64 195 367 para 197 895
+  (+2 528) e aarch64 177 329 para 179 749 (+2 420). É a detecção, as listas, a formatação da linha, a
+  união por núcleo e a tabela de despacho (536 bytes de `.rodata`). O `.bss` cresceu 16 bytes (o
+  lock da união).
 
 ### Troca de contexto e jitter de acordar (fase 3)
 

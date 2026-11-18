@@ -3,8 +3,18 @@
 
 use core::fmt;
 
-/// As vulnerabilidades que a CPU tem, pela regra do Linux; sem informação, vale `true`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Quanto a CPU está exposta à injeção de histórico de desvio; a ordem é a da gravidade.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Exposure {
+    NotAffected,
+    /// Afetada, e o hardware a mitiga sozinho (`ECBHB` no aarch64).
+    HardwareMitigated,
+    Affected,
+}
+
+/// As vulnerabilidades que a CPU tem, pela regra do Linux; sem informação, a regra devolve `ALL`.
+/// Sem `Default`: o valor vazio tem de ser pedido por `NONE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "uma vulnerabilidade por campo"
@@ -19,7 +29,7 @@ pub struct Vulns {
     /// Amostragem de dados de microarquitetura (MDS): só Intel.
     pub mds: bool,
     /// Injeção de histórico de desvio (BHI no x86_64, Spectre-BHB no aarch64).
-    pub bhb: bool,
+    pub bhb: Exposure,
 }
 
 impl Vulns {
@@ -29,8 +39,33 @@ impl Vulns {
         spectre_v2: true,
         ssb: true,
         mds: true,
-        bhb: true,
+        bhb: Exposure::Affected,
     };
+
+    /// Nenhuma vulnerabilidade: a CPU que a regra do Linux declara sem especulação.
+    pub const NONE: Self = Self {
+        meltdown: false,
+        spectre_v2: false,
+        ssb: false,
+        mds: false,
+        bhb: Exposure::NotAffected,
+    };
+
+    /// O pior de cada vulnerabilidade entre duas CPUs: o que vale para a máquina inteira.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self {
+            meltdown: self.meltdown || other.meltdown,
+            spectre_v2: self.spectre_v2 || other.spectre_v2,
+            ssb: self.ssb || other.ssb,
+            mds: self.mds || other.mds,
+            bhb: if (self.bhb as u8) >= (other.bhb as u8) {
+                self.bhb
+            } else {
+                other.bhb
+            },
+        }
+    }
 }
 
 /// `kpti=on|off|auto` na linha de comando; sem a chave, `Auto`.
@@ -65,6 +100,7 @@ impl KptiPolicy {
 }
 
 /// O que o kernel de fato liga de cada mitigação; hoje nenhuma além do clamp do Spectre v1.
+/// `On` e `Untested` são os estados que as dívidas 0100 a 0104 preveem para quando a pagarem.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Switch {
     #[default]
@@ -88,6 +124,8 @@ pub struct Enabled {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     On,
+    /// O hardware mitiga sozinho; o kernel não faz nada.
+    OnHardware,
     /// A CPU não tem a vulnerabilidade.
     NotNeeded,
     /// A CPU precisa e o kernel ainda não tem a mitigação.
@@ -104,12 +142,21 @@ impl Status {
             (true, Switch::Untested) => Self::Untested,
         }
     }
+
+    const fn of_exposure(exposure: Exposure, switch: Switch) -> Self {
+        match exposure {
+            Exposure::NotAffected => Self::NotNeeded,
+            Exposure::HardwareMitigated => Self::OnHardware,
+            Exposure::Affected => Self::of(true, switch),
+        }
+    }
 }
 
 impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::On => "on",
+            Self::OnHardware => "on (hardware)",
             Self::NotNeeded => "off (not needed)",
             Self::NotImplemented => "off (not implemented)",
             Self::Untested => "off (untested)",
@@ -174,7 +221,7 @@ impl Mitigations {
             spectre_v2: Status::of(vulns.spectre_v2, enabled.spectre_v2),
             ssb: Status::of(vulns.ssb, enabled.ssb),
             mds: Status::of(vulns.mds, enabled.mds),
-            bhb: Status::of(vulns.bhb, enabled.bhb),
+            bhb: Status::of_exposure(vulns.bhb, enabled.bhb),
         }
     }
 }
@@ -205,7 +252,7 @@ mod tests {
 
     #[test]
     fn auto_follows_meltdown_and_the_override_wins() {
-        let (vulnerable, immune) = (Vulns::ALL, Vulns::default());
+        let (vulnerable, immune) = (Vulns::ALL, Vulns::NONE);
         assert!(KptiPolicy::Auto.wanted(vulnerable));
         assert!(!KptiPolicy::Auto.wanted(immune));
         assert!(KptiPolicy::On.wanted(immune));
@@ -224,7 +271,7 @@ mod tests {
 
     #[test]
     fn an_immune_cpu_says_not_needed() {
-        let line = Mitigations::decide(Vulns::default(), KptiPolicy::Auto, Enabled::default());
+        let line = Mitigations::decide(Vulns::NONE, KptiPolicy::Auto, Enabled::default());
         assert_eq!(
             line.to_string(),
             "v1 on, kpti off (not needed), v2 off (not needed), ssb off (not needed), \
@@ -233,8 +280,38 @@ mod tests {
     }
 
     #[test]
+    fn the_union_keeps_the_worst_of_each_vulnerability() {
+        let a = Vulns {
+            meltdown: true,
+            bhb: Exposure::HardwareMitigated,
+            ..Vulns::NONE
+        };
+        let b = Vulns {
+            ssb: true,
+            bhb: Exposure::NotAffected,
+            ..Vulns::NONE
+        };
+        let both = a.union(b);
+        assert!(both.meltdown && both.ssb && !both.spectre_v2 && !both.mds);
+        assert_eq!(both.bhb, Exposure::HardwareMitigated);
+        assert_eq!(both.union(Vulns::ALL), Vulns::ALL);
+        assert_eq!(Vulns::NONE.union(Vulns::NONE), Vulns::NONE);
+    }
+
+    #[test]
+    fn a_bhb_the_hardware_mitigates_is_on_hardware_not_needed_nor_implemented() {
+        let vulns = Vulns {
+            bhb: Exposure::HardwareMitigated,
+            ..Vulns::NONE
+        };
+        let line = Mitigations::decide(vulns, KptiPolicy::Auto, Enabled::default());
+        assert_eq!(line.bhb, Status::OnHardware);
+        assert!(line.to_string().ends_with("bhb on (hardware)"));
+    }
+
+    #[test]
     fn the_kpti_override_changes_only_the_kpti_part() {
-        let on = Mitigations::decide(Vulns::default(), KptiPolicy::On, Enabled::default());
+        let on = Mitigations::decide(Vulns::NONE, KptiPolicy::On, Enabled::default());
         assert_eq!(
             on.kpti.to_string(),
             "off (not implemented, would be on by kpti=on)"
@@ -242,7 +319,7 @@ mod tests {
         let off = Mitigations::decide(Vulns::ALL, KptiPolicy::Off, Enabled::default());
         assert_eq!(off.kpti.to_string(), "off (kpti=off)");
         assert_eq!(off.spectre_v2, Status::NotImplemented);
-        let immune_off = Mitigations::decide(Vulns::default(), KptiPolicy::Off, Enabled::default());
+        let immune_off = Mitigations::decide(Vulns::NONE, KptiPolicy::Off, Enabled::default());
         assert_eq!(immune_off.kpti, KptiStatus::NotNeeded);
     }
 
@@ -274,7 +351,7 @@ mod tests {
             mds: Switch::On,
             ..Enabled::default()
         };
-        let line = Mitigations::decide(Vulns::default(), KptiPolicy::Auto, enabled);
+        let line = Mitigations::decide(Vulns::NONE, KptiPolicy::Auto, enabled);
         assert_eq!(line.mds, Status::NotNeeded);
     }
 }

@@ -3,7 +3,7 @@
 
 use core::fmt;
 
-use rustos_hal::mitigation::Vulns;
+use rustos_hal::mitigation::{Exposure, Vulns};
 
 /// `CPUID.1:ECX`, `CPUID.7.0:EBX`, `CPUID.7.0:EDX`, `CPUID.80000008H:EBX` e
 /// `CPUID.80000021H:EAX` (`cpufeatures.h` do Linux, palavras 4, 9, 18, 13 e 20).
@@ -265,7 +265,7 @@ impl MitigationFeatures {
         }
         let listed = whitelist(self.vendor, self.family, self.model);
         if listed & NO_SPECULATION != 0 {
-            return Vulns::default();
+            return Vulns::NONE;
         }
         let cap = self.arch_cap;
         Vulns {
@@ -273,7 +273,14 @@ impl MitigationFeatures {
             spectre_v2: listed & NO_SPECTRE_V2 == 0,
             ssb: listed & NO_SSB == 0 && !cap.ssb_no() && !self.amd_ssb_no,
             mds: listed & NO_MDS == 0 && !cap.mds_no(),
-            bhb: !cap.bhi_no() && listed & NO_BHI == 0 && (self.enhanced_ibrs() || self.hypervisor),
+            bhb: if !cap.bhi_no()
+                && listed & NO_BHI == 0
+                && (self.enhanced_ibrs() || self.hypervisor)
+            {
+                Exposure::Affected
+            } else {
+                Exposure::NotAffected
+            },
         }
     }
 }

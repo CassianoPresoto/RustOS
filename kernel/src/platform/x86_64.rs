@@ -506,10 +506,10 @@ pub fn hardware_entropy() -> Option<PlatformEntropy> {
     X86Entropy::detect(cpu_features())
 }
 
-/// O clamp do Spectre v1: a máscara aritmética basta no x86_64 (o Linux usa `cmp` e `sbb`).
+/// O clamp do Spectre v1: `index` se `index < size`, senão 0, com a máscara de `arch/`.
 #[inline]
 pub fn array_index_nospec(index: usize, size: usize) -> usize {
-    rustos_hal::nospec::array_index_nospec(index, size)
+    index & rustos_arch_x86_64::array_index_mask_nospec(index, size)
 }
 
 /// O que o CPUID e o `IA32_ARCH_CAPABILITIES` dizem das mitigações.

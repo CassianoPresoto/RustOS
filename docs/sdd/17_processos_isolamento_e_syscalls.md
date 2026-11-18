@@ -682,21 +682,22 @@ as vulnerabilidades por uma função pura; o `core/hal` guarda o tipo e a linha 
 | Peça | Onde |
 | --- | --- |
 | `Vulns` (meltdown, spectre v2, ssb, mds, bhb), `KptiPolicy`, `Mitigations` e o texto da linha | `core/hal/src/mitigation.rs` |
-| `array_index_nospec` e a máscara | `core/hal/src/nospec.rs`; no aarch64, a barreira `CSDB` em `arch/aarch64/src/nospec.rs` |
+| A máscara do clamp (`asm!`, a sequência do Linux) | `arch/x86_64/src/nospec.rs` e `arch/aarch64/src/nospec.rs`; o `core/hal/src/nospec.rs` tem só a versão pura, de referência e de teste |
 | x86_64: `MitigationFeatures::from_leaves`, `ArchCapabilities` e `vulnerabilities()` | `arch/x86_64/src/mitigation.rs`; a leitura do CPUID e do MSR em `sysreg.rs` |
 | aarch64: `MitigationFeatures::from_regs` e `vulnerabilities()` | `arch/aarch64/src/mitigation.rs`; a leitura dos registradores em `protection.rs` |
 | A linha e o `kpti=` | `kernel/src/mitigation.rs`; `BootParams::kpti` em `core/hal/src/cmdline.rs` |
 
 **A linha `[rustos] mitigations:`** sai **nos dois modos**, logo depois de `protections:` (mesmo
 critério dela: o `make smoke` e o `make smoke-fast` a exigem, e ela avisa o que a CPU precisa e o
-kernel ainda não tem; custa uma linha, 0,3 a 0,4 ms na serial da QEMU, e o `boot time:` não mudou
-além do arredondamento, [SDD 07](07_desempenho_e_recursos.md)). O formato é
+kernel ainda não tem; custa uma linha, 0,3 a 0,4 ms na serial da QEMU, mais o CPUID de cada núcleo (cerca de 1 ms
+no x86_64 em TCG, nada no aarch64; [SDD 07](07_desempenho_e_recursos.md)). O formato é
 `v1 on, kpti <estado>, v2 <estado>, ssb <estado>, mds <estado>, bhb <estado>`, sem endereço, com
 `<estado>` em:
 
 | Estado | Quer dizer |
 | --- | --- |
-| `on` | O kernel liga a mitigação. Hoje só o `v1` (o clamp de índice) |
+| `on` | O kernel liga a mitigação. Hoje só o `v1` (o clamp de índice). `Switch::On` e `Switch::Untested` são os estados que as dívidas 0100 a 0104 preveem para quando forem pagas |
+| `on (hardware)` | A CPU é afetada e o próprio hardware a mitiga, sem nada do kernel: hoje só o BHB com `ECBHB` no aarch64 (o ramo `supports_ecbhb` do Linux, estado `BHB_HW`) |
 | `off (not needed)` | A CPU não tem a vulnerabilidade, pela regra da tabela abaixo |
 | `off (not implemented)` | A CPU precisa e o kernel não tem a mitigação ([DEBT-0101](../tech-debt/0101-spectre-v2-nao-implementado.md) a [DEBT-0104](../tech-debt/0104-bhb-nao-implementado.md)) |
 | `off (untested)` | Ligada no código, mas nenhum ambiente a exercita (nenhuma hoje; o tipo `Switch::Untested` já existe) |
@@ -706,7 +707,11 @@ O KPTI diz mais: `off (not implemented, would be on)` (a CPU tem Meltdown e o ke
 (a CPU tem Meltdown e a linha de comando mandou não ligar) e `off (not needed)`. A chave é
 `kpti=on|off|auto` na linha de comando do Limine (valor desconhecido vale `auto`); **nesta fatia só
 muda o texto**: quem liga é o PR do KPTI ([DEBT-0100](../tech-debt/0100-kpti-nao-implementado.md)).
-O modo de teste imprime também `[rustos] cpu features: …` com o que o CPUID ou os registradores
+**A linha é a união dos núcleos:** o de boot e cada secundário somam o `Vulns` do seu CPUID ou
+registradores (o pior de cada vulnerabilidade, como o Linux, que avalia cada CPU) antes de ficar
+online, e a linha sai depois de todos subirem; o núcleo que não subiu não entra
+([DEBT-0107](../tech-debt/0107-mitigacoes-sem-os-nucleos-que-nao-subiram.md)). O modo de teste imprime também
+`[rustos] cpu features: …`, **do núcleo de boot**, com o que o CPUID ou os registradores
 anunciaram (PCID, INVPCID, IBPB, STIBP, SSBD, `MD_CLEAR`, `ARCH_CAPABILITIES`; `CSV2`, `CSV3`,
 `SSBS`, `ECBHB`, `CLRBHB`).
 
@@ -725,7 +730,7 @@ código do Linux lido na tag; **Verificado (secundária)** é espelho ou modelo 
 | aarch64 | Meltdown | `CSV3 == 0` e fora da `kpti_safe_list` | **Verificado:** `arch/arm64/kernel/cpufeature.c`, `unmap_kernel_at_el0` |
 | aarch64 | Spectre v2 | `CSV2 == 0` e fora da `spectre_v2_safe_list` | **Verificado:** `arch/arm64/kernel/proton-pack.c` |
 | aarch64 | SSB (v4) | Fora da `spectre_v4_safe_list`; `SSBS` só diz que o controle existe | **Verificado:** `proton-pack.c` (`spectre_v4_get_cpu_hw_mitigation_state`) |
-| aarch64 | BHB | `CSV2 != 3`, `ECBHB == 0` e (`CLRBHB`, ou nas listas de laço ou de firmware do Linux, ou em nenhuma lista). **Diverge do Linux** na última parte: ele só marca a CPU das listas | **Verificado:** `proton-pack.c` (`is_spectre_bhb_affected`, `supports_ecbhb`), `cpufeature.h` (`supports_csv2p3`, `supports_clearbhb`) |
+| aarch64 | BHB | Afetada se `CSV2 != 3` e (`CLRBHB`, ou nas listas de laço ou de firmware do Linux, ou em nenhuma lista); com `ECBHB` ela é afetada **e mitigada por hardware** (`on (hardware)`). **Diverge do Linux** na última parte: ele só marca a CPU das listas | **Verificado:** `proton-pack.c` (`is_spectre_bhb_affected` não consulta o `ECBHB`; `spectre_bhb_enable_mitigation` tem o ramo `supports_ecbhb`), `cpufeature.h` (`supports_csv2p3`, `supports_clearbhb`) |
 | aarch64 | MDS | Não existe | **Verificado:** o Linux só define `X86_BUG_MDS` |
 
 **Os registradores e bits**, todos com a posição **Verificada** em `arch/arm64/tools/sysreg` (v6.12) e
@@ -777,7 +782,7 @@ aarch64, TCG, -cpu a64fx:
 
 | Mitigação | Contra | Onde entra | Custo |
 | --- | --- | --- | --- |
-| Clamp de índice (Spectre v1) | Leitura especulativa fora da tabela | **Feito** para o número da syscall (índice da tabela de despacho de `kernel/src/syscall.rs`); falta o índice do handle na tabela do processo (a tabela entra na 4c). **Sempre ligado**, em toda CPU | **Verificado** (`include/linux/nospec.h`): `array_index_nospec` calcula uma máscara **sem desvio**, `~(long)(index \| (size - 1UL - index)) >> (BITS_PER_LONG - 1)`, e faz `index & máscara` (índice fora do limite vira 0); uso: `if (index < size) { index = array_index_nospec(index, size); val = array[index]; }`. **Medido:** custo no x86_64 e no aarch64 em [SDD 07](07_desempenho_e_recursos.md); no aarch64 o Linux acrescenta `CSDB` depois da máscara (**Verificado**, `arch/arm64/include/asm/barrier.h`), e o RustOS também ([DEBT-0105](../tech-debt/0105-clamp-do-spectre-v1-confere-o-assembly-a-mao.md)) |
+| Clamp de índice (Spectre v1) | Leitura especulativa fora da tabela | **Feito** para o número da syscall (índice da tabela de despacho de `kernel/src/syscall.rs`); falta o índice do handle na tabela do processo (a tabela entra na 4c). **Sempre ligado**, em toda CPU | **Verificado** (`include/linux/nospec.h`): `array_index_nospec` calcula uma máscara **sem desvio**, `~(long)(index \| (size - 1UL - index)) >> (BITS_PER_LONG - 1)`, e faz `index & máscara` (índice fora do limite vira 0); uso: `if (index < size) { index = array_index_nospec(index, size); val = array[index]; }`. **Medido:** custo no x86_64 e no aarch64 em [SDD 07](07_desempenho_e_recursos.md); a sequência por ISA é a do Linux (`arch/<isa>/src/nospec.rs`; no aarch64 com `CSDB`) ([DEBT-0105](../tech-debt/0105-csdb-do-clamp-custa-10-ns-sem-o-requisito-lido.md)) |
 | IBPB | Spectre v2 entre processos | **Condicional, não em toda troca**: o Linux só o emite para tarefa com especulação de desvio indireto restringida (estado `IBPB: conditional`: "Use IBPB on SECCOMP or indirect branch restricted tasks"). No RustOS: na troca **de e para** processo marcado como restrito, se a CPU anuncia a instrução | A medir (o SDD 09 não tem número na fonte) |
 | eIBRS ou retpoline | Spectre v2 no kernel | **eIBRS é o preferido** onde a CPU tem ("should use the feature … instead of retpoline. Enhanced IBRS is more efficient than retpoline": `spectre.rst`); retpoline só onde não há. O kernel é compilado soft-float: o retpoline exige conferir o alvo de build | A medir |
 | STIBP | Spectre v2 entre *hyperthreads* | Só com SMT, e só se a política pedir | A medir |
@@ -785,18 +790,19 @@ aarch64, TCG, -cpu a64fx:
 | SSBD | Spectre v4 | Por processo, sob pedido (política); padrão desligado | A medir |
 | KPTI | Meltdown | [Trampolim](#o-trampolim-e-o-caminho-pronto-para-kpti) | ~100 ciclos por troca de CR3 |
 
-**O clamp, como está no código.** `array_index_nospec` e a máscara moram em `core/hal/src/nospec.rs`,
-sem `asm!`: o índice passa por `core::hint::black_box`, que faz o papel do `OPTIMIZER_HIDE_VAR` do
-Linux. O despacho de `kernel/src/syscall.rs` virou uma tabela indexada pelo número (de 0 a 0x42,
-vazios para os números que a ABI não define), e o número passa pela conferência de limite e depois
-pelo clamp, como no `nospec.h`. **Conferido no assembly** (`objdump -d` do `syscall::dispatch`,
-`release`, `rustc` 1.100.0): nas duas ISAs a máscara **não virou desvio**. No x86_64 o compilador a
-trocou por `cmov` (`mov $0x42; sub; or; cmovs`): é seleção, não salto, e o Linux usa `cmp; sbb` por
-asm; no aarch64 saiu a aritmética pura (`sub; orr; mvn; asr #63; csdb; and`). O aarch64 **precisa
-de `asm!`** só para a `CSDB`, e ela mora em `arch/aarch64/src/nospec.rs` (o `core/hal` continua sem
-`asm!`): o `kernel/src/platform/aarch64.rs` calcula a máscara, passa-a pela `CSDB` e só então faz o
-`AND`. O x86_64 usa a função do `hal` como está. A garantia depende do código que o `rustc` gera; a
-conferência é manual ([DEBT-0105](../tech-debt/0105-clamp-do-spectre-v1-confere-o-assembly-a-mao.md)).
+**O clamp, como está no código.** A máscara de cada ISA mora em `arch/<isa>/src/nospec.rs`, com
+`asm!` e a sequência do Linux, **Verificada** na tag `v6.12` (`arch/x86/include/asm/barrier.h`:
+`cmp; sbb`; `arch/arm64/include/asm/barrier.h`: `cmp; sbc` e `csdb`, com o comentário de que a
+máscara é `~0` quando `0 <= idx < sz`). O `kernel/src/platform/<isa>.rs` faz `index & máscara`. O
+`core/hal/src/nospec.rs` guarda só a versão pura (aritmética com `black_box`), que os testes do host
+conferem e que serve de referência; o kernel não a chama. O despacho de `kernel/src/syscall.rs` virou
+uma tabela indexada pelo número (de 0 a 0x42, vazios para os números que a ABI não define; uma
+asserção de compilação confere que ela e `Syscall::from_raw` concordam), e o número passa pela
+conferência de limite e depois pelo clamp, como no `nospec.h`. **Conferido no assembly**
+(`objdump -d` do `syscall::dispatch`, `release`, `rustc` 1.100.0): x86_64 `cmp %rdx,%rcx; sbb
+%rsi,%rsi; and %rcx,%rsi`; aarch64 `cmp; ngc` (o `sbc xzr, xzr` desmontado), `csdb`, `and`. Como a
+máscara é `asm!`, o compilador não pode trocá-la por desvio. O requisito da `CSDB` e o motivo dela
+**NÃO foram lidos** no Arm ARM ([DEBT-0105](../tech-debt/0105-csdb-do-clamp-custa-10-ns-sem-o-requisito-lido.md)).
 
 O Linux faz na entrada `IBRS_ENTER`, `UNTRAIN_RET` e `CLEAR_BRANCH_HISTORY`
 (**verificado**: estão no `entry_64.S`); o desenho não os copia sem a leitura da página de
@@ -1712,9 +1718,9 @@ lista acima por não serem dos seis casos; cada uma diz o que a faria subir ao d
 | --- | --- | --- |
 | **KPTI** | Só em CPU vulnerável (detecção: `IA32_ARCH_CAPABILITIES.RDCL_NO`, bit 0, **verificado** em `msr-index.h`; mais a lista de CPUs imunes do Linux, **verificada** na tag `v6.12`), com chave de override `kpti=on\|off\|auto` na linha de comando do Limine (para medir as duas configurações; o nome é o do Linux, sem o prefixo `rustos.` das outras chaves). **Feito na parte 1:** a detecção, a lista (**verificada** na tag `v6.12`) e a chave, que só muda o relatório. Sem informação, vulnerável. O [SDD 08](08_roadmap.md) e o [SDD 09](09_seguranca.md) já dizem "só em CPU vulnerável" | Se o dono quiser sempre ligado, a 4e perde a detecção e o override; o resto não muda |
 | **Detecção e linha de mitigação no `hal`** | `Vulns`, `KptiPolicy`, `Mitigations` e o clamp em `core/hal` (módulos `mitigation` e `nospec`); a decodificação por ISA em `arch/<isa>/src/mitigation.rs`, pura. Porta nova no `hal` é do agente ([`AGENTS.md`](../../AGENTS.md)) | — |
-| **A linha `mitigations:` nos dois modos** | Mesmo critério da `protections:` (um gate a confere e ela avisa); custa uma linha e o `boot time:` não mudou além do arredondamento. Só o `cpu features:` é do modo de teste | Se a medida em UART física ([DEBT-0067](../tech-debt/0067-log-do-boot-normal-sem-medida-em-uart-real.md)) pesar, a linha passa para o `fetch` |
+| **A linha `mitigations:` nos dois modos** | Mesmo critério da `protections:` (um gate a confere e ela avisa); custa uma linha e cerca de 1 ms no x86_64 em TCG (o CPUID por núcleo é emulado), nada no aarch64. Só o `cpu features:` é do modo de teste | Se a medida em UART física ([DEBT-0067](../tech-debt/0067-log-do-boot-normal-sem-medida-em-uart-real.md)) pesar, a linha passa para o `fetch` |
 | **BHB do aarch64 em CPU fora das listas** | Conta como afetada (sem informação, vulnerável); o Linux só marca as das listas dele | Alarme falso em CPU nova até a [DEBT-0106](../tech-debt/0106-listas-de-cpu-do-linux-so-em-parte.md) |
-| **`CSDB` no clamp do aarch64, em `arch/`** | O Linux a põe incondicional; o RustOS também, e o `asm!` mora em `arch/aarch64`, sem tocar a regra do `hal` | Custa 12 ns por syscall no HVF ([SDD 07](07_desempenho_e_recursos.md)): tirar exige ler o requisito no Arm ARM ([DEBT-0105](../tech-debt/0105-clamp-do-spectre-v1-confere-o-assembly-a-mao.md)) |
+| **A máscara do clamp em `arch/`, nas duas ISAs** | A sequência do Linux em `asm!`, no x86_64 (`cmp; sbb`) e no aarch64 (`cmp; sbc; csdb`, a `CSDB` incondicional como no Linux); o `hal` não tem `asm!` e guarda a versão pura | Custa 10 ns por syscall no HVF ([SDD 07](07_desempenho_e_recursos.md)): tirar exige ler o requisito no Arm ARM ([DEBT-0105](../tech-debt/0105-csdb-do-clamp-custa-10-ns-sem-o-requisito-lido.md)) |
 | **Despacho por tabela indexada** | `kernel/src/syscall.rs` indexa `TABLE` pelo número em vez de percorrer `Syscall::ALL`; é o que dá ao clamp um índice de verdade | — |
 | **Framebuffer e entrada** | Ficam na fase 5, onde o [SDD 08](08_roadmap.md#decisões-futuras-casos-do-agentsmd) já os lista. O desenho deixa o caminho (VMO físico com política de cache no `vmar_map`; teclado por canal) | A interface é caso 6 quando chegar; nada a decidir na fase 4 |
 | **Alvo de compilação dos programas** | Os mesmos alvos `*-unknown-none`, com `-C code-model=small` (x86_64) e `-C relocation-model=static`, linker script próprio e `--target-dir` separado ([SDD 05](05_build_e_execucao.md): sem nightly nem `build-std`). **Testado** com `rustc 1.100.0` nos dois alvos: compila e liga em `0x40_0000` ([o linker e o alvo](#o-que-muda-no-linker-e-no-alvo)). **Mudança de plano:** as quatro fontes de `rustflags` do Cargo são **exclusivas**, então o xtask passa a lista inteira por `CARGO_ENCODED_RUSTFLAGS` e as flags do `.cargo/config.toml` (o `pie` do kernel) não somam | O risco que sobra é `code-model` em programa maior (o teste mínimo não distingue `small` de `kernel`). Se um alvo JSON virar necessário, exige `build-std`: **volta ao dono** (ferramenta de build nova, caso 2) |
@@ -1768,6 +1774,6 @@ Só o que sobrou; cada item é pré-requisito da fatia que o usa.
 | **Intel SDM** em PDF (só o espelho foi lido): o texto sobre *CPUID faulting* (`MSR` `0x140`); se a entrada de exceção limpa `NT` (o `IRETQ` do kernel com `NT = 1` dá `#GP`) | 4a |
 | Layout inicial da pilha do processo no aarch64, em fonte que não seja o `binfmt_elf.c` do Linux | 4b |
 | `-C code-model=small` com um programa de usuário **maior** que o mínimo (o teste não distingue `small` de `kernel`) | 4b |
-| Custo de IBPB, eIBRS, limpeza de buffers e KPTI: medir (o do `array_index_nospec` está no [SDD 07](07_desempenho_e_recursos.md)); STIBP e SSBD: ler as páginas do Linux; o texto do **SDM** e do **ARM ARM** sobre os bits da detecção e o requisito da `CSDB` ([DEBT-0105](../tech-debt/0105-clamp-do-spectre-v1-confere-o-assembly-a-mao.md)) | 4e |
+| Custo de IBPB, eIBRS, limpeza de buffers e KPTI: medir (o do `array_index_nospec` está no [SDD 07](07_desempenho_e_recursos.md)); STIBP e SSBD: ler as páginas do Linux; o texto do **SDM** e do **ARM ARM** sobre os bits da detecção e o requisito da `CSDB` ([DEBT-0105](../tech-debt/0105-csdb-do-clamp-custa-10-ns-sem-o-requisito-lido.md)) | 4e |
 
 Levantamento de novembro de 2026.

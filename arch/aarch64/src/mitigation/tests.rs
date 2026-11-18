@@ -20,7 +20,11 @@ fn vulns([meltdown, spectre_v2, ssb, bhb]: [bool; 4]) -> Vulns {
         spectre_v2,
         ssb,
         mds: false,
-        bhb,
+        bhb: if bhb {
+            Exposure::Affected
+        } else {
+            Exposure::NotAffected
+        },
     }
 }
 
@@ -181,7 +185,7 @@ fn the_a64fx_is_in_no_list_and_has_no_csv_field() {
 fn csv2_3_means_no_bhb_even_on_a_listed_cpu() {
     // Sintético: o Neoverse-N1 com `CSV2 = 3`, como o `-cpu max`.
     let features = MitigationFeatures::from_regs(regs(0x414F_D0C1, 0x3 << 56 | 0x1 << 60, 0x20, 0));
-    assert!(!features.vulnerabilities().bhb);
+    assert_eq!(features.vulnerabilities().bhb, Exposure::NotAffected);
 }
 
 #[test]
@@ -197,12 +201,12 @@ fn the_qemu_max_cpu_is_only_exposed_to_ssb() {
 }
 
 #[test]
-fn ecbhb_clears_the_history_in_hardware() {
-    // Sintético: o A64FX com `ECBHB = 1`.
+fn ecbhb_makes_the_cpu_affected_and_mitigated_in_hardware() {
+    // Sintético: o A64FX com `ECBHB = 1`; o Linux a trata como afetada e mitigada.
     let features =
         MitigationFeatures::from_regs(regs(0x461F_0010, 0x0000_0001_0111_1111, 0, 0x1 << 60));
     assert_eq!(features.ecbhb, 1);
-    assert!(!features.vulnerabilities().bhb);
+    assert_eq!(features.vulnerabilities().bhb, Exposure::HardwareMitigated);
 }
 
 #[test]
@@ -213,7 +217,7 @@ fn clrbhb_makes_the_cpu_affected_but_with_an_instruction() {
         ..regs(0x412F_D050, 0x0000_0000_1011_2222, 0x10, 0)
     });
     assert_eq!(features.clrbhb, 1);
-    assert!(features.vulnerabilities().bhb);
+    assert_eq!(features.vulnerabilities().bhb, Exposure::Affected);
 }
 
 #[test]

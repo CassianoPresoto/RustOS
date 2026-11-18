@@ -28,5 +28,5 @@ O primeiro boot em metal: a linha `mitigations:` daquela máquina decide o que l
 ## Como pagar
 
 No x86_64, `IBRS` uma vez no boot onde há eIBRS (`enhanced_ibrs()`), `IBPB` condicional na troca de
-espaço e `STIBP` com SMT; retpoline pede flag de compilação (caso 2 do `AGENTS.md`). Cada um vira
+espaço e `STIBP` com SMT. O retpoline é mudança de ferramenta de build (caso 2 do `AGENTS.md`): no `rustc` 1.100.0 estável, `-C target-feature=+retpoline-indirect-calls` (e `-indirect-branches`, `-external-thunk`) só gera um aviso de que a feature "cannot be enabled with `-Ctarget-feature`: use `-Zretpoline` compiler flag instead" e vai virar erro (rust-lang/rust#162235), e `-Z` só é aceito no nightly ("the option `Z` is only accepted on the nightly compiler"); o RustOS não usa nightly (SDD 05). Onde há eIBRS não precisa dele. Cada um vira
 `Switch::On` ou `Untested` em `kernel/src/mitigation.rs`, com o custo no SDD 07.

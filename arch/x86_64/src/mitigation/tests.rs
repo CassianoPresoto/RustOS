@@ -33,7 +33,11 @@ fn vulns([meltdown, spectre_v2, ssb, mds, bhb]: [bool; 5]) -> Vulns {
         spectre_v2,
         ssb,
         mds,
-        bhb,
+        bhb: if bhb {
+            Exposure::Affected
+        } else {
+            Exposure::NotAffected
+        },
     }
 }
 
@@ -328,7 +332,7 @@ fn a_cpu_with_no_speculation_has_nothing_to_mitigate() {
             max_basic: 1,
             ..leaves(INTEL, (eax, 0), (0, 0), (0, 0, 0))
         });
-        assert_eq!(features.vulnerabilities(), Vulns::default(), "{eax:#x}");
+        assert_eq!(features.vulnerabilities(), Vulns::NONE, "{eax:#x}");
     }
 }
 
@@ -363,7 +367,7 @@ fn a_hypervisor_makes_bhi_assumed_even_without_enhanced_ibrs() {
         (0x8000_0008, 0, 0),
     ));
     assert!(features.hypervisor);
-    assert!(features.vulnerabilities().bhb);
+    assert_eq!(features.vulnerabilities().bhb, Exposure::Affected);
 }
 
 #[test]
@@ -386,15 +390,16 @@ fn each_arch_capabilities_bit_flips_its_verdict() {
     assert!(!announced(1 << 0).meltdown);
     assert!(!announced(1 << 4).ssb);
     assert!(!announced(1 << 5).mds);
-    assert!(announced(1 << 1).bhb);
-    assert!(
-        !MitigationFeatures::from_leaves(MitigationLeaves {
+    assert_eq!(announced(1 << 1).bhb, Exposure::Affected);
+    assert_eq!(
+        MitigationFeatures::from_leaves(MitigationLeaves {
             leaf7_edx: 1 << 29,
             ..leaves(INTEL, (0x0003_06C3, 0x7FFA_FBFF), (0, 1 << 29), (0, 0, 0))
         })
         .with_arch_capabilities((1 << 1) | (1 << 20))
         .vulnerabilities()
-        .bhb
+        .bhb,
+        Exposure::NotAffected
     );
 }
 

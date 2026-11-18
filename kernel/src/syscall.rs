@@ -44,8 +44,7 @@ const TABLE_LEN: usize = {
     max + 1
 };
 
-/// O número da chamada indexa a tabela direto; o vazio é número que a ABI não define.
-static TABLE: [Option<Syscall>; TABLE_LEN] = {
+const fn build_table() -> [Option<Syscall>; TABLE_LEN] {
     let mut table = [None; TABLE_LEN];
     let mut index = 0;
     while index < Syscall::ALL.len() {
@@ -53,6 +52,23 @@ static TABLE: [Option<Syscall>; TABLE_LEN] = {
         index += 1;
     }
     table
+}
+
+/// O número da chamada indexa a tabela direto; o vazio é número que a ABI não define.
+static TABLE: [Option<Syscall>; TABLE_LEN] = build_table();
+
+/// A tabela e `Syscall::from_raw` dão a mesma resposta para todo número até o fim da tabela.
+const _: () = {
+    let table = build_table();
+    let mut number = 0;
+    while number < TABLE_LEN {
+        match (Syscall::from_raw(number as u64), table[number]) {
+            (None, None) => {}
+            (Some(expected), Some(found)) => assert!(expected.raw() == found.raw()),
+            _ => panic!("a tabela de despacho e Syscall::from_raw divergem"),
+        }
+        number += 1;
+    }
 };
 
 /// A chamada do número, ou `None`; o índice passa pelo clamp do Spectre v1 antes da tabela.

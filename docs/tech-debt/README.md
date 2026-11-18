@@ -84,5 +84,6 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0102](0102-ssb-nao-implementado.md) | Spectre v4 sem mitigação (SSBD no x86_64, SSBS no aarch64) | Open | O primeiro boot em metal |
 | [0103](0103-mds-nao-implementado.md) | MDS sem limpeza de buffers na volta ao usuário (`VERW`) | Open | O primeiro boot em metal |
 | [0104](0104-bhb-nao-implementado.md) | Injeção de histórico de desvio sem mitigação (BHI no x86_64, Spectre-BHB no aarch64) | Open | O primeiro boot em metal |
-| [0105](0105-clamp-do-spectre-v1-confere-o-assembly-a-mao.md) | O clamp do Spectre v1 confere o assembly à mão, e o `CSDB` custa 12 ns na syscall nula | Open | A troca do `rustc` em `rust-toolchain.toml`, ou o primeiro boot do aarch64 em metal |
+| [0105](0105-csdb-do-clamp-custa-10-ns-sem-o-requisito-lido.md) | A `CSDB` do clamp do Spectre v1 custa 10 ns na syscall nula e o requisito dela não foi lido | Open | O primeiro boot do aarch64 em metal, ou a leitura do Arm ARM sobre a `CSDB` |
 | [0106](0106-listas-de-cpu-do-linux-so-em-parte.md) | A detecção de vulnerabilidade usa só parte das listas de CPU do Linux | Open | O primeiro boot em metal, comparando a linha `mitigations:` com `/sys/devices/system/cpu/vulnerabilities` do Linux na mesma máquina |
+| [0107](0107-mitigacoes-sem-os-nucleos-que-nao-subiram.md) | A linha `mitigations:` não soma os núcleos que não subiram | Open | O primeiro boot em metal com mais de 8 núcleos, ou com um núcleo que falhe ao subir |

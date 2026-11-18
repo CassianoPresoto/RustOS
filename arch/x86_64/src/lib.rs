@@ -32,6 +32,8 @@ mod mmio;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod mmu;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+mod nospec;
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod percpu;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod port;
@@ -66,6 +68,8 @@ pub use entropy::X86Entropy;
 pub use mmio::MmioBus;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use mmu::{DirectMapTables, X86Mmu, active_root, require_features};
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub use nospec::array_index_mask_nospec;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use percpu::X86CpuLocal;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]

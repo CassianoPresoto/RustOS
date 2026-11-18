@@ -1,15 +1,24 @@
-//! A barreira de dados do clamp de índice (`CSDB`), que o Linux põe depois da máscara.
+//! A máscara do clamp de índice por `cmp`, `sbc` e `CSDB`, a sequência do
+//! `array_index_mask_nospec` do Linux (`arch/arm64/include/asm/barrier.h`, v6.12).
 
 use core::arch::asm;
 
-/// Executa `CSDB` (`HINT #20`) entre o cálculo da máscara e o seu uso; `mask` passa pela
-/// instrução para o compilador não mover nem a conta nem o `AND` para o outro lado dela.
+/// Todo bit ligado se `index < size` (sem sinal), zero caso contrário; a `CSDB` fecha a máscara
+/// antes de qualquer uso dela (DEBT-0105).
 #[inline]
-pub fn csdb(mask: usize) -> usize {
-    let mut mask = mask;
-    // SAFETY: `hint #20` é um `nop` onde o `CSDB` não existe e não toca memória nem registrador.
+pub fn array_index_mask_nospec(index: usize, size: usize) -> usize {
+    let mask: usize;
+    // SAFETY: só aritmética e `hint #20` (`nop` onde a `CSDB` não existe); sem memória, sem pilha.
     unsafe {
-        asm!("hint #20 /* {0} */", inout(reg) mask, options(nomem, nostack, preserves_flags));
+        asm!(
+            "cmp {index}, {size}",
+            "sbc {mask}, xzr, xzr",
+            "hint #20",
+            index = in(reg) index,
+            size = in(reg) size,
+            mask = out(reg) mask,
+            options(nomem, nostack),
+        );
     }
     mask
 }

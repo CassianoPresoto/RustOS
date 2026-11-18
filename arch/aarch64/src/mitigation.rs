@@ -4,7 +4,7 @@
 
 use core::fmt;
 
-use rustos_hal::mitigation::Vulns;
+use rustos_hal::mitigation::{Exposure, Vulns};
 
 const ARM: u32 = 0x41;
 const BRCM: u32 = 0x42;
@@ -153,19 +153,24 @@ impl MitigationFeatures {
         .any(|list| self.in_list(list))
     }
 
-    /// As vulnerabilidades pela regra do Linux v6.12 (`unmap_kernel_at_el0`,
-    /// `spectre_v2_get_cpu_hw_mitigation_state`, `spectre_v4_get_cpu_hw_mitigation_state` e
-    /// `is_spectre_bhb_affected`). MDS é só da Intel. O BHB do Linux só vale para a CPU nas
-    /// listas dele; aqui a CPU fora de todas as listas conta como afetada (sem informação).
+    /// As vulnerabilidades pela regra do Linux v6.12 (`cpufeature.c`, `proton-pack.c`). MDS é só
+    /// da Intel. CPU fora de todas as listas conta como afetada pelo BHB (o Linux só marca as
+    /// listadas); com `ECBHB` ela é afetada e mitigada por hardware.
     pub fn vulnerabilities(&self) -> Vulns {
-        let hardware_clears_history = self.ecbhb != 0;
         let bhb_affected = self.clrbhb != 0 || self.in_list(&BHB_AFFECTED) || !self.known();
+        let bhb = if self.csv2 == 3 || !bhb_affected {
+            Exposure::NotAffected
+        } else if self.ecbhb != 0 {
+            Exposure::HardwareMitigated
+        } else {
+            Exposure::Affected
+        };
         Vulns {
             meltdown: self.csv3 == 0 && !self.in_list(&MELTDOWN_SAFE),
             spectre_v2: self.csv2 == 0 && !self.in_list(&SPECTRE_V2_SAFE),
             ssb: !self.in_list(&SPECTRE_V4_SAFE),
             mds: false,
-            bhb: self.csv2 != 3 && !hardware_clears_history && bhb_affected,
+            bhb,
         }
     }
 }
