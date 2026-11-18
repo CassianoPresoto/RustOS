@@ -5,7 +5,7 @@ use core::{ptr, slice};
 
 use rustos_gfx::{MAX_SCALE, Pixel, PixelFormat, Rect, Rgb, Style, Surface, font};
 use rustos_hal::FramebufferInfo;
-use rustos_term::{Cell, Flags, Key, Keyboard, Layout, Terminal, xterm_rgb};
+use rustos_term::{Cell, Flags, Keyboard, Layout, Terminal, xterm_rgb};
 
 use crate::memory::Memory;
 
@@ -41,7 +41,7 @@ const BAR_TEXT_TOP: usize = 3;
 const PADDING: usize = 6;
 /// Largura de tela que ainda usa escala 1; cada múltiplo dela soma 1 à escala.
 const SCALE_STEP_WIDTH: usize = 1600;
-/// Linhas do histórico de rolagem; o custo está no SDD 07.
+/// Linhas do histórico de rolagem; o custo está no SDD 07 e só há histórico com teclado.
 const HISTORY_LINES: usize = 256;
 
 #[derive(Debug)]
@@ -159,13 +159,7 @@ impl Screen {
             .ok_or(ScreenError::OutOfMemory)?;
         let mut terminal = Terminal::new(cells, cols, rows).ok_or(ScreenError::TooSmall)?;
         if let Some(alt) = memory.alloc_slice(Terminal::cells_needed(cols, rows), Cell::BLANK) {
-            terminal = terminal.with_alternate(alt).ok_or(ScreenError::TooSmall)?;
-        }
-        if let Some(history) = memory.alloc_slice(
-            Terminal::history_cells_needed(cols, HISTORY_LINES),
-            Cell::BLANK,
-        ) {
-            terminal = terminal.with_history(history);
+            terminal.set_alternate(alt);
         }
 
         let mut screen = Self {
@@ -190,28 +184,35 @@ impl Screen {
         (self.terminal.cols(), self.terminal.rows())
     }
 
+    /// Aloca o histórico de rolagem; `false` se faltar memória. Chamar só com teclado:
+    /// sem ele ninguém rola a visão. Linhas que já saíram da tela se perdem.
+    pub fn enable_history(&mut self, memory: &mut Memory) -> bool {
+        let cells = Terminal::history_cells_needed(self.terminal.cols(), HISTORY_LINES);
+        let Some(history) = memory.alloc_slice(cells, Cell::BLANK) else {
+            return false;
+        };
+        self.terminal.set_history(history);
+        true
+    }
+
+    /// Se há tela alternativa e quantas linhas o histórico guarda.
+    pub fn screens(&self) -> (bool, usize) {
+        (
+            self.terminal.has_alternate(),
+            self.terminal.history_capacity(),
+        )
+    }
+
     /// Tecla física vira bytes pelo layout e pelo modo de cursor do terminal.
-    /// Shift+PageUp/PageDown rolam o histórico e redesenham aqui mesmo, porque
-    /// não geram byte e o shell não chamaria o `render`; outra tecla volta à tela viva.
+    /// Shift+PageUp e PageDown só marcam a visão suja: quem desenha é o `flush`
+    /// do laço do shell, fora da IRQ.
     pub fn key_event(&mut self, event: rustos_hal::KeyEvent, push: &mut dyn FnMut(u8)) {
-        let offset = self.terminal.view_offset();
-        let page = (self.terminal.rows() / 2).max(1);
         let mut next = self.keyboard.feed(event);
         while let Some(key) = next {
-            match key {
-                Key::ScrollBack => self.terminal.scroll_view_back(page),
-                Key::ScrollForward => self.terminal.scroll_view_forward(page),
-                _ => {
-                    self.terminal.snap_to_live();
-                    let mut bytes = [0; 8];
-                    let len = self.terminal.encode_key(key, &mut bytes);
-                    bytes[..len].iter().for_each(|&byte| push(byte));
-                }
-            }
+            let mut bytes = [0; 8];
+            let len = self.terminal.press(key, &mut bytes);
+            bytes[..len].iter().for_each(|&byte| push(byte));
             next = self.keyboard.next_queued();
-        }
-        if self.terminal.view_offset() != offset {
-            self.render();
         }
     }
 

@@ -139,6 +139,7 @@ pub fn read_input_blocking() -> u8 {
         }
         task::wait_for_input();
         cpu.restore_interrupts(were_enabled);
+        console::flush();
     }
 }
 

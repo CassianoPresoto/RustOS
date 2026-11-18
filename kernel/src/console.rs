@@ -5,6 +5,7 @@ use core::fmt::{self, Write};
 
 use rustos_hal::{ByteSource, Console, KeyEvent};
 
+use crate::memory::Memory;
 use crate::platform::PlatformConsole;
 use crate::screen::Screen;
 use crate::sync::IrqLock;
@@ -58,6 +59,19 @@ pub fn set_layout(layout: rustos_term::Layout) -> bool {
         .as_mut()
         .map(|screen| screen.set_layout(layout))
         .is_some()
+}
+
+/// Aloca o histórico de rolagem da tela; `false` sem tela ou sem memória.
+pub fn enable_history(memory: &mut Memory) -> bool {
+    SCREEN
+        .lock()
+        .as_mut()
+        .is_some_and(|screen| screen.enable_history(memory))
+}
+
+/// Se a tela tem a grade alternativa e quantas linhas de histórico; `None` sem tela.
+pub fn screen_modes() -> Option<(bool, usize)> {
+    SCREEN.lock().as_ref().map(Screen::screens)
 }
 
 /// Caminho do pânico: não espera nenhum lock, que pode estar com quem entrou em pânico.

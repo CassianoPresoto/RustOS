@@ -127,6 +127,9 @@ fn boot_kernel(handoff: Handoff) -> ! {
     });
 
     let interrupts_on = interrupts::init(&boot, &mut memory);
+    if platform::has_keyboard() {
+        console::enable_history(&mut memory);
+    }
     let reclaimed = memory.reclaim_bootloader(&mut boot);
     let source = random::init(&boot_marks(&boot, &memory, entry_cycles));
     report(&boot, &memory, display, reclaimed);
@@ -313,13 +316,18 @@ fn report(
         memory.metadata_bytes
     );
     match display {
-        Some(display) => kprintln!(
-            "[rustos] screen: {}x{}, grid {}x{}",
-            display.width,
-            display.height,
-            display.cols,
-            display.rows
-        ),
+        Some(display) => {
+            let (alt, history) = console::screen_modes().unwrap_or_default();
+            kprintln!(
+                "[rustos] screen: {}x{}, grid {}x{}, alt {}, history {} lines",
+                display.width,
+                display.height,
+                display.cols,
+                display.rows,
+                if alt { "on" } else { "off" },
+                history
+            );
+        }
         None => kprintln!("[rustos] screen: none"),
     }
     let mut line = fmt::Buffer::<128>::new();
