@@ -10,7 +10,7 @@ firmware UEFI (EDK2) → Limine 12.10.0 (BOOTX64.EFI / BOOTAA64.EFI) → kmain (
 ```
 
 O Limine lê `EFI/BOOT/limine.conf` (ao lado do loader EFI, o primeiro lugar onde
-procura), carrega o ELF `boot/rustos` e entra em `kmain` com paginação ligada.
+procura), carrega o ELF `boot/rustos` e o módulo `boot/initramfs.cpio` (`module_path` do `limine.conf`) e entra em `kmain` com paginação ligada.
 Versão e SHA-256 do pacote estão fixados em `xtask/src/limine.rs` (DEBT-0001).
 
 Fonte do protocolo: `PROTOCOL.md` e `include/limine.h` do repositório
@@ -32,6 +32,7 @@ Os pedidos ficam em `boot/limine/src/requests.rs`, nas seções `.requests_start
 | Executable address | Base física e virtual da imagem (com o sorteio do KASLR), para o kernel mapear cada seção | `BootError::MissingKernelAddress`, pânico |
 | Framebuffer | O primeiro framebuffer linear: endereço no HHDM, tamanho, pitch e máscaras de cor. Só 32 bpp RGB com canais de 8 bits é aceito | sem tela; a serial continua |
 | Executable cmdline | A linha de comando da entrada do `limine.conf`, lida em todo build: `rustos.selftest=1` liga o [modo de teste](#modos-de-boot) (a imagem sem a feature `selftest` o recusa, SDD 05); com a feature `panic-tests`, `rustos.panic_early=N` (SDD 06). `BootParams::parse` ignora chave e valor que não entende; uma linha que não é ASCII/UTF-8 válido vira `None` e descarta **todos** os parâmetros (o kernel sobe no modo normal; teste em `boot/limine`) | sem linha, o kernel sobe no modo normal |
+| Module | Os arquivos que o `limine.conf` manda carregar (`module_path`), cada um com o `module_string` ao lado. O pedido é de revisão 0 (sem módulo interno); a resposta que o 12.10.0 dá é de revisão 2 e é lida só nos campos da revisão 0. Para cada arquivo, o adaptador confere ponteiro, alinhamento a 4 KiB, tamanho, que a faixa não passa de 52 bits e que não toca RAM `Usable` nem `BootloaderReclaimable`; no máximo 16 arquivos são lidos e uma `string` acima de 256 bytes vira vazia. O arquivo que falha na conferência é descartado. Só o de `string` `initramfs` é mapeado ([SDD 13](13_memoria_virtual.md#o-módulo-initramfs)) | sem resposta (nenhum módulo carregado) o boot segue sem initramfs |
 | MP | Os núcleos: identificador de hardware (LAPIC ID ou `MPIDR`) e o `goto_address` de cada um. No x86_64 o pedido liga o bit de x2APIC. A presença do pedido faz o Limine acordar os núcleos secundários e estacioná-los | sem resposta o kernel roda numa CPU |
 
 O Limine mapeia o framebuffer no HHDM com o cache certo para vídeo:
@@ -68,8 +69,9 @@ os definitivos entram em `interrupts::init` ([SDD 10](10_interrupcoes.md)).
    recuperável), acha onde ele cabe (`find_free_block`), libera as regiões
    utilizáveis, reserva o próprio metadado e instala o alocador de frames e o heap
    globais ([SDD 12](12_memoria_fisica_e_heap.md)).
-3. `BootRecord::capture` copia o que o Limine entregou para o heap. `platform::harden`
-   liga as proteções da CPU. `Vm::build` monta as tabelas próprias e `Vm::activate`
+3. `BootRecord::capture` copia o que o Limine entregou para o heap (os módulos incluídos). `platform::harden`
+   liga as proteções da CPU. `Vm::build` monta as tabelas próprias; `Memory::place_windows` põe as janelas e
+   `Vm::map_initramfs` mapeia o módulo `initramfs`, se há. `Vm::activate`
    troca `CR3` / `TTBR1_EL1`. `Memory::map_stack` cria a pilha de 64 KiB e
    `call_on_stack` passa a rodar nela ([SDD 13](13_memoria_virtual.md)).
 4. `platform::console` monta a serial. No aarch64 isso mapeia a PL011: o
@@ -87,12 +89,12 @@ os definitivos entram em `interrupts::init` ([SDD 10](10_interrupcoes.md)).
    ([SDD 15](15_tarefas_e_preempcao.md)).
 7. `Memory::reclaim_bootloader` devolve ao buddy as regiões `BootloaderReclaimable`.
 8. `random::init` semeia o gerador ([SDD 09](09_seguranca.md)).
-9. O que vem depois depende do [modo de boot](#modos-de-boot). **Os dois** imprimem `RustOS`, `boot timeline:`,
+9. O que vem depois depende do [modo de boot](#modos-de-boot). **Os dois** (o boot de teste também lê o initramfs, abaixo) imprimem `RustOS`, `boot timeline:`,
    `kaslr:`, `reclaimed:`, `protections:` e `cpus:`, semeiam o gerador (`random::init`, [SDD 09](09_seguranca.md)), rodam o autoteste de um frame (escreve e relê pelo mapa direto), o `w^x:`
    (percorre as tabelas) e o autoteste de exceção, ligam as tarefas (`task::init` adota a execução atual como a tarefa `init`,
    cria a ociosa e liga FPU/SIMD; `smp::release` solta os núcleos), imprimem `boot time:` e `[rustos] boot ok`. **O modo de teste** (só na imagem com a feature `selftest`, [SDD 05](05_build_e_execucao.md#perfis)) acrescenta, logo depois de `protections:`, `bootloader:`, `memory:`, `frames:`, `screen:`, `vm:` e `random:`, e depois dos autotestes comuns, `fpu:`, `sched:`, o autoteste de resíduo de chave (`key residue:`), o do heap, o do timer (`timer:`, cinco tiques
    contra o relógio), `random bench:`, `zero bench:`, a janela `idle:`, o autoteste de preempção e de estado de SIMD
-   (`task self-test:`), o de migração (`smp self-test:`) as medidas curtas (`switch:`, `scale:`, `alloc storm:`) e a prova e o pico de pilha (`stacks:`, [SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)).
+   (`task self-test:`), o de migração (`smp self-test:`) as medidas curtas (`switch:`, `scale:`, `alloc storm:`) e a prova e o pico de pilha (`stacks:`, [SDD 15](15_tarefas_e_preempcao.md#pico-de-pilha)). Entre o `w^x:` e o autoteste de exceção, o modo de teste lê o initramfs com o `core/cpio` e imprime `initramfs: N files, M bytes` (M é o tamanho do arquivo cpio, não a soma dos dados; sem endereço); confere o arquivo de teste `hello.txt` e que cada página do módulo é só de leitura e sem execução. Sem módulo imprime `initramfs: none`, e o `smoke` reprova a falta da linha com `1 files`. **O boot normal não imprime nada do initramfs** quando tudo vai bem: só mapeia (estimado em 80 µs no x86_64 em TCG e 7 µs no aarch64 com HVF: 86 000 ciclos de TSC e 157 do `CNTVCT_EL0` em volta de `map_initramfs`; o TSC ainda não está calibrado ali, então o x86_64 vem da razão com os 4,3 milhões de ciclos do `kmain` até esse ponto, cerca de 4 ms), e avisa numa linha se o mapeamento falhou (`initramfs: not mapped…`); o `smoke-fast` reprova a linha de sucesso.
 10. `system::run_shell`: a tarefa `init` vira a tarefa `shell`. Ela lê a fila que a IRQ
    da serial (e, no x86_64, a do teclado) enche e bloqueia (`park`) quando ela está
    vazia; a ociosa dorme em `hlt`/`wfi` quando ninguém está pronto.
@@ -107,14 +109,14 @@ O kernel tem dois modos, escolhidos pela linha de comando do Limine (`BootParams
 | --- | --- | --- |
 | Quem sobe | `make run`, `make screenshot`, o usuário, `make smoke-fast`, `make smoke-panic` | `make smoke` (e o `a64fx` do `make pr`) |
 | Existe em | toda imagem | só com a feature `selftest` |
-| Autotestes | frame, `w^x:` e exceção: os três juntos custam 3 ms no x86_64 em TCG (com as linhas) e 1 ms no aarch64 com HVF, e nada além deles exercita o que provam (o mapa direto, as tabelas ativas, a IDT/`VBAR` e o retorno da exceção) | os três, mais heap, resíduo de chave, timer, preempção com estado de SIMD e migração entre núcleos |
+| Autotestes | frame, `w^x:` e exceção: os três juntos custam 3 ms no x86_64 em TCG (com as linhas) e 1 ms no aarch64 com HVF, e nada além deles exercita o que provam (o mapa direto, as tabelas ativas, a IDT/`VBAR` e o retorno da exceção) | os três, mais a leitura do initramfs, heap, resíduo de chave, timer, preempção com estado de SIMD e migração entre núcleos |
 | Medidas | nenhuma | `zero bench:`, `random bench:`, `idle:`, `switch:`, `scale:`, `alloc storm:`, `stacks:` |
-| Linhas na serial | as que um gate confere (`kaslr:`, `reclaimed:`, `protections:`, `cpus:`, `w^x:`) ou que avisam (`random: jitter (weak)`) | todas |
+| Linhas na serial | as que um gate confere (`kaslr:`, `reclaimed:`, `protections:`, `cpus:`, `w^x:`) ou que avisam (`random: jitter (weak)`, `initramfs: not mapped…`) | todas |
 | Tempo no kernel (`release`) | 25 a 31 ms (x86_64, TCG) · 2 ms (aarch64, HVF) | 1,0 a 3,8 s conforme o binário (x86_64 em TCG, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md)) · 0,45 s (aarch64) |
 
 **Por que dois.** O que mais pesava no boot era espera de relógio e medida, não código de boot: `timer:` (50 ms), `idle:` (50 ms), `task self-test:` (80 ms), `smp self-test:` (140 ms), `switch:`/`scale:`/`alloc storm:` (110 ms no aarch64, 550 ms no x86_64) e, no x86_64 em TCG, o `heap self-test:` (12 ms), o `random bench:` (13 ms) e o `zero bench:` (50 ms). Prova que depende de janela de tempo, ou que mede, não vale a cada boot de quem só quer o shell; vale no `make smoke` e no CI. O que roda sempre é o que custa mil vezes menos e que nada mais exercita (a regra que fixa isso é proposta ao guidelines 05 em Draft separado, à espera do dono).
 
-**Cada linha é tempo.** Na serial da QEMU, uma linha custa de 0,3 ms (x86_64) a 0,4 ms (aarch64) e, com a tela, mais 0,7 ms no x86_64 em TCG (o redesenho da linha). Numa UART física de 115 200 baud seria 7 ms por linha de 80 bytes. O modo normal imprime 11 linhas (12 com o aviso de entropia fraca no aarch64, o de calibração do TSC acima de 0,5% ou a recusa do modo de teste na imagem enxuta), o de teste 33 no x86_64.
+**Cada linha é tempo.** Na serial da QEMU, uma linha custa de 0,3 ms (x86_64) a 0,4 ms (aarch64) e, com a tela, mais 0,7 ms no x86_64 em TCG (o redesenho da linha). Numa UART física de 115 200 baud seria 7 ms por linha de 80 bytes. O modo normal imprime 11 linhas (12 com o aviso de entropia fraca no aarch64, o de calibração do TSC acima de 0,5% ou a recusa do modo de teste na imagem enxuta), o de teste 34 no x86_64.
 
 **O `bench` do shell** existe só na imagem com a feature `selftest` (sem ela responde `bench: not in this build`), é o mesmo nos dois modos e mede o que o boot de teste mede, com o esforço completo: troca de contexto, IPI, escala, tempestade de alocação, jitter de acordar e, desde esta mudança, o custo de zerar memória e o do gerador aleatório (`Host::micro_bench`).
 
@@ -240,6 +242,7 @@ Modo de teste (`make smoke`, imagem com a feature `selftest`). **Esta saída é 
 [rustos] cpus: 4 online (found 4, limit 8)
 [rustos] frame self-test: ok
 [rustos] w^x: ok (64992 pages)
+[rustos] initramfs: 1 files, 272 bytes
 [rustos] exception self-test: ok
 [rustos] key residue: 0 chacha states, 0 key copies on the stack, probe 4 of 4: ok
 [rustos] heap self-test: ok
