@@ -10,6 +10,8 @@ pub const USER_MIN: u64 = 0x1_0000;
 pub const USER_TOP: u64 = 0x0000_7FFF_FFFF_F000;
 /// Onde o linker do usuário põe a imagem de um `ET_EXEC`.
 pub const USER_IMAGE_BASE: u64 = 0x40_0000;
+/// Teto da soma dos `p_memsz` dos `PT_LOAD` de um executável (os `Limits` do `core/elf`).
+pub const EXEC_MAX_LOADS_BYTES: u64 = 64 << 20;
 
 /// Bytes de um `debug_write`; o excedente é descartado (o lock do console mascara IRQ).
 pub const DEBUG_WRITE_MAX: u64 = 512;
@@ -433,6 +435,96 @@ pub fn debug_sanitize(bytes: &[u8], prefix: &str, mut emit: impl FnMut(char)) {
     }
 }
 
+/// A pilha inicial de um programa: `argc`, `argv`, `envp` e o auxv (SDD 17, "Auxv mínimo").
+pub mod auxv {
+    pub const AT_NULL: u64 = 0;
+    pub const AT_PHDR: u64 = 3;
+    pub const AT_PHENT: u64 = 4;
+    pub const AT_PHNUM: u64 = 5;
+    pub const AT_PAGESZ: u64 = 6;
+    pub const AT_ENTRY: u64 = 9;
+    pub const AT_HWCAP: u64 = 16;
+    pub const AT_RANDOM: u64 = 25;
+    pub const AT_HWCAP2: u64 = 26;
+}
+
+/// Bytes de `AT_RANDOM`.
+pub const AT_RANDOM_LEN: usize = 16;
+/// Tamanho do maior bloco que `InitialStack` monta.
+pub const INITIAL_STACK_MAX: usize = 256;
+/// `argc`, o fim de `argv` e o de `envp`, mais as 9 entradas do auxv (duas palavras cada).
+const MAX_WORDS: usize = 3 + 9 * 2;
+
+/// O que o kernel sabe do programa que vai começar, para o auxv.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StartInfo {
+    pub entry: u64,
+    /// Endereço dos program headers na memória, se a tabela cai dentro de um `PT_LOAD`.
+    pub phdr: Option<u64>,
+    pub phent: u64,
+    pub phnum: u64,
+    pub random: [u8; AT_RANDOM_LEN],
+}
+
+/// Os bytes que o kernel grava no topo da pilha do primeiro programa. `bytes()` ocupa
+/// `[sp, top)`: `argc = 0`, `argv` e `envp` vazios, o auxv e, no fim, os bytes de `AT_RANDOM`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InitialStack {
+    sp: u64,
+    len: usize,
+    bytes: [u8; INITIAL_STACK_MAX],
+}
+
+impl InitialStack {
+    /// `top` é o fim exclusivo da pilha, alinhado a 16. `None` se não é.
+    pub fn build(top: u64, info: &StartInfo) -> Option<Self> {
+        if !top.is_multiple_of(16) || top < USER_MIN + INITIAL_STACK_MAX as u64 {
+            return None;
+        }
+        let random_at = top - AT_RANDOM_LEN as u64;
+        let mut words = [0_u64; MAX_WORDS];
+        let mut count = 3;
+        let mut push = |tag: u64, value: u64| {
+            words[count] = tag;
+            words[count + 1] = value;
+            count += 2;
+        };
+        if let Some(phdr) = info.phdr {
+            push(auxv::AT_PHDR, phdr);
+            push(auxv::AT_PHENT, info.phent);
+            push(auxv::AT_PHNUM, info.phnum);
+        }
+        push(auxv::AT_PAGESZ, PAGE_SIZE);
+        push(auxv::AT_ENTRY, info.entry);
+        push(auxv::AT_HWCAP, 0);
+        push(auxv::AT_HWCAP2, 0);
+        push(auxv::AT_RANDOM, random_at);
+        push(auxv::AT_NULL, 0);
+        let head = count * 8;
+        let len = (head + AT_RANDOM_LEN).next_multiple_of(16);
+        let mut bytes = [0_u8; INITIAL_STACK_MAX];
+        for (slot, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(&words[..count]) {
+            slot.copy_from_slice(&word.to_le_bytes());
+        }
+        bytes[len - AT_RANDOM_LEN..len].copy_from_slice(&info.random);
+        Some(Self {
+            sp: top - len as u64,
+            len,
+            bytes,
+        })
+    }
+
+    /// O valor inicial do ponteiro de pilha: aponta `argc`, alinhado a 16.
+    pub const fn sp(&self) -> u64 {
+        self.sp
+    }
+
+    /// Os bytes de `[sp, top)`.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::mem::{offset_of, size_of};
@@ -687,5 +779,114 @@ mod tests {
         assert_eq!(SyscallReturn::ok(5).value, 5);
         assert_eq!(SyscallReturn::err(Status::NotSupported).status, -7);
         assert_eq!(SyscallReturn::err(Status::NotSupported).value, 0);
+    }
+
+    const TOP: u64 = 0x7000_0000_0000;
+    const RANDOM: [u8; AT_RANDOM_LEN] = *b"0123456789abcdef";
+
+    fn start(phdr: Option<u64>) -> StartInfo {
+        StartInfo {
+            entry: 0x40_1000,
+            phdr,
+            phent: 56,
+            phnum: 4,
+            random: RANDOM,
+        }
+    }
+
+    fn word(stack: &InitialStack, index: usize) -> u64 {
+        let bytes = &stack.bytes()[index * 8..index * 8 + 8];
+        u64::from_le_bytes(bytes.try_into().unwrap())
+    }
+
+    /// As entradas do auxv depois de `argc`, `argv` e `envp`, até `AT_NULL` inclusive.
+    fn auxv_of(stack: &InitialStack) -> Vec<(u64, u64)> {
+        let mut entries = Vec::new();
+        let mut index = 3;
+        loop {
+            let pair = (word(stack, index), word(stack, index + 1));
+            entries.push(pair);
+            if pair.0 == auxv::AT_NULL {
+                return entries;
+            }
+            index += 2;
+        }
+    }
+
+    #[test]
+    fn the_initial_stack_has_argc_empty_argv_and_envp_then_the_auxv() {
+        let stack = InitialStack::build(TOP, &start(Some(0x40_0040))).unwrap();
+        assert_eq!(
+            (word(&stack, 0), word(&stack, 1), word(&stack, 2)),
+            (0, 0, 0)
+        );
+        let random_at = TOP - AT_RANDOM_LEN as u64;
+        assert_eq!(
+            auxv_of(&stack),
+            [
+                (auxv::AT_PHDR, 0x40_0040),
+                (auxv::AT_PHENT, 56),
+                (auxv::AT_PHNUM, 4),
+                (auxv::AT_PAGESZ, 4096),
+                (auxv::AT_ENTRY, 0x40_1000),
+                (auxv::AT_HWCAP, 0),
+                (auxv::AT_HWCAP2, 0),
+                (auxv::AT_RANDOM, random_at),
+                (auxv::AT_NULL, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_initial_stack_is_aligned_and_puts_the_random_bytes_at_the_top() {
+        for phdr in [Some(0x40_0040), None] {
+            let stack = InitialStack::build(TOP, &start(phdr)).unwrap();
+            assert_eq!(stack.sp() % 16, 0);
+            assert_eq!(stack.sp() + stack.bytes().len() as u64, TOP);
+            assert_eq!(stack.bytes().len() % 16, 0);
+            assert!(stack.bytes().len() <= INITIAL_STACK_MAX);
+            assert_eq!(
+                &stack.bytes()[stack.bytes().len() - AT_RANDOM_LEN..],
+                &RANDOM
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_phdr_inside_a_load_the_auxv_leaves_the_three_entries_out() {
+        let stack = InitialStack::build(TOP, &start(None)).unwrap();
+        let tags: Vec<u64> = auxv_of(&stack).iter().map(|pair| pair.0).collect();
+        assert!(!tags.contains(&auxv::AT_PHDR) && !tags.contains(&auxv::AT_PHNUM));
+        assert!(tags.contains(&auxv::AT_RANDOM) && tags.contains(&auxv::AT_ENTRY));
+    }
+
+    #[test]
+    fn the_initial_stack_refuses_a_top_that_is_not_aligned_or_too_low() {
+        assert!(InitialStack::build(TOP + 8, &start(None)).is_none());
+        assert!(InitialStack::build(0, &start(None)).is_none());
+        assert!(InitialStack::build(USER_MIN, &start(None)).is_none());
+    }
+
+    #[test]
+    fn auxv_tags_are_the_linux_numbers() {
+        let linux = [
+            (auxv::AT_NULL, 0),
+            (auxv::AT_PHDR, 3),
+            (auxv::AT_PHENT, 4),
+            (auxv::AT_PHNUM, 5),
+            (auxv::AT_PAGESZ, 6),
+            (auxv::AT_ENTRY, 9),
+            (auxv::AT_HWCAP, 16),
+            (auxv::AT_RANDOM, 25),
+            (auxv::AT_HWCAP2, 26),
+        ];
+        for (tag, number) in linux {
+            assert_eq!(tag, number);
+        }
+    }
+
+    #[test]
+    fn the_executable_limit_is_64_mib() {
+        assert_eq!(EXEC_MAX_LOADS_BYTES, 64 * 1024 * 1024);
     }
 }
