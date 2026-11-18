@@ -153,6 +153,12 @@ por CPU.
 
 ### 4 — Processos e isolamento
 
+> **Desenho em Draft, aguardando decisão do dono:** [SDD 17](17_processos_isolamento_e_syscalls.md)
+> (entrada de syscall por ISA, espaço de usuário, handles, ABI nativa, ELF, init, falhas,
+> SIMD, mitigações, medidas) e [SDD 18](18_fase_4_decisoes_pedidas.md) (as nove decisões do dono). O texto abaixo é o roadmap de antes do desenho; onde
+> divergem (VFS e tmpfs, sinais mínimos, COW no fork), o capítulo propõe e o roadmap só
+> muda no PR que o tornar verdade.
+
 - **Execução de usuário:** anel 3/EL0, entrada de syscall e carregador ELF.
 - **Arquivos em memória:** VFS mínimo, initramfs (os módulos que o Limine
   carrega) e tmpfs. É de onde sai o primeiro programa; o disco vem na fase 6.
@@ -424,11 +430,12 @@ fase chegar**, antes de escrever código.
 | **DRM do guest** para a Mesa | 6 | 13 | Contrato com o mundo de fora: sem ele o 3D vira protocolo próprio |
 | **Ligação dinâmica** (`dlopen`, carregador de `.so`) | 6 | 11 ou 13 | Formato de executável e ABI. Só se o SDL ou a Mesa precisarem; senão, ligação estática |
 | **DOOM e o WAD** como código e binário de terceiros | 2 | 5 | O marco 1 roda código e dados que não são do repositório |
-| **Interface do framebuffer e dos eventos de entrada** para o programa de usuário (`/dev/fb`, evdev ou própria) | 6 | 5 | O marco 1 já precisa dela; é o que o mundo de fora enxerga |
+| **Interface do framebuffer e dos eventos de entrada** para o programa de usuário (`/dev/fb`, evdev ou própria) | 6 | 5 | O marco 1 já precisa dela; é o que o mundo de fora enxerga. O desenho da fase 4 a mantém na fase 5 ([SDD 18](18_fase_4_decisoes_pedidas.md#decisões-do-agente-para-o-dono-vetar)) |
 | **`AT_HWCAP`/`AT_HWCAP2`** no auxv | 6 | 5 | O programa lê o auxv para saber o que a CPU tem |
-| **Pedido de AMX** (equivalente do `ARCH_REQ_XCOMP_PERM`) e **VL do SVE** por processo | 6 | 4 (antes dos sinais) | O sigframe dos sinais da fase 4 depende do tamanho do estado |
-| **`rdtsc` por processo** (equivalente do `PR_SET_TSC`) | 6 | 4 | Interface que o programa vê; o padrão `CR4.TSD = 0` já está na fase 4 |
-| **Overcommit** (estrito ou heurístico) | 6 | 4 | Comportamento visível a programa Linux: `malloc` que falha contra processo morto depois. O estrito só reserva mais que o uso real; a pesquisa não mediu o custo |
+| **Pedido de AMX** (equivalente do `ARCH_REQ_XCOMP_PERM`) e **VL do SVE** por processo | 6 | 4 (antes dos sinais) | O sigframe dos sinais da fase 4 depende do tamanho do estado. [SDD 18, decisão 6](18_fase_4_decisoes_pedidas.md#decisão-6--falha-de-usuário-canal-de-eventos-ou-sinal-síncrono): sem sinais na fase 4, a decisão espera a fase 5 |
+| **`rdtsc` por processo** (equivalente do `PR_SET_TSC`) | 6 | 4 | Interface que o programa vê; o padrão `CR4.TSD = 0` já está na fase 4. [SDD 17](17_processos_isolamento_e_syscalls.md#simd-de-usuário): a fase 4 não oferece a opção |
+| **Overcommit** (estrito ou heurístico) | 6 | 4 | Comportamento visível a programa Linux: `malloc` que falha contra processo morto depois. O estrito só reserva mais que o uso real; a pesquisa não mediu o custo. [SDD 18, decisão 9](18_fase_4_decisoes_pedidas.md#decisão-9--overcommit-na-abi-nativa) |
 | **SIMD no kernel** (ChaCha20, `memset`) | 5; ou 3, se mudar o alvo de build | só se medido | Exige `asm!` fora de `arch/` ou alvo que não seja soft-float; hoje o código escalar basta |
 | Formato da raiz; criptografia de disco | 6 | 6 e 8 | Já descritas nas fases 6 e 8 |
 | Boot verificado | 2 e 4 | 12 | [SDD 09](09_seguranca.md) |
+| **Desenho da fase 4:** formato do executável, ABI nativa, direitos, init, PIE, falha de usuário, crates novos, pasta `user/`, overcommit | 1, 3 e 6 | 4 | Nove decisões pedidas, com opções e recomendação, em [SDD 18](18_fase_4_decisoes_pedidas.md) |
