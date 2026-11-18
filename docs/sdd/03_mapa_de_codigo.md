@@ -47,6 +47,7 @@
 │   ├── term/                   # rustos-term: Terminal (VT/xterm sobre grade de células, tela alternativa, histórico, DEC Special Graphics, tabulação; SDD 16), Cell, Key, Keyboard (layouts)
 │   ├── cpio/                   # rustos-cpio: leitor de cpio `newc` sem alocação (iterador sobre `&[u8]`), para o initramfs; só arquivo regular sai
 │   ├── elf/                    # rustos-elf: validação de ELF64 estático (`ET_EXEC`) para uma `Image` sem alocação; o chamador passa os `Limits` (ISA e faixa do usuário)
+│   ├── object/                 # rustos-object: `HandleTable<T, S>` (handle de 64 bits, geração de 48, slot de 32 bytes, lista livre FIFO, reserva e *commit*), direitos e o que cada operação exige, `HandleCount` e o fechamento sem recursão, fila e sinais do canal, `channel_write` e `channel_read` atômicos; o kernel entrega os objetos (`Object`), o lock (`Lock`) e a memória dos slots (`SlotStorage`)
 │   └── shell/                  # rustos-shell: Shell (edição de linha, histórico, comandos) e a porta Host; o comando `bench` (`bench.rs`) é da feature `bench`, que o `selftest` do kernel liga
 ├── lib/
 │   └── sync/                   # rustos-sync: SpinLock (test-and-test-and-set, conta disputas, `force_unlock` para o pânico)
@@ -82,6 +83,7 @@
 | `rustos-shell` | `rustos-hal` |
 | `rustos-cpio` | nada |
 | `rustos-elf` | nada |
+| `rustos-object` | `rustos-hal` (o módulo `abi`) |
 | `rustos-sync` | nada |
 | `rustos-arch-x86_64` | `rustos-hal` (só no alvo bare-metal) |
 | `rustos-arch-aarch64` | `rustos-hal` |
@@ -111,6 +113,7 @@ EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_es
 | Desenho de pixel, glifo da fonte | `core/gfx/` |
 | Sequência de terminal, codificação de tecla, layout de teclado | `core/term/` |
 | Ler o initramfs (cpio `newc`) | `core/cpio/` |
+| Tabela de handles, direitos, contagem de handles, fila e sinais do canal, transferência de handles | `core/object/`; os objetos reais (Process, Thread, VMO, VMAR, ponta de canal), o lock e a memória dos slots vêm do `kernel/` ([SDD 17](17_processos_isolamento_e_syscalls.md#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) |
 | Validar um executável ELF e dizer o que mapear | `core/elf/`; os limites da ISA e da faixa do usuário vêm do chamador (`elf::Limits`) |
 | Comando do shell embutido | `core/shell/`; o dado do sistema chega pela porta `Host` |
 | Tema, barra do topo, como a grade vira pixel | `kernel/src/screen.rs` |
@@ -130,7 +133,7 @@ entrada hostil vira `Error` (enum, uma variante por regra), nunca pânico. Todo 
 de tamanho e de offset é `checked_*`. Os testes de host ([SDD 06](06_testes.md)) têm um
 caso por regra de recusa, as truncações em todos os comprimentos e os campos nos extremos.
 
-Nenhum dos dois está em `[workspace.dependencies]` ainda: o primeiro consumidor (o carregador da 4b, no `kernel/`) acrescenta a entrada junto com a dependência.
+Nenhum dos dois (nem o `core/object`) está em `[workspace.dependencies]` ainda: o primeiro consumidor (o carregador da 4b, no `kernel/`) acrescenta a entrada junto com a dependência.
 
 **`core/cpio`** (`Reader`, `Entry`, `find`). Regras do `newc` como no
 [early-userspace buffer format](https://docs.kernel.org/driver-api/early-userspace/buffer-format.html):

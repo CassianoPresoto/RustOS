@@ -38,6 +38,7 @@
 | Resíduo de chave na pilha | linha `key residue:` do boot (`random::stack_residue`), `make smoke ARCH=all PROFILE=dev\|release\|release-small` | 0 estados do ChaCha20 e 0 cópias da chave nas duas ISAs e nos três perfis; antes, de 0 a 2 e de 1 a 3 (tabela abaixo, no gerador) |
 | Código de `core/crypto` | `.text` do crate sem LTO, com todas as funções públicas (`llvm-size`); no kernel, com LTO, só entra o que se usa | `release`: 8 202 (x86_64) e 7 866 (aarch64) bytes · `release-small`: 6 216 e 7 349 bytes |
 | Vazão de ChaCha20, BLAKE2b e do gerador | `cargo run --release -p rustos-crypto --example bench`, no host (Apple M5, `rustc` 1.100.0), melhor de 15 rodadas, sem SIMD (o compilador não vetorizou: o resultado com `-vectorize-loops=false -vectorize-slp=false` é o mesmo) | Ver tabela abaixo. **Números do host**; os do alvo estão abaixo |
+| Tabela de handles e canal (`core/object`) | `cargo test --release -p rustos-object bench -- --ignored --nocapture --test-threads=1` (`core/object/src/tests/bench.rs`), no host | Host: buscar com direito 0,6 ns; inserir, remover e fechar 8,2 ns; escrever e ler uma mensagem de 64 B com 4 handles, cerca de 125 ns; slot de 32 bytes, par de pontas de 7 256 bytes ([seção](#tabela-de-handles-e-canal-fatia-4c-medido-no-host)). **Medida de host**, não do alvo |
 | Escalonador (`core/sched`) | `cargo test --release -p rustos-sched bench -- --ignored --nocapture --test-threads=1` (`core/sched/src/bench.rs`), no host | Host: `pick_next` do EEVDF em 41 a 136 ns com 8 a 512 tarefas; 96 bytes por tarefa ([SDD 14](14_escalonador.md)). No alvo (`bench`, 8 prontas): `pick_next` 34 a 35 ns e `tick` 2 ns no aarch64 HVF; 320 e 36 ns em TCG; 670 a 730 e 85 a 89 ns no x86_64 em TCG (tabela abaixo) |
 | Boot de parede | `make smoke-fast` (modo normal) e `make smoke` (modo de teste) | inclui firmware EDK2: 1,7 a 1,9 s (x86_64, TCG) e 0,17 s (aarch64, HVF; 0,6 s em TCG) no modo normal, dominado pelo firmware (no aarch64, antes de `-boot menu=on,splash-time=0`, eram 5,2 s, [SDD 05](05_build_e_execucao.md#qemu-e-firmware)); a tabela de [Tempo de boot](#tempo-de-boot) separa firmware, Limine e kernel |
 | Tempo do kernel até o prompt | linha `boot time:` do boot (`make smoke-fast ARCH=all PROFILE=release`) | modo normal: 25 a 31 ms (x86_64, TCG) e 2 ms (aarch64, HVF); antes, com os autotestes e medidas no caminho: 964 e 453 ms ([Tempo de boot](#tempo-de-boot)) |
@@ -425,6 +426,26 @@ e o máximo delas):
 
 O `AsidAllocator` não tem medida de ciclos: o custo que importa é o da 4e (o `INVPCID`, o
 `tlbi` e o lock), que só vale sob KVM/HVF ou metal.
+
+### Tabela de handles e canal (fatia 4c, medido no host)
+
+Comando: `cargo test --release -p rustos-object bench -- --ignored --nocapture --test-threads=1`
+(`core/object/src/tests/bench.rs`). Máquina: Apple M5 (aarch64), `rustc` 1.100.0, perfil `release`,
+melhor de 9 rodadas de 200 000 chamadas, três execuções. **Medida de host**: não é QEMU nem metal, e
+o kernel real troca o `Mutex` do teste pelo `IrqLock`; serve para comparar o RustOS consigo mesmo
+(guidelines 05). Os números do alvo entram quando a 4c ligar a tabela.
+
+| O quê | Host | Observação |
+| --- | --- | --- |
+| Buscar com direito (`get`, 1 001 handles, 7 de passo) | 0,6 ns (uma execução com 1,8 ns) | Vazão de buscas independentes: o laço não encadeia as chamadas |
+| Inserir, remover e fechar | 8,2 a 8,6 ns | Inclui o `clone` do `Arc` do teste, 3,2 ns sozinho |
+| Escrever e ler 1 mensagem de 64 B com 4 handles, mais preparar e fechar os 4 | 183 a 193 ns | Cinco locks do `Mutex` sem disputa, os `Arc` dos bytes e dos handles |
+| Só preparar e fechar os 4 handles (sem canal) | 59 a 61 ns | Por diferença, escrever e ler custam cerca de 125 ns |
+
+**Memória por unidade** (`size_of`, o teste confere o do slot): `Slot` com o `T` do kernel (enum de seis
+`Arc`s), **32 bytes**; pior caso de uma tabela cheia, 4 096 × 32 = **128 KiB** por processo (o `Vec`
+do kernel pode chegar ao dobro pela capacidade); `Message` **224 bytes**; `Channel` (par de pontas,
+16 mensagens por ponta inline) **7 256 bytes**, ocupados ou não ([DEBT-0091](../tech-debt/0091-fila-do-canal-com-armazenamento-inline.md)).
 
 ### Escalonador (fase 3, medido no host; o alvo está acima)
 

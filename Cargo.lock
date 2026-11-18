@@ -116,6 +116,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-object"
+version = "0.1.0"
+dependencies = [
+ "rustos-hal",
+]
+
+[[package]]
 name = "rustos-sched"
 version = "0.1.0"
 

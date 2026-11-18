@@ -1,0 +1,17 @@
+[package]
+name = "rustos-object"
+description = "Modelo de objetos: tabela de handles, direitos, contagem de handles e fila do canal, puros."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+rustos-hal.workspace = true
+
+[lints]
+workspace = true

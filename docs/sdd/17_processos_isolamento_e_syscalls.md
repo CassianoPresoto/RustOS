@@ -5,7 +5,7 @@
 > de syscall, handles, ABI nativa), como o primeiro programa chega à memória, e quais
 > decisões do dono o desenho aplica.
 
-**Estado: desenho aprovado no #9 (2026-11-18). A fatia 4a está implementada ([abaixo](#a-fatia-4a-como-entrou)); as demais, não.** A ABI de
+**Estado: desenho aprovado no #9 (2026-11-18). A fatia 4a está implementada ([abaixo](#a-fatia-4a-como-entrou)); da 4c só o crate puro `core/object` ([abaixo](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)); as demais, não.** A ABI de
 syscall e o formato de executável são contrato que o mundo de fora enxerga (caso 6 do
 [`AGENTS.md`](../../AGENTS.md)), e crate novo em `core/` e pasta nova de primeiro nível são
 o caso 1; por isso o desenho nasceu num PR em Draft só com docs. O dono aprovou as nove
@@ -143,6 +143,76 @@ roadmap muda no PR de cada fatia que torna o ponto verdade, junto com o código.
 | "VFS mínimo, initramfs e tmpfs" | Sem VFS na fase 4: o initramfs é um arquivo lido por quem o recebe como VMO; VFS e tmpfs entram na fase 5, com a tabela de descritores | O modelo nativo não tem caminho: tem handle. VFS existe para a ABI Linux |
 | "sinais mínimos" | Sem sinais POSIX na ABI nativa; falha vira mensagem num canal ([decisão 6](#decisão-6--falha-de-usuário-canal-de-eventos-ou-sinal-síncrono)) | Sinal exige o sigframe, e o sigframe exige decidir antes o pedido de AMX e o VL do SVE ([SDD 08](08_roadmap.md#decisões-futuras-casos-do-agentsmd)); sem sinal, as duas decisões esperam a fase 5 |
 | "COW no fork" | COW só a partir da página zero compartilhada; `fork` e o COW inteiro vêm com a ABI Linux (fase 5) | A ABI nativa não tem `fork`: cria processo vazio e o preenche |
+
+## O que o `core/object` torna verdade (fatia 4c, parte pura)
+
+**Descritivo.** O crate `rustos-object` (decisão 7) implementa a parte de [Modelo de objetos e
+handles](#modelo-de-objetos-e-handles) que não precisa de kernel: roda e é testado no host, sem
+`unsafe`, só com `core` e o módulo `abi` do `hal`. A ligação com os objetos reais, os locks, a cópia
+de usuário e as syscalls é da 4c (`kernel/`). Os números estão em
+[SDD 07](07_desempenho_e_recursos.md#tabela-de-handles-e-canal-fatia-4c-medido-no-host).
+
+| Peça | O que é | Arquivo |
+| --- | --- | --- |
+| `HandleTable<T, S>` | Valor `geração << 16 \| (índice + 1)`; geração de 48 bits que sobe a cada reuso; o slot que chegaria a `2^48 - 1` é aposentado (2^48 - 1 usos por slot); lista livre FIFO; teto de 4 096 handles (usados mais reservados) e de 65 534 slots; `insert`, `get`, `get_of`, `remove`, `duplicate`, `replace`, `reserve`/`commit`/`cancel`, `check_array`/`take_array`, `drain` | `table.rs` |
+| Slot de 32 bytes | `meta: u64` (geração nos 48 bits baixos, estado nos altos), `rights: u32`, elo da lista livre `u32` e `Option<T>`; com o `T` do kernel (um enum de seis `Arc`s, 16 bytes e nicho na tag) o slot mede 32, conferido por `size_of` no teste. Um `T` sem nicho daria 40 | `table.rs` |
+| Direitos | `parse` (bit reservado é `InvalidArgs`), `require` (`AccessDenied`), `reduce` (subconjunto, senão `InvalidArgs`) e o módulo `required` com o que cada chamada exige, conferido contra as tabelas deste capítulo | `rights.rs` |
+| Contagem de handles | `HandleCount` atômico no objeto: sobe em `commit`/`duplicate`, desce em `close`. O handle em trânsito (`Transit`) segue contado; só `close` o desconta. `Object::on_handle_closed` roda **depois** de soltar o lock da tabela; o padrão chama `on_zero_handles` (Process, Thread, VMO) ou, numa ponta de canal, a checagem de alcançabilidade | `object.rs` |
+| `close` e `Worklist` | Fechamento em laço com lista de trabalho, sem recursão: a morte de uma ponta empurra os handles da fila dela, e o laço os fecha | `object.rs` |
+| `Channel<T>` | Um par de pontas com a fila de cada uma (16 mensagens, 1 024 bytes, 8 handles), `own_in_queue` por ponta, `reserve`/`commit`/`cancel` da escrita, `peek`/`pop_if` da leitura, `on_handles_changed` (a regra do ciclo) e `signals` (`READABLE`, `WRITABLE`, `PEER_CLOSED`, por nível) | `channel.rs` |
+| `channel_write`, `channel_read` | As ordens do SDD, em funções sobre `Lock<HandleTable>` e `Object::with_channel`; a falha nunca perde mensagem nem handle | `transfer.rs` |
+
+### Ordem de lock (lacuna L3)
+
+Duas ordens valem no kernel; o `core/object` as obedece e o teste de threads as exercita.
+
+| Regra | Texto |
+| --- | --- |
+| Ordem global | **Tabela do processo, depois o lock do par de pontas.** Nunca o contrário, e nunca dois pares ao mesmo tempo |
+| Um lock por par | O `Channel` guarda as duas pontas e as duas filas: A→B e B→A pegam o mesmo lock |
+| `channel_write` | Segura a tabela do escritor do começo ao fim e toma o lock do par duas vezes, só por dentro dela: reservar (passo 2) e *commit* (passo 5). Entre as duas, nenhum outro lock é tomado |
+| `channel_read` | Passo 1: valida `ch` sob a tabela e, dentro dela, espia sob o par. Passo 2: reserva slots sob a tabela. Passo 3: **sem lock**. Passo 5: sob a tabela, retira sob o par e instala os handles |
+| Fechar | `handle_close`, o descarte do array e `drain` removem **sob** a tabela e fecham **depois de soltá-la**, sem lock nenhum. `on_handle_closed` toma só o lock do par da ponta; a morte tira as mensagens sob esse lock e **empurra** os handles para a lista de trabalho; fechá-los (que pode tomar outro par) acontece depois de soltar o primeiro |
+| Ganchos | `on_zero_handles` roda sem lock. `on_end_died` roda sem o lock do par; na escrita (morte da ponta de destino pelo ciclo) roda ainda com a tabela do escritor, então o código dele só pode tomar locks que ficam abaixo da tabela, como o do escalonador |
+| Contagem | `HandleCount` é atômico e fica fora do lock do par. A checagem de morte **relê** `handle_count` sob o lock do par, no momento da checagem; o `remaining` que `release` devolveu, sem lock, pode estar velho (outra thread duplica ou escreve um handle da ponta entre o desconto e o lock) e **não** serve para decidir. Quando `handle_count == own_in_queue` sob o par, ninguém mais alcança a ponta e a contagem não sobe. Teste: `a_stale_remaining_count_does_not_kill_an_end_that_is_still_reachable` |
+
+### O que fechou das lacunas
+
+| # | Parte pura, feita e testada em `core/object` | O que fica para a 4c |
+| --- | --- | --- |
+| L1 | `Channel::commit` reconfere a ponta oposta sob o lock do par e devolve a mensagem se ela morreu; `channel_write` fecha os handles dela e responde `PeerClosed` (teste `the_peer_dying_between_reserve_and_commit_…`; e threads que fecham o par durante a escrita) | A ligação com o `IrqLock` e a SMP real |
+| L2 | `channel_read` repete desde o passo 1 se a frente mudou e **cancela** as reservas, e `cancel` sobe a geração: o valor reservado e solto não volta (testes do `a_competing_read_…` e do modelo, que confere que nenhum valor reaparece) | `copy_to_user` real no passo 3 |
+| L3 | A tabela acima | O `IrqLock` por processo e o lock por par, na ordem |
+| L4 | `reserve` → `commit` ou `cancel` na tabela; a reserva desfeita não deixa handle, não conta em `len` e consome a geração (o modelo cria canais com 20% de desistência) | `channel_create` e `process_create` com `copy_to_user` em `out` |
+
+### Decisões do agente
+
+Nenhuma é dos seis casos do [`AGENTS.md`](../../AGENTS.md); cada uma diz o que a faria subir.
+
+| Decisão | O que ficou | Contingência |
+| --- | --- | --- |
+| Memória dos slots | A tabela é genérica sobre `SlotStorage<T>`, que o kernel implementa com um `Vec` e `try_reserve` (falta de memória é `NoMemory`, não aborta). O crate traz `FixedSlots<T, N>`, sem alocação, que serve ao teste e a tabelas pequenas. `core/` não chama o alocador (guidelines 05) | Se o kernel preferir `Vec` dentro do crate, é exceção ao guidelines 05: caso 3 |
+| Custo do `Vec` no kernel | A tabela cresce de um em um slot; o `Vec` dobra a capacidade, então a memória passa até do dobro do necessário (pior caso 256 KiB com 4 096 handles) | Medir na 4c; um `Vec` com crescimento fixo se doer |
+| Quem conta | O objeto traz o `HandleCount`; a tabela só o sobe em `commit` e `duplicate` e desce em `close`. `commit_moved` e `remove` não mexem, porque o handle só muda de lugar | — |
+| `replace` | Segue o SDD e o Zircon lido (com a inferência marcada): o handle velho **sempre** morre se existe, inclusive no erro (`InvalidArgs` por direito maior; `NoMemory` se faltar slot). O fechamento volta em `ReplaceFailed::closed`. Não é "tudo ou nada" | — |
+| Limites do canal | Mais de 1 024 bytes ou 8 handles é `InvalidArgs` e **consome** o array (a regra geral só poupa `ShouldWait` e a falha ao ler o array). O Zircon devolve `OUT_OF_RANGE` (lido em `channel_write`); a tabela de erros do RustOS reserva `OutOfRange` a ponteiro e intervalo de usuário e define `InvalidArgs` como "argumento fora do domínio", então o código segue a tabela, sem status novo. Mensagem vazia e sem handle é válida. O kernel limita a cópia do array a 64 entradas (o teto do Zircon); acima disso não sabe quais handles são e responde `InvalidArgs` sem consumir | Se o dono quiser `OutOfRange`, muda a tabela de erros e aqui |
+| Bytes da mensagem | O kernel os copia para um `Object::Bytes` (um `Arc<[u8]>`) **antes** de chamar `channel_write`; a espiada da leitura clona esse `Arc`, e por isso o passo 3 copia sem lock | — |
+| Fila inline | Cada ponta guarda 16 mensagens inline; o par mede 7 256 bytes ([DEBT-0091](../tech-debt/0091-fila-do-canal-com-armazenamento-inline.md)) | — |
+| Lista de trabalho | `Worklist` é trait, e `push` não falha. **Requisito da 4c, não dívida:** a morte da ponta empurra de dentro de `with_channel`, então o `push` roda com o lock do par preso e a IRQ mascarada e não pode alocar nem bloquear. A implementação do kernel é uma lista intrusiva (cada ponta morre uma vez e guarda o elo) ou uma reserva prévia por `try_reserve` no `channel_create` | — |
+| Número de sequência | `seq` é `u32` por ponta, com `wrapping_add`. Só separa a mensagem da frente da que a substituiu durante uma cópia: repetir um valor pede 2^32 mensagens escritas e lidas naquela fila entre o passo 1 e o passo 5 de **uma** leitura, com a fila em 16, o que é impraticável | — |
+| Identidade da ponta | `Object::channel_end` devolve `EndId { channel, side }`, sem lock; a regra "a própria ponta não viaja" compara essa identidade, não o valor do handle | — |
+| Ordem dos erros do array | Para cada handle, na ordem: existe, não repete, tem o direito, não é a própria ponta; o primeiro erro vence | — |
+| `ShouldWait` e o array | Fila cheia devolve `ShouldWait` antes de olhar o array, como o SDD manda: um erro no array só aparece na repetição | — |
+| `locate` e o valor zero | `Handle::INVALID` e todo valor sem índice dão `BadHandle`, sem depender de o chamador ter usado `handle_from_raw` | — |
+| Teste de entrelaçamento | O SDD pedia embaralhar passos de threads do mesmo processo e falhar **sem o lock**. Sem `unsafe`, a tabela só se alcança por `&mut` dentro de `Lock::with`, então "sem lock" não compila. Em troca: a repetição da leitura é testada com uma leitura concorrente injetada entre a cópia e o *commit* (a janela real, em que a tabela está solta), e há threads de verdade (escritor, leitor e *churn* de handles na mesma tabela; fechar o par no meio da escrita) | Se a 4c quiser o embaralhador, ele cabe sobre `Lock` |
+
+### Limite que o modelo de teste mostra
+
+O teste de modelo (milhares de operações aleatórias contra um mapa e um ponto fixo da regra de
+morte da ponta) confere, a cada 25 operações, o conteúdo das tabelas, o `handle_count` de todo
+objeto, a morte das pontas, as filas e `own_in_queue`. Ao fim, fechar todas as tabelas **não**
+zera as contagens que estão em ciclos entre filas: é o limite documentado e a
+[DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md).
 
 ## Entrada de syscall por ISA
 
@@ -634,11 +704,11 @@ segue o Zircon, com as páginas **verificadas** abaixo. O que não foi lido do Z
 
 | Fato verificado | Fonte |
 | --- | --- |
-| Direitos (DUPLICATE, TRANSFER, READ, WRITE, MAP, EXECUTE, WAIT, INSPECT, GET/SET_PROPERTY, DESTROY, MANAGE_PROCESS, MANAGE_THREAD) e a possibilidade de reduzi-los por `zx_handle_replace` e `zx_handle_duplicate` | [rights](https://fuchsia.dev/fuchsia-src/concepts/kernel/rights) |
-| `zx_handle_replace(handle, rights, out)`: direitos novos devem ser subconjunto (senão `ZX_ERR_INVALID_ARGS`); **"handle is always invalidated"**, em sucesso e em erro; direitos exigidos: **"None"**; erros `BAD_HANDLE`, `INVALID_ARGS` e `NO_MEMORY` | [handle_replace](https://fuchsia.dev/fuchsia-src/reference/syscalls/handle_replace) |
+| Direitos (DUPLICATE, TRANSFER, READ, WRITE, MAP, EXECUTE, WAIT, INSPECT, GET/SET_PROPERTY, DESTROY, MANAGE_PROCESS, MANAGE_THREAD) e a possibilidade de reduzi-los por `zx_handle_replace` e `zx_handle_duplicate` (a página diz que os direitos "can be reduced"; **inferência do RustOS:** "só diminuem", que ela não enuncia assim) | [rights](https://fuchsia.dev/fuchsia-src/concepts/kernel/rights) |
+| `zx_handle_replace(handle, rights, out)`: direitos novos devem ser subconjunto (senão `ZX_ERR_INVALID_ARGS`); **"handle is always invalidated"** (a página não separa sucesso de erro; **inferência do RustOS:** vale também no erro); direitos exigidos: **"None"**; erros `BAD_HANDLE`, `INVALID_ARGS` e `NO_MEMORY` | [handle_replace](https://fuchsia.dev/fuchsia-src/reference/syscalls/handle_replace) |
 | `zx_channel_write`: **"All handles are discarded and no longer available to the caller, on success or failure"**; o canal exige `WRITE` e cada handle do array exige `TRANSFER`; handle repetido no array dá `BAD_HANDLE`; a **própria ponta** do canal no array dá `NOT_SUPPORTED`; limites: 65 536 bytes e 64 handles por mensagem | [channel_write](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_write) |
 | `zx_process_create(job, name, …)` devolve o handle do processo e o do VMAR raiz; a thread só roda após `zx_process_start`; exige `ZX_RIGHT_MANAGE_PROCESS` no job | [process_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/process_create) |
-| `zx_channel_create`: dois handles; mensagens de um lado são lidas no outro; transferência de handle com `ZX_RIGHT_TRANSFER`. **Ponta fechada:** "messages in flight to that endpoint are discarded and any Handles they contained are closed"; leitura de canal vazio com a outra ponta fechada dá `PEER_CLOSED` | [channel_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_create), [conceitos](https://fuchsia.dev/fuchsia-src/concepts/kernel/concepts), [channel_read](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_read) |
+| `zx_channel_create`: dois handles; mensagens de um lado são lidas no outro; transferência de handle com `ZX_RIGHT_TRANSFER`. **Ponta fechada:** "messages in flight to that endpoint are discarded and any Handles they contained are closed"; leitura de canal vazio com a outra ponta fechada dá `PEER_CLOSED` (a página de `channel_read` **não** diz que a mensagem fica na fila em `BUFFER_TOO_SMALL`: isso é desenho do RustOS, não fato lido) | [channel_create](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_create), [conceitos](https://fuchsia.dev/fuchsia-src/concepts/kernel/concepts), [channel_read](https://fuchsia.dev/fuchsia-src/reference/syscalls/channel_read) |
 | `zx_process_start(process, thread, entry, stack, arg1, arg2)`: `arg1` é um handle **transferido** ao processo novo (o valor dele entra em `arg1` da thread); **"If zx_process_start() returns an error, arg1 is closed rather than transferred"**; "all other registers are zero upon start" | [process_start](https://fuchsia.dev/fuchsia-src/reference/syscalls/process_start) |
 | seL4: Copy (com direitos), Mint (direitos e badge), Move, Mutate, Delete, Revoke (apaga filhos); Untyped retype: memória vira objeto só por capability | [API do seL4](https://docs.sel4.systems/projects/sel4/api-doc.html) (a definição geral dos direitos Read, Write, Grant, GrantReply não foi lida) |
 
@@ -730,7 +800,7 @@ morreria ali.
 | --- | --- |
 | `handle_close` | Remove o slot. Não pede direito. Se foi o último handle do objeto, `on_zero_handles` roda **depois** de soltar o lock da tabela |
 | `handle_duplicate(h, rights)` | `h` exige `DUPLICATE`; `rights ⊆ h.rights`; insere o handle novo e devolve o valor |
-| `handle_replace(h, rights)` | Remove `h` **sempre** que ele existe, em sucesso e em erro (**verificado** no Zircon: "handle is always invalidated"). Se `rights ⊄ h.rights`: `InvalidArgs`, com o original já invalidado. `h` que não existe: `BadHandle` (nada a invalidar). **Nenhum direito é exigido** (**verificado**: "Rights: None"); em particular, não pede `DUPLICATE` |
+| `handle_replace(h, rights)` | Remove `h` **sempre** que ele existe, em sucesso e em erro (lido no Zircon: "handle is always invalidated", sem separar sucesso de erro; a extensão ao erro é inferência). Se `rights ⊄ h.rights`: `InvalidArgs`, com o original já invalidado. `h` que não existe: `BadHandle` (nada a invalidar). **Nenhum direito é exigido** (lido: "Rights: None"); em particular, não pede `DUPLICATE` |
 | `process_create(parent, …, bootstrap, events)` | `parent` com `MANAGE_PROCESS` (erro: `bootstrap` e `events` são consumidos, como o `arg1` do Zircon). `bootstrap` (`TRANSFER`) e `events` (`WRITE` e `TRANSFER`) seguem a regra geral. O `bootstrap` vai para a tabela do filho; o `events` fica **no Process**, contado em `handle_count`, e o kernel o fecha depois de escrever o evento final (então o pai vê `PEER_CLOSED` depois do evento) |
 | `channel_write(ch, bytes, handles)` | Abaixo |
 | `channel_read(ch, …)` | Abaixo |
@@ -760,7 +830,7 @@ nunca o contrário:
 | Direitos só diminuem | Sequências aleatórias de duplicar, substituir e transferir nunca produzem handle com direito fora do conjunto do handle raiz |
 | **Entrelaçamento** | Cada operação é partida em passos (adquirir o lock, validar, remover, inserir) e o teste embaralha, de modo determinístico, os passos de duas ou três threads do mesmo processo sobre os mesmos handles. Nenhum handle é usado duas vezes, nenhum some sem ser fechado, e a soma dos `handle_count` é igual aos handles em tabela mais os em trânsito. **Sem o lock, o teste tem de falhar** |
 | Ciclo da ponta | O cenário acima termina com as duas pontas mortas e `handle_count` zero, nas duas ordens |
-| Atomicidade do `channel_write` | Handle repetido, a própria ponta, sem `TRANSFER` e `PeerClosed` consomem o array por inteiro; `ch` inválido consome o array (os handles que existem saem e fecham) |
+| Atomicidade do `channel_write` | Handle repetido, a própria ponta, sem `TRANSFER`, `PeerClosed` e o excesso de bytes ou de handles consomem o array por inteiro; `ch` inválido consome o array (os handles que existem saem e fecham) |
 | **`ShouldWait` não consome** | Encher a fila de uma ponta; escrever com um handle: `ShouldWait`, e o handle **segue na tabela**; esperar `WRITABLE`; reescrever: sucesso, e o handle sai da tabela |
 | `process_create` | `bootstrap == events` é `BadHandle` e consome os dois; o `events` entra em `handle_count` (a ponta do pai não vê `PEER_CLOSED` na criação); erro em `parent` consome `bootstrap` e `events`, como o `arg1` do `zx_process_start` |
 | `channel_read` | Cópia que falha (ponteiro ruim no meio do buffer) deixa a mensagem na fila e a tabela intacta; duas threads lendo o mesmo canal não perdem nem duplicam mensagem |
@@ -855,7 +925,7 @@ O contrato de como um programa **começa**, igual para o `init` e para qualquer 
 | Código | Valor | Quando |
 | --- | --- | --- |
 | `Ok` | 0 | Sucesso |
-| `InvalidArgs` | -1 | Argumento fora do domínio, bit reservado, tamanho zero, desalinhado, `entry`/`sp` fora de `[USER_MIN, USER_TOP]`, direitos que não são subconjunto |
+| `InvalidArgs` | -1 | Argumento fora do domínio (inclui mais de 1 024 bytes ou 8 handles numa mensagem de canal), bit reservado, tamanho zero, desalinhado, `entry`/`sp` fora de `[USER_MIN, USER_TOP]`, direitos que não são subconjunto |
 | `BadHandle` | -2 | Valor que não é handle vivo (inclui geração velha) ou handle repetido num array |
 | `WrongType` | -3 | Handle de outro tipo de objeto |
 | `AccessDenied` | -4 | Falta direito no handle |
@@ -886,7 +956,7 @@ ilegal, falta sem região) mata, pelo [canal de eventos](#falhas-de-usuário).
 | `0x05` | `random_get` | `ptr`, `len` (até 256) | — | Nenhum |
 | `0x10` | `handle_close` | `h` | — | Nenhum |
 | `0x11` | `handle_duplicate` | `h`, `rights` | handle novo | `h`: `DUPLICATE`; `rights ⊆ h.rights` |
-| `0x12` | `handle_replace` | `h`, `rights` | handle novo | **Nenhum** (verificado no Zircon); `rights ⊆ h.rights` |
+| `0x12` | `handle_replace` | `h`, `rights` | handle novo | **Nenhum** (lido no Zircon); `rights ⊆ h.rights` |
 | `0x13` | `object_wait_one` | `h`, `signals`, `deadline_ns` | sinais observados | `h`: `WAIT` |
 | `0x20` | `vmo_create` | `size`, `flags` (0) | handle do VMO | Nenhum (ver acima) |
 | `0x21` | `vmar_map` | `vmar`, `vmo`, `vmo_off`, `len`, `flags`, `vmar_off` | endereço mapeado | `vmar`: `MAP`; `vmo`: `MAP` e cada permissão pedida (`READ`/`WRITE`/`EXECUTE`), todas também no teto do `vmar` |
@@ -1252,7 +1322,7 @@ O adaptador Linux da fase 5 traduz o `Fault` em sinal.
 | --- | --- | --- | --- | --- |
 | `rustos-elf` **(novo)** | `core/elf` | Validação e leitura de ELF64: `&[u8]` para `Image { entry, loads, phdr }`; o chamador passa `Limits` (ISA e faixa do usuário) | proibido | nada |
 | `rustos-cpio` **(novo)** | `core/cpio` | Leitor `newc`, iterador sem alocação | proibido | nada |
-| `rustos-object` **(novo)** | `core/object` | `Rights`, `HandleTable<T>`, regras de duplicar, substituir e transferir, contagem de handles, fila do canal, sinais | proibido | `rustos-hal` |
+| `rustos-object` **(novo, feito na 4c, parte pura)** | `core/object` | `HandleTable<T, S>`, regras de direito, duplicar, substituir e transferir, contagem de handles, fila do canal, sinais ([seção](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) | proibido | `rustos-hal` |
 | ABI (números, `Status`, direitos, constantes de layout, `ProcessEvent`, mensagem de boot) | `core/hal/src/abi.rs` (**módulo, não crate**) | O contrato com o programa de usuário, a "primeira porta de entrada" do [SDD 02](02_arquitetura.md) | proibido | nada |
 | `rustos-user-rt` **(novo)** | `user/rt` | Runtime dos programas: ponto de entrada em Rust, `panic`, alocador mínimo, leitor de auxv, carregador de ELF de usuário | **mínimo, com `// SAFETY:`**: `GlobalAlloc`, a leitura do auxv e `#[unsafe(no_mangle)]` o exigem; nenhum `asm!` | `hal` (a ABI), `elf`, `cpio`, `arch-<isa>-user` |
 | `rustos-user-init` e programas de teste **(novos)** | `user/init`, `user/tests/*` | O `init`, o teste de falha, o de SIMD, o de syscall nula | proibido (`forbid(unsafe_code)`; o `unsafe` fica no `user/rt`) | `user-rt` |
@@ -1380,7 +1450,7 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 | Dívida 0037, pilha sem medida de pico (paga no #19: 16 KiB pelo pico medido) e [DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) | A 4a remediu com syscall e falta fatal: 2,0 KiB e 1,6 KiB de 16 (`release`). Os 16 KiB ficam; a 0070 segue aberta até a 4c e a 4f medirem handles, canais e a falta resolvida |
 | [DEBT-0052](../tech-debt/0052-afinidade-so-no-spawn.md) Afinidade só no `spawn` | Não dispara: a ABI nativa não tem afinidade |
 | **Abertas pela 4a:** [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md) (limpeza da pilha até 128 bytes limpos), [DEBT-0077](../tech-debt/0077-iretq-sem-fixup-de-falha-fora-do-rip-e-do-rsp.md) (`iretq` sem *fixup*), [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md) (EL1h na pilha de falhas); [DEBT-0081](../tech-debt/0081-debug-write-de-512-bytes-com-a-irq-mascarada.md) (`debug_write` com a IRQ mascarada) e [DEBT-0082](../tech-debt/0082-sem-lfence-depois-do-swapgs-condicional.md) (sem `lfence` depois do `swapgs`); [DEBT-0072](../tech-debt/0072-pilhas-de-excecao-sem-medida-permanente.md) agora inclui a IST4 | A 4a fecha os itens dela |
-| **A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados (4c; gatilho: o primeiro programa que os produza, ou os grupos de recursos da fase 9); imagem de usuário sem ASLR (4b; [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
+| **A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md), registrada com o `core/object`); imagem de usuário sem ASLR (4b; [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
 
 **Pagas antes da fase:** 0011 (GIC e timer só na CPU 0), 0018 (frames sem cache por CPU), 0036
 (estado de troca global) e 0039 (escalonador de uma CPU), no #13; 0020 (zerar página pelo `memset`) e
@@ -1397,10 +1467,10 @@ do dono. Cada uma vira texto no SDD e teste no mesmo PR.
 
 | # | Lacuna | O que o PR da 4c escreve e testa |
 | --- | --- | --- |
-| L1 | Entre a reserva do slot e o *commit* do `channel_write`, a ponta oposta pode morrer em outra CPU (SMP) | O *commit* reconfere a ponta viva sob o lock do canal; se morreu, os handles seguem a regra de descarte |
-| L2 | A repetição do `channel_read` (sequência mudou) | A repetição libera as reservas do passo 2, e um valor de handle reservado e solto não reaparece |
-| L3 | Regra de lock dos canais não está escrita | Um lock por par de pontas (A→B e B→A pegam o mesmo); a destruição tira as mensagens sob o lock e fecha os handles **depois** de soltá-lo; o passo 1 do `channel_read` valida `ch` sob a tabela antes do canal; ordem global tabela → canal |
-| L4 | Chamadas que devolvem handle por ponteiro de saída (`channel_create`, `process_create`) | O mesmo padrão reserva → copia → *commit*: falha no `copy_to_user` desfaz a criação, sem objeto órfão |
+| L1 | Entre a reserva do slot e o *commit* do `channel_write`, a ponta oposta pode morrer em outra CPU (SMP) | O *commit* reconfere a ponta viva sob o lock do canal; se morreu, os handles seguem a regra de descarte. **Parte pura feita** ([seção](#o-que-fechou-das-lacunas)) |
+| L2 | A repetição do `channel_read` (sequência mudou) | A repetição libera as reservas do passo 2, e um valor de handle reservado e solto não reaparece. **Parte pura feita** |
+| L3 | Regra de lock dos canais não está escrita (**escrita**, [acima](#ordem-de-lock-lacuna-l3)) | Um lock por par de pontas (A→B e B→A pegam o mesmo); a destruição tira as mensagens sob o lock e fecha os handles **depois** de soltá-lo; o passo 1 do `channel_read` valida `ch` sob a tabela antes do canal; ordem global tabela → canal |
+| L4 | Chamadas que devolvem handle por ponteiro de saída (`channel_create`, `process_create`) | O mesmo padrão reserva → copia → *commit*: falha no `copy_to_user` desfaz a criação, sem objeto órfão. **Parte pura feita** (a tabela) |
 | L5 | `fault_kind` contra a tabela do `ProcessEvent` | Já concordam (`breakpoint` incluído); manter um teste que compare as duas |
 | L6 | O `check-layers` não expressa "o `user/` depende só de `elf` e `cpio` entre os crates de `core/`", nem a isenção de `unsafe` só do `user/rt` | Lista por nome no `xtask`, com teste vermelho antes do verde (já pedido para a 4a, ver [guidelines 03](../guidelines/03_camadas_e_dependencias.md)) |
 
