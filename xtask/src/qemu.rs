@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::arch::Arch;
 use crate::cargo::{self, Profile};
-use crate::{image, leak, png, workspace};
+use crate::{image, leak, panic_smoke, png, workspace};
 
 /// Igual ao `BOOT_OK_MARKER` do kernel; os dois mudam juntos.
 pub const BOOT_OK: &str = "[rustos] boot ok";
@@ -214,7 +214,7 @@ pub fn smoke(root: &Path, arch: Arch, profile: Profile, mode: BootMode) -> Resul
     let receiver = stream_stdout(&mut child)?;
     let (outcome, mut log) = wait_for_boot(&receiver, started);
     if mode == BootMode::Refused && matches!(outcome, Outcome::Booted(_)) {
-        type_bench(&mut child, &receiver, &mut log);
+        type_lean_commands(&mut child, &receiver, &mut log);
     }
     child.kill().ok();
     child.wait().ok();
@@ -223,32 +223,43 @@ pub fn smoke(root: &Path, arch: Arch, profile: Profile, mode: BootMode) -> Resul
     report(arch, mode, outcome, &log)
 }
 
-/// Digita `bench` no shell, quando o prompt aparece, e lê a resposta para o `log`.
-fn type_bench(
+/// Lê para o `log` até o prompt do shell voltar depois de `from`, ou o prazo acabar.
+fn read_to_prompt(
+    receiver: &mpsc::Receiver<String>,
+    log: &mut String,
+    from: usize,
+    deadline: Instant,
+) {
+    while !ends_with_prompt(&log[from..]) {
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            return;
+        };
+        match receiver.recv_timeout(left) {
+            Ok(chunk) => log.push_str(&chunk),
+            Err(_) => return,
+        }
+    }
+}
+
+/// Digita `bench` e depois `ps` no shell da imagem enxuta, cada um quando o prompt volta, e lê as
+/// respostas para o `log`: a recusa do `bench` e a coluna de pilha que o gate confere.
+fn type_lean_commands(
     child: &mut std::process::Child,
     receiver: &mpsc::Receiver<String>,
     log: &mut String,
 ) {
     let deadline = Instant::now() + COMMAND_TIMEOUT;
-    let mut read_until = |done: &dyn Fn(&str) -> bool| {
-        while !done(log) {
-            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-                return;
-            };
-            match receiver.recv_timeout(left) {
-                Ok(chunk) => log.push_str(&chunk),
-                Err(_) => return,
-            }
+    read_to_prompt(receiver, log, 0, deadline);
+    for command in ["bench", "ps"] {
+        let from = log.len();
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(format!("{command}\r").as_bytes())
+                .and_then(|()| stdin.flush())
+                .ok();
         }
-    };
-    read_until(&ends_with_prompt);
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(b"bench\r")
-            .and_then(|()| stdin.flush())
-            .ok();
+        read_to_prompt(receiver, log, from, deadline);
     }
-    read_until(&|log| log.contains(BENCH_REFUSED));
 }
 
 /// Sobe sem janela, espera o boot, digita cada comando na serial e grava a tela
@@ -487,6 +498,12 @@ fn report(arch: Arch, mode: BootMode, outcome: Outcome, log: &str) -> Result<(),
                     return Err(failure(arch, &reason, log));
                 }
             }
+            if mode == BootMode::Refused
+                && let Some(problem) = panic_smoke::stack_over_limit(log)
+            {
+                let reason = format!("pilha da imagem enxuta: {problem} (SDD 15)");
+                return Err(failure(arch, &reason, log));
+            }
             if mode != BootMode::SelfTest && arch == Arch::Aarch64 {
                 let Some(us) = firmware_boot_us(log) else {
                     return Err(failure(arch, "boot sem a linha `boot timeline:`", log));
@@ -685,7 +702,13 @@ mod tests {
         log.push('\n');
         log.push_str(BENCH_REFUSED);
         log.push('\n');
+        let no_ps = report(Arch::X86_64, BootMode::Refused, outcome, &log);
+        assert!(no_ps.unwrap_err().contains("coluna de pilha"));
+        log.push_str("  0  idle  0 run  1.7  479  1.1/16K  -\n");
         assert!(report(Arch::X86_64, BootMode::Refused, outcome, &log).is_ok());
+        let deep = log.replace("1.1/16K", "13.0/16K");
+        let result = report(Arch::X86_64, BootMode::Refused, outcome, &deep);
+        assert!(result.unwrap_err().contains("75%"));
         log.push_str("[rustos] heap self-test: ok\n");
         let ran = report(Arch::X86_64, BootMode::Refused, outcome, &log);
         assert!(ran.unwrap_err().contains("do modo de teste"));

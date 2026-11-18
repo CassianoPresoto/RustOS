@@ -259,11 +259,8 @@ pub fn fpu_init() -> Result<FpuSummary, PlatformError> {
     // SAFETY: EL1, uma vez, antes de qualquer troca de contexto.
     unsafe { rustos_arch_aarch64::fpu::init() };
     Ok(FpuSummary {
-        #[cfg(feature = "selftest")]
         mode: "fpsimd",
-        #[cfg(feature = "selftest")]
         bytes: rustos_arch_aarch64::fpu::AREA_BYTES,
-        #[cfg(feature = "selftest")]
         components: "v0-v31 fpsr fpcr",
     })
 }

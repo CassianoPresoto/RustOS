@@ -18,24 +18,6 @@ static FRAMES: IrqLock<Option<BuddyAllocator<'static>>> = IrqLock::new(None);
 /// O cache por CPU está ligado: frame solto passa por ele em vez do lock do buddy.
 static CACHE_ON: AtomicBool = AtomicBool::new(true);
 
-/// Liga ou desliga o cache por CPU. Desligar não devolve o que ele guarda: `flush_caches`.
-#[cfg(feature = "selftest")]
-pub fn set_cache(on: bool) {
-    CACHE_ON.store(on, Ordering::Release);
-}
-
-/// Devolve um frame que `allocate_frame` entregou.
-#[cfg(feature = "selftest")]
-pub fn free_frame(frames: Frames, frame: PhysAddr) {
-    frames.deallocate(PhysFrame::containing(frame)).ok();
-}
-
-/// O handle, se o alocador já foi instalado.
-#[cfg(feature = "selftest")]
-pub fn handle() -> Option<Frames> {
-    FRAMES.lock().is_some().then_some(Frames { _installed: () })
-}
-
 /// Disputas pelo lock do buddy desde o boot.
 pub fn contentions() -> u32 {
     FRAMES.contentions()
@@ -94,11 +76,6 @@ impl Frames {
         Self::with(|allocator| allocator.free_frames()) + cached
     }
 
-    #[cfg(feature = "selftest")]
-    pub fn total_frames(self) -> usize {
-        Self::with(|allocator| allocator.total_frames())
-    }
-
     pub fn allocate(self) -> Option<PhysFrame> {
         if CACHE_ON.load(Ordering::Acquire) {
             return percpu::current().frames.lock().allocate(&mut Backing);
@@ -152,3 +129,8 @@ impl FrameAllocator for Frames {
         Self::with(|allocator| allocator.verify_used(first, count))
     }
 }
+
+#[cfg(feature = "selftest")]
+mod selftest;
+#[cfg(feature = "selftest")]
+pub use selftest::{free_frame, handle, set_cache};

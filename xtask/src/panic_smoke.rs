@@ -237,16 +237,38 @@ fn verdict(log: &str, scenario: &Scenario) -> Option<String> {
         .map(|text| format!("apareceu `{text}` na serial"))
 }
 
+/// As linhas do `ps` com a coluna de pilha (`3.4/64K`): o nome da tarefa, o pico e o tamanho, em KiB.
+fn stack_rows(log: &str) -> Vec<(&str, f64, f64)> {
+    log.lines()
+        .filter_map(|line| {
+            let name = line.split_whitespace().nth(1)?;
+            let (peak, size) = line
+                .split_whitespace()
+                .find_map(|word| word.strip_suffix('K')?.split_once('/'))?;
+            Some((name, peak.parse().ok()?, size.parse().ok()?))
+        })
+        .collect()
+}
+
 /// O pico de pilha da linha `shell` do `ps` (coluna `3.4/64K`), em KiB.
 fn shell_stack_peak_kib(log: &str) -> Option<f64> {
-    let row = log.lines().find(|line| {
-        let mut words = line.split_whitespace();
-        words.nth(1) == Some("shell")
-    })?;
-    let (peak, _) = row
-        .split_whitespace()
-        .find_map(|word| word.strip_suffix('K')?.split_once('/'))?;
-    peak.parse().ok()
+    stack_rows(log)
+        .into_iter()
+        .find_map(|(name, peak, _)| (name == "shell").then_some(peak))
+}
+
+/// O gate de pilha do `smoke-fast` da imagem enxuta, que não tem a linha `stacks:`: a primeira
+/// tarefa do `ps` com pico acima de 75% da própria pilha, ou a falta da coluna.
+pub fn stack_over_limit(log: &str) -> Option<String> {
+    let rows = stack_rows(log);
+    if rows.is_empty() {
+        return Some("o `ps` não mostrou a coluna de pilha".to_owned());
+    }
+    rows.into_iter()
+        .find(|(_, peak, size)| peak * 4.0 > size * 3.0)
+        .map(|(name, peak, size)| {
+            format!("`{name}` usou {peak} KiB de {size} KiB de pilha (mais de 75%)")
+        })
 }
 
 /// Lê a serial até o cenário se completar (e mais um instante), ou o tempo acabar. Digita
@@ -340,6 +362,17 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn the_stack_gate_is_75_percent_of_each_row() {
+        let ps = "  0  idle       0 run   1.7  479   1.1/16K  -\n  8  shell      3 run   0.1  124  17.0/64K  -\n";
+        assert_eq!(stack_over_limit(ps), None);
+        let tight = ps.replace("1.1/16K", "12.1/16K");
+        assert!(stack_over_limit(&tight).unwrap().contains("idle"));
+        let edge = ps.replace("1.1/16K", "12.0/16K");
+        assert_eq!(stack_over_limit(&edge), None);
+        assert!(stack_over_limit("sem ps").unwrap().contains("não mostrou"));
     }
 
     #[test]

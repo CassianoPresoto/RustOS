@@ -33,19 +33,20 @@ static SINCE: AtomicU64 = AtomicU64::new(0);
 static CURRENT: AtomicUsize = AtomicUsize::new(Phase::Memory as usize);
 
 /// Tempo por fase, em microssegundos.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "lido só pelo modo de teste")
+)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Summary {
     pub total: u64,
     pub memory: u64,
-    #[cfg(feature = "selftest")]
     pub console: u64,
-    #[cfg(feature = "selftest")]
     pub interrupts: u64,
     pub smp: u64,
     pub reclaim: u64,
     pub self_tests: u64,
     pub benches: u64,
-    #[cfg(feature = "selftest")]
     pub setup: u64,
 }
 
@@ -72,15 +73,12 @@ pub fn finish() -> Summary {
     Summary {
         total: platform::cycles_to_ns(all) / 1_000,
         memory: us(Phase::Memory),
-        #[cfg(feature = "selftest")]
         console: us(Phase::Console),
-        #[cfg(feature = "selftest")]
         interrupts: us(Phase::Interrupts),
         smp: us(Phase::Smp),
         reclaim: us(Phase::Reclaim),
         self_tests: us(Phase::SelfTests),
         benches: us(Phase::Benches),
-        #[cfg(feature = "selftest")]
         setup: us(Phase::Setup),
     }
 }

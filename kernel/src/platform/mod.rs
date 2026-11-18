@@ -55,12 +55,13 @@ pub struct Protection {
 }
 
 /// O que `fpu_init` ligou, para o relatório do boot.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "lido só pelo modo de teste")
+)]
 #[derive(Clone, Copy, Debug)]
 pub struct FpuSummary {
-    #[cfg(feature = "selftest")]
     pub mode: &'static str,
-    #[cfg(feature = "selftest")]
     pub bytes: usize,
-    #[cfg(feature = "selftest")]
     pub components: &'static str,
 }

@@ -429,14 +429,9 @@ pub fn fpu_init() -> Result<FpuSummary, PlatformError> {
     // SAFETY: ring 0, uma vez, antes de qualquer troca de contexto.
     let info = unsafe { rustos_arch_x86_64::fpu::init(cpu_features()) }
         .map_err(|_| PlatformError::MissingFeature("sse"))?;
-    #[cfg(not(feature = "selftest"))]
-    let _ = info;
     Ok(FpuSummary {
-        #[cfg(feature = "selftest")]
         mode: info.mode.name(),
-        #[cfg(feature = "selftest")]
         bytes: info.bytes,
-        #[cfg(feature = "selftest")]
         components: xstate::components(info.xcr0),
     })
 }

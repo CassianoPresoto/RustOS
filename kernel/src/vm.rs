@@ -51,9 +51,12 @@ impl From<MapError> for VmError {
 }
 
 /// O que `Vm::build` montou, para o relatório do boot.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "lido só pelo modo de teste")
+)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VmStats {
-    #[cfg(feature = "selftest")]
     pub table_frames: u64,
     pub large_pages: u64,
     pub small_pages: u64,
@@ -80,7 +83,10 @@ pub struct Vm {
     image_phys: (u64, u64),
     /// Faixa virtual do mapa direto, `[início, fim)`.
     direct: (u64, u64),
-    #[cfg(feature = "selftest")]
+    #[cfg_attr(
+        not(feature = "selftest"),
+        allow(dead_code, reason = "lido só pelo modo de teste")
+    )]
     stats: VmStats,
 }
 
@@ -187,16 +193,12 @@ impl Vm {
             .ok_or(VmError::ImageMismatch)?;
 
         let direct = map_direct(boot, &mut space, &mut frames, &mut stats)?;
-        #[cfg(feature = "selftest")]
-        {
-            stats.table_frames = frames.taken;
-        }
+        stats.table_frames = frames.taken;
         Ok(Self {
             space,
             sections,
             image_phys,
             direct,
-            #[cfg(feature = "selftest")]
             stats,
         })
     }
@@ -210,7 +212,10 @@ impl Vm {
         &mut self.space
     }
 
-    #[cfg(feature = "selftest")]
+    #[cfg_attr(
+        not(feature = "selftest"),
+        allow(dead_code, reason = "lido só pelo modo de teste")
+    )]
     pub fn stats(&self) -> VmStats {
         self.stats
     }

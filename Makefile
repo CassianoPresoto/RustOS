@@ -75,6 +75,7 @@ pr: check test ## checklist antes do PR: gates, testes, smoke, smoke-fast e smok
 	$(XTASK) smoke-fast --arch all --profile $(PROFILE)
 	$(XTASK) smoke-fast --arch all --profile release-small
 	$(XTASK) smoke-panic --arch all --profile $(PROFILE)
+	$(XTASK) smoke-panic --arch all --profile release-small
 	RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx $(XTASK) smoke --arch aarch64 --profile $(PROFILE)
 
 clean: ## apaga target/ (inclusive o Limine baixado)
