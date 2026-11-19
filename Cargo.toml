@@ -25,6 +25,8 @@ members = [
     "user/rt",
     "user/init",
     "user/tests/big",
+    "user/tests/child",
+    "user/tests/procs",
     "user/tests/handles",
     "user/tests/lazy",
     "xtask",

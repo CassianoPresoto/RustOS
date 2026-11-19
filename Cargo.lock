@@ -158,11 +158,20 @@ version = "0.1.0"
 dependencies = [
  "rustos-arch-aarch64-user",
  "rustos-arch-x86_64-user",
+ "rustos-cpio",
+ "rustos-elf",
  "rustos-hal",
 ]
 
 [[package]]
 name = "rustos-user-test-big"
+version = "0.1.0"
+dependencies = [
+ "rustos-user-rt",
+]
+
+[[package]]
+name = "rustos-user-test-child"
 version = "0.1.0"
 dependencies = [
  "rustos-user-rt",
@@ -177,6 +186,13 @@ dependencies = [
 
 [[package]]
 name = "rustos-user-test-lazy"
+version = "0.1.0"
+dependencies = [
+ "rustos-user-rt",
+]
+
+[[package]]
+name = "rustos-user-test-procs"
 version = "0.1.0"
 dependencies = [
  "rustos-user-rt",

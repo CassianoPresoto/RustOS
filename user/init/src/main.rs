@@ -1,13 +1,19 @@
 //! O `init`: o primeiro programa de usuário. Confere o que o kernel deixou na pilha inicial
 //! (auxv, alinhamento, handle de boot), lê a mensagem de boot e escreve pelo console que ela traz,
-//! exercita canal e espera com um canal próprio, chama `clock_get_monotonic` e `random_get`, e sai com 0.
+//! exercita canal e espera com um canal próprio, cria um processo filho a partir do initramfs (lê o ELF
+//! pelo VMO, mapeia os segmentos, escreve a mensagem de boot com o console e o inicia), espera o
+//! `TERMINATED` dele, chama `clock_get_monotonic` e `random_get`, e sai com 0.
 
 #![no_std]
 #![no_main]
 #![forbid(unsafe_code)]
 
 use rustos_user_rt::boot::{self, Boot};
-use rustos_user_rt::{Env, Handle, Rights, Status, entry, entry_address, println, signals, sys};
+use rustos_user_rt::spawn::{self, Parent};
+use rustos_user_rt::vm::Archive;
+use rustos_user_rt::{
+    Env, Handle, Rights, Status, boot_kind, entry, entry_address, println, signals, sys,
+};
 
 entry!(main);
 
@@ -124,6 +130,35 @@ fn own_channel(console: Handle) -> Result<(), &'static str> {
     sys::handle_close(b).map_err(|_| "handle_close of the second end")
 }
 
+/// O filho: lê o `child` do initramfs (o VMO que o kernel entregou), cria o processo, mapeia os
+/// segmentos, monta a pilha, escreve a mensagem de boot com o console e o inicia; depois espera o
+/// `TERMINATED` dele. O filho escreve pelo console que recebeu e sai.
+fn child(boot: Boot) -> Result<(), &'static str> {
+    let parent = Parent::from_boot(&boot).ok_or("a process and a root VMAR in the boot message")?;
+    let console = boot.console.ok_or("a console in the boot message")?;
+    let Some(initramfs) = boot.initramfs else {
+        println!("init: no initramfs in the boot message, no child");
+        return Ok(());
+    };
+    let archive = Archive::open(parent.vmar, initramfs).map_err(|_| "mapping the initramfs")?;
+    let file = archive.file(b"child").ok_or("the child in the initramfs")?;
+    let child = spawn::create(parent, file).map_err(|_| "creating the child process")?;
+    let lent = sys::handle_duplicate(console, Rights::WRITE.union(Rights::TRANSFER))
+        .map_err(|_| "duplicating the console for the child")?;
+    child
+        .send_boot(&[(boot_kind::CONSOLE, lent)])
+        .map_err(|_| "writing the boot message")?;
+    let sp = child.stack().map_err(|_| "building the child stack")?;
+    let thread = child.start(sp).map_err(|_| "starting the child")?;
+    let now = sys::clock_get_monotonic().map_err(|_| "the clock")?;
+    let waited = child.wait(now + 5_000_000_000);
+    let _ = sys::handle_close(thread);
+    child.release();
+    waited.map_err(|_| "the child terminating")?;
+    println!("init: the child process ran and terminated");
+    Ok(())
+}
+
 fn handles(env: &Env, boot: Boot) -> bool {
     let result = boot_channel(env, boot).and_then(own_channel);
     match result {
@@ -157,6 +192,12 @@ fn main(env: &Env) -> i64 {
     }
     if !handles(env, boot) && code == 0 {
         code = 101;
+    }
+    if let Err(what) = child(boot) {
+        println!("init: FAILED {what}");
+        if code == 0 {
+            code = 102;
+        }
     }
     let first = sys::clock_get_monotonic();
     let second = sys::clock_get_monotonic();
