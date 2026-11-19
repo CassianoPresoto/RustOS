@@ -9,11 +9,14 @@ use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use rustos_hal::abi::{ProcessEvent, event_kind, fault_kind};
 
+mod demand;
+
 use super::{Program, Source, fault_peak, last_event, spawn, spawn_keeping};
 use crate::frames::Frames;
 use crate::platform::user_blob::{Case, image, offset};
-use crate::uspace::{UserSpace, set_frame_budget};
+use crate::uspace::{Resolved, UserSpace, set_frame_budget};
 use crate::{loader, platform, scrub, task};
+use rustos_mm::vmar::Access;
 
 /// Quanto o autoteste espera um processo acabar, e o passo da espera.
 const WAIT_NS: u64 = 15_000_000_000;
@@ -220,6 +223,18 @@ fn handles_program_runs(frames: Frames, map_offset: u64, archive: Option<&[u8]>)
     exited_with(result, 0) && first && second && seconds < 5
 }
 
+/// O `lazy` do initramfs: pilha e `.bss` sob demanda, com os números por página (4c).
+fn lazy_program_runs(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
+    let find = |name: &[u8]| archive.and_then(|archive| loader::find(archive, name).ok());
+    let (Some(init), Some(lazy)) = (find(b"init"), find(b"lazy")) else {
+        return false;
+    };
+    let Some(slack) = settled_slack(frames, map_offset, init) else {
+        return false;
+    };
+    demand::lazy_program(frames, map_offset, lazy, slack)
+}
+
 /// Escreve `value` em `bytes` bytes little-endian a partir de `at`.
 fn put(file: &mut [u8], at: usize, value: u64, bytes: usize) {
     file[at..at + bytes].copy_from_slice(&value.to_le_bytes()[..bytes]);
@@ -298,7 +313,15 @@ fn unaligned_segment_loads_zeroed(frames: Frames, map_offset: u64) -> bool {
         return false;
     };
     let loaded = loader::load_image(&mut space, &mut tree, &file);
+    let lazy_tail = [0x40_4000, 0x40_5000]
+        .iter()
+        .all(|&page| !space.read(page, &mut [0; 1]));
+    let resolved = [0x40_4000, 0x40_5000]
+        .iter()
+        .all(|&page| space.resolve_fault(&tree, page, Access::Read) == Ok(Resolved::ZeroPage));
     let ok = loaded.is_ok_and(|loaded| loaded.segments == 2)
+        && lazy_tail
+        && resolved
         && user_bytes_are(&space, 0x40_0000, 4, |index| b"\x7fELF"[index])
         && user_bytes_are(&space, 0x40_3000, 0x1000, |index| {
             if (0x10..0x30).contains(&index) {
@@ -331,10 +354,13 @@ fn loader_leaves_no_frame_behind(frames: Frames, map_offset: u64, archive: Optio
     let before = frames.free_frames();
     let refused = early.into_iter().all(try_spawn);
     let early_ok = refused && frames.free_frames() == before;
-    // A falta de frame na página `n` de dados: 1 (primeiro segmento), 3 e 5 (imagem e pilha) e 18 (a
-    // última página da pilha, na segunda chamada de `map_at`).
+    // A falta de frame na página `n` de dados: a primeira, uma do meio e a última, que é a da pilha
+    // com os argumentos (a pilha só ganha essa; o resto dela é preguiçoso).
     let mut late_ok = true;
-    for budget in [1, 3, 5, 18] {
+    let Some(total) = spawned_data_frames(frames, map_offset, good) else {
+        return false;
+    };
+    for budget in [1, total / 2, total - 1] {
         let before = frames.free_frames();
         set_frame_budget(Some(budget));
         let refused = try_spawn(good);
@@ -342,6 +368,20 @@ fn loader_leaves_no_frame_behind(frames: Frames, map_offset: u64, archive: Optio
         late_ok &= refused && frames.free_frames() == before;
     }
     early_ok && late_ok
+}
+
+/// Os frames de dados que o carregador mapeia para `file`: o processo roda até sair.
+fn spawned_data_frames(frames: Frames, map_offset: u64, file: &[u8]) -> Option<u64> {
+    let spawned = spawn(frames, map_offset, Source::Elf(file), here()).ok()?;
+    let deadline = platform::now_ns()? + WAIT_NS;
+    while !task::has_exited(spawned.task) {
+        let now = platform::now_ns()?;
+        if now > deadline {
+            return None;
+        }
+        task::sleep_until(now + POLL_NS);
+    }
+    Some(spawned.stats.data)
 }
 
 fn exited_with(result: Option<(u32, ProcessEvent)>, code: i64) -> bool {
@@ -440,10 +480,15 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
     let trap = faulted(run_case(frames, map_offset, Case::FaultTrap, 0, 0)).is_some();
     let stack = faulted(run_case(frames, map_offset, Case::FaultBadStack, 0, 0)).is_some();
     let flags = flags_survive(frames, map_offset);
+    let resolver = demand::resolver_cases(frames, map_offset);
     let big = big_program_runs(frames, map_offset, archive);
     let handles = handles_program_runs(frames, map_offset, archive);
     let refused = loader_leaves_no_frame_behind(frames, map_offset, archive);
     let unaligned = unaligned_segment_loads_zeroed(frames, map_offset);
+    let lazy = resolver && lazy_program_runs(frames, map_offset, archive);
+    let shot = demand::shootdown(frames, map_offset)
+        && demand::ring_stress(frames, map_offset, demand::RING_ROUNDS, false)
+        && demand::ring_stress(frames, map_offset, demand::RING_ROUNDS, true);
     let (syscall_depth, fault_depth) = (scrub::deepest(), fault_peak());
     scrub::set_measuring(false);
     let clean_found = residue(frames, map_offset);
@@ -487,9 +532,12 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
         && handles
         && refused
         && unaligned
+        && resolver
+        && lazy
+        && shot
         && medians.is_some();
     kprintln!(
-        "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, flags {flags}, stack clean {scrub_ok}, big {big}, handles {handles}, bad executables {refused}, unaligned segment {unaligned})",
+        "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, flags {flags}, stack clean {scrub_ok}, big {big}, handles {handles}, bad executables {refused}, unaligned segment {unaligned}, fault resolver {resolver}, lazy program {lazy}, tlb shootdown {shot})",
         if ok { "ok" } else { "FAILED" }
     );
     ok

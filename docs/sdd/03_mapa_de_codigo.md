@@ -25,9 +25,11 @@
 │       ├── interrupts.rs       # IRQ do timer (o que o escalonador pede: acordar, fim de fatia, próximo disparo), fila de entrada e o relatório de falha
 │       ├── process.rs          # processo de usuário (um espaço, uma thread, uma árvore de regiões, a tabela de handles): `spawn` de um ELF ou, no modo de teste, de um programa plano, `process_main`, `exit`, `user_fault` (mata o processo, esvazia a tabela e o kernel segue); `process/boot.rs`: o canal de boot; `process/selftest.rs`: o autoteste dos casos de usuário (feature `selftest`)
 │       ├── object.rs           # os objetos do kernel sobre o `core/object` (4c): o enum `Obj` de `Arc`, o `Lock` do `IrqLock`, os slots da tabela, a espera por máscara de tarefas, o par de pontas de canal, a cobrança de pontas
-│       ├── loader.rs           # o carregador de ELF do initramfs (4b): `core/cpio` + `core/elf`, `PT_LOAD` em frames novos, `Vmar` do processo e a pilha inicial com guarda e topo sorteado
+│       ├── loader.rs           # o carregador de ELF do initramfs (4b): `core/cpio` + `core/elf`, `PT_LOAD` em frames novos (o `.bss` de páginas inteiras e a pilha, regiões preguiçosas, 4c), `Vmar` do processo e a pilha inicial com guarda e topo sorteado
 │       ├── init.rs             # (feature `selftest`) lança o `init` do initramfs, espera e confere o código de saída; mede o custo do menor processo
-│       ├── uspace.rs           # UserSpace: tabelas da metade baixa, mapeamento de frames zerados (`map_at`) e a devolução zerada na morte
+│       ├── uspace.rs           # UserSpace: tabelas da metade baixa, mapeamento de frames zerados (`map_at`), a falta de página resolvida (página zero, frame novo, cópia da página zero), `unmap_page` com *shootdown*, a máscara de CPUs ativas e a devolução zerada na morte (4c)
+│       ├── commit.rs           # a promessa estrita das páginas preguiçosas contra os frames livres (decisão 9 do SDD 17, a parte da 4c)
+│       ├── tlb.rs              # *shootdown* de TLB: no x86_64 caixas por par de CPUs e o IPI `0xFC` com espera; no aarch64 nada (o `tlbi ...is` basta)
 │       ├── syscall.rs          # o despacho da ABI nativa por tabela com clamp: `nop`, `clock_get_monotonic`, `random_get`, `process_exit`, `debug_write(console, …)`; `syscall/handles.rs`: handle, canal e espera (4c); VMO, VMAR, processo e thread ainda devolvem `NotSupported`
 │       ├── scrub.rs            # a limpeza da pilha do kernel na volta ao usuário (`Handlers::leave_user`)
 │       ├── stack.rs            # marca d'água das pilhas: pinta com um padrão e lê o pico varrendo do fundo (SDD 15)
@@ -65,6 +67,7 @@
 │   ├── init/                   # rustos-user-init: o `init`, `forbid(unsafe_code)`
 │   ├── tests/big/              # rustos-user-test-big: programa de teste de 1,3 MiB (carregador e `code-model=small`); só entra na imagem com `selftest`
 │   ├── tests/handles/          # rustos-user-test-handles: os casos hostis de handle, canal e espera (usa `rt` com `raw-syscalls`); só entra na imagem com `selftest`
+│   ├── tests/lazy/             # rustos-user-test-lazy: pilha e `.bss` sob demanda, leitura antes da escrita e o tempo por página dos três caminhos da falta; só com `selftest`
 │   └── link/                   # x86_64.ld, aarch64.ld: `ET_EXEC` em `0x40_0000`, uma página por permissão
 ├── boot/
 │   └── limine/                 # rustos-boot-limine: protocolo Limine rev. 6 (inclusive MP e módulos) escrito aqui → hal::BootInfo
@@ -102,7 +105,7 @@
 | `rustos-driver-uart16550`, `rustos-driver-pl011`, `rustos-driver-i8042`, `rustos-driver-gicv3` | `rustos-hal` |
 | `rustos-arch-x86_64-user`, `rustos-arch-aarch64-user` | `rustos-hal` (só no alvo bare-metal da ISA) |
 | `rustos-user-rt` | `rustos-hal`; por ISA, `arch-<isa>-user` (só bare-metal) |
-| `rustos-user-init`, `rustos-user-test-big` | `rustos-user-rt` |
+| `rustos-user-init`, `rustos-user-test-big`, `rustos-user-test-lazy` | `rustos-user-rt` |
 | `rustos-kernel` | `hal`, `mm`, `crypto`, `sched`, `gfx`, `term`, `shell`, `cpio`, `elf`, `sync`, `boot-limine`; por ISA, `arch-*` e os drivers (x86_64: `uart16550`, `i8042`; aarch64: `pl011`, `gicv3`) |
 | `xtask` | nada (só `std`) |
 

@@ -1,6 +1,7 @@
 //! O carregador de executável do initramfs (SDD 17, fatia 4b): acha o arquivo no `cpio`, valida o
 //! ELF com o `core/elf`, copia cada `PT_LOAD` para frames novos, registra as regiões no `Vmar` do
-//! processo e monta a pilha inicial com guarda. Sem objeto VMO nem VMAR e sem handle.
+//! processo e monta a pilha inicial com guarda. A pilha e o `.bss` de páginas inteiras são regiões
+//! preguiçosas: reservadas, sem frames até o primeiro toque. Sem objeto VMO nem VMAR e sem handle.
 #![cfg_attr(
     not(feature = "selftest"),
     allow(
@@ -27,7 +28,7 @@ use crate::uspace::UserSpace;
 pub type RegionTree = Vmar<Box<[Region]>>;
 
 /// Regiões que cabem na árvore: no máximo 16 `PT_LOAD` e a pilha, com folga para os mapeamentos da
-/// 4c; 32 regiões custam 1 KiB por processo.
+/// 4c; 32 regiões custam 1 KiB por processo. O `.bss` preguiçoso não ganha região à parte.
 pub const REGION_CAPACITY: usize = 32;
 
 /// A pilha inicial: 16 páginas, com uma página de guarda abaixo e outra acima.
@@ -125,8 +126,9 @@ fn summary(image: &Image) -> Loaded {
     }
 }
 
-/// Aloca os frames do segmento (zerados), copia os bytes do arquivo a partir de `p_vaddr` (o começo
-/// da primeira página e a cauda até `p_memsz` ficam zero) e mapeia com a permissão dele.
+/// Aloca os frames das páginas que têm bytes do arquivo (zerados, com o começo da primeira página e
+/// a cauda delas em zero) e mapeia com a permissão do segmento. As páginas só de `.bss` de um
+/// segmento gravável ficam sem frame: a região é preguiçosa.
 fn map_segment(
     space: &mut UserSpace,
     tree: &mut RegionTree,
@@ -139,8 +141,20 @@ fn map_segment(
         .ok_or(LoadError::Elf(elf::Error::SegmentOutOfFile))?;
     let lead = usize::try_from(segment.page_offset(PAGE_SIZE)).unwrap_or(0);
     let (flags, perms) = permissions(segment);
-    tree.reserve(start, end - start, Attrs::new(Kind::Image, perms))?;
-    space.map_at(start, lead, bytes, (end - start) / PAGE_SIZE, flags)?;
+    let total = (end - start) / PAGE_SIZE;
+    let eager = if flags.writable {
+        ((lead + bytes.len()) as u64).div_ceil(PAGE_SIZE).min(total)
+    } else {
+        total
+    };
+    let attrs = Attrs::new(Kind::Image, perms);
+    tree.reserve(
+        start,
+        end - start,
+        if eager < total { attrs.lazy() } else { attrs },
+    )?;
+    space.map_at(start, lead, bytes, eager, flags)?;
+    space.reserve_lazy(total - eager)?;
     Ok(())
 }
 
@@ -155,8 +169,8 @@ fn permissions(segment: &Segment) -> (PageFlags, Perms) {
     }
 }
 
-/// Registra e mapeia a pilha (guarda abaixo e acima, topo sorteado) e grava nela `argc`, `argv`,
-/// `envp` e o auxv. Devolve o `sp` de entrada, alinhado a 16.
+/// Registra a pilha (guarda abaixo e acima, topo sorteado, preguiçosa) e mapeia só a última página,
+/// com `argc`, `argv`, `envp` e o auxv; as outras nascem na falta. Devolve o `sp` de entrada, alinhado a 16.
 pub fn map_stack(
     space: &mut UserSpace,
     tree: &mut RegionTree,
@@ -175,7 +189,9 @@ pub fn map_stack(
     }
     let start = drawn.ok_or(LoadError::NoEntropy)?;
     let top = start + STACK_PAGES * PAGE_SIZE;
-    let attrs = Attrs::new(Kind::Stack, Perms::READ.union(Perms::WRITE)).with_guards(true, true);
+    let attrs = Attrs::new(Kind::Stack, Perms::READ.union(Perms::WRITE))
+        .with_guards(true, true)
+        .lazy();
     tree.reserve(start, STACK_PAGES * PAGE_SIZE, attrs)?;
     let mut random_bytes = [0_u8; AT_RANDOM_LEN];
     for chunk in random_bytes.as_chunks_mut::<8>().0 {
@@ -194,20 +210,17 @@ pub fn map_stack(
     rustos_crypto::wipe(&mut info.random);
     let mut initial = built.ok_or(LoadError::StackLayout)?;
     let lead = usize::try_from(PAGE_SIZE).unwrap_or(0) - initial.bytes().len();
-    let mapped = space
-        .map_at(start, 0, &[], STACK_PAGES - 1, PageFlags::USER_DATA)
-        .and_then(|()| {
-            space.map_at(
-                top - PAGE_SIZE,
-                lead,
-                initial.bytes(),
-                1,
-                PageFlags::USER_DATA,
-            )
-        });
+    let mapped = space.map_at(
+        top - PAGE_SIZE,
+        lead,
+        initial.bytes(),
+        1,
+        PageFlags::USER_DATA,
+    );
     let sp = initial.sp();
     rustos_crypto::wipe(initial.storage_mut());
     mapped?;
+    space.reserve_lazy(STACK_PAGES - 1)?;
     Ok(sp)
 }
 

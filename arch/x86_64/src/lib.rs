@@ -67,7 +67,7 @@ pub use entropy::X86Entropy;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use mmio::MmioBus;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub use mmu::{DirectMapTables, X86Mmu, active_root, require_features};
+pub use mmu::{DirectMapTables, X86Mmu, active_root, flush_pages, require_features};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use nospec::array_index_mask_nospec;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]

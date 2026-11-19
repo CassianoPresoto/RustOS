@@ -14,6 +14,7 @@ mod addr;
 mod bench;
 mod boot;
 mod boot_time;
+mod commit;
 #[macro_use]
 mod console;
 mod early;
@@ -45,6 +46,7 @@ mod sync;
 mod syscall;
 mod system;
 mod task;
+mod tlb;
 mod uspace;
 mod vm;
 

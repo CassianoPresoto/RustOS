@@ -91,6 +91,9 @@ pub struct Attrs {
     pub guard_above: bool,
     /// `None`: região anônima.
     pub backing: Option<Backing>,
+    /// Anônima e preguiçosa: a reserva não traz frames, e a falta numa página ausente resolve com a
+    /// página zero (leitura) ou um frame novo (escrita), conforme `Vmar::plan_fault`.
+    pub lazy: bool,
 }
 
 impl Attrs {
@@ -102,7 +105,14 @@ impl Attrs {
             guard_below: false,
             guard_above: false,
             backing: None,
+            lazy: false,
         }
+    }
+
+    /// `self` preguiçosa: sem frames até o primeiro toque.
+    #[must_use]
+    pub const fn lazy(self) -> Self {
+        Self { lazy: true, ..self }
     }
 
     /// `self` com as guardas de baixo e de cima ligadas ou desligadas.
@@ -198,6 +208,33 @@ pub enum FaultError {
     Guard,
     /// A região existe e não permite este acesso.
     Permission,
+    /// A página não está mapeada e a região não é preguiçosa: nada a criar (o carregador mapeia
+    /// tudo antes de rodar).
+    Unbacked,
+}
+
+/// O que as tabelas dizem da página que faltou, para `Vmar::plan_fault`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mapped {
+    /// Sem folha.
+    Absent,
+    /// A folha é a página zero compartilhada, só leitura.
+    ZeroPage,
+    /// A folha é um frame do processo.
+    Private,
+}
+
+/// O que o tratador da falta faz numa região preguiçosa.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultPlan {
+    /// Mapeia a página zero, só leitura e sem execução.
+    MapZero,
+    /// Aloca um frame zerado e o mapeia gravável.
+    MapFresh,
+    /// Aloca um frame zerado e o põe no lugar da página zero, gravável; invalida a entrada.
+    CopyZero,
+    /// A página já serve ao acesso (outra CPU a resolveu antes, ou o TLB estava velho): só repete.
+    Retry,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -415,6 +452,25 @@ impl<S: AsRef<[Region]> + AsMut<[Region]>> Vmar<S> {
             Hit::Guard(_) => Err(FaultError::Guard),
             Hit::Region(region) if region.attrs.perms.permits(access) => Ok(region),
             Hit::Region(_) => Err(FaultError::Permission),
+        }
+    }
+
+    /// Decide a falta de página de usuário: o que o tratador faz, ou por que o processo morre.
+    /// `mapped` é o que as tabelas dizem da página que faltou.
+    pub fn plan_fault(
+        &self,
+        addr: u64,
+        access: Access,
+        mapped: Mapped,
+    ) -> Result<FaultPlan, FaultError> {
+        let region = self.check_fault(addr, access)?;
+        match (mapped, access) {
+            (Mapped::Private, _) | (Mapped::ZeroPage, Access::Read) => Ok(FaultPlan::Retry),
+            _ if !region.attrs.lazy => Err(FaultError::Unbacked),
+            (_, Access::Execute) => Err(FaultError::Permission),
+            (Mapped::Absent, Access::Read) => Ok(FaultPlan::MapZero),
+            (Mapped::Absent, Access::Write) => Ok(FaultPlan::MapFresh),
+            (Mapped::ZeroPage, _) => Ok(FaultPlan::CopyZero),
         }
     }
 
@@ -938,6 +994,100 @@ mod tests {
         assert_eq!(
             vmar.check_fault(u64::MAX, Access::Read),
             Err(FaultError::NoRegion)
+        );
+    }
+
+    fn lazy_vmar() -> Vmar<[Region; 4]> {
+        let mut vmar = vmar::<4>();
+        let stack = RW.with_guards(true, true).lazy();
+        vmar.reserve(LO + PAGE, 4 * PAGE, stack).unwrap();
+        let rodata = Attrs::new(Kind::Image, Perms::READ).lazy();
+        vmar.reserve(LO + 8 * PAGE, PAGE, rodata).unwrap();
+        vmar.reserve(LO + 10 * PAGE, PAGE, RW).unwrap();
+        vmar
+    }
+
+    #[test]
+    fn a_lazy_region_resolves_an_absent_page_by_the_access() {
+        let vmar = lazy_vmar();
+        let at = LO + 2 * PAGE + 24;
+        assert_eq!(
+            vmar.plan_fault(at, Access::Read, Mapped::Absent),
+            Ok(FaultPlan::MapZero)
+        );
+        assert_eq!(
+            vmar.plan_fault(at, Access::Write, Mapped::Absent),
+            Ok(FaultPlan::MapFresh)
+        );
+    }
+
+    #[test]
+    fn a_write_over_the_zero_page_copies_it_and_a_read_just_retries() {
+        let vmar = lazy_vmar();
+        let at = LO + 3 * PAGE;
+        assert_eq!(
+            vmar.plan_fault(at, Access::Write, Mapped::ZeroPage),
+            Ok(FaultPlan::CopyZero)
+        );
+        assert_eq!(
+            vmar.plan_fault(at, Access::Read, Mapped::ZeroPage),
+            Ok(FaultPlan::Retry)
+        );
+    }
+
+    #[test]
+    fn a_page_another_cpu_already_resolved_only_retries() {
+        let vmar = lazy_vmar();
+        for access in [Access::Read, Access::Write] {
+            assert_eq!(
+                vmar.plan_fault(LO + PAGE, access, Mapped::Private),
+                Ok(FaultPlan::Retry)
+            );
+        }
+    }
+
+    #[test]
+    fn the_plan_keeps_the_region_rules_guards_holes_and_permissions() {
+        let vmar = lazy_vmar();
+        assert_eq!(
+            vmar.plan_fault(LO, Access::Write, Mapped::Absent),
+            Err(FaultError::Guard)
+        );
+        assert_eq!(
+            vmar.plan_fault(LO + 5 * PAGE, Access::Read, Mapped::Absent),
+            Err(FaultError::Guard)
+        );
+        assert_eq!(
+            vmar.plan_fault(LO + 6 * PAGE, Access::Read, Mapped::Absent),
+            Err(FaultError::NoRegion)
+        );
+        assert_eq!(
+            vmar.plan_fault(LO + 8 * PAGE, Access::Write, Mapped::Absent),
+            Err(FaultError::Permission)
+        );
+        assert_eq!(
+            vmar.plan_fault(LO + 2 * PAGE, Access::Execute, Mapped::Absent),
+            Err(FaultError::Permission)
+        );
+        assert_eq!(
+            vmar.plan_fault(LO + 8 * PAGE, Access::Read, Mapped::Absent),
+            Ok(FaultPlan::MapZero)
+        );
+    }
+
+    #[test]
+    fn a_region_that_is_not_lazy_never_creates_a_page() {
+        let vmar = lazy_vmar();
+        let at = LO + 10 * PAGE;
+        for access in [Access::Read, Access::Write] {
+            assert_eq!(
+                vmar.plan_fault(at, access, Mapped::Absent),
+                Err(FaultError::Unbacked)
+            );
+        }
+        assert_eq!(
+            vmar.plan_fault(at, Access::Read, Mapped::Private),
+            Ok(FaultPlan::Retry)
         );
     }
 

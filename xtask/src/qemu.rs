@@ -100,7 +100,7 @@ const BENCH_REFUSED: &str = "bench: not in this build";
 
 /// O que só o modo de teste imprime: se uma destas faltar, a linha de comando se perdeu e o
 /// boot que passou foi o normal.
-const SELFTEST_LINES: [(&str, &str); 19] = [
+const SELFTEST_LINES: [(&str, &str); 23] = [
     (
         "[rustos] cpu features: ",
         "os recursos de CPU das mitigações",
@@ -138,8 +138,24 @@ const SELFTEST_LINES: [(&str, &str); 19] = [
         "o autoteste dos casos de usuário",
     ),
     (
-        "[rustos] initramfs: 3 files, ",
-        "a leitura do initramfs (o `init`, o `big` e o `handles`)",
+        "[rustos] initramfs: 4 files, ",
+        "a leitura do initramfs (o `init`, o `big`, o `handles` e o `lazy`)",
+    ),
+    (
+        "[user] lazy: ok (",
+        "o `lazy`: pilha e `.bss` sob demanda, com a página zero e a cópia dela",
+    ),
+    (
+        "[rustos] user: demand paging: ",
+        "as faltas de página resolvidas pelo kernel (página zero, frame novo, cópia)",
+    ),
+    (
+        "[rustos] tlb shootdown: ok (cpu ",
+        "o teste de invalidação do TLB entre CPUs",
+    ),
+    (
+        "[rustos] tlb shootdown ring: ok (",
+        "o estresse de invalidação do TLB em anel com todas as CPUs",
     ),
 ];
 /// O que o boot normal confere, além do que o `REQUIRED` tem de comum aos dois modos.
@@ -672,14 +688,17 @@ fn stream_chunks(mut stdout: impl Read, sender: &mpsc::Sender<String>) {
     }
 }
 
-/// O que o smoke imprime: as linhas do kernel e as dos programas de usuário (menos as sondas, que
-/// só provam que um handle escreve).
+/// Imprime o que o kernel disse e, depois da marca, o que os programas de usuário disseram: o
+/// prefixo `[user]` mostra de quem é cada linha (só as do kernel valem para os gates). As sondas do
+/// `handles`, que só provam que um handle escreve, ficam de fora.
 fn print_kernel_lines(log: &str) {
-    for line in log.split('\n').map(|line| line.trim_end_matches('\r')) {
-        let user = line.starts_with("[user] ") && !line.starts_with("[user] probe");
-        if user || line.starts_with("[rustos]") {
-            println!("  {}", line.trim_end());
-        }
+    for line in log
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| line.starts_with("[rustos]") || line.starts_with("[user] "))
+        .filter(|line| !line.starts_with("[user] probe"))
+    {
+        println!("  {}", line.trim_end());
     }
 }
 
@@ -790,7 +809,7 @@ mod tests {
             "[rustos] heap self-test: ok",
             "[rustos] timer: 100 Hz",
             "[rustos] initramfs: not mapped, the boot goes on without it",
-            "[rustos] initramfs: 3 files, 272 bytes",
+            "[rustos] initramfs: 4 files, 272 bytes",
             "[rustos] user: fault contained (pid 3)",
             "[rustos] user self-test: ok",
         ] {
