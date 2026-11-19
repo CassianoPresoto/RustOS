@@ -1,11 +1,12 @@
 //! Comandos embutidos: uma tabela de `{ name, summary, run }`.
 
-use core::fmt;
+use core::fmt::{self, Write as _};
 
 use crate::ansi::{ACCENT, CLEAR_SCREEN, DIM, LOGO, RESET};
-use crate::fmtutil::{Bytes, Millis, Percent, Pid, Seconds, StackUse, Uptime};
+use crate::fmtutil::{Bytes, Millis, Percent, Pid, Seconds, StackStr, StackUse, Uptime};
 use crate::history::Entries;
 use rustos_hal::PAGE_SIZE;
+use rustos_hal::abi::USER_MIN;
 
 use crate::host::{Access, FaultTest, Host, KillCause, Listing, RunOutcome, SystemInfo, TaskState};
 
@@ -446,34 +447,50 @@ fn run(ctx: &mut Ctx<'_>) -> fmt::Result {
             .out
             .write_str("run: programs take no arguments yet (usage: run <program> [&])\r\n");
     }
-    match ctx.host.run_program(name, !background) {
-        RunOutcome::Exited { pid, code } => write!(ctx.out, "exit code {code} (pid {pid})\r\n"),
-        RunOutcome::Killed { pid, cause } => write!(ctx.out, "killed: {cause} (pid {pid})\r\n"),
-        RunOutcome::Started { pid } => write!(ctx.out, "started pid {pid}\r\n"),
-        RunOutcome::NotFound => write!(ctx.out, "run: {name}: no such program (try 'ls')\r\n"),
+    // Uma escrita só por linha: o console escreve por pedaço, e a saída de um processo em segundo
+    // plano rasgaria `started pid N` no meio (DEBT-0132).
+    let mut line = StackStr::<160>::new();
+    let shown = match ctx.host.run_program(name, !background) {
+        RunOutcome::Exited { pid, code } => write!(line, "exit code {code} (pid {pid})\r\n"),
+        RunOutcome::Killed { pid, cause } => write!(line, "killed: {cause} (pid {pid})\r\n"),
+        RunOutcome::Started { pid } => write!(line, "started pid {pid}\r\n"),
+        RunOutcome::NotFound => write!(line, "run: {name}: no such program (try 'ls')\r\n"),
         RunOutcome::NotExecutable => {
             write!(
-                ctx.out,
+                line,
                 "run: {name}: not an executable this kernel accepts\r\n"
             )
         }
-        RunOutcome::NoMemory => write!(ctx.out, "run: {name}: out of memory\r\n"),
-        RunOutcome::NoInitramfs => ctx.out.write_str("run: no initramfs in this boot\r\n"),
-        RunOutcome::Failed => write!(ctx.out, "run: {name}: could not start the process\r\n"),
+        RunOutcome::NoMemory => write!(line, "run: {name}: out of memory\r\n"),
+        RunOutcome::TooManyProcesses => write!(line, "run: {name}: too many processes\r\n"),
+        RunOutcome::NoInitramfs => write!(line, "run: no initramfs in this boot\r\n"),
+        RunOutcome::Failed => write!(line, "run: {name}: could not start the process\r\n"),
+    };
+    match shown {
+        Ok(()) => ctx.out.write_str(line.as_str()),
+        // Nome comprido demais para o buffer: o aviso curto basta.
+        Err(_) => ctx.out.write_str("run: the program name is too long\r\n"),
     }
 }
 
 impl fmt::Display for KillCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let what = |access| match access {
+            Access::Read => "read of",
+            Access::Write => "write to",
+            Access::Execute => "instruction fetch at",
+        };
         match *self {
-            Self::PageFault { address: 0, .. } => f.write_str("page fault outside the user half"),
+            Self::PageFault { address, access } if address < USER_MIN => write!(
+                f,
+                "page fault on a {} {address:#x} (null or low address)",
+                what(access)
+            ),
             Self::PageFault { address, access } => {
-                let what = match access {
-                    Access::Read => "read of",
-                    Access::Write => "write to",
-                    Access::Execute => "instruction fetch at",
-                };
-                write!(f, "page fault on a {what} {address:#x}")
+                write!(f, "page fault on a {} {address:#x}", what(access))
+            }
+            Self::KernelPageFault { access } => {
+                write!(f, "page fault on a {} a kernel address", what(access))
             }
             Self::IllegalInstruction => f.write_str("illegal instruction"),
             Self::Unaligned => f.write_str("unaligned access"),
@@ -905,6 +922,42 @@ mod tests {
         }
     }
 
+    /// Um `Write` que conta as chamadas: o console escreve por pedaço, e cada pedaço pega o lock.
+    struct Counting(String, usize);
+
+    impl fmt::Write for Counting {
+        fn write_str(&mut self, text: &str) -> fmt::Result {
+            self.1 += 1;
+            self.0.push_str(text);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn each_run_answer_is_one_write_so_background_output_cannot_tear_it() {
+        let mut host = FakeHost::new();
+        for outcome in [
+            RunOutcome::Started { pid: 12 },
+            RunOutcome::Exited { pid: 3, code: -1 },
+            RunOutcome::Killed {
+                pid: 3,
+                cause: KillCause::IllegalInstruction,
+            },
+            RunOutcome::NotFound,
+        ] {
+            host.outcome = outcome;
+            let mut out = Counting(String::new(), 0);
+            let mut ctx = Ctx {
+                args: &["x", "&"],
+                host: &host,
+                out: &mut out,
+                history: &crate::history::History::<16, 4>::new(),
+            };
+            super::run(&mut ctx).unwrap();
+            assert_eq!(out.1, 1, "{outcome:?}: {:?}", out.0);
+        }
+    }
+
     #[test]
     fn run_shows_the_cause_of_a_death_without_kernel_addresses() {
         let fault = KillCause::PageFault {
@@ -921,7 +974,13 @@ mod tests {
                     address: 0,
                     access: Access::Read,
                 },
-                "killed: page fault outside the user half (pid 5)",
+                "killed: page fault on a read of 0x0 (null or low address) (pid 5)",
+            ),
+            (
+                KillCause::KernelPageFault {
+                    access: Access::Write,
+                },
+                "killed: page fault on a write to a kernel address (pid 5)",
             ),
             (
                 KillCause::IllegalInstruction,
@@ -945,6 +1004,7 @@ mod tests {
                 "run: x: not an executable this kernel accepts",
             ),
             (RunOutcome::NoMemory, "run: x: out of memory"),
+            (RunOutcome::TooManyProcesses, "run: x: too many processes"),
             (RunOutcome::NoInitramfs, "run: no initramfs in this boot"),
             (RunOutcome::Failed, "run: x: could not start the process"),
         ];

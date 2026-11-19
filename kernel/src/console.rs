@@ -45,6 +45,19 @@ pub fn print(args: fmt::Arguments<'_>) {
     flush();
 }
 
+/// Como `print`, mas só na serial: a tela fica para o que o usuário lê (SDD 17, "O M1"). Serve às
+/// linhas de diagnóstico do ciclo de vida do processo, que repetem o que o shell já mostra.
+pub fn print_serial(args: fmt::Arguments<'_>) {
+    if panic::elsewhere() {
+        return;
+    }
+    if let Some(serial) = SERIAL.lock().as_mut() {
+        addr::scrubbed(Writer(serial), |out| {
+            out.write_fmt(args).ok();
+        });
+    }
+}
+
 /// Desenha na tela o que o `Sink` escreveu: uma vez por mensagem ou tecla, não
 /// por pedaço de texto, porque cada desenho repinta linhas inteiras.
 pub fn flush() {
@@ -205,4 +218,9 @@ impl Write for ScreenWriter<'_> {
 
 macro_rules! kprintln {
     ($($arg:tt)*) => { $crate::console::print(format_args!("{}\n", format_args!($($arg)*))) };
+}
+
+/// `kprintln!` só para a serial.
+macro_rules! kprintln_serial {
+    ($($arg:tt)*) => { $crate::console::print_serial(format_args!("{}\n", format_args!($($arg)*))) };
 }

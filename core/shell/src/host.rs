@@ -101,6 +101,8 @@ pub enum RunOutcome {
     NotExecutable,
     /// Faltou memória para criar o processo.
     NoMemory,
+    /// A tabela de tarefas do kernel está cheia.
+    TooManyProcesses,
     NoInitramfs,
     /// Qualquer outra falha ao criar o processo.
     Failed,
@@ -109,9 +111,13 @@ pub enum RunOutcome {
 /// Por que o kernel encerrou um processo. Só valores de usuário: nenhum endereço do kernel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KillCause {
-    /// Acesso a endereço sem mapa ou sem permissão; `address` zero é fora da metade do usuário.
+    /// Acesso a endereço de usuário sem mapa ou sem permissão; abaixo de `USER_MIN` é nulo ou quase.
     PageFault {
         address: u64,
+        access: Access,
+    },
+    /// A falta foi na metade do kernel: o endereço não sai do kernel.
+    KernelPageFault {
         access: Access,
     },
     IllegalInstruction,

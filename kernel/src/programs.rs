@@ -46,11 +46,11 @@ static ENDED: IrqLock<Ring> = IrqLock::new(Ring {
 static WAITERS: Waiters = Waiters::new();
 
 /// Chamado por `process::terminate`, na tarefa do processo, depois do log da morte.
-pub fn finished(pid: u32, event: &ProcessEvent, no_memory: bool) {
+pub fn finished(pid: u32, event: &ProcessEvent, no_memory: bool, kernel_half: bool) {
     let ended = if event.kind == event_kind::EXIT {
         Ended::Exit(event.code)
     } else {
-        Ended::Killed(cause(event, no_memory))
+        Ended::Killed(cause(event, no_memory, kernel_half))
     };
     {
         let mut ring = ENDED.lock();
@@ -61,21 +61,28 @@ pub fn finished(pid: u32, event: &ProcessEvent, no_memory: bool) {
     WAITERS.wake();
 }
 
-fn cause(event: &ProcessEvent, no_memory: bool) -> KillCause {
+fn cause(event: &ProcessEvent, no_memory: bool, kernel_half: bool) -> KillCause {
     if no_memory {
         return KillCause::OutOfMemory;
     }
     match event.fault_kind {
-        fault_kind::PAGE_FAULT => KillCause::PageFault {
-            address: event.addr,
-            access: if event.access & fault_access::EXECUTE != 0 {
+        fault_kind::PAGE_FAULT => {
+            let access = if event.access & fault_access::EXECUTE != 0 {
                 Access::Execute
             } else if event.access & fault_access::WRITE != 0 {
                 Access::Write
             } else {
                 Access::Read
-            },
-        },
+            };
+            if kernel_half {
+                KillCause::KernelPageFault { access }
+            } else {
+                KillCause::PageFault {
+                    address: event.addr,
+                    access,
+                }
+            }
+        }
         fault_kind::ILLEGAL_INSTRUCTION => KillCause::IllegalInstruction,
         fault_kind::UNALIGNED => KillCause::Unaligned,
         fault_kind::ARITHMETIC => KillCause::Arithmetic,
@@ -170,8 +177,9 @@ fn refusal(error: &ProcessError) -> RunOutcome {
     use crate::task::TaskError;
     match error {
         ProcessError::Load(LoadError::Elf(_)) => RunOutcome::NotExecutable,
+        ProcessError::Task(TaskError::NoSlot) => RunOutcome::TooManyProcesses,
         ProcessError::Load(LoadError::Map(MapError::OutOfFrames))
-        | ProcessError::Task(TaskError::NoMemory | TaskError::NoSlot | TaskError::Stack(_))
+        | ProcessError::Task(TaskError::NoMemory | TaskError::Stack(_))
         | ProcessError::Handles(rustos_hal::abi::Status::NoMemory) => RunOutcome::NoMemory,
         _ => RunOutcome::Failed,
     }

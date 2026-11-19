@@ -279,6 +279,8 @@ pub fn spawn_keeping(
         Err(error) => {
             // SAFETY: `raw` veio de `Box::into_raw` acima e a tarefa não chegou a existir.
             let process = unsafe { Box::from_raw(raw) };
+            // O número só vale a um processo que existiu: devolve-o se ninguém pegou o seguinte.
+            let _ = NEXT_PID.compare_exchange(pid + 1, pid, Ordering::Relaxed, Ordering::Relaxed);
             process.space.destroy();
             Err(ProcessError::Task(error))
         }
@@ -344,17 +346,20 @@ pub fn copy_ran_out_of_memory() -> bool {
 pub fn note_first_syscall() {
     if !FIRST_SYSCALL.swap(true, Ordering::Relaxed) {
         FIRST_SYSCALL_CYCLES.store(platform::cycles(), Ordering::Relaxed);
-        kprintln!("[rustos] user: entered ring3/el0");
+        kprintln_serial!("[rustos] user: entered ring3/el0");
     }
 }
 
 /// O fim do processo por `process_exit`. Nunca volta.
 pub fn exit(code: i64) -> ! {
-    terminate(ProcessEvent {
-        kind: event_kind::EXIT,
-        code,
-        ..ProcessEvent::default()
-    })
+    terminate(
+        ProcessEvent {
+            kind: event_kind::EXIT,
+            code,
+            ..ProcessEvent::default()
+        },
+        false,
+    )
 }
 
 /// O fim do processo por uma falha da CPU: o processo morre e o kernel segue. Nenhum endereço do
@@ -380,16 +385,21 @@ pub fn user_fault(fault: &Fault) -> ! {
         FaultKind::Breakpoint => (fault_kind::BREAKPOINT, 0, 0),
         _ => (fault_kind::OTHER, 0, 0),
     };
-    terminate(ProcessEvent {
-        kind: event_kind::FAULT,
-        fault_kind: kind,
-        access,
-        pc: fault.pc.as_u64().min(USER_TOP),
-        sp: fault.user_sp,
-        addr: if addr < USER_TOP { addr } else { 0 },
-        isa_code: fault.code,
-        ..ProcessEvent::default()
-    })
+    // O evento nunca leva endereço do kernel (vira 0); a frase da falta diz só que foi na metade dele.
+    let kernel_half = kind == fault_kind::PAGE_FAULT && addr >= USER_TOP;
+    terminate(
+        ProcessEvent {
+            kind: event_kind::FAULT,
+            fault_kind: kind,
+            access,
+            pc: fault.pc.as_u64().min(USER_TOP),
+            sp: fault.user_sp,
+            addr: if addr < USER_TOP { addr } else { 0 },
+            isa_code: fault.code,
+            ..ProcessEvent::default()
+        },
+        kernel_half,
+    )
 }
 
 fn fault_name(kind: u32) -> &'static str {
@@ -405,44 +415,49 @@ fn fault_name(kind: u32) -> &'static str {
 
 /// Mata o processo da tarefa corrente, na ordem do SDD 17: sai da raiz do processo antes de
 /// liberar qualquer tabela, devolve os frames zerados e só então encerra a tarefa.
-fn terminate(event: ProcessEvent) -> ! {
-    platform::cpu().save_and_disable_interrupts();
-    let Some(raw) = task::unbind_user() else {
-        panic!("falha de usuário sem processo na tarefa");
+fn terminate(event: ProcessEvent, kernel_half: bool) -> ! {
+    // Tudo o que tem dono (o `Box<Process>`, o `Arc<ProcessObj>`, a cota) cai neste bloco: o que
+    // sobrasse vivo até o `task::exit`, que não volta, nunca rodaria o `Drop` e vazaria heap.
+    let (pid, no_memory, cpu) = {
+        platform::cpu().save_and_disable_interrupts();
+        let Some(raw) = task::unbind_user() else {
+            panic!("falha de usuário sem processo na tarefa");
+        };
+        // SAFETY: `raw` é o `Box::into_raw` de `spawn`, guardado na tarefa e tirado dela agora.
+        let process = unsafe { Box::from_raw(ptr::with_exposed_provenance_mut::<Process>(raw)) };
+        let pid = process.pid;
+        let no_memory = process.out_of_memory;
+        let cpu = crate::percpu::pinned(crate::percpu::PerCpu::index);
+        process.space.wait_inactive();
+        let Process {
+            space,
+            regions,
+            object,
+            table,
+            ..
+        } = *process;
+        close_handles(&table);
+        drop(table);
+        #[cfg(feature = "selftest")]
+        {
+            *LAST_STATS.lock() = Some((pid, space.stats()));
+        }
+        space.destroy();
+        drop(regions);
+        object.terminate();
+        (pid, no_memory, cpu)
     };
-    // SAFETY: `raw` é o `Box::into_raw` de `spawn`, guardado na tarefa e tirado dela agora.
-    let process = unsafe { Box::from_raw(ptr::with_exposed_provenance_mut::<Process>(raw)) };
-    let pid = process.pid;
-    let no_memory = process.out_of_memory;
-    let cpu = crate::percpu::pinned(crate::percpu::PerCpu::index);
-    process.space.wait_inactive();
-    let Process {
-        space,
-        regions,
-        object,
-        table,
-        ..
-    } = *process;
-    close_handles(&table);
-    drop(table);
-    #[cfg(feature = "selftest")]
-    {
-        *LAST_STATS.lock() = Some((pid, space.stats()));
-    }
-    space.destroy();
-    drop(regions);
-    object.terminate();
     if event.kind == event_kind::EXIT {
-        kprintln!(
+        kprintln_serial!(
             "[rustos] user: pid {pid} exited (code {}, cpu {cpu})",
             event.code
         );
     } else {
-        log_fault(pid, &event, no_memory);
-        kprintln!("[rustos] user: fault contained (pid {pid})");
+        log_fault(pid, &event, no_memory, kernel_half);
+        kprintln_serial!("[rustos] user: fault contained (pid {pid})");
     }
     *LAST_EVENT.lock() = Some((pid, event));
-    crate::programs::finished(pid, &event, no_memory);
+    crate::programs::finished(pid, &event, no_memory, kernel_half);
     if crate::scrub::measuring() {
         let peak = task::note_stack_peak();
         #[cfg(feature = "selftest")]
@@ -455,19 +470,19 @@ fn terminate(event: ProcessEvent) -> ! {
     task::exit()
 }
 
-fn log_fault(pid: u32, event: &ProcessEvent, no_memory: bool) {
+fn log_fault(pid: u32, event: &ProcessEvent, no_memory: bool, kernel_half: bool) {
     let name = fault_name(event.fault_kind);
     let reason = if no_memory { " (out of memory)" } else { "" };
-    if event.fault_kind == fault_kind::PAGE_FAULT && event.addr == 0 {
-        kprintln!("[rustos] user: pid {pid} stopped by a {name} outside the user half{reason}");
+    if kernel_half {
+        kprintln_serial!("[rustos] user: pid {pid} stopped by a {name} in the kernel half{reason}");
     } else if event.fault_kind == fault_kind::PAGE_FAULT {
-        kprintln!(
+        kprintln_serial!(
             "[rustos] user: pid {pid} stopped by a {name} at {:#x} (pc {:#x}){reason}",
             event.addr,
             event.pc
         );
     } else {
-        kprintln!(
+        kprintln_serial!(
             "[rustos] user: pid {pid} stopped by {name} (pc {:#x}, isa code {:#x})",
             event.pc,
             event.isa_code
