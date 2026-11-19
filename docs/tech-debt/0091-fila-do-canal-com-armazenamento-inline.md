@@ -18,7 +18,7 @@ ou não. O núcleo não aloca, então a fila não cresce por demanda.
 O kernel o paga de outro jeito também: o par não cabe na pilha de 16 KiB da tarefa (construí-lo
 estourava a pilha e o `init` morria em `#DF`), então nasce por cópia de um modelo vazio de 7 KiB que mora
 na imagem (`kernel/src/object.rs`, `EMPTY_PAIR`; `rodata` do kernel +9 KiB na parte 1 da 4c) e leva
-dois `unsafe` com `// SAFETY:`.
+dois `unsafe` com `// SAFETY:`. Medido pelo revisor: sem ele a imagem seria **6,8 KiB menor no x86_64 e 6,6 KiB no aarch64**.
 
 ## Por que foi aceito
 

@@ -167,7 +167,7 @@ Duas ordens valem no kernel; o `core/object` as obedece e o teste de threads as 
 
 | Regra | Texto |
 | --- | --- |
-| Ordem global | **Tabela do processo, depois o lock do par de pontas.** Nunca o contrário, e nunca dois pares ao mesmo tempo |
+| Ordem global | **Tabela do processo, depois o lock do par de pontas.** Nunca o contrário, e nunca dois pares ao mesmo tempo. O alocador entra na ordem: **tabela, depois o heap, depois os frames** (o `try_reserve` que cresce os slots roda com a tabela presa e pode pedir um frame ao crescer o heap); o lock do par nunca aloca |
 | Um lock por par | O `Channel` guarda as duas pontas e as duas filas: A→B e B→A pegam o mesmo lock |
 | `channel_write` | Segura a tabela do escritor do começo ao fim e toma o lock do par duas vezes, só por dentro dela: reservar (passo 2) e *commit* (passo 5). Entre as duas, nenhum outro lock é tomado |
 | `channel_read` | Passo 1: valida `ch` sob a tabela e, dentro dela, espia sob o par. Passo 2: reserva slots sob a tabela. Passo 3: **sem lock**. Passo 5: sob a tabela, retira sob o par e instala os handles |
@@ -227,7 +227,7 @@ zera as contagens que estão em ciclos entre filas: é o limite documentado e a
 | O lançamento do `init`, a espera e a conferência do código de saída | `kernel/src/init.rs` (só com `selftest`) |
 | `_start` (alinha o `sp`, zera o frame pointer, chama `rustos_user_main(pilha, handle)`) e o stub de `syscall`/`svc` | `arch/{x86_64,aarch64}-user` |
 | Ponto de entrada em Rust, leitor do auxv (`Env`), `println!`, wrappers seguros das syscalls da 4a, pânico, alocador de avanço | `user/rt` (o único `unsafe` de usuário) |
-| `init` (`forbid(unsafe_code)`) e `big` (programa de teste de 1,3 MiB) | `user/init`, `user/tests/big` |
+| `init` (`forbid(unsafe_code)`) e `big` (programa de teste de 1,3 MiB, `deny(unsafe_code)` como todo `user/tests/*`) | `user/init`, `user/tests/big` |
 | Linker scripts | `user/link/{x86_64,aarch64}.ld` |
 | `cargo xtask user`, o initramfs da imagem (`init`, mais `big` com `selftest`), as linhas do smoke | `xtask/src/{user,image,initramfs,qemu}.rs` |
 
@@ -290,8 +290,8 @@ de boot. VMO, VMAR, `process_create`, `thread_create` e `process_kill` são as p
 | `handle_close`, `handle_duplicate`, `handle_replace`, `object_wait_one`, `channel_create`, `channel_write`, `channel_read`, `debug_write(console, ptr, len)`; a tabela de despacho ganhou as entradas | `kernel/src/syscall.rs`, `kernel/src/syscall/handles.rs` |
 | `block_until`, `wake_waiters`, `wait_bit`, `clear_permit`, `current_process` (a ponte com o escalonador) | `kernel/src/task.rs` |
 | `ReadActual`, `encode_boot_message`, `parse_boot_message`, `MAX_CHANNEL_ENDS`, `USER_HANDLE_ARRAY_MAX` | `core/hal/src/abi.rs` |
-| Syscalls seguras, `boot::{read, attach_console}`, `set_console` (o `println!` escreve pelo console por handle) e a feature `raw-syscalls` | `user/rt` |
-| O `init` e o programa de teste `handles` (casos hostis, medida e espera bloqueante com o kernel do outro lado) | `user/init`, `user/tests/handles` |
+| Syscalls seguras, `boot::{read, attach_console}`, `set_console` (o `println!` escreve pelo console por handle) e a feature `raw-syscalls` (`raw::syscall` é `unsafe fn`, só dos `user/tests/*`; o xtask compila cada programa numa invocação própria e o `check-layers` confere) | `user/rt` |
+| O `init` (anexa o console antes de qualquer conferência; sem ele sai com 99) e o programa de teste `handles` (casos hostis, medida e espera bloqueante com o kernel do outro lado) | `user/init`, `user/tests/handles` |
 
 **A espera.** `object_wait_one` bloqueia a tarefa (`block_until`: `Blocked` sem prazo, `Sleeping` com prazo) e quem
 muda o sinal a acorda. O objeto guarda uma máscara de 64 bits com **um bit por slot de tarefa** (`Waiters`; um
@@ -327,14 +327,14 @@ de boot):
 | Cobrança de pontas | `MAX_CHANNEL_ENDS = 256` (`hal::abi`); cada ponta guarda uma `Charge` do criador e a devolve no `Drop`. O canal de boot do kernel não é cobrado | A defesa que o SDD escolheu para o vazamento entre filas ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md)) |
 | Teto de 64 handles no array de usuário | `USER_HANDLE_ARRAY_MAX = 64`; acima disso, `InvalidArgs` sem consumir (o kernel não leu quais são). Entre 9 e 64, `InvalidArgs` **consumindo** (a regra do canal) | O teto do Zircon, como o SDD já dizia |
 | O erro depois de ler o array consome | Bytes acima do limite, ponteiro de bytes ruim e canal inválido consomem o array; só `ShouldWait` e a falha ao **ler** o array não | A regra geral para quem move handle |
-| Alocação de objeto e de mensagem | Falta de heap num `Arc` ou na cópia dos bytes aborta (`handle_alloc_error`); só os slots da tabela usam `try_reserve` ([DEBT-0110](../tech-debt/0110-objeto-e-mensagem-abortam-na-falta-de-heap.md)) | `Arc` não tem alocação fracassável na toolchain estável |
+| Alocação de objeto e de mensagem | O [guidelines 05](../guidelines/05_recursos_e_desempenho.md) deixa a syscall que cria objeto ou handle, ou carrega mensagem, alocar **com `try_*`** (a falta é `NoMemory`). A parte 1 só cumpre nos slots da tabela: falta de heap num `Arc` ou na cópia dos bytes ainda aborta (`handle_alloc_error`) ([DEBT-0110](../tech-debt/0110-objeto-e-mensagem-abortam-na-falta-de-heap.md)) | `Arc` não tem alocação fracassável na toolchain estável |
 | `init` no boot normal | Segue só no modo de teste ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)): o `init` ainda não lança processo | O gatilho da dívida pede também o lançamento de outros processos, da parte 3 |
 
 **O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs), além dos casos anteriores: o `init`
 lê a mensagem de boot (`process` e `console`), vê `PEER_CLOSED` na ponta do kernel e nenhuma segunda mensagem,
 escreve pelo console, **recusa** duplicar o console com `READ`, cria um canal, vê `TimedOut` com a fila vazia,
 escreve 64 bytes, espera `READABLE`, lê, transfere um handle e o recebe de volta, fecha a ponta e vê `PEER_CLOSED`
-(`[user] init: boot channel, console and handles ok`). O programa `handles` (`[user] handles: ok (N cases)`):
+(`[user] init: boot channel, console and handles ok`). O `init` anexa o console antes de qualquer conferência, então falha de conferência e pânico saem no log; se o anexo falha, sai com 99. O programa `handles` (`[user] handles: ok (N assertions)`, 181 hoje: `expect` e `status` do programa, não chamadas):
 handle forjado de seis formas em cada chamada, handle velho (fechado duas vezes, e o valor segue morto com o slot
 reusado), sem direito (`DUPLICATE`, `WRITE`, `READ`, `WAIT`), de outro tipo, `replace` com direito maior (o velho
 morre), bits de direito reservados, a própria ponta e o mesmo handle duas vezes no array, handle sem `TRANSFER`,
@@ -1262,6 +1262,18 @@ ilegal, falta sem região) mata, pelo [canal de eventos](#falhas-de-usuário).
 | Mensagens na fila de cada ponta | 16 | não lido |
 | Pior caso por ponta | 16 KiB de bytes mais 128 handles | — |
 
+**Limites e formas que a parte 1 da 4c fixou** (preenchem o que a tabela acima e as chamadas deixavam aberto; os números de `Status`, de syscall e o layout da mensagem de boot não mudam):
+
+| Item | Contrato |
+| --- | --- |
+| Array de handles de usuário | Até **64** entradas (`USER_HANDLE_ARRAY_MAX`); acima disso `InvalidArgs` **sem consumir** (o kernel não leu quais são). De 9 a 64, o teto do canal vale: `InvalidArgs` **consumindo** o array |
+| Pontas de canal por processo | **256** (`MAX_CHANNEL_ENDS`), cobradas ao criador enquanto a ponta existir; a 257ª é `NoMemory` em `channel_create` |
+| `actual*` do `channel_read` | **Obrigatório** (nulo ou fora de `UserRange` é `OutOfRange`) e aponta para `ReadActual`, `#[repr(C)]` de 16 bytes: `bytes: u64` no offset 0 e `handles: u64` no 8. É gravado antes de a mensagem sair da fila e também em `BufferTooSmall`, com o que a mensagem pede. **A confirmar pelo dono** (o contrato original dizia só "tamanhos em `actual`") |
+| `signals` de `object_wait_one` | Bit além dos quatro definidos é `InvalidArgs`, como `signals == 0` |
+| `deadline_ns` de `object_wait_one` | Acima de `agora + 2^61` ns (`WAIT_HORIZON_NS`, cerca de 73 anos) vale **sem prazo**, como `u64::MAX`: o timer do hardware nunca recebe valor que dê a volta no contador |
+| `handle_replace` com direitos inválidos | Bit reservado ou valor acima de 32 bits é `InvalidArgs` **e o handle velho morre** (existindo), como no erro de subconjunto; sem handle, `BadHandle` |
+| Ordem de validação | Em `channel_read` e `debug_write`, o handle primeiro e depois o resto |
+
 São menores de propósito (a meta de memória): a mensagem de boot cabe, e dado maior vai por
 VMO. O custo é que um protocolo que precise de mensagem grande tem de usar VMO.
 
@@ -1578,7 +1590,7 @@ O adaptador Linux da fase 5 traduz o `Fault` em sinal.
 | `rustos-object` **(novo, feito na 4c, parte pura)** | `core/object` | `HandleTable<T, S>`, regras de direito, duplicar, substituir e transferir, contagem de handles, fila do canal, sinais ([seção](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) | proibido | `rustos-hal` |
 | ABI (números, `Status`, direitos, constantes de layout, `ProcessEvent`, mensagem de boot) | `core/hal/src/abi.rs` (**módulo, não crate**) | O contrato com o programa de usuário, a "primeira porta de entrada" do [SDD 02](02_arquitetura.md) | proibido | nada |
 | `rustos-user-rt` **(novo, feito na 4b)** | `user/rt` | Runtime dos programas: ponto de entrada em Rust, `panic`, alocador mínimo, leitor de auxv, carregador de ELF de usuário | **mínimo, com `// SAFETY:`**: `GlobalAlloc`, a leitura do auxv e `#[unsafe(no_mangle)]` o exigem; nenhum `asm!` | `hal` (a ABI), `elf`, `cpio`, `arch-<isa>-user` |
-| `rustos-user-init` e programas de teste **(novos; na 4b, `user/init` e `user/tests/big`)** | `user/init`, `user/tests/*` | O `init`, o teste de falha, o de SIMD, o de syscall nula | proibido (`forbid(unsafe_code)`; o `unsafe` fica no `user/rt`) | `user-rt` |
+| `rustos-user-init` e programas de teste **(novos; na 4b, `user/init` e `user/tests/big`)** | `user/init`, `user/tests/*` | O `init`, o teste de falha, o de SIMD, o de syscall nula | proibido no `init` (`forbid(unsafe_code)`; o `unsafe` fica no `user/rt`). Em `user/tests/*`, `deny(unsafe_code)` com `#[allow]` pontual e `// SAFETY:` só para syscall crua em teste hostil ([guidelines 03](../guidelines/03_camadas_e_dependencias.md), regra 11) | `user-rt` |
 | `rustos-arch-x86_64-user`, `rustos-arch-aarch64-user` **(novos)** | `arch/x86_64-user`, `arch/aarch64-user` | **Todo o `asm!` do lado do usuário:** `_start` (alinha o `rsp`, zera o frame pointer e chama o `main` do `user/rt`), os stubs de `syscall`/`svc`, `rdtsc`/`cntvct` e `xmm0`/`v0` do teste | permitido | `rustos-hal` |
 
 O `_start` precisa de `asm!` (o alinhamento do `rsp`, e nenhuma função Rust nasce sem

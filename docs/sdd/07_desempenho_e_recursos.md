@@ -521,8 +521,13 @@ ida e volta é na mesma tarefa, sem troca de contexto; a troca entre processos �
   A imagem enxuta paga o código mesmo sem rodar processo (o despacho o liga): reduzir é medida futura (instanciação
   genérica menor, `channel_read` e `channel_write` sem o buffer de 1 KiB na pilha), sem número ainda.
 - **Memória por unidade:** um canal custa 7 256 bytes de heap de fila mais os dois `Arc` de ponta (cerca de 100 bytes); um processo, a tabela de handles
-  (`Vec` de slots de 32 bytes, que cresce de um em um: o `init` usa 3 handles) e o `ProcessObj`. A cobrança limita um processo a 256 pontas (1,8 MiB
-  de filas no pior caso).
+  (`Vec` de slots de 32 bytes, que cresce de um em um: o `init` usa 3 handles) e o `ProcessObj`. A cobrança limita um processo a 256 pontas, e o teto vale em
+  **pontas, não em bytes**: 128 pares de 7 256 bytes são **0,89 MiB de filas**, mais até cerca de **4 MiB de mensagens** (128 pares × 2 pontas × 16
+  mensagens × 1 KiB). Um processo hostil medido por revisor chegou a **17,7 MiB** de pico, e 127 ciclos entre canais (cerca de 1,5 mil
+  syscalls) **vazam 18,3 MiB para sempre** ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md),
+  [DEBT-0110](../tech-debt/0110-objeto-e-mensagem-abortam-na-falta-de-heap.md)): a parte 3, com `process_create`, precisa de um teto em **bytes** por processo.
+- **O custo do `EMPTY_PAIR`** (o modelo de 7 KiB que existe porque a fila é inline, [DEBT-0091](../tech-debt/0091-fila-do-canal-com-armazenamento-inline.md)):
+  sem ele a imagem seria **6,8 KiB menor no x86_64 e 6,6 KiB no aarch64** (medido pelo revisor, `release`). Sai quando a fila deixar de ser inline.
 
 ### Processo mínimo e carregador do init (fatia 4b)
 
