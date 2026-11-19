@@ -533,7 +533,7 @@ ida e volta é na mesma tarefa, sem troca de contexto; a troca entre processos �
 
 Medido na QEMU 11.1.3 num Mac com Apple Silicon: aarch64 em HVF, x86_64 em TCG (só se compara o RustOS consigo mesmo). `make smoke`
 no modo de teste (a linha `user: init load`), `release-small` com `RUSTOS_SELFTEST=1`. O `init` roda só no modo de teste
-([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)).
+([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)); o carregador entrou na imagem de produção com o M1 ([abaixo](#o-carregador-na-imagem-enxuta-m1)).
 
 | Medida | x86_64 (TCG) | aarch64 (HVF) |
 | --- | --- | --- |
@@ -611,6 +611,34 @@ Os 15 frames a menos são 47% do menor processo. A página zero custa 1 frame pa
 | carregado | 198 055 | 203 135 | 179 961 | 182 653 |
 
 (+5 080 bytes no x86_64 e +2 692 no aarch64, 2,6% e 1,5% do carregado. No x86_64, 1 536 do `bss` são as caixas do *shootdown*; o resto é o resolvedor da falta, a reserva de páginas, o `tlb` e o `destroy` que espera a CPU, que a imagem enxuta carrega porque a morte do processo é a mesma.)
+
+### O carregador na imagem enxuta (M1)
+
+Medido em 2026-11-19, `make size` e `make smoke-fast PROFILE=release-small`, rustc 1.100.0, QEMU 11.1.3 (x86_64 em TCG, aarch64 em HVF, `-smp 4`, 256 MiB). "Antes" é a `main` `03f5849`; "depois" é o PR do M1. Até aqui o compilador descartava da `release-small` o carregador, a árvore de regiões, a paginação de usuário, os handles e a espera (nada os chamava fora do modo de teste); o M1 os chama pelo `run` do shell, então entram.
+
+| `make size` (`release-small`) | x86_64 antes | x86_64 depois | aarch64 antes | aarch64 depois |
+| --- | --- | --- | --- | --- |
+| `text` | 148 215 | 160 535 (**+12 320**) | 133 792 | 144 924 (**+11 132**) |
+| `rodata` | 43 229 | 45 144 (+1 915) | 38 981 | 40 864 (+1 883) |
+| `data` | 19 850 | 20 962 (+1 112) | 19 624 | 20 736 (+1 112) |
+| `bss` | 17 409 | 17 417 (+8) | 14 656 | 14 664 (+8) |
+| **carregado** | 228 703 | 244 058 (**+15 355, +6,7%**) | 207 053 | 221 188 (**+14 135, +6,8%**) |
+| arquivo | 310 256 | 332 736 (+22 480) | 345 128 | 371 576 (+26 448) |
+
+Do que é do M1 (`llvm-nm -S`): a tabela de fins de processo ([DEBT-0133](../tech-debt/0133-fim-de-processo-numa-tabela-de-16-posicoes.md)) é `programs::ENDED`, 400 bytes de `.data` (16 posições de 24 bytes), e o `.bss` de +8 é o `WAITERS`. O resto do `.data` (+1 112 no total) e do `text` é o que o carregador, a paginação de usuário, os handles e a espera arrastam para a imagem; não separei por símbolo. As imagens `dev` e `release` já tinham tudo isso, então o M1 não as altera de forma que importe.
+
+**Tempo de boot** (`make smoke-fast`, linha `boot time:`, 3 boots cada): **sem mudança**, porque o boot normal não lança processo; o carregador só roda quando o usuário digita `run`.
+
+| ISA | Antes | Depois |
+| --- | --- | --- |
+| x86_64 (TCG) | 39, 39, 35 ms | 30, 29, 28 ms |
+| aarch64 (HVF) | 4, 3, 3 ms | 2, 2, 2 ms |
+
+A diferença é do ruído do host (o "antes" rodou com a máquina mais carregada: o x86_64 em TCG varia 24 a 40 ms entre execuções, como no [Tempo de boot](#tempo-de-boot)); nenhuma fase do boot ganhou linha nem chamada. `reclaimed:` não mudou (43 784 a 43 788 KiB no x86_64, 30 656 a 30 660 no aarch64).
+
+**O initramfs cresce**: de cerca de 23 KB (só o `init`) para 93 412 bytes no x86_64 e 89 804 no aarch64, porque cada programa tem três a quatro páginas de segmento (um `PT_LOAD` por permissão, [SDD 17](17_processos_isolamento_e_syscalls.md#o-que-muda-no-linker-e-no-alvo)): `hello` 17 424, `crash` 17 296, `sysinfo` 17 648 e `count` 17 488 bytes no x86_64 (16 344 a 16 512 no aarch64). Esses frames ficam residentes ([DEBT-0080](../tech-debt/0080-initramfs-residente-sem-devolver-os-frames.md)): cerca de 17 frames (68 KiB) a mais de RAM em uso.
+
+**Custo de lançar um processo, no shell**: o mesmo da 4b (o `init` consumia 21 frames: 7 de dados, 7 de tabelas e 7 do kernel, e 30 us até a entrada em usuário no aarch64); `ps` e `mem` voltam ao que eram quando o processo morre (a morte devolve os frames zerados). O boot normal segue com a pilha do shell em 13,0 KiB de 64 (`ps`, gate de 75%).
 
 ### Escalonador (fase 3, medido no host; o alvo está acima)
 

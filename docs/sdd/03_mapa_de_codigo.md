@@ -26,6 +26,7 @@
 │       ├── process.rs          # processo de usuário (um espaço, uma thread, uma árvore de regiões, a tabela de handles): `spawn` de um ELF ou, no modo de teste, de um programa plano, `process_main`, `exit`, `user_fault` (mata o processo, esvazia a tabela e o kernel segue); `process/boot.rs`: o canal de boot; `process/selftest.rs`: o autoteste dos casos de usuário (feature `selftest`)
 │       ├── object.rs           # os objetos do kernel sobre o `core/object` (4c): o enum `Obj` de `Arc`, o `Lock` do `IrqLock`, os slots da tabela, a espera por máscara de tarefas, o par de pontas de canal, a cobrança de pontas
 │       ├── loader.rs           # o carregador de ELF do initramfs (4b): `core/cpio` + `core/elf`, `PT_LOAD` em frames novos (o `.bss` de páginas inteiras e a pilha, regiões preguiçosas, 4c), `Vmar` do processo e a pilha inicial com guarda e topo sorteado
+│       ├── programs.rs         # o que o shell faz com programas (M1): `ls` lê o `cpio`, `run` carrega com `process::spawn` e espera o fim do processo (a tabela de 16 fins que `process::terminate` alimenta)
 │       ├── init.rs             # (feature `selftest`) lança o `init` do initramfs, espera e confere o código de saída; mede o custo do menor processo
 │       ├── uspace.rs           # UserSpace: tabelas da metade baixa, mapeamento de frames zerados (`map_at`), a falta de página resolvida (página zero, frame novo, cópia da página zero), `unmap_page` com *shootdown*, a máscara de CPUs ativas e a devolução zerada na morte (4c)
 │       ├── commit.rs           # a promessa estrita das páginas preguiçosas contra os frames livres (decisão 9 do SDD 17, a parte da 4c)
@@ -65,6 +66,7 @@
 ├── user/                       # o segundo anel de composição: só alvos bare-metal, fora do `default-members` (guidelines 03, regra 11)
 │   ├── rt/                     # rustos-user-rt: ponto de entrada em Rust, leitor do auxv (`Env`), `println!`, wrappers seguros das syscalls, a leitura da mensagem de boot, pânico e alocador de avanço; o único `unsafe` de usuário
 │   ├── init/                   # rustos-user-init: o `init`, `forbid(unsafe_code)`
+│   ├── hello/ crash/ sysinfo/ count/   # as demonstrações do shell (M1), `forbid(unsafe_code)`, na imagem de produção ao lado do `init`: olá e saída 0; desce a pilha até a guarda e morre contido; relógio, página e número aleatório; conta com `object_wait_one` e prazo
 │   ├── tests/big/              # rustos-user-test-big: programa de teste de 1,3 MiB (carregador e `code-model=small`); só entra na imagem com `selftest`
 │   ├── tests/handles/          # rustos-user-test-handles: os casos hostis de handle, canal e espera (usa `rt` com `raw-syscalls`); só entra na imagem com `selftest`
 │   ├── tests/lazy/             # rustos-user-test-lazy: pilha e `.bss` sob demanda, leitura antes da escrita e o tempo por página dos três caminhos da falta; só com `selftest`

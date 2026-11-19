@@ -123,6 +123,24 @@ O shell tem dois comandos de demonstração: `lines` desenha uma tabela com o DE
 Special Graphics e `alt` / `alt off` entra e sai da tela alternativa. Sem grade
 alternativa (`Host::has_alternate_screen` falso), `alt` avisa e não envia `?1049`.
 
+## Comandos que falam com processos (M1)
+
+Três comandos do shell tratam de programas do initramfs; a porta é o `Host` do `core/shell`
+(`programs`, `run_program`, `TaskInfo::pid`), e o kernel a implementa em `kernel/src/programs.rs`. Os
+textos são em inglês, como a saída do sistema, e o `core/shell` segue puro e testado no host com um `Host` falso.
+
+| Comando | O que faz | Saída |
+| --- | --- | --- |
+| `ls` | Lista os arquivos do initramfs | `bytes  name` e uma linha por arquivo, em ordem; `ls: no initramfs in this boot` sem initramfs |
+| `run <programa> [&]` | Carrega o ELF, roda como processo isolado com o canal de boot e o console, **espera** e mostra como acabou. Com `&` (solto ou colado ao nome) não espera | `exit code N (pid P)`; `killed: <causa> (pid P)` (`page fault on a write to 0x…`, `illegal instruction`, `out of memory`…, só endereços de usuário); `started pid P` com `&`; `run: X: no such program (try 'ls')` |
+| `ps` | Ganha a coluna `pid` (depois de `name`): o processo que a tarefa roda, ou `-` na tarefa de kernel | Uma linha `user` por processo vivo |
+
+A saída do programa (`[user] …`) e as linhas do kernel (`[rustos] user: pid N exited …`) aparecem no mesmo terminal e na
+serial, antes do `exit code`. Argumentos do programa ainda não passam ([DEBT-0130](../tech-debt/0130-run-sem-argumentos-para-o-programa.md)).
+O shell espera sem prazo e não há Ctrl-C que solte um processo travado ([DEBT-0131](../tech-debt/0131-sem-ctrl-c-nem-kill-de-processo.md)),
+e a saída de um processo em segundo plano cola no prompt ([DEBT-0132](../tech-debt/0132-saida-de-segundo-plano-cola-no-prompt.md)).
+O caminho do kernel está no [SDD 17](17_processos_isolamento_e_syscalls.md#o-m1-programas-pelo-shell-como-entrou).
+
 ## Conferido contra o xterm
 
 O `ctlseqs` do xterm (patch 411, 2026/08/23) não detalha tudo; o resto veio do
@@ -174,3 +192,4 @@ O que divergia e foi corrigido, cada um com teste em
 - Símbolos de controle do DEC, NRCS e G2/G3: [DEBT-0048](../tech-debt/0048-dec-sem-simbolos-de-controle-nem-nrcs.md).
 - Histórico sem rolagem no aarch64: [DEBT-0050](../tech-debt/0050-historico-sem-rolagem-no-aarch64.md).
 - Redesenho com IRQ mascarada: [DEBT-0051](../tech-debt/0051-redesenho-da-tela-com-irq-mascarada.md).
+- Ctrl-C que solte o `run`, argumentos e saída de segundo plano sem colar no prompt: [DEBT-0131](../tech-debt/0131-sem-ctrl-c-nem-kill-de-processo.md), [0130](../tech-debt/0130-run-sem-argumentos-para-o-programa.md), [0132](../tech-debt/0132-saida-de-segundo-plano-cola-no-prompt.md).
