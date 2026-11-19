@@ -399,6 +399,10 @@ fn check_no_kernel_address(session: &str) -> Result<(), String> {
     }
 }
 
+/// Quantos bytes antes do que o `type_command` digita cabem o prompt anterior, com o `% ` que o eco
+/// segue: o prompt pode chegar em pedaços, e o `% ` ficar antes do trecho lido.
+const PROMPT_WINDOW: usize = 48;
+
 /// Digita `command` e lê para o `log` até o prompt voltar. Devolve a resposta em texto puro.
 fn type_command(
     child: &mut std::process::Child,
@@ -412,8 +416,18 @@ fn type_command(
         .write_all(format!("{command}\r").as_bytes())
         .and_then(|()| stdin.flush())
         .map_err(|error| format!("digitar `{command}` na serial: {error}"))?;
-    read_to_prompt(receiver, log, from, Instant::now() + COMMAND_TIMEOUT);
-    if !ends_with_prompt(&log[from..]) {
+    let deadline = Instant::now() + COMMAND_TIMEOUT;
+    let window = log.floor_char_boundary(from.saturating_sub(PROMPT_WINDOW));
+    while !answered(&log[window..], command) {
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        match receiver.recv_timeout(left) {
+            Ok(chunk) => log.push_str(&chunk),
+            Err(_) => break,
+        }
+    }
+    if !answered(&log[window..], command) {
         return Err(format!(
             "o shell não devolveu o prompt depois de `{command}`"
         ));
@@ -441,10 +455,17 @@ fn type_session(
                 step.command
             ));
         }
-        if step.command == "ps" && !ps_shows_a_process(&answer) {
-            return Err(format!(
-                "o `ps` não mostrou o processo `count` com o pid:\n{answer}"
-            ));
+        if step.command == "ps" {
+            if !ps_shows_a_process(&answer) {
+                return Err(format!(
+                    "o `ps` não mostrou o processo `count` com o pid:\n{answer}"
+                ));
+            }
+            if !ps_table_is_whole(&answer) {
+                return Err(format!(
+                    "a saída de um programa caiu no meio da tabela do `ps`:\n{answer}"
+                ));
+            }
         }
         println!("xtask: `{}` ok", step.command);
     }
@@ -460,6 +481,7 @@ fn type_session(
             Err(_) => return Err("a serial fechou antes de o `count` terminar".to_owned()),
         }
     }
+    check_no_prompt_glue(log)?;
     check_no_heap_leak(child, receiver, log)
 }
 
@@ -508,12 +530,46 @@ fn heap_used(answer: &str) -> Option<String> {
     Some(format!("{number} {unit}"))
 }
 
-/// Uma linha do `ps` de uma tarefa `user` com o número do processo na coluna `pid` (a terceira).
+/// Uma linha do `ps` do processo `count` (o que `run count &` lançou) com o número do processo na
+/// coluna `pid` (a terceira).
 fn ps_shows_a_process(answer: &str) -> bool {
     answer.lines().any(|line| {
         let mut words = line.split_whitespace().skip(1);
-        words.next() == Some("user") && words.next().is_some_and(|pid| pid.parse::<u32>().is_ok())
+        words.next() == Some("count") && words.next().is_some_and(|pid| pid.parse::<u32>().is_ok())
     })
+}
+
+/// A tabela de tarefas do `ps`, do cabeçalho até o cabeçalho da tabela de CPUs, não tem linha de
+/// usuário no meio: a saída de um programa em segundo plano espera o `ps` acabar.
+fn ps_table_is_whole(answer: &str) -> bool {
+    let mut lines = answer.lines().skip_while(|line| !line.contains("switches"));
+    lines.by_ref().next().is_some()
+        && lines
+            .take_while(|line| !line.contains("ipi"))
+            .all(|line| !line.contains("[user]"))
+}
+
+/// A resposta de `command` terminou: o eco dele depois de um prompt, seguido do Enter, e depois
+/// outro prompt. Em texto puro, porque um prompt que o shell redesenha no meio da digitação
+/// (saída de segundo plano) parte o eco em pedaços que o terminal junta.
+fn answered(log: &str, command: &str) -> bool {
+    let plain = strip_escapes(log);
+    plain
+        .find(&format!("% {command}\n"))
+        .is_some_and(|at| plain[at..].contains("rustos ~ % "))
+}
+
+/// Nenhuma linha começa com o prompt colado em texto de usuário: o shell apaga a linha do prompt
+/// (`\r`) antes de a saída de segundo plano entrar. A tela de um terminal mostra o que vem depois
+/// do último `\r` da linha.
+fn check_no_prompt_glue(log: &str) -> Result<(), String> {
+    for line in log.split('\n').map(|line| line.trim_end_matches('\r')) {
+        let visible = strip_escapes(line.rsplit('\r').next().unwrap_or(line));
+        if visible.contains("rustos ~ % [user]") {
+            return Err(format!("saída de usuário colada no prompt: `{visible}`"));
+        }
+    }
+    Ok(())
 }
 
 /// Lê para o `log` até o prompt do shell voltar depois de `from`, ou o prazo acabar.
@@ -707,11 +763,27 @@ pub fn stream_stdout(child: &mut std::process::Child) -> Result<mpsc::Receiver<S
     Ok(receiver)
 }
 
-/// As linhas do kernel: a linha inteira, sem o `\r`, **começa** com `[rustos]`. Texto de usuário
-/// (`debug_write`, sempre prefixado por `[user]`) e lixo de firmware no meio da linha não contam.
+/// O que um terminal mostra no começo da linha: depois do último `\r` (o shell apaga a linha do
+/// prompt antes de a saída de segundo plano entrar) e sem as sequências de apagar que a abrem.
+fn shown(line: &str) -> &str {
+    let line = line.trim_end_matches('\r');
+    let mut text = line.rsplit('\r').next().unwrap_or(line);
+    while let Some(rest) = text.strip_prefix("\x1b[") {
+        let end = rest.find(|ch: char| ch.is_ascii_alphabetic());
+        match end {
+            Some(at) => text = &rest[at + 1..],
+            None => break,
+        }
+    }
+    text
+}
+
+/// As linhas do kernel: a linha como o terminal a mostra **começa** com `[rustos]`. Texto de
+/// usuário (`debug_write`, sempre prefixado por `[user]`) e lixo de firmware no meio da linha não
+/// contam.
 fn kernel_lines(log: &str) -> impl Iterator<Item = &str> {
     log.split('\n')
-        .map(|line| line.trim_end_matches('\r'))
+        .map(shown)
         .filter(|line| line.starts_with("[rustos]"))
 }
 
@@ -737,10 +809,10 @@ fn has_fatal(log: &str) -> bool {
     })
 }
 
-/// Alguma linha de usuário (`debug_write`: prefixo `[user] `, sem `\r`) começa com `mark`.
+/// Alguma linha de usuário (`debug_write`: prefixo `[user] `) começa com `mark`.
 fn has_user_line(log: &str, mark: &str) -> bool {
     log.split('\n')
-        .map(|line| line.trim_end_matches('\r'))
+        .map(shown)
         .any(|line| line.starts_with(mark))
 }
 
@@ -1095,11 +1167,74 @@ mod tests {
     }
 
     #[test]
-    fn the_ps_check_wants_a_user_task_with_a_numeric_pid() {
-        let ps = "id  name       pid cpu state\n  1  shell        -   0 run\n  9  user         3   1 wait\n";
+    fn the_ps_check_wants_the_count_task_with_a_numeric_pid() {
+        let ps = "id  name       pid cpu state\n  1  shell        -   0 run\n  9  count         3   1 wait\n";
         assert!(ps_shows_a_process(ps));
         assert!(!ps_shows_a_process("  1  shell        -   0 run\n"));
-        assert!(!ps_shows_a_process("  9  user         -   1 wait\n"));
+        assert!(!ps_shows_a_process("  9  count        -   1 wait\n"));
+        assert!(!ps_shows_a_process("  9  user         3   1 wait\n"));
+    }
+
+    #[test]
+    fn the_ps_task_table_must_be_whole() {
+        let whole = "  id  name  pid cpu state switches\n  1  shell  -  0 run  7\n  9  count  3  1 wait  2\ncpu  load  ipi out/in\n  0  1\n";
+        assert!(ps_table_is_whole(whole));
+        let torn = "  id  name  pid cpu state switches\n  1  shell  -  0 run  7\n[user] count: 3/5\n  9  count  3  1 wait  2\ncpu  load  ipi out/in\n";
+        assert!(!ps_table_is_whole(torn));
+        assert!(ps_table_is_whole(
+            "ps\n  id  name  switches\n  1  shell\ncpu  ipi\n[user] late\n"
+        ));
+        assert!(!ps_table_is_whole("nothing here"));
+    }
+
+    #[test]
+    fn an_answer_needs_the_echo_and_a_prompt_after_it() {
+        let prompt = "rustos \x1b[34m~\x1b[0m % \x1b[J";
+        let redraw = format!("\r\x1b[J[user] count: 1/5\n{prompt}");
+        assert!(!answered(&redraw, "ps"));
+        assert!(!answered(&format!("{redraw}ps\r\n  1 shell\n"), "ps"));
+        assert!(answered(
+            &format!("{redraw}ps\r\n  1 shell\n{prompt}"),
+            "ps"
+        ));
+        assert!(!answered(&format!("{redraw}ls\r\n{prompt}"), "s"));
+    }
+
+    #[test]
+    fn a_redraw_in_the_middle_of_typing_does_not_hide_the_echo() {
+        let prompt = "rustos \x1b[34m~\x1b[0m % ";
+        let typed = format!(
+            "r\r\x1b[J[rustos] user: pid 4 exited\n{prompt}r\x1b[Jun hello\r\nexit code 0\n"
+        );
+        assert!(!answered(&typed, "run hello"));
+        assert!(answered(&format!("{typed}{prompt}\x1b[J"), "run hello"));
+    }
+
+    #[test]
+    fn a_line_is_what_the_terminal_shows_after_the_last_cr_and_the_erase() {
+        assert_eq!(shown("[user] a\r"), "[user] a");
+        assert_eq!(shown("PROMPT \r\x1b[J[user] a\r"), "[user] a");
+        assert_eq!(shown("\r\x1b[2K\x1b[J[rustos] x"), "[rustos] x");
+        assert!(has_user_line(
+            "PROMPT\r\x1b[J[user] count: done\r\n",
+            "[user] count: done"
+        ));
+        assert!(!has_user_line(
+            "PROMPT [user] count: done\r\n",
+            "[user] count: done"
+        ));
+        assert_eq!(
+            kernel_lines("PROMPT\r\x1b[J[rustos] user: pid 4 exited\n").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_prompt_glued_to_user_output_is_caught_and_a_redraw_is_not() {
+        let prompt = "rustos \x1b[34m~\x1b[0m % ";
+        assert!(check_no_prompt_glue(&format!("{prompt}[user] count: 1/5\r\n")).is_err());
+        assert!(check_no_prompt_glue(&format!("{prompt}\r\x1b[K[user] count: 1/5\r\n")).is_ok());
+        assert!(check_no_prompt_glue(&format!("{prompt}ps\r\n")).is_ok());
     }
 
     #[test]

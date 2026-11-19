@@ -13,13 +13,14 @@ use rustos_term::Layout;
 
 use crate::console::{self, Sink};
 use crate::heap;
-use crate::interrupts;
+use crate::interrupts::{self, Input};
 use crate::memory::Memory;
 use crate::panic;
 use crate::platform;
 use crate::programs;
 use crate::random;
 use crate::task::{self, State};
+use crate::userout;
 
 /// Layout em uso; só o laço do shell lê e escreve, numa CPU.
 static KEYMAP: KeymapCell = KeymapCell(core::cell::Cell::new(Some("us")));
@@ -176,7 +177,7 @@ impl<B: BootInfo> Host for System<'_, B> {
             };
             visit(&TaskInfo {
                 id: snapshot.id,
-                name: snapshot.name,
+                name: snapshot.name.as_str(),
                 pid: snapshot.pid,
                 state,
                 cpu: u8::try_from(snapshot.cpu).unwrap_or(u8::MAX),
@@ -256,11 +257,20 @@ pub fn exception_self_test() -> bool {
 pub fn run_shell(host: &mut impl Host) -> ! {
     task::set_current_name("shell");
     let mut shell = SHELL.lock();
+    userout::queued();
     shell.start(host, &mut Sink).ok();
     console::flush();
     loop {
-        let byte = interrupts::read_input_blocking();
-        shell.feed(byte, host, &mut Sink).ok();
+        if let Input::Byte(byte) = interrupts::read_input_blocking(userout::pending) {
+            shell.feed(byte, host, &mut Sink).ok();
+        }
+        if userout::pending() {
+            userout::interject(|backlog| {
+                shell
+                    .interject(&*host, backlog, &mut userout::Drain::default())
+                    .ok();
+            });
+        }
         console::flush();
     }
 }

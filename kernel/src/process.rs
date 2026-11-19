@@ -14,6 +14,7 @@ use rustos_hal::abi::{ProcessEvent, Status, USER_TOP, event_kind, fault_access, 
 use rustos_hal::{Cpu, Fault, FaultKind};
 use rustos_mm::vmar::Access;
 use rustos_sched::SchedParams;
+use rustos_shell::TaskName;
 
 use crate::frames::Frames;
 use crate::loader::{self, LoadError, Loaded, RegionTree};
@@ -54,6 +55,8 @@ pub struct Process {
     channels: Arc<Quota>,
     /// A última falta de página não se resolveu por falta de frame.
     out_of_memory: bool,
+    /// O programa que o processo roda, como o `ps` o mostra; `user` sem nome dado.
+    name: TaskName,
 }
 
 /// De onde vem o código do processo: um ELF do initramfs ou, no modo de teste, um programa plano.
@@ -98,6 +101,9 @@ pub struct Spawned {
 /// O maior fundo da pilha do kernel que uma falha de usuário alcançou, em bytes.
 #[cfg(feature = "selftest")]
 static FAULT_PEAK: AtomicUsize = AtomicUsize::new(0);
+
+/// O nome da tarefa de um processo criado sem nome.
+const DEFAULT_NAME: &str = "user";
 
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 /// O último evento de fim de processo, para o modo de teste conferir.
@@ -154,6 +160,7 @@ impl Process {
             table,
             channels: Arc::default(),
             out_of_memory: false,
+            name: TaskName::new(DEFAULT_NAME),
         };
         Ok((process, loaded, peer))
     }
@@ -237,6 +244,13 @@ fn load_flat(
 }
 
 /// Cria o processo e a tarefa que o roda. Devolve a tarefa e o número do processo.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(
+        dead_code,
+        reason = "usada pelo modo de teste e pela criação de processo por outro processo"
+    )
+)]
 pub fn spawn(
     frames: Frames,
     direct_map_offset: u64,
@@ -246,8 +260,27 @@ pub fn spawn(
     spawn_keeping(frames, direct_map_offset, source, affinity, false).map(|(spawned, _)| spawned)
 }
 
+/// Como `spawn`, com o nome do programa que a tarefa mostra no `ps` (cortado ao tamanho do campo).
+pub fn spawn_as(
+    frames: Frames,
+    direct_map_offset: u64,
+    source: Source<'_>,
+    affinity: u32,
+    name: &str,
+) -> Result<Spawned, ProcessError> {
+    spawn_keeping_as(frames, direct_map_offset, source, affinity, false, name)
+        .map(|(spawned, _)| spawned)
+}
+
 /// Como `spawn`; com `keep_peer`, devolve também a ponta do kernel do canal de boot, que fica
 /// aberta até quem a recebe fechá-la.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(
+        dead_code,
+        reason = "usada pelo modo de teste e pela criação de processo por outro processo"
+    )
+)]
 pub fn spawn_keeping(
     frames: Frames,
     direct_map_offset: u64,
@@ -255,7 +288,27 @@ pub fn spawn_keeping(
     affinity: u32,
     keep_peer: bool,
 ) -> Result<(Spawned, Option<boot::BootPeer>), ProcessError> {
-    let (process, loaded, peer) = Process::load(frames, direct_map_offset, source, keep_peer)?;
+    spawn_keeping_as(
+        frames,
+        direct_map_offset,
+        source,
+        affinity,
+        keep_peer,
+        DEFAULT_NAME,
+    )
+}
+
+/// O ponto único que cria processo: `spawn` e `spawn_keeping` chegam aqui, e `name` vai ao `ps`.
+pub fn spawn_keeping_as(
+    frames: Frames,
+    direct_map_offset: u64,
+    source: Source<'_>,
+    affinity: u32,
+    keep_peer: bool,
+    name: &str,
+) -> Result<(Spawned, Option<boot::BootPeer>), ProcessError> {
+    let (mut process, loaded, peer) = Process::load(frames, direct_map_offset, source, keep_peer)?;
+    process.name = TaskName::new(name);
     let (pid, stats) = (process.pid, process.space.stats());
     let raw = Box::into_raw(Box::new(process));
     let started = task::spawn(Spawn {
@@ -291,7 +344,7 @@ pub fn spawn_keeping(
 fn process_main(arg: usize) {
     let process = ptr::with_exposed_provenance_mut::<Process>(arg);
     // SAFETY: `arg` é o `Box::into_raw` de `spawn`, entregue só a esta tarefa.
-    let (root, entry, sp, arg0, active, pid) = unsafe {
+    let (root, entry, sp, arg0, active, pid, name) = unsafe {
         let p = &*process;
         (
             p.space.root().as_u64(),
@@ -300,10 +353,12 @@ fn process_main(arg: usize) {
             p.arg0,
             p.space.active_addr(),
             p.pid,
+            p.name,
         )
     };
     let top = task::bind_user(root, arg, active);
     task::set_pid(pid);
+    task::set_user_name(name);
     ENTRY_CYCLES.store(platform::cycles(), Ordering::Relaxed);
     // SAFETY: `bind_user` mascarou a IRQ e já pôs o espaço e a pilha de entrada desta CPU; `entry` e
     // `sp` vêm de `load`, dentro de `[USER_MIN, USER_TOP)`, `sp` alinhado a 16.

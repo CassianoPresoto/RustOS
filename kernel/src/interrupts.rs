@@ -137,20 +137,33 @@ pub fn pop_input() -> Option<u8> {
     unsafe { INPUT.pop() }
 }
 
-/// Próximo byte digitado; dorme (a tarefa, não a CPU) até a IRQ trazer um.
-/// Só o laço do shell chama: ele é o único consumidor da fila.
-pub fn read_input_blocking() -> u8 {
+/// O que acordou o laço do shell.
+#[derive(Clone, Copy, Debug)]
+pub enum Input {
+    Byte(u8),
+    /// Chegou texto de fora do shell (`output_waiting`) e nenhum byte.
+    Output,
+}
+
+/// Próximo byte digitado; dorme (a tarefa, não a CPU) até a IRQ trazer um, ou até
+/// `output_waiting` dizer que há saída de fora a mostrar. Só o laço do shell chama: ele é o
+/// único consumidor da fila.
+pub fn read_input_blocking(output_waiting: impl Fn() -> bool) -> Input {
     let cpu = platform::cpu();
     loop {
         let were_enabled = cpu.save_and_disable_interrupts();
         if let Some(byte) = pop_input() {
             cpu.restore_interrupts(were_enabled);
-            return byte;
+            return Input::Byte(byte);
+        }
+        if output_waiting() {
+            cpu.restore_interrupts(were_enabled);
+            return Input::Output;
         }
         // Desenha sob a mesma máscara do sono: a tecla de rolagem não traz byte,
         // e um flush fora daqui perderia a IRQ que chegasse antes de dormir.
         console::flush();
-        task::wait_for_input(|| !INPUT.is_empty());
+        task::wait_for_input(|| !INPUT.is_empty() || output_waiting());
         cpu.restore_interrupts(were_enabled);
     }
 }

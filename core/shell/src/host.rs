@@ -180,6 +180,45 @@ pub struct CpuInfo {
     pub pulled: u64,
 }
 
+/// Quantos bytes do nome de uma tarefa o `ps` mostra.
+pub const TASK_NAME_BYTES: usize = 16;
+
+/// Nome curto e copiável de uma tarefa: o do programa, cortado em `TASK_NAME_BYTES` sem partir
+/// um caractere.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TaskName {
+    bytes: [u8; TASK_NAME_BYTES],
+    len: u8,
+}
+
+impl TaskName {
+    pub const EMPTY: Self = Self {
+        bytes: [0; TASK_NAME_BYTES],
+        len: 0,
+    };
+
+    pub fn new(name: &str) -> Self {
+        let mut end = name.len().min(TASK_NAME_BYTES);
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut bytes = [0; TASK_NAME_BYTES];
+        bytes[..end].copy_from_slice(&name.as_bytes()[..end]);
+        Self {
+            bytes,
+            len: u8::try_from(end).unwrap_or(0),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("")
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 /// Uma linha do `ps`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TaskInfo<'a> {
@@ -333,4 +372,29 @@ pub struct DisplayInfo {
     pub cols: u16,
     /// Linhas de texto.
     pub rows: u16,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_short_name_is_kept() {
+        assert_eq!(TaskName::new("count").as_str(), "count");
+        assert!(TaskName::default().is_empty() && TaskName::EMPTY.as_str().is_empty());
+    }
+
+    #[test]
+    fn a_long_name_is_cut_at_the_field_size() {
+        let name = TaskName::new("a-program-with-a-very-long-name");
+        assert_eq!(name.as_str(), "a-program-with-a");
+        assert_eq!(name.as_str().len(), TASK_NAME_BYTES);
+    }
+
+    #[test]
+    fn the_cut_never_splits_a_character() {
+        let name = TaskName::new("123456789012345é");
+        assert_eq!(name.as_str(), "123456789012345");
+        assert_eq!(TaskName::new("12345678901234é").as_str(), "12345678901234é");
+    }
 }
