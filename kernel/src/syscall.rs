@@ -9,7 +9,7 @@ use rustos_hal::abi::{
 
 use rustos_mm::UserRange;
 
-use crate::{console, platform, process, random};
+use crate::{platform, process, random, userout};
 
 mod handles;
 
@@ -148,7 +148,7 @@ fn debug_write(console: u64, ptr: u64, len: u64) -> SyscallReturn {
     if !platform::copy_from_user(range, bytes) {
         return SyscallReturn::err(copy_failure());
     }
-    console::print(format_args!("{}", Filtered(bytes)));
+    userout::write(format_args!("{}", Filtered(bytes)));
     SyscallReturn::ok(len)
 }
 

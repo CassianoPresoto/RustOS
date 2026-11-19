@@ -48,6 +48,7 @@ mod syscall;
 mod system;
 mod task;
 mod tlb;
+mod userout;
 mod uspace;
 mod vm;
 

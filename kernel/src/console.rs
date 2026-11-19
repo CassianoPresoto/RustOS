@@ -47,7 +47,13 @@ pub fn print(args: fmt::Arguments<'_>) {
 
 /// Como `print`, mas só na serial: a tela fica para o que o usuário lê (SDD 17, "O M1"). Serve às
 /// linhas de diagnóstico do ciclo de vida do processo, que repetem o que o shell já mostra.
+/// Com o prompt na tela, a linha espera a vez do shell (`userout`).
 pub fn print_serial(args: fmt::Arguments<'_>) {
+    crate::userout::write_serial(args);
+}
+
+/// `print_serial` sem esperar pelo shell.
+pub fn print_serial_now(args: fmt::Arguments<'_>) {
     if panic::elsewhere() {
         return;
     }
@@ -175,6 +181,22 @@ impl Write for Sink {
         }
         if let Some(screen) = SCREEN.lock().as_mut() {
             screen.write(text.as_bytes());
+        }
+        Ok(())
+    }
+}
+
+/// Só a serial, texto cru, como o `Sink` a escreve.
+#[derive(Debug)]
+pub struct SerialSink;
+
+impl Write for SerialSink {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        if panic::elsewhere() {
+            return Ok(());
+        }
+        if let Some(serial) = SERIAL.lock().as_mut() {
+            serial.write_bytes(text.as_bytes());
         }
         Ok(())
     }

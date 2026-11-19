@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 mod ansi;
+mod backlog;
 #[cfg(feature = "bench")]
 mod bench;
 mod commands;
@@ -18,8 +19,10 @@ mod shell;
 #[cfg(test)]
 mod testing;
 
+pub use backlog::Backlog;
 pub use host::{
     Access, BenchReport, CpuInfo, DisplayInfo, FaultTest, Host, KillCause, Listing, MemoryInfo,
-    MicroBench, ProgramInfo, RunOutcome, ScaleSample, StormSample, SystemInfo, TaskInfo, TaskState,
+    MicroBench, ProgramInfo, RunOutcome, ScaleSample, StormSample, SystemInfo, TaskInfo, TaskName,
+    TaskState,
 };
 pub use shell::Shell;

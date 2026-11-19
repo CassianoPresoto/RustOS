@@ -354,7 +354,7 @@ fn mem(ctx: &mut Ctx<'_>) -> fmt::Result {
 fn ps(ctx: &mut Ctx<'_>) -> fmt::Result {
     write!(
         ctx.out,
-        "{DIM}{:>3}  {:<8} {:>4} {:>3} {:<7} {:>10} {:>9} {:>9}  simd{RESET}\r\n",
+        "{DIM}{:>3}  {:<16} {:>4} {:>3} {:<7} {:>10} {:>9} {:>9}  simd{RESET}\r\n",
         "id", "name", "pid", "cpu", "state", "cpu (s)", "switches", "stack"
     )?;
     let mut result = Ok(());
@@ -373,7 +373,7 @@ fn ps(ctx: &mut Ctx<'_>) -> fmt::Result {
         if result.is_ok() {
             result = write!(
                 ctx.out,
-                "{:>3}  {:<8} {:>4} {:>3} {:<7} {:>10} {:>9} {:>9}  {simd}\r\n",
+                "{:>3}  {:<16} {:>4} {:>3} {:<7} {:>10} {:>9} {:>9}  {simd}\r\n",
                 task.id,
                 task.name,
                 Pid(task.pid),
@@ -447,8 +447,6 @@ fn run(ctx: &mut Ctx<'_>) -> fmt::Result {
             .out
             .write_str("run: programs take no arguments yet (usage: run <program> [&])\r\n");
     }
-    // Uma escrita só por linha: o console escreve por pedaço, e a saída de um processo em segundo
-    // plano rasgaria `started pid N` no meio (DEBT-0132).
     let mut line = StackStr::<160>::new();
     let shown = match ctx.host.run_program(name, !background) {
         RunOutcome::Exited { pid, code } => write!(line, "exit code {code} (pid {pid})\r\n"),
@@ -874,7 +872,7 @@ mod tests {
         let pid_of = |row: &str| row.split_whitespace().nth(2).map(str::to_owned);
         assert_eq!(pid_of(rows[1]).as_deref(), Some("-"));
         assert_eq!(pid_of(rows[2]).as_deref(), Some("-"));
-        assert!(rows[4].contains("user") && rows[4].contains("wait"));
+        assert!(rows[4].contains("count") && rows[4].contains("wait"));
         assert_eq!(pid_of(rows[4]).as_deref(), Some("43"));
     }
 
