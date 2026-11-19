@@ -3,11 +3,11 @@
 use core::fmt;
 
 use crate::ansi::{ACCENT, CLEAR_SCREEN, DIM, LOGO, RESET};
-use crate::fmtutil::{Bytes, Millis, Percent, Seconds, StackUse, Uptime};
+use crate::fmtutil::{Bytes, Millis, Percent, Pid, Seconds, StackUse, Uptime};
 use crate::history::Entries;
 use rustos_hal::PAGE_SIZE;
 
-use crate::host::{FaultTest, Host, SystemInfo, TaskState};
+use crate::host::{Access, FaultTest, Host, KillCause, Listing, RunOutcome, SystemInfo, TaskState};
 
 #[cfg(feature = "bench")]
 use crate::bench::run as bench;
@@ -92,19 +92,29 @@ pub(crate) const COMMANDS: &[Command] = &[
         run: lines,
     },
     Command {
+        name: "ls",
+        summary: "list the files in the initramfs, with their sizes",
+        run: ls,
+    },
+    Command {
         name: "mem",
         summary: "show the physical memory usage",
         run: mem,
     },
     Command {
         name: "ps",
-        summary: "list the tasks, their state and CPU time",
+        summary: "list the tasks (and the user process of each), their state and CPU time",
         run: ps,
     },
     Command {
         name: "random",
         summary: "print a random 64-bit number in hex",
         run: random,
+    },
+    Command {
+        name: "run",
+        summary: "run a program from the initramfs as a process (run <program> [&] to not wait)",
+        run,
     },
     Command {
         name: "uname",
@@ -343,8 +353,8 @@ fn mem(ctx: &mut Ctx<'_>) -> fmt::Result {
 fn ps(ctx: &mut Ctx<'_>) -> fmt::Result {
     write!(
         ctx.out,
-        "{DIM}{:>3}  {:<8} {:>3} {:<7} {:>10} {:>9} {:>9}  simd{RESET}\r\n",
-        "id", "name", "cpu", "state", "cpu (s)", "switches", "stack"
+        "{DIM}{:>3}  {:<8} {:>4} {:>3} {:<7} {:>10} {:>9} {:>9}  simd{RESET}\r\n",
+        "id", "name", "pid", "cpu", "state", "cpu (s)", "switches", "stack"
     )?;
     let mut result = Ok(());
     ctx.host.tasks(&mut |task| {
@@ -362,9 +372,10 @@ fn ps(ctx: &mut Ctx<'_>) -> fmt::Result {
         if result.is_ok() {
             result = write!(
                 ctx.out,
-                "{:>3}  {:<8} {:>3} {:<7} {:>10} {:>9} {:>9}  {simd}\r\n",
+                "{:>3}  {:<8} {:>4} {:>3} {:<7} {:>10} {:>9} {:>9}  {simd}\r\n",
                 task.id,
                 task.name,
+                Pid(task.pid),
                 task.cpu,
                 state,
                 Seconds(task.cpu_ns),
@@ -375,6 +386,103 @@ fn ps(ctx: &mut Ctx<'_>) -> fmt::Result {
     });
     result?;
     cpu_table(ctx)
+}
+
+fn ls(ctx: &mut Ctx<'_>) -> fmt::Result {
+    if let Some(operand) = ctx.args.first() {
+        return write!(ctx.out, "ls: extra operand '{operand}'\r\n");
+    }
+    let mut header = false;
+    let mut result = Ok(());
+    let listing = ctx.host.programs(&mut |file| {
+        if result.is_err() {
+            return;
+        }
+        if !header {
+            header = true;
+            result = write!(ctx.out, "{DIM}{:>9}  name{RESET}\r\n", "bytes");
+        }
+        result = result.and_then(|()| write!(ctx.out, "{:>9}  {}\r\n", file.bytes, file.name));
+    });
+    result?;
+    match listing {
+        Listing::Done if !header => ctx.out.write_str("ls: the initramfs is empty\r\n"),
+        Listing::Done => Ok(()),
+        Listing::NoInitramfs => ctx.out.write_str("ls: no initramfs in this boot\r\n"),
+        Listing::Unreadable => ctx.out.write_str("ls: the initramfs is unreadable\r\n"),
+    }
+}
+
+/// O nome do programa, quantas palavras sobram e se pede para não esperar: um `&` no fim da linha,
+/// solto ou colado ao nome.
+fn run_operands<'a>(args: &[&'a str]) -> (Option<&'a str>, usize, bool) {
+    let (words, mut background) = match args {
+        [rest @ .., "&"] => (rest, true),
+        _ => (args, false),
+    };
+    let Some((&first, rest)) = words.split_first() else {
+        return (None, 0, background);
+    };
+    let mut name = first;
+    if rest.is_empty()
+        && let Some(stripped) = first.strip_suffix('&')
+    {
+        (name, background) = (stripped, true);
+    }
+    (
+        Some(name).filter(|name| !name.is_empty()),
+        rest.len(),
+        background,
+    )
+}
+
+fn run(ctx: &mut Ctx<'_>) -> fmt::Result {
+    let (name, extra, background) = run_operands(ctx.args);
+    let Some(name) = name else {
+        return ctx.out.write_str("usage: run <program> [&]\r\n");
+    };
+    if extra > 0 {
+        return ctx
+            .out
+            .write_str("run: programs take no arguments yet (usage: run <program> [&])\r\n");
+    }
+    match ctx.host.run_program(name, !background) {
+        RunOutcome::Exited { pid, code } => write!(ctx.out, "exit code {code} (pid {pid})\r\n"),
+        RunOutcome::Killed { pid, cause } => write!(ctx.out, "killed: {cause} (pid {pid})\r\n"),
+        RunOutcome::Started { pid } => write!(ctx.out, "started pid {pid}\r\n"),
+        RunOutcome::NotFound => write!(ctx.out, "run: {name}: no such program (try 'ls')\r\n"),
+        RunOutcome::NotExecutable => {
+            write!(
+                ctx.out,
+                "run: {name}: not an executable this kernel accepts\r\n"
+            )
+        }
+        RunOutcome::NoMemory => write!(ctx.out, "run: {name}: out of memory\r\n"),
+        RunOutcome::NoInitramfs => ctx.out.write_str("run: no initramfs in this boot\r\n"),
+        RunOutcome::Failed => write!(ctx.out, "run: {name}: could not start the process\r\n"),
+    }
+}
+
+impl fmt::Display for KillCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::PageFault { address: 0, .. } => f.write_str("page fault outside the user half"),
+            Self::PageFault { address, access } => {
+                let what = match access {
+                    Access::Read => "read of",
+                    Access::Write => "write to",
+                    Access::Execute => "instruction fetch at",
+                };
+                write!(f, "page fault on a {what} {address:#x}")
+            }
+            Self::IllegalInstruction => f.write_str("illegal instruction"),
+            Self::Unaligned => f.write_str("unaligned access"),
+            Self::Arithmetic => f.write_str("arithmetic fault"),
+            Self::Breakpoint => f.write_str("breakpoint"),
+            Self::OutOfMemory => f.write_str("out of memory"),
+            Self::Other => f.write_str("exception"),
+        }
+    }
 }
 
 /// Uma linha por CPU: fila, tempo ocupado, trocas, IPIs e tarefas puxadas.
@@ -614,6 +722,7 @@ fn fetch(ctx: &mut Ctx<'_>) -> fmt::Result {
 mod tests {
     use super::*;
     use crate::testing::{FakeHost, info};
+    use crate::{Listing, RunOutcome};
 
     fn run(name: &str, args: &[&str], host: &FakeHost) -> String {
         let mut out = String::new();
@@ -733,11 +842,127 @@ mod tests {
     fn ps_ends_with_one_row_per_cpu() {
         let out = run("ps", &[], &FakeHost::new());
         let rows: Vec<&str> = out.split("\r\n").collect();
-        assert!(rows[4].contains("load") && rows[4].contains("ipi out/in"));
-        assert!(rows[5].starts_with("  0     2  100%      1000     7/9"));
-        assert!(rows[5].ends_with('3'));
-        assert!(rows[6].starts_with("  1     1   50%      1001"));
-        assert_eq!(rows.len(), 8);
+        assert!(rows[5].contains("load") && rows[5].contains("ipi out/in"));
+        assert!(rows[6].starts_with("  0     2  100%      1000     7/9"));
+        assert!(rows[6].ends_with('3'));
+        assert!(rows[7].starts_with("  1     1   50%      1001"));
+        assert_eq!(rows.len(), 9);
+    }
+
+    #[test]
+    fn ps_has_a_pid_column_that_is_a_dash_for_kernel_tasks() {
+        let out = run("ps", &[], &FakeHost::new());
+        let rows: Vec<&str> = out.split("\r\n").collect();
+        assert!(rows[0].contains("pid"));
+        let pid_of = |row: &str| row.split_whitespace().nth(2).map(str::to_owned);
+        assert_eq!(pid_of(rows[1]).as_deref(), Some("-"));
+        assert_eq!(pid_of(rows[2]).as_deref(), Some("-"));
+        assert!(rows[4].contains("user") && rows[4].contains("wait"));
+        assert_eq!(pid_of(rows[4]).as_deref(), Some("43"));
+    }
+
+    #[test]
+    fn ls_lists_each_file_with_its_size_in_bytes() {
+        let out = run("ls", &[], &FakeHost::new());
+        let rows: Vec<&str> = out.split("\r\n").collect();
+        assert!(rows[0].contains("bytes") && rows[0].contains("name"));
+        assert_eq!(rows[1], "    11584  init");
+        assert_eq!(rows[2], "     4096  hello");
+        assert_eq!(rows.len(), 4);
+    }
+
+    #[test]
+    fn ls_says_why_there_is_nothing_to_list() {
+        let mut host = FakeHost::new();
+        host.listing = Listing::NoInitramfs;
+        assert_eq!(run("ls", &[], &host), "ls: no initramfs in this boot\r\n");
+        host.listing = Listing::Unreadable;
+        assert_eq!(run("ls", &[], &host), "ls: the initramfs is unreadable\r\n");
+        assert_eq!(run("ls", &["x"], &host), "ls: extra operand 'x'\r\n");
+    }
+
+    fn run_with(outcome: RunOutcome, args: &[&str]) -> (String, Option<(String, bool)>) {
+        let mut host = FakeHost::new();
+        host.outcome = outcome;
+        let out = run("run", args, &host);
+        let seen = host.last_run.borrow().clone();
+        (out, seen)
+    }
+
+    #[test]
+    fn run_waits_by_default_and_shows_the_exit_code() {
+        let (out, seen) = run_with(RunOutcome::Exited { pid: 7, code: 3 }, &["hello"]);
+        assert_eq!(out, "exit code 3 (pid 7)\r\n");
+        assert_eq!(seen, Some(("hello".to_owned(), true)));
+    }
+
+    #[test]
+    fn run_with_an_ampersand_does_not_wait_and_names_the_pid() {
+        for args in [&["count", "&"][..], &["count&"][..]] {
+            let (out, seen) = run_with(RunOutcome::Started { pid: 9 }, args);
+            assert_eq!(out, "started pid 9\r\n");
+            assert_eq!(seen, Some(("count".to_owned(), false)));
+        }
+    }
+
+    #[test]
+    fn run_shows_the_cause_of_a_death_without_kernel_addresses() {
+        let fault = KillCause::PageFault {
+            address: 0x6000_0000_1000,
+            access: Access::Write,
+        };
+        let cases = [
+            (
+                fault,
+                "killed: page fault on a write to 0x600000001000 (pid 5)",
+            ),
+            (
+                KillCause::PageFault {
+                    address: 0,
+                    access: Access::Read,
+                },
+                "killed: page fault outside the user half (pid 5)",
+            ),
+            (
+                KillCause::IllegalInstruction,
+                "killed: illegal instruction (pid 5)",
+            ),
+            (KillCause::OutOfMemory, "killed: out of memory (pid 5)"),
+            (KillCause::Arithmetic, "killed: arithmetic fault (pid 5)"),
+        ];
+        for (cause, expected) in cases {
+            let (out, _) = run_with(RunOutcome::Killed { pid: 5, cause }, &["crash"]);
+            assert_eq!(out, format!("{expected}\r\n"));
+        }
+    }
+
+    #[test]
+    fn run_explains_every_way_of_not_starting() {
+        let cases = [
+            (RunOutcome::NotFound, "run: x: no such program (try 'ls')"),
+            (
+                RunOutcome::NotExecutable,
+                "run: x: not an executable this kernel accepts",
+            ),
+            (RunOutcome::NoMemory, "run: x: out of memory"),
+            (RunOutcome::NoInitramfs, "run: no initramfs in this boot"),
+            (RunOutcome::Failed, "run: x: could not start the process"),
+        ];
+        for (outcome, expected) in cases {
+            assert_eq!(run_with(outcome, &["x"]).0, format!("{expected}\r\n"));
+        }
+    }
+
+    #[test]
+    fn run_without_a_program_or_with_arguments_does_not_call_the_host() {
+        for args in [&[][..], &["&"][..]] {
+            let (out, seen) = run_with(RunOutcome::Failed, args);
+            assert_eq!(out, "usage: run <program> [&]\r\n");
+            assert_eq!(seen, None);
+        }
+        let (out, seen) = run_with(RunOutcome::Failed, &["hello", "world"]);
+        assert!(out.starts_with("run: programs take no arguments yet"));
+        assert_eq!(seen, None);
     }
 
     #[cfg(feature = "bench")]
