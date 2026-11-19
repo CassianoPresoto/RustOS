@@ -468,9 +468,8 @@ impl<S: AsRef<[Region]> + AsMut<[Region]>> Vmar<S> {
     ) -> Result<FaultPlan, FaultError> {
         let region = self.check_fault(addr, access)?;
         match (mapped, access) {
-            (Mapped::Private, _) => Ok(FaultPlan::Retry),
             (Mapped::Absent, _) if region.attrs.backing.is_some() => Ok(FaultPlan::MapObject),
-            (Mapped::ZeroPage, Access::Read) => Ok(FaultPlan::Retry),
+            (Mapped::Private, _) | (Mapped::ZeroPage, Access::Read) => Ok(FaultPlan::Retry),
             _ if !region.attrs.lazy => Err(FaultError::Unbacked),
             (_, Access::Execute) => Err(FaultError::Permission),
             (Mapped::Absent, Access::Read) => Ok(FaultPlan::MapZero),
@@ -1047,7 +1046,8 @@ mod tests {
             object: NonZeroU32::new(7).unwrap(),
             page_offset: 3,
         };
-        let attrs = Attrs::new(Kind::Mapping, Perms::READ.union(Perms::WRITE)).with_backing(backing);
+        let attrs =
+            Attrs::new(Kind::Mapping, Perms::READ.union(Perms::WRITE)).with_backing(backing);
         vmar.reserve(LO, 2 * PAGE, attrs).unwrap();
         for access in [Access::Read, Access::Write] {
             assert_eq!(

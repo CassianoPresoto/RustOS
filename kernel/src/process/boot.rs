@@ -20,12 +20,20 @@ const ITEMS_MAX: usize = 4;
 
 /// A ponta do canal de boot que o kernel guarda (só o modo de teste): fala com o programa por uma
 /// tabela de handles própria, como o pai de um processo falaria.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "só o modo de teste guarda a ponta")
+)]
 #[derive(Debug)]
 pub struct BootPeer {
     table: IrqLock<Table>,
     channel: Handle,
 }
 
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "só o modo de teste guarda a ponta")
+)]
 impl BootPeer {
     /// Escreve `bytes` na fila do programa.
     pub fn write(&self, bytes: &[u8]) -> Result<(), Status> {
@@ -127,10 +135,7 @@ fn boot_channel(
             .then(|| Vmo::physical(system.frames, base, len.div_ceil(PAGE_SIZE)))
     });
     if let Some(vmo) = initramfs {
-        add(
-            boot_kind::INITRAMFS,
-            put(Obj::Vmo(vmo), Rights::INITRAMFS)?,
-        );
+        add(boot_kind::INITRAMFS, put(Obj::Vmo(vmo), Rights::INITRAMFS)?);
     }
     let mut message = [0_u8; 16 + 4 * ITEMS_MAX];
     let len = encode_boot_message(&kinds[..count], &mut message).ok_or(Status::InvalidArgs)?;
@@ -142,7 +147,9 @@ fn boot_channel(
         &items[..count],
         &mut work,
     )?;
-    if !options.keep_peer && let Ok(transit) = kernel.with(|table| table.remove(channel)) {
+    if !options.keep_peer
+        && let Ok(transit) = kernel.with(|table| table.remove(channel))
+    {
         close(transit, &mut work);
     }
     let boot = process

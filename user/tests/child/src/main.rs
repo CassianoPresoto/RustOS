@@ -22,6 +22,7 @@ const MODE_BLOCK: u8 = 3;
 const MODE_OVERFLOW: u8 = 4;
 const MODE_ECHO: u8 = 5;
 const MODE_EXIT: u8 = 6;
+const MODE_SELF_KILL: u8 = 7;
 
 /// O `arg0` das threads a mais: gira para sempre, ou sai.
 const WORKER_SPIN: u64 = 0;
@@ -36,7 +37,7 @@ const WORKER_EXIT: u64 = 7;
 )]
 fn recurse(depth: u64) -> u64 {
     let mut pad = [0_u8; 512];
-    pad[(depth % 512) as usize] = depth as u8;
+    pad[usize::try_from(depth % 512).unwrap_or(0)] = depth.to_le_bytes()[0];
     black_box(&mut pad);
     recurse(black_box(depth + 1)) + u64::from(pad[0])
 }
@@ -87,7 +88,10 @@ fn hello(env: &Env, boot: Boot) -> i64 {
         ("sp is 16-byte aligned", env.initial_sp().is_multiple_of(16)),
         ("boot handle is 1", env.boot_handle() == 1),
         ("AT_ENTRY is _start", env.auxv().entry == entry_address()),
-        ("a process handle in the boot message", boot.process.is_some()),
+        (
+            "a process handle in the boot message",
+            boot.process.is_some(),
+        ),
         ("the root VMAR mapping a VMO of its own", own_vmar.is_ok()),
     ]) {
         if !ok {
@@ -127,6 +131,11 @@ fn main(env: &Env) -> i64 {
         Some((MODE_OVERFLOW, _)) => i64::try_from(recurse(0)).unwrap_or(0),
         Some((MODE_ECHO, rounds)) => echo(channel, u32::from(rounds) * 16),
         Some((MODE_EXIT, code)) => i64::from(code),
+        Some((MODE_SELF_KILL, _)) => {
+            let own = boot.process.map(sys::process_kill);
+            println!("child: process_kill of itself came back: {own:?}");
+            95
+        }
         Some(_) => 96,
     }
 }

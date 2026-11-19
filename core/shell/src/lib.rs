@@ -19,7 +19,7 @@ mod shell;
 mod testing;
 
 pub use host::{
-    BenchReport, CpuInfo, DisplayInfo, FaultTest, Host, MemoryInfo, MicroBench, ScaleSample,
-    StormSample, SystemInfo, TaskInfo, TaskState,
+    Access, BenchReport, CpuInfo, DisplayInfo, FaultTest, Host, KillCause, Listing, MemoryInfo,
+    MicroBench, ProgramInfo, RunOutcome, ScaleSample, StormSample, SystemInfo, TaskInfo, TaskState,
 };
 pub use shell::Shell;

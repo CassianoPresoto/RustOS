@@ -153,8 +153,8 @@ fn create_child(
 /// `thread_create(process, entry, sp, arg0, arg1)`: cria **e inicia** uma thread em `process`
 /// (`MANAGE_THREAD`); a primeira inicia o processo. `entry` em `[USER_MIN, USER_TOP)`, `sp` até
 /// `USER_TOP` e alinhado a 16, senão `InvalidArgs`. `arg0` e `arg1` vão a `rdi`/`rsi` (`x0`/`x1`).
-pub fn thread_create(args: &[u64; 6]) -> Outcome {
-    let [process, entry, sp, arg0, arg1, _] = *args;
+pub fn thread_create(call: &[u64; 6]) -> Outcome {
+    let [process, entry, sp, first, second, _] = *call;
     let target = current(|p| process_of(p, process, required::THREAD_CREATE))?;
     if !(USER_MIN..USER_TOP).contains(&entry) || sp > USER_TOP || !sp.is_multiple_of(16) {
         return Err(Status::InvalidArgs);
@@ -167,10 +167,10 @@ pub fn thread_create(args: &[u64; 6]) -> Outcome {
         };
         let thread = ThreadObj::new(&target, Some(cost));
         let at = Entry {
-            entry,
+            pc: entry,
             sp,
-            arg0,
-            arg1,
+            arg0: first,
+            arg1: second,
         };
         if let Err(status) = process::start_thread(&target, Arc::clone(&thread), at, 0) {
             p.table().lock().cancel(slot);

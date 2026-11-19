@@ -1,8 +1,7 @@
 //! O carregador do lado do usuário (SDD 17, "Como o `init` e os outros programas chegam à memória"):
 //! lê um ELF com `core/elf`, cria o processo, preenche um VMO por segmento, mapeia no filho com a
 //! permissão do segmento, monta a pilha inicial com `hal::abi::InitialStack` (o mesmo código do
-//! carregador do kernel) e escreve a mensagem de boot. O kernel garante o que importa (W^X, faixas,
-//! direitos) em `vmar_map`, qualquer que seja o analisador.
+//! carregador do kernel) e escreve a mensagem de boot. O kernel garante W^X, faixas e direitos.
 
 use rustos_elf::{self as elf, Image, Limits, PF_W, PF_X, Segment};
 use rustos_hal::PAGE_SIZE;
@@ -106,12 +105,12 @@ pub fn create(parent: Parent, file: &[u8]) -> Result<Child, Error> {
 /// permissão do segmento, no endereço em que o linker o pôs.
 fn load_segment(child: &Child, file: &[u8], segment: &Segment) -> Result<(), Error> {
     let (start, end) = segment.page_range(PAGE_SIZE);
-    let len = (end - start) as usize;
+    let len = vm::to_usize(end - start);
     let bytes = segment
         .file_bytes(file)
         .ok_or(Error::Elf(elf::Error::SegmentOutOfFile))?;
     let (vmo, mut local) = vm::scratch(child.parent.vmar, len)?;
-    let lead = segment.page_offset(PAGE_SIZE) as usize;
+    let lead = vm::to_usize(segment.page_offset(PAGE_SIZE));
     local.bytes_mut()[lead..lead + bytes.len()].copy_from_slice(bytes);
     drop(local);
     let mut flags = vmar_flags::READ | vmar_flags::FIXED;
@@ -144,7 +143,14 @@ impl Child {
         let base = sys::vmar_map(self.vmar, vmo, 0, whole, 0, 0)?;
         sys::vmar_unmap(self.vmar, base + PAGE_SIZE, pages * PAGE_SIZE)?;
         let rw = vmar_flags::READ | vmar_flags::WRITE | vmar_flags::FIXED;
-        sys::vmar_map(self.vmar, vmo, PAGE_SIZE, pages * PAGE_SIZE, rw, base + PAGE_SIZE)?;
+        sys::vmar_map(
+            self.vmar,
+            vmo,
+            PAGE_SIZE,
+            pages * PAGE_SIZE,
+            rw,
+            base + PAGE_SIZE,
+        )?;
         let top = base + (pages + 1) * PAGE_SIZE;
         let mut random = [0_u8; AT_RANDOM_LEN];
         sys::random_get(&mut random)?;
@@ -161,11 +167,11 @@ impl Child {
             self.parent.vmar,
             vmo,
             last,
-            PAGE_SIZE as usize,
+            vm::to_usize(PAGE_SIZE),
             vmar_flags::READ | vmar_flags::WRITE,
         )?;
         let bytes = initial.bytes();
-        let at = PAGE_SIZE as usize - bytes.len();
+        let at = vm::to_usize(PAGE_SIZE) - bytes.len();
         page.bytes_mut()[at..].copy_from_slice(bytes);
         initial.storage_mut().fill(0);
         Ok(initial.sp())
@@ -201,7 +207,13 @@ impl Child {
 
     /// Inicia o processo: a primeira thread, com `sp` e o handle de boot (`1`) em `rdi`/`x0`.
     pub fn start(&self, sp: u64) -> Result<Handle, Error> {
-        Ok(sys::thread_create(self.process, self.image.entry, sp, 1, 0)?)
+        Ok(sys::thread_create(
+            self.process,
+            self.image.entry,
+            sp,
+            1,
+            0,
+        )?)
     }
 
     /// Uma thread a mais, com a própria pilha (a mesma entrada do programa).

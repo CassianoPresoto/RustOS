@@ -26,6 +26,7 @@
 │       ├── process.rs          # processo de usuário (um espaço, uma thread, uma árvore de regiões, a tabela de handles): `spawn` de um ELF ou, no modo de teste, de um programa plano, `process_main`, `exit`, `user_fault` (mata o processo, esvazia a tabela e o kernel segue); `process/boot.rs`: o canal de boot; `process/selftest.rs`: o autoteste dos casos de usuário (feature `selftest`)
 │       ├── object.rs           # os objetos do kernel sobre o `core/object` (4c): o enum `Obj` de `Arc`, o `Lock` do `IrqLock`, os slots da tabela, a espera por máscara de tarefas, o par de pontas de canal, a cobrança de pontas
 │       ├── loader.rs           # o carregador de ELF do initramfs (4b): `core/cpio` + `core/elf`, `PT_LOAD` em frames novos (o `.bss` de páginas inteiras e a pilha, regiões preguiçosas, 4c), `Vmar` do processo e a pilha inicial com guarda e topo sorteado
+│       ├── programs.rs         # o que o shell faz com programas (M1): `ls` lê o `cpio`, `run` carrega com `process::spawn` e espera o fim do processo (a tabela de 16 fins que `process::terminate` alimenta)
 │       ├── init.rs             # (feature `selftest`) lança o `init` do initramfs, espera e confere o código de saída; mede o custo do menor processo
 │       ├── uspace.rs           # UserSpace: tabelas da metade baixa, mapeamento de frames zerados (`map_at`), a falta de página resolvida (página zero, frame novo, cópia da página zero), `unmap_page` com *shootdown*, a máscara de CPUs ativas e a devolução zerada na morte (4c)
 │       ├── commit.rs           # a promessa estrita das páginas preguiçosas contra os frames livres (decisão 9 do SDD 17, a parte da 4c)
@@ -65,6 +66,7 @@
 ├── user/                       # o segundo anel de composição: só alvos bare-metal, fora do `default-members` (guidelines 03, regra 11)
 │   ├── rt/                     # rustos-user-rt: ponto de entrada em Rust, leitor do auxv (`Env`), `println!`, wrappers seguros das syscalls, a leitura da mensagem de boot, pânico e alocador de avanço; o único `unsafe` de usuário
 │   ├── init/                   # rustos-user-init: o `init`, `forbid(unsafe_code)`
+│   ├── hello/ crash/ sysinfo/ count/   # as demonstrações do shell (M1), `forbid(unsafe_code)`, na imagem de produção ao lado do `init`: olá e saída 0; desce a pilha até a guarda e morre contido; relógio, página e número aleatório; conta com `object_wait_one` e prazo
 │   ├── tests/big/              # rustos-user-test-big: programa de teste de 1,3 MiB (carregador e `code-model=small`); só entra na imagem com `selftest`
 │   ├── tests/handles/          # rustos-user-test-handles: os casos hostis de handle, canal e espera (usa `rt` com `raw-syscalls`); só entra na imagem com `selftest`
 │   ├── tests/lazy/             # rustos-user-test-lazy: pilha e `.bss` sob demanda, leitura antes da escrita e o tempo por página dos três caminhos da falta; só com `selftest`
@@ -127,7 +129,7 @@ EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_es
 | Algoritmo ou política (alocador, escalonador, cache, fila) | crate de `core/` do assunto |
 | Estado por CPU (fila, carga, contadores) | `kernel/src/percpu.rs`; o registrador que o acha (`GS`, `TPIDR_EL1`) é da porta `hal::CpuLocal`, em `arch/` |
 | Subir um núcleo, o IPI | `kernel/src/smp.rs`, `task.rs`; o ICR e a SGI em `arch/` (porta `hal::Ipi`) |
-| Processo de usuário, espaço de endereçamento, carregador, syscall | `kernel/src/{process,uspace,loader,syscall}.rs`; a entrada e a saída (`SYSCALL`, `SVC`, `swapgs`, `eret`) e a cópia usuário↔kernel em `arch/<isa>/src/{traps,exception,user,usercopy}.rs`; o contrato em `core/hal/src/abi.rs` |
+| Processo de usuário, thread, espaço de endereçamento, VMO, carregador, syscall | `kernel/src/{process,uspace,loader,vmo,syscall}.rs` (a memória do processo e o VMAR em `process/mem.rs`; as chamadas de memória e de processo em `syscall/{memory,tasks}.rs`); a entrada e a saída (`SYSCALL`, `SVC`, `swapgs`, `eret`) e a cópia usuário↔kernel em `arch/<isa>/src/{traps,exception,user,usercopy}.rs`; o contrato em `core/hal/src/abi.rs` |
 | Estado de uma tarefa, pilha, troca de contexto, preempção, migração | `kernel/src/task.rs`; salvar e restaurar registrador, em `arch/<isa>/src/context.rs` e `fpu.rs` |
 | Cifra, hash ou gerador de números aleatórios | `core/crypto/`; a semente do hardware vem por porta do `hal` |
 | Desenho de pixel, glifo da fonte | `core/gfx/` |
@@ -136,6 +138,7 @@ EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_es
 | Tabela de handles, direitos, contagem de handles, fila e sinais do canal, transferência de handles | `core/object/`; os objetos reais (Process, Thread, VMO, VMAR, ponta de canal), o lock e a memória dos slots vêm do `kernel/` ([SDD 17](17_processos_isolamento_e_syscalls.md#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) |
 | Validar um executável ELF e dizer o que mapear | `core/elf/`; os limites da ISA e da faixa do usuário vêm do chamador (`elf::Limits`) |
 | Programa de usuário, o runtime dele, o `_start` e o stub de syscall | `user/` (programa e `rt`); `arch/<isa>-user` (o `asm!`) |
+| Criar um processo filho pela ABI (ler o ELF, preencher e mapear os VMOs, pilha, mensagem de boot) | `user/rt/src/{spawn,vm}.rs`; a pilha é o `hal::abi::InitialStack`, o mesmo código do carregador do kernel |
 | Comando do shell embutido | `core/shell/`; o dado do sistema chega pela porta `Host` |
 | Tema, barra do topo, como a grade vira pixel | `kernel/src/screen.rs` |
 | Vulnerabilidade de CPU, mitigação e a linha `mitigations:` | a decodificação do CPUID e dos registradores e a regra do Linux em `arch/<isa>/src/mitigation.rs` (puro); o tipo `Vulns`, a política `kpti=` e o texto da linha em `core/hal/src/mitigation.rs`; o clamp de índice em `core/hal/src/nospec.rs` (a `CSDB` do aarch64 em `arch/aarch64/src/nospec.rs`); a linha em `kernel/src/mitigation.rs` |

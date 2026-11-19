@@ -206,8 +206,8 @@ pub fn process_create(parent: Handle, name: &[u8], bootstrap: Handle) -> Result<
 /// `thread_create`: cria e inicia uma thread em `process` (a primeira inicia o processo); `arg0` e
 /// `arg1` chegam em `rdi`/`rsi` (`x0`/`x1`).
 pub fn thread_create(process: Handle, entry: u64, sp: u64, arg0: u64, arg1: u64) -> Result<Handle> {
-    let args = [process.raw(), entry, sp, arg0, arg1, 0];
-    checked(call(Syscall::ThreadCreate, args)).and_then(handle_of)
+    let values = [process.raw(), entry, sp, arg0, arg1, 0];
+    checked(call(Syscall::ThreadCreate, values)).and_then(handle_of)
 }
 
 /// `thread_exit`: a thread sai; o processo acaba com a última. Não volta.

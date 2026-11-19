@@ -10,7 +10,7 @@ use rustos_hal::abi::{
 
 use rustos_mm::UserRange;
 
-use crate::{console, platform, process, random, task};
+use crate::{console, platform, process, random};
 
 mod handles;
 mod memory;
@@ -94,7 +94,6 @@ pub fn dispatch(args: &SyscallArgs) -> SyscallReturn {
 
 fn call(args: &SyscallArgs) -> SyscallReturn {
     process::note_first_syscall();
-    task::clear_retry();
     let Some(call) = lookup(args.number) else {
         return SyscallReturn::err(Status::NotSupported);
     };

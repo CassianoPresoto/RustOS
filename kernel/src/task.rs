@@ -167,8 +167,12 @@ struct Slot {
     user_top: AtomicU64,
     /// A thread de usuário da tarefa (`Arc::into_raw` de um `ThreadObj`), ou zero.
     process: AtomicUsize,
+    /// `process_kill` pediu que a thread desta tarefa saia: a volta ao usuário confere só isto.
+    kill: AtomicBool,
     /// A página da última falta que só repetiu (`Retry`), mais um; zero se a última não repetiu.
     retry_page: AtomicU64,
+    /// O número do processo que a tarefa roda, só para o `ps`; zero sem processo.
+    pid: AtomicU32,
     /// O endereço da máscara de CPUs do espaço que a tarefa roda (`UserSpace::active_addr`), ou zero.
     user_active: AtomicUsize,
     meta: IrqLock<Meta>,
@@ -190,7 +194,9 @@ impl Slot {
             user_root: AtomicU64::new(0),
             user_top: AtomicU64::new(0),
             process: AtomicUsize::new(0),
+            kill: AtomicBool::new(false),
             retry_page: AtomicU64::new(0),
+            pid: AtomicU32::new(0),
             user_active: AtomicUsize::new(0),
             meta: IrqLock::new(Meta {
                 name: "",
@@ -221,6 +227,11 @@ const _: () = assert!(MAX_TASKS <= 64);
 
 static TASKS: [Slot; MAX_TASKS] = [const { Slot::new() }; MAX_TASKS];
 
+#[allow(
+    clippy::inline_always,
+    reason = "no caminho da syscall nula: um quadro a mais passa da janela que o `arch/` repinta"
+)]
+#[inline(always)]
 fn slot(id: usize) -> &'static Slot {
     &TASKS[id]
 }
@@ -499,6 +510,8 @@ fn start(id: usize, config: Spawn) -> Result<bool, TaskError> {
     target.user_top.store(0, Ordering::Relaxed);
     target.process.store(0, Ordering::Relaxed);
     target.retry_page.store(0, Ordering::Relaxed);
+    target.kill.store(false, Ordering::Relaxed);
+    target.pid.store(0, Ordering::Relaxed);
     target.user_active.store(0, Ordering::Relaxed);
     target.cpu_ns.store(0, Ordering::Relaxed);
     target.switches.store(0, Ordering::Relaxed);
@@ -1082,6 +1095,14 @@ pub fn bind_user(root: u64, process: usize, active: usize) -> u64 {
     top
 }
 
+/// Diz ao `ps` qual processo a tarefa corrente roda; vale até `unbind_user`.
+pub fn set_pid(pid: u32) {
+    let here = percpu::current();
+    slot(here.current.load(Ordering::Relaxed) as usize)
+        .pid
+        .store(pid, Ordering::Relaxed);
+}
+
 /// A thread de usuário da tarefa corrente, ou `None` se ela não roda uma. Para o tratador de falta.
 pub fn current_process() -> Option<usize> {
     let here = percpu::current();
@@ -1102,6 +1123,7 @@ pub fn unbind_user() -> Option<usize> {
     );
     current.user_root.store(0, Ordering::Relaxed);
     current.user_top.store(0, Ordering::Relaxed);
+    current.pid.store(0, Ordering::Relaxed);
     let process = current.process.swap(0, Ordering::AcqRel);
     (process != 0).then_some(process)
 }
@@ -1123,10 +1145,24 @@ pub fn clear_retry() {
         .store(0, Ordering::Relaxed);
 }
 
-/// Faz a tarefa `id` (um slot que o chamador sabe vivo) passar logo por um ponto em que o kernel a
-/// vê: acorda a que espera e, se roda em outra CPU, manda o IPI de reescalonar. A morte de um
-/// processo usa para parar as threads dele.
-pub fn poke(id: usize) {
+/// A thread da tarefa corrente foi pedida para sair (`stop`).
+#[allow(
+    clippy::inline_always,
+    reason = "no caminho da syscall nula: um quadro a mais passa da janela que o `arch/` repinta"
+)]
+#[inline(always)]
+pub fn kill_requested() -> bool {
+    let here = percpu::current();
+    slot(here.current.load(Ordering::Relaxed) as usize)
+        .kill
+        .load(Ordering::SeqCst)
+}
+
+/// Pede à tarefa `id` (um slot que o chamador sabe vivo) que saia, e a faz passar logo por um ponto
+/// em que o kernel a vê: acorda a que espera e, se roda em outra CPU, manda o IPI de reescalonar. A
+/// morte de um processo usa para parar as threads dele.
+pub fn stop(id: usize) {
+    slot(id).kill.store(true, Ordering::SeqCst);
     let cpu = platform::cpu();
     let were_enabled = cpu.save_and_disable_interrupts();
     let now = now();
@@ -1274,6 +1310,8 @@ pub fn notify_input() {
 pub struct Snapshot {
     pub id: u32,
     pub name: &'static str,
+    /// O processo de usuário da tarefa, se roda um.
+    pub pid: Option<u32>,
     pub state: State,
     pub cpu: usize,
     pub cpu_ns: u64,
@@ -1307,6 +1345,7 @@ pub fn for_each_snapshot(visit: &mut dyn FnMut(Snapshot)) {
         visit(Snapshot {
             id: slot_u32(id),
             name,
+            pid: Some(task.pid.load(Ordering::Relaxed)).filter(|&pid| pid != 0),
             state,
             cpu: task.cpu.load(Ordering::Relaxed) as usize,
             cpu_ns: task.cpu_ns.load(Ordering::Relaxed) + running,

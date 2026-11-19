@@ -19,6 +19,8 @@ raw-syscalls = []
 
 [dependencies]
 rustos-hal.workspace = true
+
+[target.'cfg(target_os = "none")'.dependencies]
 rustos-elf.workspace = true
 rustos-cpio.workspace = true
 

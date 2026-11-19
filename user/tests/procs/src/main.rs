@@ -30,6 +30,7 @@ const MODE_SPIN: u8 = 2;
 const MODE_BLOCK: u8 = 3;
 const MODE_OVERFLOW: u8 = 4;
 const MODE_ECHO: u8 = 5;
+const MODE_SELF_KILL: u8 = 7;
 const WORKER_SPIN: u64 = 0;
 const WORKER_EXIT: u64 = 7;
 /// Rodadas do laço de criar e matar, e idas e voltas do eco entre processos.
@@ -135,8 +136,16 @@ fn start(cx: &Cx<'_>, mode: Option<u8>, with_console: bool) -> Result<Child, spa
 /// Os argumentos dos VMOs e VMARs que o kernel tem de recusar, e os direitos como teto.
 fn vmo_vmar(c: &mut Checks, cx: &Cx<'_>) {
     let vmar = cx.parent.vmar;
-    c.status("vmo_create of 0 bytes", sys::vmo_create(0), Status::InvalidArgs);
-    c.status("vmo_create unaligned", sys::vmo_create(100), Status::InvalidArgs);
+    c.status(
+        "vmo_create of 0 bytes",
+        sys::vmo_create(0),
+        Status::InvalidArgs,
+    );
+    c.status(
+        "vmo_create unaligned",
+        sys::vmo_create(100),
+        Status::InvalidArgs,
+    );
     c.status(
         "vmo_create above the maximum",
         sys::vmo_create(VMO_MAX + PAGE),
@@ -197,17 +206,49 @@ fn vmo_vmar(c: &mut Checks, cx: &Cx<'_>) {
         map(vmar, vmo, vmar_flags::WRITE | vmar_flags::EXECUTE),
         Status::InvalidArgs,
     );
-    c.status("a reserved flag bit", map(vmar, vmo, 1 << 9), Status::InvalidArgs);
-    c.status("a VMO as the VMAR", map(vmo, vmo, vmar_flags::READ), Status::WrongType);
-    c.status("a VMAR as the VMO", map(vmar, vmar, vmar_flags::READ), Status::WrongType);
+    c.status(
+        "a reserved flag bit",
+        map(vmar, vmo, 1 << 9),
+        Status::InvalidArgs,
+    );
+    wrong_handles(c, cx, vmo);
+    placement(c, vmar, vmo);
+}
+
+/// Handle de outro tipo, forjado: o tipo e a existência valem antes de qualquer outro argumento.
+fn wrong_handles(c: &mut Checks, cx: &Cx<'_>, vmo: Handle) {
+    let vmar = cx.parent.vmar;
+    let map = |vmar, vmo, flags| sys::vmar_map(vmar, vmo, 0, PAGE, flags, 0);
+    c.status(
+        "a VMO as the VMAR",
+        map(vmo, vmo, vmar_flags::READ),
+        Status::WrongType,
+    );
+    c.status(
+        "a VMAR as the VMO",
+        map(vmar, vmar, vmar_flags::READ),
+        Status::WrongType,
+    );
     c.status(
         "a console as the VMO",
         map(vmar, cx.console, vmar_flags::READ),
         Status::WrongType,
     );
     let forged = Handle::from_raw(0xDEAD_0001).unwrap_or(vmo);
-    c.status("a forged VMO", map(vmar, forged, vmar_flags::READ), Status::BadHandle);
-    c.status("a forged VMAR", map(forged, vmo, vmar_flags::READ), Status::BadHandle);
+    c.status(
+        "a forged VMO",
+        map(vmar, forged, vmar_flags::READ),
+        Status::BadHandle,
+    );
+    c.status(
+        "a forged VMAR",
+        map(forged, vmo, vmar_flags::READ),
+        Status::BadHandle,
+    );
+}
+
+/// Onde o kernel põe um mapeamento e o que recusa: `FIXED` sobre região, fora da faixa, e tamanhos.
+fn placement(c: &mut Checks, vmar: Handle, vmo: Handle) {
     let Ok(at) = sys::vmar_map(vmar, vmo, 0, 4 * PAGE, RW, 0) else {
         c.expect("vmar_map of 4 pages", false);
         return;
@@ -219,21 +260,57 @@ fn vmo_vmar(c: &mut Checks, cx: &Cx<'_>) {
     let fixed =
         |addr: u64, len: u64| sys::vmar_map(vmar, vmo, 0, len, RW | vmar_flags::FIXED, addr);
     c.status("FIXED over a mapping", fixed(at, PAGE), Status::InvalidArgs);
-    c.status("FIXED inside a mapping", fixed(at + PAGE, PAGE), Status::InvalidArgs);
-    c.status("FIXED across the end", fixed(at + 3 * PAGE, 2 * PAGE), Status::InvalidArgs);
-    c.status("FIXED across the start", fixed(at - PAGE, 2 * PAGE), Status::InvalidArgs);
+    c.status(
+        "FIXED inside a mapping",
+        fixed(at + PAGE, PAGE),
+        Status::InvalidArgs,
+    );
+    c.status(
+        "FIXED across the end",
+        fixed(at + 3 * PAGE, 2 * PAGE),
+        Status::InvalidArgs,
+    );
+    c.status(
+        "FIXED across the start",
+        fixed(at - PAGE, 2 * PAGE),
+        Status::InvalidArgs,
+    );
     c.status("FIXED in the null zone", fixed(0, PAGE), Status::OutOfRange);
-    c.status("FIXED below the minimum", fixed(USER_MIN - PAGE, PAGE), Status::OutOfRange);
-    c.status("FIXED at the top", fixed(USER_TOP, PAGE), Status::OutOfRange);
-    c.status("FIXED in the kernel half", fixed(KERNEL, PAGE), Status::OutOfRange);
-    c.status("FIXED unaligned", fixed(at + 5 * PAGE + 8, PAGE), Status::InvalidArgs);
+    c.status(
+        "FIXED below the minimum",
+        fixed(USER_MIN - PAGE, PAGE),
+        Status::OutOfRange,
+    );
+    c.status(
+        "FIXED at the top",
+        fixed(USER_TOP, PAGE),
+        Status::OutOfRange,
+    );
+    c.status(
+        "FIXED in the kernel half",
+        fixed(KERNEL, PAGE),
+        Status::OutOfRange,
+    );
+    c.status(
+        "FIXED unaligned",
+        fixed(at + 5 * PAGE + 8, PAGE),
+        Status::InvalidArgs,
+    );
     c.status(
         "an address without FIXED",
         sys::vmar_map(vmar, vmo, 0, PAGE, RW, at + 8 * PAGE),
         Status::InvalidArgs,
     );
-    c.status("a zero length", sys::vmar_map(vmar, vmo, 0, 0, RW, 0), Status::InvalidArgs);
-    c.status("an unaligned length", sys::vmar_map(vmar, vmo, 0, 100, RW, 0), Status::InvalidArgs);
+    c.status(
+        "a zero length",
+        sys::vmar_map(vmar, vmo, 0, 0, RW, 0),
+        Status::InvalidArgs,
+    );
+    c.status(
+        "an unaligned length",
+        sys::vmar_map(vmar, vmo, 0, 100, RW, 0),
+        Status::InvalidArgs,
+    );
     c.status(
         "an unaligned VMO offset",
         sys::vmar_map(vmar, vmo, 8, PAGE, RW, 0),
@@ -254,14 +331,28 @@ fn vmo_vmar(c: &mut Checks, cx: &Cx<'_>) {
         sys::vmar_map(vmar, vmo, 0, u64::MAX, RW, 0),
         Status::InvalidArgs,
     );
+    unmap_rules(c, vmar, vmo, at);
+}
+
+/// `vmar_unmap`: argumentos ruins, handle sem `MAP`, buraco e o endereço que volta a ser livre.
+fn unmap_rules(c: &mut Checks, vmar: Handle, vmo: Handle, at: u64) {
+    let fixed =
+        |addr: u64, len: u64| sys::vmar_map(vmar, vmo, 0, len, RW | vmar_flags::FIXED, addr);
     let another = sys::vmar_map(vmar, vmo, 0, PAGE, RW, 0);
-    c.expect("the failed mappings left the first one alone", another.is_ok());
+    c.expect(
+        "the failed mappings left the first one alone",
+        another.is_ok(),
+    );
     c.status(
         "vmar_unmap unaligned",
         sys::vmar_unmap(vmar, at + 8, PAGE),
         Status::InvalidArgs,
     );
-    c.status("vmar_unmap of zero bytes", sys::vmar_unmap(vmar, at, 0), Status::InvalidArgs);
+    c.status(
+        "vmar_unmap of zero bytes",
+        sys::vmar_unmap(vmar, at, 0),
+        Status::InvalidArgs,
+    );
     c.status(
         "vmar_unmap above the top",
         sys::vmar_unmap(vmar, USER_TOP, PAGE),
@@ -273,8 +364,14 @@ fn vmo_vmar(c: &mut Checks, cx: &Cx<'_>) {
         sys::vmar_unmap(read_only, at, PAGE),
         Status::AccessDenied,
     );
-    c.expect("vmar_unmap of a hole", sys::vmar_unmap(vmar, at + 64 * PAGE, PAGE).is_ok());
-    c.expect("vmar_unmap of the mapping", sys::vmar_unmap(vmar, at, 4 * PAGE).is_ok());
+    c.expect(
+        "vmar_unmap of a hole",
+        sys::vmar_unmap(vmar, at + 64 * PAGE, PAGE).is_ok(),
+    );
+    c.expect(
+        "vmar_unmap of the mapping",
+        sys::vmar_unmap(vmar, at, 4 * PAGE).is_ok(),
+    );
     if let Ok(other) = another {
         let _ = sys::vmar_unmap(vmar, other, PAGE);
     }
@@ -291,7 +388,7 @@ fn sharing_and_partial_unmap(c: &mut Checks, cx: &Cx<'_>) {
         c.expect("vmo_create of 8 pages", false);
         return;
     };
-    let len = (8 * PAGE) as usize;
+    let len = 8 * 4096_usize;
     let (Ok(mut first), Ok(second)) = (
         Mapping::new(vmar, vmo, 0, len, RW),
         Mapping::new(vmar, vmo, 0, len, RW),
@@ -299,13 +396,17 @@ fn sharing_and_partial_unmap(c: &mut Checks, cx: &Cx<'_>) {
         c.expect("two mappings of one VMO", false);
         return;
     };
-    c.expect("two mappings at two addresses", first.addr() != second.addr());
+    c.expect(
+        "two mappings at two addresses",
+        first.addr() != second.addr(),
+    );
     for page in 0..8 {
-        first.bytes_mut()[page * 4096 + 7] = 0x10 + page as u8;
+        first.bytes_mut()[page * 4096 + 7] = 0x10 + u8::try_from(page).unwrap_or(0);
     }
     c.expect(
         "a write through one mapping is seen through the other",
-        (0..8).all(|page| second.bytes()[page * 4096 + 7] == 0x10 + page as u8),
+        (0..8)
+            .all(|page| second.bytes()[page * 4096 + 7] == 0x10 + u8::try_from(page).unwrap_or(0)),
     );
     c.expect(
         "a page nobody wrote reads zero",
@@ -326,9 +427,20 @@ fn sharing_and_partial_unmap(c: &mut Checks, cx: &Cx<'_>) {
     let fixed = |addr: u64, pages: u64| {
         sys::vmar_map(vmar, vmo, 0, pages * PAGE, RW | vmar_flags::FIXED, addr)
     };
-    c.status("remapping over the whole range", fixed(base, 8), Status::InvalidArgs);
-    c.status("remapping over the edge of the hole", fixed(base + PAGE, 2), Status::InvalidArgs);
-    c.expect("the hole takes a FIXED mapping", fixed(base + 2 * PAGE, 2).is_ok());
+    c.status(
+        "remapping over the whole range",
+        fixed(base, 8),
+        Status::InvalidArgs,
+    );
+    c.status(
+        "remapping over the edge of the hole",
+        fixed(base + PAGE, 2),
+        Status::InvalidArgs,
+    );
+    c.expect(
+        "the hole takes a FIXED mapping",
+        fixed(base + 2 * PAGE, 2).is_ok(),
+    );
     c.expect(
         "the hole mapping shows pages 0 and 1 of the VMO",
         first.bytes()[2 * 4096 + 7] == 0x10 && first.bytes()[3 * 4096 + 7] == 0x11,
@@ -355,7 +467,7 @@ fn map_loop(c: &mut Checks, cx: &Cx<'_>) {
         let Ok(vmo) = sys::vmo_create(64 * PAGE) else {
             break;
         };
-        if let Ok(mut map) = Mapping::new(vmar, vmo, 0, (64 * PAGE) as usize, RW) {
+        if let Ok(mut map) = Mapping::new(vmar, vmo, 0, 64 * 4096_usize, RW) {
             for page in 0..64 {
                 map.bytes_mut()[page * 4096] = 1;
             }
@@ -363,7 +475,10 @@ fn map_loop(c: &mut Checks, cx: &Cx<'_>) {
         }
         let _ = sys::handle_close(vmo);
     }
-    c.expect("500 rounds of create, map, touch, unmap and close", done == 500);
+    c.expect(
+        "500 rounds of create, map, touch, unmap and close",
+        done == 500,
+    );
 }
 
 /// Criação de processo sem o direito, com argumento ruim, e o que o erro consome.
@@ -413,6 +528,13 @@ fn process_rights(c: &mut Checks, cx: &Cx<'_>) {
         sys::handle_close(no_transfer),
         Status::BadHandle,
     );
+    process_args(c, me, give);
+    let _ = sys::handle_close(keep);
+}
+
+/// Nome, ponteiro de saída e `events`: o que cada erro de argumento consome.
+fn process_args(c: &mut Checks, me: Handle, give: Handle) {
+    let pair = || sys::channel_create().ok();
     let long = [b'n'; 33];
     c.status(
         "a name of 33 bytes",
@@ -431,7 +553,10 @@ fn process_rights(c: &mut Checks, cx: &Cx<'_>) {
     let out_ptr = out.as_mut_ptr().addr() as u64;
     c.status(
         "a bad out pointer",
-        raw(Syscall::ProcessCreate, [me.raw(), 0, 0, give.raw(), 0, UNMAPPED]),
+        raw(
+            Syscall::ProcessCreate,
+            [me.raw(), 0, 0, give.raw(), 0, UNMAPPED],
+        ),
         Status::OutOfRange,
     );
     c.status(
@@ -477,7 +602,6 @@ fn process_rights(c: &mut Checks, cx: &Cx<'_>) {
         raw(Syscall::ProcessCreate, [0xBEEF_0001, 0, 0, 0, 0, out_ptr]),
         Status::BadHandle,
     );
-    let _ = sys::handle_close(keep);
 }
 
 /// Thread e kill sem o direito, argumentos ruins, e a vida de um processo que nunca rodou.
@@ -538,7 +662,11 @@ fn thread_rules(c: &mut Checks, cx: &Cx<'_>) {
         "the killed process is terminated at once",
         wait(process, signals::TERMINATED, 0),
     );
-    c.status("process_kill twice", sys::process_kill(manage), Status::BadState);
+    c.status(
+        "process_kill twice",
+        sys::process_kill(manage),
+        Status::BadState,
+    );
     c.status(
         "thread_create in a dead process",
         sys::thread_create(manage, code, 0x7000_0000, 0, 0),
@@ -635,14 +763,38 @@ fn threads_and_kill(c: &mut Checks, cx: &Cx<'_>) {
             "procs: kill of a process with 4 spinning threads took {} us",
             (now() - started) / 1000
         );
-        c.status("process_kill again", sys::process_kill(child.process), Status::BadState);
+        c.status(
+            "process_kill again",
+            sys::process_kill(child.process),
+            Status::BadState,
+        );
         c.expect(
             "the worker handles see TERMINATED",
-            spinners.iter().all(|&thread| wait(thread, signals::TERMINATED, 0)),
+            spinners
+                .iter()
+                .all(|&thread| wait(thread, signals::TERMINATED, 0)),
         );
         child.release();
     } else {
         c.expect("a child in spin mode", false);
+    }
+    deaths(c, cx);
+}
+
+/// O processo que se mata e o estouro de pilha numa thread com outra girando.
+fn deaths(c: &mut Checks, cx: &Cx<'_>) {
+    if let Ok(child) = start(cx, Some(MODE_SELF_KILL), true) {
+        let started = child.stack().and_then(|sp| child.start(sp));
+        c.expect(
+            "a process that kills itself terminates and the call does not come back",
+            started.is_ok() && child.wait(now() + 5 * SECOND).is_ok(),
+        );
+        if let Ok(thread) = started {
+            let _ = sys::handle_close(thread);
+        }
+        child.release();
+    } else {
+        c.expect("a child in self-kill mode", false);
     }
     if let Ok(child) = start(cx, Some(MODE_OVERFLOW), false) {
         let spinner = worker(&child, WORKER_SPIN);
@@ -687,7 +839,10 @@ fn byte_cap(c: &mut Checks, cx: &Cx<'_>) {
         "procs: the byte cap stopped {} at {pairs} pairs and {written} message bytes",
         refused.unwrap_or("nothing")
     );
-    c.expect("the byte cap answers NoMemory before 128 pairs", refused.is_some());
+    c.expect(
+        "the byte cap answers NoMemory before 128 pairs",
+        refused.is_some(),
+    );
     c.expect(
         "the cap bounds what a process queues in the kernel",
         written > 64 * 1024 && written <= 512 * 1024,
@@ -701,8 +856,13 @@ fn byte_cap(c: &mut Checks, cx: &Cx<'_>) {
         a != Handle::INVALID && sys::channel_write(a, &message, &[]).is_ok(),
     );
     let _ = (sys::handle_close(a), sys::handle_close(b));
+    cap_objects(c, cx);
+}
+
+/// O mesmo teto com VMOs pequenos e com processos que nunca rodam.
+fn cap_objects(c: &mut Checks, cx: &Cx<'_>) {
     let mut vmos = 0_usize;
-    let mut handles = [Handle::INVALID; 3000];
+    let mut handles = [Handle::INVALID; 2000];
     let status = loop {
         match sys::vmo_create(PAGE) {
             Ok(vmo) => {
@@ -723,12 +883,15 @@ fn byte_cap(c: &mut Checks, cx: &Cx<'_>) {
     for handle in handles {
         let _ = sys::handle_close(handle);
     }
-    c.expect("closing the VMOs gives the cap back", sys::vmo_create(PAGE).is_ok());
+    c.expect(
+        "closing the VMOs gives the cap back",
+        sys::vmo_create(PAGE).is_ok(),
+    );
     let mut made = 0_usize;
     let mut processes = [Handle::INVALID; 128];
     let status = loop {
         let Some((_, give)) = sys::channel_create().ok() else {
-            break None;
+            break Some(Status::NoMemory);
         };
         match sys::process_create(cx.parent.process, b"cap", give) {
             Ok((process, vmar)) => {
@@ -792,7 +955,7 @@ fn echo(c: &mut Checks, cx: &Cx<'_>, rounds: u8) -> u64 {
     let started = now();
     let mut good = 0;
     for round in 0..total {
-        let token = [round as u8; 4];
+        let token = [u8::try_from(round % 256).unwrap_or(0); 4];
         if sys::channel_write(child.channel, &token, &[]).is_err()
             || !wait(child.channel, signals::READABLE, 5 * SECOND)
         {
@@ -804,7 +967,10 @@ fn echo(c: &mut Checks, cx: &Cx<'_>, rounds: u8) -> u64 {
         }
     }
     let elapsed = now() - started;
-    c.expect("every token came back from the other process", good == total);
+    c.expect(
+        "every token came back from the other process",
+        good == total,
+    );
     let _ = child.wait(now() + 5 * SECOND);
     if let Some(thread) = thread {
         let _ = sys::handle_close(thread);
@@ -830,10 +996,12 @@ fn release_blocked(c: &mut Checks, blocked: Result<(Child, Handle), spawn::Error
 fn warm_up(c: &mut Checks, cx: &Cx<'_>) {
     let mut crowd = [const { None }; 8];
     for slot in &mut crowd {
-        *slot = start(cx, Some(MODE_BLOCK), false).and_then(|child| {
-            let thread = child.stack().and_then(|sp| child.start(sp))?;
-            Ok((child, thread))
-        }).ok();
+        *slot = start(cx, Some(MODE_BLOCK), false)
+            .and_then(|child| {
+                let thread = child.stack().and_then(|sp| child.start(sp))?;
+                Ok((child, thread))
+            })
+            .ok();
     }
     sleep(MS);
     for blocked in crowd {
@@ -903,7 +1071,7 @@ fn main(env: &Env) -> i64 {
     println!(
         "procs: create, map, start, run, exit and wait took {per_process} us per process ({LOOPS} processes)"
     );
-    let per_round = echo(&mut c, &cx, (ECHOES / 16) as u8);
+    let per_round = echo(&mut c, &cx, u8::try_from(ECHOES / 16).unwrap_or(1));
     println!("procs: echo between two processes took {per_round} ns per round trip");
     sleep(30 * MS);
     sync(&cx, b"C");

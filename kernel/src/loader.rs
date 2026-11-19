@@ -1,15 +1,7 @@
 //! O carregador de executável do initramfs (SDD 17, fatia 4b): acha o arquivo no `cpio`, valida o
 //! ELF com o `core/elf`, copia cada `PT_LOAD` para frames novos, registra as regiões no `Vmar` do
 //! processo e monta a pilha inicial com guarda. A pilha e o `.bss` de páginas inteiras são regiões
-//! preguiçosas: reservadas, sem frames até o primeiro toque. Sem objeto VMO nem handle: só o `init`
-//! e os programas de teste nascem aqui; um filho do `init` é montado por ele pela ABI.
-#![cfg_attr(
-    not(feature = "selftest"),
-    allow(
-        dead_code,
-        reason = "só o modo de teste lança processo até a 4c dar trabalho ao init"
-    )
-)]
+//! preguiçosas. Só o programa que o kernel lança nasce aqui; o filho do `init` vem da ABI.
 
 use alloc::boxed::Box;
 use alloc::vec;

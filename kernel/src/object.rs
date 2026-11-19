@@ -159,7 +159,8 @@ impl Quota {
     pub fn take_bytes(&self, bytes: usize) -> bool {
         self.bytes
             .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_add(bytes).filter(|&sum| sum <= PROCESS_BYTES_MAX)
+                used.checked_add(bytes)
+                    .filter(|&sum| sum <= PROCESS_BYTES_MAX)
             })
             .is_ok()
     }

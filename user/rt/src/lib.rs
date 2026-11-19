@@ -6,10 +6,6 @@
 
 pub mod boot;
 mod console;
-#[cfg(target_os = "none")]
-pub mod vm;
-#[cfg(target_os = "none")]
-pub mod spawn;
 mod env;
 #[cfg_attr(
     not(target_os = "none"),
@@ -17,7 +13,11 @@ mod env;
 )]
 mod heap;
 #[cfg(target_os = "none")]
+pub mod spawn;
+#[cfg(target_os = "none")]
 pub mod sys;
+#[cfg(target_os = "none")]
+pub mod vm;
 
 pub use console::{LineBuffer, print_line, set_console};
 pub use env::{Auxv, Env};

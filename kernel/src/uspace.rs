@@ -26,7 +26,7 @@ pub enum Pages {
     Borrowed,
     /// Frames do espaço (imagem, pilha, `.bss`): voltam ao alocador, zerados.
     Owned,
-    /// Como `Owned`, de região preguiçosa: acerta também a promessa (DEBT-0123).
+    /// Como `Owned`, de região preguiçosa: acerta também a promessa.
     OwnedLazy,
 }
 
@@ -294,6 +294,10 @@ impl UserSpace {
     }
 
     /// Devolve uma promessa de `reserve_promise`.
+    #[allow(
+        clippy::unused_self,
+        reason = "a promessa é global; `self` prova que o espaço a fez"
+    )]
     pub fn release_promise(&self, frames: u64) {
         commit::release(frames);
     }
@@ -513,7 +517,10 @@ impl UserSpace {
     /// Remove a página de `virt` de região `kind`; `false` se não havia página.
     #[cfg_attr(
         not(feature = "selftest"),
-        allow(dead_code, reason = "o `vmar_unmap` usa `unmap_pages`; esta só o modo de teste")
+        allow(
+            dead_code,
+            reason = "o `vmar_unmap` usa `unmap_pages`; esta só o modo de teste"
+        )
     )]
     pub fn unmap_page(&mut self, virt: u64, kind: Pages) -> bool {
         let had = self.tables.leaf(VirtAddr::new(virt)).is_some();
@@ -524,7 +531,7 @@ impl UserSpace {
     /// Remove as folhas de `pages` páginas a partir de `virt`, invalida o TLB de todas as CPUs
     /// que rodam o espaço (um IPI por 32 páginas) e só então devolve os frames que o espaço possui,
     /// zerados. A página zero nunca volta. Em região preguiçosa a promessa de cada página volta ao
-    /// contador (DEBT-0123). O chamador tem o lock do espaço.
+    /// contador. O chamador tem o lock do espaço.
     pub fn unmap_pages(&mut self, virt: u64, pages: u64, kind: Pages) {
         let zero = zero_page_now();
         let mut done = 0;
@@ -533,7 +540,11 @@ impl UserSpace {
             let start = virt + done * PAGE_SIZE;
             let mut removed = [None::<PhysAddr>; UNMAP_CHUNK];
             let mut any = false;
-            for (offset, slot) in removed.iter_mut().take(count as usize).enumerate() {
+            for (offset, slot) in removed
+                .iter_mut()
+                .take(usize::try_from(count).unwrap_or(UNMAP_CHUNK))
+                .enumerate()
+            {
                 *slot = self
                     .tables
                     .unmap_page(VirtAddr::new(start + offset as u64 * PAGE_SIZE));
@@ -542,7 +553,10 @@ impl UserSpace {
             if any {
                 self.flush_remote_range(start, count);
             }
-            for frame in removed.into_iter().take(count as usize) {
+            for frame in removed
+                .into_iter()
+                .take(usize::try_from(count).unwrap_or(UNMAP_CHUNK))
+            {
                 self.settle(frame, zero, kind);
             }
             done += count;
@@ -576,12 +590,6 @@ impl UserSpace {
     fn flush_remote_range(&self, virt: u64, pages: u64) {
         fence(Ordering::SeqCst);
         tlb::shoot_range(virt, pages, self.active.load(Ordering::SeqCst));
-    }
-
-    /// Há folha na página de `virt` (só o modo de teste).
-    #[cfg(feature = "selftest")]
-    pub fn has_leaf(&self, virt: u64) -> bool {
-        self.tables.leaf(VirtAddr::new(virt)).is_some()
     }
 
     /// Invalida `virt` nesta CPU e nas outras do espaço sem mudar a tabela; mede o custo do

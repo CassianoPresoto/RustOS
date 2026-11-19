@@ -25,7 +25,12 @@ fn sample(frames: Frames) -> Sample {
 }
 
 /// Espera a mensagem `want` do programa e responde `go`, até `WAIT_NS`.
-fn rendezvous(peer: &super::super::boot::BootPeer, want: &[u8], at: &mut Option<Sample>, frames: Frames) -> bool {
+fn rendezvous(
+    peer: &super::super::boot::BootPeer,
+    want: &[u8],
+    at: &mut Option<Sample>,
+    frames: Frames,
+) -> bool {
     let Some(start) = platform::now_ns() else {
         return false;
     };
@@ -39,8 +44,55 @@ fn rendezvous(peer: &super::super::boot::BootPeer, want: &[u8], at: &mut Option<
     false
 }
 
+/// O VMO sem processo: a cobrança e a promessa na criação, o frame no primeiro toque, o teto em bytes e
+/// o `NoMemory` antes de qualquer toque, e tudo de volta, exato, quando o último `Arc` solta.
+fn vmo_cases(frames: Frames) -> bool {
+    use alloc::sync::Arc;
+
+    use rustos_hal::PhysAddr;
+    use rustos_hal::abi::{PROCESS_BYTES_MAX, Status};
+
+    use crate::object::Quota;
+    use crate::vmo::{VMO_BYTES, Vmo};
+
+    let (free, promised) = (frames.free_frames(), commit::reserved());
+    let quota = Arc::<Quota>::default();
+    let Ok(vmo) = Vmo::anonymous(frames, &quota, 16) else {
+        return false;
+    };
+    let created = quota.bytes_used() == VMO_BYTES + 16 * 4 && commit::reserved() == promised + 16;
+    let (Ok(first), Ok(again), Ok(other)) = (vmo.frame_at(3), vmo.frame_at(3), vmo.frame_at(4))
+    else {
+        return false;
+    };
+    let touched = first == again
+        && first != other
+        && vmo.committed() == 2
+        && commit::reserved() == promised + 14
+        && vmo.frame_at(16).is_err();
+    let huge = Vmo::anonymous(frames, &quota, u64::MAX / 8).err() == Some(Status::NoMemory);
+    let over_cap = Vmo::anonymous(frames, &quota, (PROCESS_BYTES_MAX / 4) as u64).err()
+        == Some(Status::NoMemory)
+        && quota.bytes_used() == VMO_BYTES + 16 * 4;
+    let beyond_ram =
+        Vmo::anonymous(frames, &quota, free as u64 + 1).err() == Some(Status::NoMemory);
+    let physical = Vmo::physical(frames, PhysAddr::new(0x10_0000), 4);
+    let fixed = physical.frame_at(2).ok() == Some(PhysAddr::new(0x10_2000))
+        && physical.frame_at(4).is_err();
+    drop(vmo);
+    drop(physical);
+    let back =
+        frames.free_frames() == free && commit::reserved() == promised && quota.bytes_used() == 0;
+    created && touched && huge && over_cap && beyond_ram && fixed && back
+}
+
 /// Roda o `procs` e confere o que ele diz e o que o kernel mede.
 pub fn run(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
+    let vmo = vmo_cases(frames);
+    kprintln!(
+        "[rustos] user: vmo cases: {}",
+        if vmo { "ok" } else { "FAILED" }
+    );
     let (Some(file), Some(_)) = (
         archive.and_then(|archive| loader::find(archive, b"procs").ok()),
         archive.and_then(|archive| loader::find(archive, b"child").ok()),
@@ -84,5 +136,5 @@ pub fn run(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
         "[rustos] user: process_kill stopped threads on up to {} cpus at once",
         process::kill_cpus_max()
     );
-    synced && exited && exact && others
+    vmo && synced && exited && exact && others
 }

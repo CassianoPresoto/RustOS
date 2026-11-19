@@ -30,7 +30,7 @@ pub const MAX_CHANNEL_ENDS: usize = 256;
 /// Handles que o kernel aceita copiar de um array de usuário; acima disso é `InvalidArgs`.
 pub const USER_HANDLE_ARRAY_MAX: usize = 64;
 /// Bytes de heap do kernel que um processo pode ter cobrados a ele (pontas, mensagens em fila,
-/// VMOs, processos e threads que criou); acima disso a criação é `NoMemory` (SDD 17, DEBT-0110).
+/// VMOs, processos e threads que criou); acima disso a criação é `NoMemory` (SDD 17).
 pub const PROCESS_BYTES_MAX: usize = 512 << 10;
 /// Bytes do nome que `process_create` aceita.
 pub const PROCESS_NAME_MAX: usize = 32;
@@ -842,16 +842,16 @@ mod tests {
         let page = PAGE_SIZE;
         assert!(MMAP_FLOOR > USER_IMAGE_BASE && MMAP_FLOOR.is_multiple_of(page));
         assert_eq!(MMAP_ASLR_LIMIT - MMAP_FLOOR, (1 << 28) * page);
-        assert!(MMAP_ASLR_LIMIT < MMAP_TOP && MMAP_TOP <= 0x6000_0000_0000);
-        assert!(MMAP_TOP < USER_TOP);
+        const { assert!(MMAP_ASLR_LIMIT < MMAP_TOP && MMAP_TOP <= 0x6000_0000_0000) };
+        const { assert!(MMAP_TOP < USER_TOP) };
     }
 
     #[test]
     fn the_byte_cap_and_the_limits_that_it_bounds_are_consistent() {
-        assert!(PROCESS_BYTES_MAX >= 64 * 1024);
-        assert!(PROCESS_BYTES_MAX < MAX_CHANNEL_ENDS * 4096);
+        const { assert!(PROCESS_BYTES_MAX >= 64 * 1024) };
+        const { assert!(PROCESS_BYTES_MAX < MAX_CHANNEL_ENDS * 4096) };
         assert!(VMO_MAX_BYTES.is_multiple_of(PAGE_SIZE));
-        assert!(PROCESS_KILLED_CODE < 0);
+        const { assert!(PROCESS_KILLED_CODE < 0) };
     }
 
     #[test]

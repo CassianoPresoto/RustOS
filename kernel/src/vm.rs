@@ -279,7 +279,10 @@ impl Vm {
     /// Onde o initramfs está na memória física: início e bytes (o VMO físico do `init`).
     #[cfg_attr(
         not(feature = "selftest"),
-        allow(dead_code, reason = "lido só pelo modo de teste, até o init rodar no boot normal")
+        allow(
+            dead_code,
+            reason = "lido só pelo modo de teste, até o init rodar no boot normal"
+        )
     )]
     pub fn initramfs_phys(&self) -> Option<(rustos_hal::PhysAddr, u64)> {
         let module = self.initramfs.filter(|_| self.activated)?;

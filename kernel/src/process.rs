@@ -1,15 +1,7 @@
 //! Processos de usuário (SDD 17, fatias 4a a 4c): um espaço de endereçamento com a tabela de handles,
 //! a memória (`mem`) e uma ou mais threads. Nasce de um ELF do initramfs (o `init`) ou de
 //! `process_create`, entra em anel 3 ou EL0, morre por `process_exit`, por falha da CPU, por
-//! `process_kill` ou com a última thread, e o kernel segue. O programa plano de teste só existe no
-//! modo de teste.
-#![cfg_attr(
-    not(feature = "selftest"),
-    allow(
-        dead_code,
-        reason = "só o modo de teste lança processo antes de o init rodar no boot normal"
-    )
-)]
+//! `process_kill` ou com a última thread. O programa plano de teste só existe no modo de teste.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -19,8 +11,7 @@ use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 
 use rustos_hal::abi::{
-    PROCESS_KILLED_CODE, ProcessEvent, Status, USER_TOP, event_kind,
-    fault_access, fault_kind,
+    PROCESS_KILLED_CODE, ProcessEvent, Status, USER_TOP, event_kind, fault_access, fault_kind,
 };
 use rustos_hal::{Cpu, Fault, FaultKind, PhysAddr};
 use rustos_mm::vmar::Access;
@@ -28,7 +19,7 @@ use rustos_object::HandleCount;
 use rustos_sched::SchedParams;
 
 use crate::frames::Frames;
-use crate::loader::{self, LoadError, Loaded, RegionTree};
+use crate::loader::{self, LoadError, Loaded};
 use crate::object::{ByteCharge, Lifecycle, Quota, Table, VecSlots, Work};
 use crate::sync::IrqLock;
 use crate::task::{self, Spawn, TaskError};
@@ -130,6 +121,8 @@ pub struct Process {
     dying: AtomicBool,
     /// A última falta de página não se resolveu por falta de frame.
     out_of_memory: AtomicBool,
+    /// A falha foi um acesso à metade do kernel (a frase da morte diz só isso).
+    kernel_half: AtomicBool,
     /// O evento do fim: o primeiro que chega vale.
     event: IrqLock<Option<ProcessEvent>>,
 }
@@ -195,8 +188,16 @@ pub struct Program<'a> {
 /// O que `spawn` entrega: a tarefa, o número do processo e o que a carga custou.
 #[derive(Clone, Copy, Debug)]
 pub struct Spawned {
+    #[cfg_attr(
+        not(feature = "selftest"),
+        allow(dead_code, reason = "lido só pelo modo de teste")
+    )]
     pub task: rustos_sched::TaskId,
     pub pid: u32,
+    #[cfg_attr(
+        not(feature = "selftest"),
+        allow(dead_code, reason = "lido só pelo modo de teste")
+    )]
     pub segments: usize,
     #[cfg_attr(
         not(feature = "selftest"),
@@ -248,6 +249,7 @@ impl Process {
             }),
             dying: AtomicBool::new(false),
             out_of_memory: AtomicBool::new(false),
+            kernel_half: AtomicBool::new(false),
             event: IrqLock::new(None),
         })
     }
@@ -263,12 +265,9 @@ impl Process {
             space.destroy();
             return Err(Status::NoMemory);
         }
-        let regions = match loader::new_tree() {
-            Ok(regions) => regions,
-            Err(_) => {
-                space.destroy();
-                return Err(Status::NoMemory);
-            }
+        let Ok(regions) = loader::new_tree() else {
+            space.destroy();
+            return Err(Status::NoMemory);
         };
         let mem = Mem::new(space, regions)?;
         Ok(Self::new(mem, Some(cost)))
@@ -360,7 +359,7 @@ impl Process {
         fence(Ordering::SeqCst);
         let mask = state.mask & !own_bit;
         for id in (0..64).filter(|id| mask >> id & 1 != 0) {
-            task::poke(id);
+            task::stop(id);
         }
         true
     }
@@ -377,9 +376,7 @@ impl Process {
         if let Ok(active) = self.with_mem(|mem| mem.space.active_cpus()) {
             KILL_CPUS.fetch_max(active.count_ones(), Ordering::Relaxed);
         }
-        let own = current_thread(|thread| Arc::ptr_eq(&thread.process, self)).unwrap_or(false);
-        let bit = if own { task::wait_bit() } else { 0 };
-        if !self.begin_death(event, bit) {
+        if !self.begin_death(event, 0) {
             return Err(Status::BadState);
         }
         if self.state.lock().threads == 0 {
@@ -404,21 +401,24 @@ impl Process {
             mem.destroy();
         }
         let event = self.event.lock().take().unwrap_or_default();
+        let no_memory = self.out_of_memory.load(Ordering::Relaxed);
+        let kernel_half = self.kernel_half.load(Ordering::Relaxed);
         self.state.lock().phase = Phase::Dead;
         self.life.terminate();
         let pid = self.pid;
         if event.kind == event_kind::EXIT && event.code == PROCESS_KILLED_CODE {
-            kprintln!("[rustos] user: pid {pid} killed (cpu {cpu})");
+            kprintln_serial!("[rustos] user: pid {pid} killed (cpu {cpu})");
         } else if event.kind == event_kind::EXIT {
-            kprintln!(
+            kprintln_serial!(
                 "[rustos] user: pid {pid} exited (code {}, cpu {cpu})",
                 event.code
             );
         } else {
-            log_fault(pid, &event, self.out_of_memory.load(Ordering::Relaxed));
-            kprintln!("[rustos] user: fault contained (pid {pid})");
+            log_fault(pid, &event, no_memory, kernel_half);
+            kprintln_serial!("[rustos] user: fault contained (pid {pid})");
         }
         *LAST_EVENT.lock() = Some((pid, event));
+        crate::programs::finished(pid, &event, no_memory, kernel_half);
     }
 }
 
@@ -464,7 +464,7 @@ fn close_handles(table: &IrqLock<Table>) {
 #[cfg(feature = "selftest")]
 fn load_flat(
     space: &mut UserSpace,
-    regions: &mut RegionTree,
+    regions: &mut loader::RegionTree,
     program: Program<'_>,
 ) -> Result<Loaded, LoadError> {
     use rustos_hal::abi::USER_IMAGE_BASE;
@@ -519,6 +519,13 @@ pub fn spawn(
     .map(|(spawned, _)| spawned)
 }
 
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(
+        dead_code,
+        reason = "só o modo de teste guarda a ponta do canal de boot"
+    )
+)]
 /// Como `spawn`; com `keep_peer`, devolve também a ponta do kernel do canal de boot, que fica
 /// aberta até quem a recebe fechá-la.
 pub fn spawn_keeping(
@@ -561,21 +568,26 @@ pub fn spawn_with(
     let mem = Mem::new(space, regions).map_err(ProcessError::Handles)?;
     let stats = mem.space.stats();
     let process = Process::new(mem, None);
-    let (arg0, peer) = boot::handles_of(&process, source, arg0, options)
-        .map_err(ProcessError::Handles)?;
+    let (arg0, peer) =
+        boot::handles_of(&process, source, arg0, options).map_err(ProcessError::Handles)?;
     let thread = ThreadObj::new(&process, None);
     let task = start_thread(
         &process,
         thread,
         Entry {
-            entry: loaded.entry,
+            pc: loaded.entry,
             sp,
             arg0,
             arg1: 0,
         },
         affinity,
     )
-    .map_err(|status| ProcessError::Task(task_error(status)))?;
+    .map_err(|status| {
+        // O número só vale a um processo que existiu: devolve-o se ninguém pegou o seguinte.
+        let pid = process.pid;
+        let _ = NEXT_PID.compare_exchange(pid + 1, pid, Ordering::Relaxed, Ordering::Relaxed);
+        ProcessError::Task(task_error(status))
+    })?;
     Ok((
         Spawned {
             task,
@@ -623,7 +635,7 @@ impl ThreadObj {
 /// Onde a thread começa: entrada, pilha e os dois argumentos de `rdi`/`rsi` (`x0`/`x1`).
 #[derive(Clone, Copy, Debug)]
 pub struct Entry {
-    pub entry: u64,
+    pub pc: u64,
     pub sp: u64,
     pub arg0: u64,
     pub arg1: u64,
@@ -653,15 +665,13 @@ pub fn start_thread(
         params: SchedParams::fair(0),
         affinity,
     });
-    match started {
-        Ok(id) => Ok(id),
-        Err(_) => {
-            // SAFETY: `raw` veio de `Box::into_raw` acima e a tarefa não chegou a existir.
-            drop(unsafe { Box::from_raw(raw) });
-            process.abort_thread();
-            Err(Status::NoMemory)
-        }
+    if let Ok(id) = started {
+        return Ok(id);
     }
+    // SAFETY: `raw` veio de `Box::into_raw` acima e a tarefa não chegou a existir.
+    drop(unsafe { Box::from_raw(raw) });
+    process.abort_thread();
+    Err(Status::NoMemory)
 }
 
 /// A primeira instrução da tarefa de uma thread: liga o espaço nesta CPU e entra no usuário, a menos
@@ -672,28 +682,38 @@ fn thread_main(arg: usize) {
     let Start { thread, at } =
         *unsafe { Box::from_raw(ptr::with_exposed_provenance_mut::<Start>(arg)) };
     let process = Arc::clone(&thread.process);
-    let (root, active) = match process.with_mem(|mem| (mem.space.root().as_u64(), mem.space.active_addr())) {
-        Ok(found) => found,
-        Err(_) => {
-            // Impossível: o processo só desfaz com zero threads, e esta conta.
-            panic!("thread sem espaço");
-        }
-    };
+    let pid = process.pid;
+    let (root, active) = process
+        .with_mem(|mem| (mem.space.root().as_u64(), mem.space.active_addr()))
+        .expect("o processo só desfaz com zero threads, e esta conta");
     process.thread_started(task::wait_bit());
     let raw = Arc::into_raw(thread).expose_provenance();
     drop(process);
     let top = task::bind_user(root, raw, active);
-    exit_if_dying();
+    task::set_pid(pid);
+    if process_is_dying() {
+        leave_current(None);
+    }
     ENTRY_CYCLES.store(platform::cycles(), Ordering::Relaxed);
     // SAFETY: `bind_user` mascarou a IRQ e já pôs o espaço e a pilha de entrada desta CPU; `entry` e
     // `sp` foram conferidos pela quem criou a thread, dentro de `[USER_MIN, USER_TOP)`, `sp` alinhado a 16.
-    unsafe { platform::enter_user(at.entry, at.sp, at.arg0, at.arg1, top) }
+    unsafe { platform::enter_user(at.pc, at.sp, at.arg0, at.arg1, top) }
+}
+
+/// O processo da tarefa corrente já morre (a conferência lenta, só na entrada da thread).
+fn process_is_dying() -> bool {
+    current_thread(|thread| thread.process.is_dying()) == Some(true)
 }
 
 /// Se o processo da tarefa corrente morre, a thread sai: chamado em todo ponto de volta ao usuário
 /// (fim de syscall, de falta resolvida, de IRQ e a entrada), com a IRQ mascarada.
+#[allow(
+    clippy::inline_always,
+    reason = "no caminho da syscall nula: um quadro a mais passa da janela que o `arch/` repinta"
+)]
+#[inline(always)]
 pub fn exit_if_dying() {
-    if current_thread(|thread| thread.process.is_dying()) == Some(true) {
+    if task::kill_requested() {
         leave_current(None);
     }
 }
@@ -749,7 +769,7 @@ pub fn copy_ran_out_of_memory() -> bool {
 pub fn note_first_syscall() {
     if !FIRST_SYSCALL.swap(true, Ordering::Relaxed) {
         FIRST_SYSCALL_CYCLES.store(platform::cycles(), Ordering::Relaxed);
-        kprintln!("[rustos] user: entered ring3/el0");
+        kprintln_serial!("[rustos] user: entered ring3/el0");
     }
 }
 
@@ -790,6 +810,9 @@ pub fn user_fault(fault: &Fault) -> ! {
         FaultKind::Breakpoint => (fault_kind::BREAKPOINT, 0, 0),
         _ => (fault_kind::OTHER, 0, 0),
     };
+    // O evento nunca leva endereço do kernel (vira 0); a frase da falta diz só que foi na metade dele.
+    let kernel_half = kind == fault_kind::PAGE_FAULT && addr >= USER_TOP;
+    let _ = with_current(|process| process.kernel_half.store(kernel_half, Ordering::Relaxed));
     leave_current(Some(ProcessEvent {
         kind: event_kind::FAULT,
         fault_kind: kind,
@@ -816,6 +839,8 @@ fn fault_name(kind: u32) -> &'static str {
 /// A thread da tarefa corrente sai, na ordem do SDD 17: com `Some(event)` o processo inteiro começa a
 /// morrer e as outras threads são paradas; sai da raiz do espaço antes de qualquer tabela ser liberada;
 /// a última a sair desfaz o processo (handles, frames, `TERMINATED`); e só então a tarefa acaba.
+#[cold]
+#[inline(never)]
 fn leave_current(event: Option<ProcessEvent>) -> ! {
     platform::cpu().save_and_disable_interrupts();
     let bit = task::wait_bit();
@@ -851,19 +876,19 @@ fn leave_current(event: Option<ProcessEvent>) -> ! {
     task::exit()
 }
 
-fn log_fault(pid: u32, event: &ProcessEvent, no_memory: bool) {
+fn log_fault(pid: u32, event: &ProcessEvent, no_memory: bool, kernel_half: bool) {
     let name = fault_name(event.fault_kind);
     let reason = if no_memory { " (out of memory)" } else { "" };
-    if event.fault_kind == fault_kind::PAGE_FAULT && event.addr == 0 {
-        kprintln!("[rustos] user: pid {pid} stopped by a {name} outside the user half{reason}");
+    if kernel_half {
+        kprintln_serial!("[rustos] user: pid {pid} stopped by a {name} in the kernel half{reason}");
     } else if event.fault_kind == fault_kind::PAGE_FAULT {
-        kprintln!(
+        kprintln_serial!(
             "[rustos] user: pid {pid} stopped by a {name} at {:#x} (pc {:#x}){reason}",
             event.addr,
             event.pc
         );
     } else {
-        kprintln!(
+        kprintln_serial!(
             "[rustos] user: pid {pid} stopped by {name} (pc {:#x}, isa code {:#x})",
             event.pc,
             event.isa_code
@@ -896,6 +921,10 @@ pub fn last_stats() -> Option<(u32, SpaceStats)> {
 }
 
 /// O último evento de fim de processo e de que processo foi.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "lido só pelo modo de teste")
+)]
 pub fn last_event() -> Option<(u32, ProcessEvent)> {
     *LAST_EVENT.lock()
 }

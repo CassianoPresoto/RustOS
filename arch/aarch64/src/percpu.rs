@@ -26,6 +26,11 @@ impl CpuLocal for Aarch64CpuLocal {
         unsafe { asm!("msr tpidr_el1, {}", in(reg) block, options(nostack, preserves_flags)) };
     }
 
+    #[allow(
+        clippy::inline_always,
+        reason = "no caminho da syscall nula: um quadro a mais passa da janela que o `arch/` repinta"
+    )]
+    #[inline(always)]
     fn block(&self) -> usize {
         let block: usize;
         // SAFETY: `new` exige EL1+. Sem `nomem` nem `pure`: o compilador não pode reaproveitar

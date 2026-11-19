@@ -27,7 +27,7 @@ clippy: ## lint no host e nos dois alvos bare-metal (kernel com e sem `selftest`
 		for features in "" selftest debug-addrs,panic-tests selftest,debug-addrs,panic-tests; do \
 			cargo clippy --package rustos-kernel --target $$target $${features:+--features $$features} -- -D warnings || exit 1; \
 		done; \
-		for program in rustos-user-rt rustos-user-init rustos-user-test-big rustos-user-test-handles rustos-user-test-lazy rustos-user-test-child rustos-user-test-procs; do \
+		for program in rustos-user-rt rustos-user-init rustos-user-hello rustos-user-crash rustos-user-sysinfo rustos-user-count rustos-user-test-big rustos-user-test-handles rustos-user-test-lazy rustos-user-test-child rustos-user-test-procs; do \
 			cargo clippy --package $$program --package rustos-arch-$${target%%-*}-user --target $$target -- -D warnings || exit 1; \
 		done; \
 	done
@@ -51,7 +51,7 @@ test: ## testes de unidade no host (todos os crates menos o kernel), o shell sem
 build: ## compila o kernel
 	$(XTASK) build --arch $(ARCH) --profile $(PROFILE)
 
-user: ## compila os programas de `user/` (init e os de teste) em target/user/<arch>
+user: ## compila os programas de `user/` (init, demonstrações e os de teste) em target/user/<arch>
 	$(XTASK) user --arch $(ARCH) --profile $(PROFILE)
 
 image: ## monta a partição EFI em target/esp/<arch>

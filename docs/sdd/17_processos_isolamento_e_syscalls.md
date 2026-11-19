@@ -11,7 +11,7 @@ syscall e o formato de executável são contrato que o mundo de fora enxerga (ca
 o caso 1; por isso o desenho nasceu num PR em Draft só com docs. O dono aprovou as nove
 [decisões pedidas](#as-decisões-do-dono) sem mudança. O código vem em PRs seguintes, e
 este capítulo passa a descritivo à medida que cada fatia entra: o que a 4a e a 4b tornaram verdade está
-em [A fatia 4a, como entrou](#a-fatia-4a-como-entrou), [A fatia 4b, como entrou](#a-fatia-4b-como-entrou) e [A fatia 4c, paginação sob demanda e *shootdown*, como entrou](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou), e o resto do texto continua sendo desenho.
+em [A fatia 4a, como entrou](#a-fatia-4a-como-entrou), [A fatia 4b, como entrou](#a-fatia-4b-como-entrou) [A fatia 4c, paginação sob demanda e *shootdown*, como entrou](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou) e [A fatia 4c, parte 3, como entrou](#a-fatia-4c-parte-3-como-entrou), o **M1**, em que o shell lança os programas do initramfs ([abaixo](#o-m1-programas-pelo-shell-como-entrou)); e o resto do texto continua sendo desenho.
 
 Fase 4 do [roadmap](08_roadmap.md). Pesquisa de origem, com as marcas de
 verificação: `syscalls-processes.md` (2026-11-17). O modelo de controle de acesso
@@ -57,7 +57,8 @@ número novo no [SDD 07](07_desempenho_e_recursos.md).
 | --- | --- | --- |
 | 4a (**feita**) | Entrada de syscall e saída para anel 3/EL0 nas duas ISAs; `PageFlags.user`; `Fault.from_user`; `#DB` com IST; cópia usuário↔kernel; espaço de **um** processo, sem objetos; **limpeza da pilha do kernel na volta ao usuário** (pagou a dívida do resíduo do ChaCha20 na pilha); a troca para o par `swapgs` e os MSRs de syscall em cada CPU; `nop`, `clock_get_monotonic`, `random_get`, `process_exit` e **`debug_write(ptr, len)` provisória, sem handle**; um programa embutido no kernel só para esta fatia | `hello` imprime de anel 3 e de EL0; falha de usuário mata o processo e o kernel segue (pagou a dívida da exceção de usuário só para a CPU) |
 | 4b (**feita**) | `core/cpio`, `core/elf`; a árvore de regiões em `core/mm/src/vmar.rs`, **interna ao kernel** (o carregador mapeia frames direto, sem objeto VMO nem VMAR e sem handle); módulo do Limine; `user/` (runtime e `init`); o xtask monta o initramfs | O `init` do initramfs roda, imprime pelo `debug_write` provisório e sai; o smoke exige a linha dele (**no modo de teste**: [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)) |
-| 4c (**em partes**: a parte 1, handles, canais, espera e canal de boot, **feita**; a paginação sob demanda e o *shootdown*, **feitos**; VMO, VMAR, `process_create`, `thread_create` e `process_kill` vêm nas partes seguintes) | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (**feito**); **página zero** e **falta de página de usuário resolvida** (**feitas**, [abaixo](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou)); ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; ***shootdown* de TLB** e espera da CPU que ainda roda o espaço na morte do processo (**feitos e pagos**: dívidas 0055 e 0085); o `init` recebe os handles pelo canal de boot | Um processo cria outro, que escreve no console por um handle que recebeu |
+| M1 (**feito**) | O shell (`ls`, `run`, `ps` com a coluna `pid`) lista os programas do initramfs e os roda como processos isolados **no boot normal**, na imagem `release-small`; quatro programas de demonstração em `user/` (`hello`, `crash`, `sysinfo`, `count`); o smoke digita a sessão no shell | O dono sobe a imagem, digita `ls`, `run hello`, `run crash` e `ps`, e vê o sistema sobreviver à morte contida ([abaixo](#o-m1-programas-pelo-shell-como-entrou)). Paga a metade do [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md) que dizia respeito ao carregador |
+| 4c (**feita**: a parte 1, handles, canais, espera e canal de boot; a paginação sob demanda e o *shootdown*; e a parte 3, VMO, VMAR, `process_create`, `thread_create`, `thread_exit` e `process_kill`, o teto em bytes e o `init` com um filho, [abaixo](#a-fatia-4c-parte-3-como-entrou)) | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (**feito**); **página zero** e **falta de página de usuário resolvida** (**feitas**, [abaixo](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou)); ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; ***shootdown* de TLB** e espera da CPU que ainda roda o espaço na morte do processo (**feitos e pagos**: dívidas 0055 e 0085); o `init` recebe os handles pelo canal de boot (**feitos**) | Um processo cria outro, que escreve no console por um handle que recebeu (**atingido**: o `init` cria o `child`) |
 | 4d | SIMD de usuário, canal de eventos do processo, teste de `xmm0`/`v0` entre processos | Dois processos preservam `xmm0`/`v0`; o culpado de uma falha chega ao pai (**paga** [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md)) |
 | 4e | KPTI, PCID/ASID com a regra de geração entre CPUs, mitigações de CPU ([seção](#mitigações-de-cpu)), relatório no boot. **Parte 1 (feita):** detecção de vulnerabilidade e de recurso nas duas ISAs, a linha `mitigations:`, a chave `kpti=` (só no relatório) e o clamp do Spectre v1. **Parte 2:** o KPTI, o PCID/ASID na troca e o IBPB na troca | Linha `mitigations:` no boot; custo de cada uma medida |
 | 4f | As medidas da fase (inclui a falta de página que zera, [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)) ([abaixo](#medidas-da-fase)) e este capítulo virando descritivo | Fecha a fase: "syscall nula medida; processo que toca o kernel morre sem derrubar nada" |
@@ -241,7 +242,7 @@ prefixo `[user] `.
 
 | Decisão | O que ficou | Por quê |
 | --- | --- | --- |
-| O `init` só roda no modo de teste | O boot normal não o lança; o `release-small` não carrega o carregador ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)) | Na 4b o `init` é um autoteste, e o guidelines 05 manda o que roda tarefa para o modo de teste. Experimento com ele no boot normal: +1 a 3 ms no aarch64 em HVF (2 ms para 4–7) e cerca de +10 ms no x86_64 em TCG, sem ganho para o usuário. O boot normal sem initramfs ou sem `init` segue como antes |
+| O `init` só roda no modo de teste | O boot normal não o lança; **desde o M1 o carregador está na `release-small`** e o shell lança qualquer programa do initramfs, o `init` inclusive ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md), reescrita) | Na 4b o `init` é um autoteste, e o guidelines 05 manda o que roda tarefa para o modo de teste. Experimento com ele no boot normal: +1 a 3 ms no aarch64 em HVF (2 ms para 4–7) e cerca de +10 ms no x86_64 em TCG, sem ganho para o usuário. O boot normal sem initramfs ou sem `init` segue como antes |
 | `-C code-model=small` com `-C lto=off` no x86_64 | O `core` pré-compilado do alvo vem em `code-model=kernel`; com o LTO fat dos perfis `release`/`release-small` o LLVM recusa o módulo (`linking module flags 'Code Model': IDs have conflicting values`, `failed to load bitcode`). O `xtask user` liga `-C lto=off` no x86_64 ([DEBT-0084](../tech-debt/0084-usuario-do-x86-sem-lto-por-causa-do-code-model.md)) | O `small` é a decisão aprovada; o `init` custa 17 600 bytes sem LTO contra 15 176 com o modelo `kernel` e LTO. **O item "Por ler" do `small` fecha**: o `big` (1,3 MiB de arquivo, 2,3 MiB mapeados, `.rodata`, `.data` com cauda de 400 bytes e `.bss` de 1 MiB) liga em `0x40_0000` e roda nas duas ISAs. O `small` e o `kernel` geram o mesmo código a 4 MiB (17 920 bytes nos dois, sem LTO), então o teste continua sem distingui-los |
 | Layout do linker | Cabeçalhos e `.rodata` no primeiro `PT_LOAD` (R), `.text` (RX) numa página a partir de `0x40_1000`, `.data` e `.bss` (RW) juntos num `PT_LOAD` com `-z norelro`; `AT_PHDR` aponta `0x40_0040` | O primeiro `PT_LOAD` com os cabeçalhos faz o `AT_PHDR` existir; sem `norelro` o `.bss` virava um `PT_LOAD` de `p_filesz` 0 |
 | Pilha | 16 páginas mapeadas na criação, com uma página de guarda abaixo e outra acima e o início sorteado com `aslr_base` na janela `[0x6000_0000_0000, 0x6100_0000_0000)` (28 bits de página, o intervalo cheio); a imagem fica em endereço fixo ([DEBT-0083](../tech-debt/0083-imagem-de-usuario-sem-aslr.md)). Mapeada inteira na 4b, porque não havia falta resolvida; **a 4c a tornou preguiçosa** (só a página dos argumentos nasce mapeada) | Decisão 5 e o desenho de pilha; o `mmap_base` fica para a 4c |
@@ -327,8 +328,8 @@ de boot):
 | Cobrança de pontas | `MAX_CHANNEL_ENDS = 256` (`hal::abi`); cada ponta guarda uma `Charge` do criador e a devolve no `Drop`. O canal de boot do kernel não é cobrado | A defesa que o SDD escolheu para o vazamento entre filas ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md)) |
 | Teto de 64 handles no array de usuário | `USER_HANDLE_ARRAY_MAX = 64`; acima disso, `InvalidArgs` sem consumir (o kernel não leu quais são). Entre 9 e 64, `InvalidArgs` **consumindo** (a regra do canal) | O teto do Zircon, como o SDD já dizia |
 | O erro depois de ler o array consome | Bytes acima do limite, ponteiro de bytes ruim e canal inválido consomem o array; só `ShouldWait` e a falha ao **ler** o array não | A regra geral para quem move handle |
-| Alocação de objeto e de mensagem | O [guidelines 05](../guidelines/05_recursos_e_desempenho.md) deixa a syscall que cria objeto ou handle, ou carrega mensagem, alocar **com `try_*`** (a falta é `NoMemory`). A parte 1 só cumpre nos slots da tabela: falta de heap num `Arc` ou na cópia dos bytes ainda aborta (`handle_alloc_error`) ([DEBT-0110](../tech-debt/0110-objeto-e-mensagem-abortam-na-falta-de-heap.md)) | `Arc` não tem alocação fracassável na toolchain estável |
-| `init` no boot normal | Segue só no modo de teste ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)): o `init` ainda não lança processo | O gatilho da dívida pede também o lançamento de outros processos, da parte 3 |
+| Alocação de objeto e de mensagem | O [guidelines 05](../guidelines/05_recursos_e_desempenho.md) deixa a syscall que cria objeto ou handle, ou carrega mensagem, alocar **com `try_*`** (a falta é `NoMemory`). A parte 1 só cumpre nos slots da tabela: falta de heap num `Arc` ou na cópia dos bytes ainda aborta (`handle_alloc_error`) ([DEBT-0142](../tech-debt/0142-objeto-do-kernel-sem-try-new.md); o teto em bytes entrou na parte 3) | `Arc` não tem alocação fracassável na toolchain estável |
+| `init` no boot normal | Segue só no modo de teste ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)) | Na parte 3 o `init` passou a criar um filho; o orçamento do boot é do dono |
 
 **O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs), além dos casos anteriores: o `init`
 lê a mensagem de boot (`process` e `console`), vê `PEER_CLOSED` na ponta do kernel e nenhuma segunda mensagem,
@@ -405,7 +406,7 @@ A cópia usuário↔kernel resolve do mesmo jeito (`Handlers.copy_fault`): um `d
 | `copy_fault` à parte do `fault` | Um gancho novo em `Handlers` que diz se a cópia se repete | A falta da cópia chega do kernel (`from_user` falso) e o arch já tinha o ponto de recuperação dela |
 | A página zero nasce no primeiro uso | `ZERO_FRAME` por `compare_exchange` | O boot normal não a usa, e duas CPUs que a criam juntas ficam com uma só |
 | `.bss` preguiçoso só em segmento gravável | `eager = ceil((lead + filesz) / 4096)` páginas | Uma página que mistura arquivo e `.bss` já tem o arquivo; segmento só de leitura com cauda zero é raro |
-| Sem lock por espaço na falta | Uma thread por processo | [DEBT-0120](../tech-debt/0120-falta-de-pagina-sem-lock-por-espaco.md): o gatilho é o primeiro `thread_create` |
+| Sem lock por espaço na falta | Uma thread por processo | Paga na parte 3, com `thread_create`: um lock por espaço ([abaixo](#a-fatia-4c-parte-3-como-entrou)) |
 | O controle do teste de *shootdown* é só informação | Sem a parte remota a tradução velha sobrevive: **sim** no x86_64 (TCG) e no aarch64 em TCG, **não** no aarch64 em HVF | Medido: no HVF o controle não tem dentes (0 leituras velhas em 240 000) e em TCG tem (26 553 em 120 000). O gate do aarch64 só distingue `is` de local em TCG, que o último passo do `make pr` cobre (`RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx`); em HVF ele só prova que nada velho aparece |
 
 **O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs; linha `user self-test:` com `fault resolver`, `lazy program` e `tlb shootdown`):
@@ -413,8 +414,152 @@ A cópia usuário↔kernel resolve do mesmo jeito (`Handlers.copy_fault`): um `d
 - O resolvedor, num espaço montado à mão: leitura (página zero compartilhada), leitura de novo (`Retry`), escrita sobre ela (cópia, e a página segue zero), escrita em página ausente (frame novo), guarda de baixo e de cima, buraco, escrita em página de leitura, execução; a promessa sobe e volta, e rodado duas vezes devolve **exatamente** os frames; uma promessa maior que a memória é recusada.
 - O `lazy` (`user/tests/lazy`) desce a pilha por nove páginas que ninguém mapeou, lê antes de escrever um `.bss` de 32 MiB (página zero), escreve sobre ela e no `.bss` virgem, e confere que o que não foi escrito segue zero (`[user] lazy: ok (...)`); o kernel confere que passaram pela falta pelo menos 4 094 páginas de cada caminho, que o processo saiu com 0, que os frames voltaram como depois do `init` e que a promessa zerou (`[rustos] user: demand paging: ...`); as páginas com frame próprio ao sair passam de `2 x 4 096 + 6` (as duas matrizes e a pilha), e o programa confere vários bytes de cada página depois da cópia. A página zero é relida inteira depois dos casos do resolvedor e segue zero.
 - O *shootdown* entre CPUs (`[rustos] tlb shootdown: ok (cpu A -> cpu B: ...)`): a CPU B roda uma tarefa com o espaço carregado, lê uma página lida por ela (página zero) e uma página própria; a CPU A troca a primeira por um frame novo com dado (a cópia da página zero) e remove a segunda. Depois disso a leitora vê o dado novo e a falta, nunca a tradução velha. O mesmo roteiro com a parte remota desligada é o controle (a tradução velha sobrevive no x86_64 e no aarch64 em TCG). O dono do espaço espera a leitora sair antes do `destroy`.
-- O estresse em anel (`[rustos] tlb shootdown ring: ok (cpus N, ...)`), com todas as CPUs online: a CPU i dirige o espaço da CPU i+1 (página zero, cópia com dado novo, remoção, em laço) e vigia o seu, que a CPU i-1 dirige, com a IRQ aberta e depois mascarada como na falta. Cada leitura vê o valor do passo, nunca o velho: 300 rodadas por passo, 3 600 leituras conferidas. Sem a parte remota o mesmo anel vê 1 446 de 3 600 leituras velhas (x86_64, TCG). Veio do revisor independente, que o rodou com 4 e 8 CPUs em 25 boots por configuração (0 falhas; sem a parte remota, de 1 000 a 26 000 leituras velhas). O anel reserva 1 página a cada cópia porque `unmap_page` não devolve a promessa ([DEBT-0123](../tech-debt/0123-unmap-page-sem-acertar-a-promessa.md)).
+- O estresse em anel (`[rustos] tlb shootdown ring: ok (cpus N, ...)`), com todas as CPUs online: a CPU i dirige o espaço da CPU i+1 (página zero, cópia com dado novo, remoção, em laço) e vigia o seu, que a CPU i-1 dirige, com a IRQ aberta e depois mascarada como na falta. Cada leitura vê o valor do passo, nunca o velho: 300 rodadas por passo, 3 600 leituras conferidas. Sem a parte remota o mesmo anel vê 1 446 de 3 600 leituras velhas (x86_64, TCG). Veio do revisor independente, que o rodou com 4 e 8 CPUs em 25 boots por configuração (0 falhas; sem a parte remota, de 1 000 a 26 000 leituras velhas). O anel reserva 1 página a cada cópia porque a região dele segue na árvore depois de `unmap_page`.
 - O `init` imprime os frames que consome ao morrer (`init at exit: 5 data, 7 tables, 0 of 15 lazy pages backed`).
+
+## O M1: programas pelo shell, como entrou
+
+**Descritivo.** O M1 é o marco "minimamente usável" do [roadmap](08_roadmap.md): subir o sistema no **boot normal** e, no
+shell que já existe, listar os programas do initramfs, rodar um como **processo isolado**, vê-lo no `ps` e ver um programa
+que falha morrer sozinho sem derrubar o sistema. Nenhuma syscall, formato de executável nem contrato de fora mudou
+(nenhum dos casos de parada do `AGENTS.md`): o shell usa o carregador da 4b e o canal de boot da 4c, parte 1, como o `init`.
+
+| Peça | Onde mora |
+| --- | --- |
+| Os comandos `ls`, `run` e a coluna `pid` do `ps`, e a porta (`Host::programs`, `Host::run_program`, `RunOutcome`, `KillCause`, `TaskInfo::pid`), puros e testados no host com um `Host` falso | `core/shell/src/{commands,host}.rs` ([SDD 16](16_terminal.md#comandos-que-falam-com-processos-m1)) |
+| Ler o `cpio` para o `ls`; carregar com `process::spawn`; esperar o fim do processo | `kernel/src/programs.rs` |
+| O fim do processo: `terminate` chama `programs::finished(pid, evento, sem_memória)`, que guarda o resultado numa tabela de 16 posições e acorda quem espera ([DEBT-0133](../tech-debt/0133-fim-de-processo-numa-tabela-de-16-posicoes.md)) | `kernel/src/process.rs` (uma linha) e `programs.rs` |
+| O número do processo no `ps`: `Slot::pid` da tarefa, posto por `task::set_pid` na entrada do processo e zerado em `unbind_user` | `kernel/src/task.rs` |
+| `hello`, `crash`, `sysinfo` e `count`, `forbid(unsafe_code)` sobre o `user/rt`, na imagem de produção ao lado do `init`; os de teste (`big`, `handles`, `lazy`) seguem só na imagem com `selftest` | `user/{hello,crash,sysinfo,count}`, `xtask/src/user.rs` |
+| A sessão que o smoke digita (`ls`, `run hello`, `run sysinfo`, `run crash`, `run nothere`, `run count &`, `ps`) e confere, nos dois modos | `xtask/src/qemu.rs` (`SESSION`) |
+
+**O que o `run` faz.** `System::run_program` acha o arquivo no `cpio`, chama `process::spawn(Source::Elf)` e, sem `&`,
+dorme (`block_until` sem prazo, registrado em `Waiters`) até `terminate` acordá-la. O processo é o mesmo do `init`: espaço
+próprio, pilha preguiçosa com guarda, canal de boot com `process` e `console`, e a saída `[user] …` pelo console por handle.
+O shell mostra `exit code N (pid P)` ou `killed: <causa> (pid P)`, cada resposta numa **única escrita** (a saída de um processo em segundo plano não a rasga), com a causa tirada do evento de falha (falta de
+página com o endereço **de usuário** e o tipo do acesso, instrução ilegal, acesso desalinhado, falha aritmética, `out of
+memory` quando a falta de página não achou frame) e nunca um endereço do kernel (o gate de vazamento do smoke confere a
+sessão). A tarefa do processo se chama `user` no `ps` ([DEBT-0134](../tech-debt/0134-ps-mostra-user-como-nome-de-tarefa-de-processo.md)).
+
+**Decisões do agente** (nenhuma toca os seis casos de parada):
+
+| Decisão | O que ficou | Por quê |
+| --- | --- | --- |
+| A porta é do `core/shell` | `Host::programs` e `Host::run_program` com tipos próprios (`RunOutcome`, `KillCause`); nenhuma porta nova no `hal` | O `core/shell` já é a porta de tudo o que o shell pede; um tipo do `hal` pediria um terceiro crate para dois consumidores |
+| `run <programa> &` cabe | Sem esperar, o `run` devolve `started pid P` e o `ps` mostra o processo enquanto ele roda (`count` dura 2,5 s). O resultado de quem termina fica só no log do kernel (`[rustos] user: pid N exited …`) | A espera é a mesma tabela de fins; o que o `&` poupa é só a espera. A saída dele cola no prompt ([DEBT-0132](../tech-debt/0132-saida-de-segundo-plano-cola-no-prompt.md)) |
+| Argumentos não passam | `run hello x` é recusado no shell | `argv` mexe no `InitialStack` do `core/hal` e no `process_create` da parte 3 ([DEBT-0130](../tech-debt/0130-run-sem-argumentos-para-o-programa.md)) |
+| Não há Ctrl-C | O `run` em primeiro plano espera sem prazo; o kernel não mata processo de fora | Depende de `process_kill` e da morte de thread bloqueada ([DEBT-0131](../tech-debt/0131-sem-ctrl-c-nem-kill-de-processo.md)). Todo programa de demonstração termina sozinho |
+| O `init` não sobe no boot | O boot normal não lança processo nenhum; `run init` roda as conferências dele | O shell lança o que o usuário pede; o `init` como primeiro processo fica com a parte 3 ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)) |
+| `crash` é Rust seguro | Desce a pilha por recursão até a página de guarda; a falta de página não se resolve | O `rt` não tem leitura de endereço arbitrário em função segura (seria um `unsafe` que só o `rt` pode ter), e a guarda é um endereço proibido de verdade. Exercita também a paginação sob demanda |
+| Linhas do ciclo de vida só na serial | `entered ring3/el0`, `pid N exited (…)`, `stopped by …` e `fault contained` saem por `kprintln_serial!` (`console::print_serial`): serial sim, tela não. As de `[user]` (a saída do programa) seguem nas duas | O [guidelines 05](../guidelines/05_recursos_e_desempenho.md) manda o boot normal imprimir só o que um gate confere ou o que avisa, e a tela da imagem de produção mostra o que o shell já diz (`exit code`, `killed: …`). A serial é o diagnóstico do kernel e o smoke lê só ela, então o modo de teste não perde nada |
+| `terminate` solta os donos antes de sair | O `Box<Process>`, o `Arc<ProcessObj>` e a cota ficam num bloco interno que devolve `(pid, no_memory, cpu)`; `task::exit()` é `-> !` e **nunca roda o `Drop`** de local vivo | Sem o bloco, cada processo vazava cerca de 290 bytes de heap do kernel (200 `run hello`: 16,7 para 73,8 KiB). O smoke agora roda `mem`, 20 `run hello` e `mem` e exige o heap em uso igual; sem o bloco ele reprova (17,8 para 23,4 KiB no aarch64) |
+| O pid só existe para quem existiu | `spawn_keeping` devolve o número ao contador se a tarefa não nasce (`NEXT_PID.compare_exchange`) | A tabela de tarefas cheia (`TaskError::NoSlot`) gastava um pid; agora `run` responde `too many processes` e o número volta |
+| Falta no endereço nulo, baixo ou do kernel | O evento do processo (ABI) não muda: endereço de kernel segue virando 0. O kernel passa a `finished` e a `log_fault` um `kernel_half` à parte; o shell diz `(null or low address)` abaixo de `USER_MIN` e `a kernel address`, sem endereço, na metade do kernel | Antes as duas saíam como "outside the user half" |
+| Resultado por pid numa tabela, não `LAST_EVENT` | `LAST_EVENT` é um só, serve ao modo de teste; a tabela de 16 serve ao `run &` com vários processos | [DEBT-0133](../tech-debt/0133-fim-de-processo-numa-tabela-de-16-posicoes.md) |
+| `process.rs` só ganha | Uma linha em `terminate`, o `pid` em `process_main` e o `allow(dead_code)` do módulo sai (o de `Spawned`, `last_event` e `BootPeer` passa a ser por item, `cfg_attr(not(selftest))`) | A parte 3 da 4c reescreve `process_create` no mesmo arquivo |
+
+**O que o smoke confere.** Depois do `boot ok` e do prompt, nos dois modos e nas duas ISAs, o `xtask` digita a sessão e
+confere cada resposta: o `ls` lista as cinco entradas (`init`, `hello`, `crash`, `sysinfo`, `count`); `run hello` e
+`run sysinfo` imprimem a linha `[user]` e saem com `exit code 0`; `run crash` mostra `killed: page fault` e o kernel
+`user: fault contained`; um programa que não existe é recusado; `run count &` volta na hora e o `ps` mostra a linha
+`user` com o pid; a última linha do `count` (`[user] count: done`) chega sozinha; e o heap do kernel em uso, lido no `mem` antes e depois de 20 `run hello`, é o mesmo (cada processo devolve tudo ao morrer). No boot normal as linhas do modo de teste
+seguem proibidas no log **inteiro**, boot e sessão, menos as três que lançar um processo produz (`entered ring3/el0`, `pid 1 exited (code 0,` e `fault contained`; `init loaded` e `user self-test:` continuam proibidas).
+
+**Números** (bytes e `boot time:`) estão no [SDD 07](07_desempenho_e_recursos.md#o-carregador-na-imagem-enxuta-m1).
+
+## A fatia 4c, parte 3, como entrou
+
+**Descritivo.** O que a parte 3 da 4c (PR `feat/phase4c-processes`) tornou verdade, nas duas ISAs: VMO e VMAR como objetos, `process_create`, `thread_create`, `thread_exit` e `process_kill`, o teto em bytes por processo, o canal de boot completo e o `init` criando um filho. A chamada que o texto do desenho chama de `process_start` é a primeira `thread_create`: o contrato numérico não mudou (a ABI tem 19 chamadas, todas atendidas). Os números estão em [SDD 07](07_desempenho_e_recursos.md#processos-vmo-e-vmar-fatia-4c-parte-3).
+
+| Peça | Onde mora |
+| --- | --- |
+| VMO anônimo (preguiçoso, dono dos frames) e físico (initramfs, só leitura, sem zerar nem devolver) | `kernel/src/vmo.rs` |
+| A memória do processo (`Mem`: espaço, árvore de regiões, os VMOs mapeados) sob um `IrqLock` que espera o *shootdown* girando; `map`, `unmap`, a falta | `kernel/src/process/mem.rs`, `kernel/src/sync.rs` (`lock_serving`) |
+| `Process` (objeto, tabela, cota, vida e morte), `ThreadObj`, `VmarObj`, `start_thread`, `leave_current` | `kernel/src/process.rs` |
+| `vmo_create`, `vmar_map`, `vmar_unmap`; `process_create`, `thread_create`, `process_kill` | `kernel/src/syscall/{memory,tasks}.rs`; `thread_exit` e `process_exit` em `syscall.rs` |
+| `Obj::{Thread,Vmo,Vmar}`, `Lifecycle` (`TERMINATED`), `Quota`, `ByteCharge`, `Bytes` (mensagem cobrada) | `kernel/src/object.rs` |
+| `FaultPlan::MapObject` | `core/mm/src/vmar.rs` |
+| `unmap_pages` (32 páginas por IPI), `Pages`, a promessa das tabelas, `resolve_fault_with` | `kernel/src/uspace.rs`, `kernel/src/tlb.rs` (`shoot_range`) |
+| `task::stop` e `kill_requested` (parar a thread), `note_retry` | `kernel/src/task.rs`; os pontos de volta ao usuário em `syscall.rs` (fim de `dispatch`), `interrupts.rs` (fim de IRQ, falta resolvida) |
+| O canal de boot com VMAR raiz e VMO do initramfs | `kernel/src/process/boot.rs`, `Vm::initramfs_phys` |
+| `PROCESS_BYTES_MAX`, `PROCESS_NAME_MAX`, `VMO_MAX_BYTES`, `MMAP_FLOOR`/`MMAP_ASLR_LIMIT`/`MMAP_TOP`, `USER_STACK_PAGES`, `PROCESS_KILLED_CODE` | `core/hal/src/abi.rs` |
+| O carregador do lado do usuário (`spawn::create`, `Child::{stack, send_boot, start}`), `Mapping`, `Archive` | `user/rt/src/{spawn,vm}.rs`, as sete syscalls novas em `sys.rs` |
+| O filho (modos: olá, laço, bloqueio, estouro de pilha, eco, saída, `process_kill` de si) e o `procs` (os casos hostis, o teto e os laços) | `user/tests/child`, `user/tests/procs`; o `init` cria o `child` |
+
+### O processo, a thread e a morte
+
+O `Process` é um `Arc` que cada thread e cada handle seguram; a tarefa guarda o `Arc<ThreadObj>` (que aponta o processo) em vez do ponteiro cru de antes. Um processo nasce **sem thread** (`Created`); a primeira `thread_create` o inicia, e `BadState` é o processo que morre ou morreu. O espaço mora numa `Option<Mem>` que a morte tira: depois dela `vmar_map` e `vmar_unmap` dão `BadState`. `thread_exit` da última thread encerra o processo com `Exit` de código 0.
+
+**Pôr a thread para fora.** Quem mata marca o processo (`Dying`), grava o evento (o primeiro vale) e, para cada thread viva (uma máscara de slots de tarefa, mantida sob o lock de estado), liga o bit `kill` do slot, acorda a que espera e manda o IPI de reescalonar à CPU que a roda. A thread confere o bit em **todo ponto de volta ao usuário**, com a IRQ mascarada: o fim de `dispatch` (syscall), o fim de falta resolvida, o fim de IRQ (`preempt`) e a entrada da thread (que confere o processo, porque o bit pode ter sido ligado antes de ela existir). `object_wait_one` confere o bit a cada volta do laço, então a thread bloqueada sai da espera e o objeto só guarda um bit que a própria thread retira (isto paga a [DEBT-0111](../tech-debt/0111-espera-de-objeto-por-mascara-de-slots-de-tarefa.md) no que ela tinha de morte). Uma thread em `debug_write` só sai quando a chamada volta ([DEBT-0081](../tech-debt/0081-debug-write-de-512-bytes-com-a-irq-mascarada.md)).
+
+**A ordem da morte** (a tabela de [Falhas de usuário](#falhas-de-usuário) vale; cada thread faz 1 a 3 e só a última faz 4 a 6):
+
+| # | Passo |
+| --- | --- |
+| 1 | `begin_death` (só em quem inicia a morte: `process_exit`, falha, `process_kill`): fase `Dying`, evento, as outras threads paradas |
+| 2 | `unbind_user`: a CPU volta à raiz do kernel e o bit da CPU sai da máscara do espaço; `TERMINATED` da thread |
+| 3 | `thread_left`: contagem de threads; a que zera é a última |
+| 4 | `teardown` (a última): tira o `Mem`, fecha todos os handles, espera o espaço inativo (não gira: todas as threads já saíram), desmapeia as páginas de VMO, devolve os frames e as tabelas, devolve as promessas |
+| 5 | Fase `Dead`, `TERMINATED` do processo, a linha da morte e `LAST_EVENT` |
+| 6 | Só depois de **todo local com `Drop` ter saído de escopo** a tarefa chama `task::exit` (que não volta: o que sobrasse vivo vazaria) |
+
+Um processo sem thread que `process_kill` mata é desfeito por quem matou, na hora. Um processo que perde o último handle sem nunca ter morrido (nunca rodou) é desfeito no `Drop`. A `process_kill` em si mesmo não volta: o bit da própria tarefa liga e o fim de `dispatch` a faz sair. O código do evento de um `process_kill` é `PROCESS_KILLED_CODE` (-1024); `thread_exit` da última thread e `process_exit(0)` dão `Exit` com código 0.
+
+**A falta de página** ganhou o lock por espaço que a dívida 0120 pedia (paga): a resolução, a troca de folha e o `vmar_unmap` rodam sob o `IrqLock` do `Mem`, que **gira atendendo os pedidos de invalidação** (`lock_serving`): quem segura o lock espera o *shootdown* das outras CPUs, e uma CPU que gira no lock responde por elas. Duas faltas seguidas que só repetem (`Retry`) na mesma página sem IRQ nem syscall no meio matam o processo, em vez de prender a CPU.
+
+### VMO e VMAR
+
+O VMO **é dono dos frames**; cada mapeamento segura um `Arc<Vmo>`. A falta numa região de VMO (`FaultPlan::MapObject`) pede o frame ao VMO, que o cria zerado no primeiro toque, **leitura ou escrita**, e o mapeia com a permissão da região. O VMO físico responde `base + página`. O desmapeamento tira a folha e **não** devolve o frame de VMO; a região do carregador (imagem, pilha) segue dona dos frames. O que os dois dão a quem chama:
+
+| Chamada | Contrato preenchido |
+| --- | --- |
+| `vmo_create(size, flags)` | `flags` 0, `size` de 1 página a `VMO_MAX_BYTES` (256 MiB) e múltiplo de página, senão `InvalidArgs`. Cobra `256 + 4 por página` do teto do criador e promete as páginas contra os frames livres: `NoMemory` na chamada, nunca a morte na falta de página. Handle com todos os direitos de VMO |
+| `vmar_map(vmar, vmo, vmo_off, len, flags, vmar_off)` | Flags inválidas ou W+X: `InvalidArgs`; `vmar` e `vmo` com `MAP` e cada permissão pedida (o direito do handle é o teto): `AccessDenied`; tipo errado: `WrongType`. `len` zero, desalinhado, `vmo_off` desalinhado, `vmar_off` sem `FIXED`: `InvalidArgs`; fora do VMO: `OutOfRange`. `FIXED` abaixo de `USER_MIN`, na faixa nula ou acima do topo: `OutOfRange`; **sobre região ocupada: `InvalidArgs`**, sem mudar nada. Sem vaga na árvore ou sem faixa livre ou sem promessa das tabelas: `NoMemory`. Sem `FIXED` escolhe a primeira faixa livre a partir do `mmap_base`, sorteado por processo em `2^28` páginas a partir de 64 GiB; sem entropia no gerador, `process_create` dá `NotSupported`. `flags` sem permissão nenhuma reserva faixa que sempre falta (a guarda do `user/rt`) |
+| `vmar_unmap(vmar, addr, len)` | `MAP` no handle. Apara, parte ou remove regiões; faixa sem região é sucesso. Partir uma região sem vaga é `NoMemory` com a árvore intacta. As folhas saem e as outras CPUs do espaço são invalidadas (um IPI por 32 páginas) antes de qualquer frame voltar. Em região preguiçosa a promessa de cada página volta ao contador e a página que tinha frame deixa de contar como com frame (paga a dívida 0123) |
+
+**A reserva estrita** (decisão 9): o VMO promete suas páginas; o `vmar_map` promete as tabelas de página do mapeamento (uma por 512 páginas e mais uma, devolvidas quando o último pedaço do mapeamento sai); `commit::reserve` confere contra os frames livres menos o que já está prometido. A [DEBT-0121](../tech-debt/0121-reserva-so-das-paginas-preguicosas.md) segue aberta só no modo por processo e no que o kernel aloca.
+
+**O VMO não usa a página zero.** O frame do VMO é compartilhado entre espaços, e uma leitura mapeada para a página zero em um espaço ficaria velha quando outro escrevesse; por isso a falta de VMO sempre cria o frame ([DEBT-0141](../tech-debt/0141-vmo-sem-pagina-zero.md)).
+
+### O teto em bytes por processo (dívida 0110, paga)
+
+Cada processo tem uma conta de **`PROCESS_BYTES_MAX = 512 KiB`** de heap do kernel, cobrada a quem cria e devolvida quando o objeto some (`ByteCharge`, no `Drop`). Acima dela a chamada dá `NoMemory`:
+
+| O que | Custo cobrado |
+| --- | --- |
+| Ponta de canal | 4 096 bytes (metade do par, que mede 7,2 KiB), mais a ponta na conta de 256 |
+| Mensagem em fila | o payload mais 64 de cabeçalho, ao processo que escreveu, até a mensagem sair da fila |
+| VMO | 256 mais 4 bytes por página (o índice de frames nasce inteiro) |
+| Processo filho | 8 KiB (o objeto, a árvore de 32 regiões, os slots da tabela) |
+| Thread | 4 KiB (o objeto e a área de FPU/SIMD, até uns 2,7 KiB) |
+
+**Por que 512 KiB:** (a) abaixo de 256 pontas × 4 KiB = 1 MiB, então o teto em bytes é o que de fato morde, e o de 256 pontas fica como contagem; (b) com no máximo 24 tarefas vivas e cada processo no seu teto, o pior caso de usuário é 12 MiB de heap, menos de 5% dos 256 MiB da QEMU; (c) o `init` com um filho gasta cerca de 20 KiB, 25 vezes menos; (d) o custo de processo e de thread medido (cerca de 9,5 KB de heap com o filho esperando, e 14 a 16 frames no total) cabe nos 12 KiB cobrados. O revisor mediu 17,7 MiB de pico e 18,3 MiB vazados num processo hostil; o `procs` esgota o teto de três jeitos e vê `NoMemory` (10 pares com 311 a 322 KB de mensagens; 1 590 a 1 637 VMOs de uma página; 25 filhos), e depois de fechar tudo a conta volta e a criação segue.
+
+O que fica fora do teto é a [DEBT-0142](../tech-debt/0142-objeto-do-kernel-sem-try-new.md): o `Arc::new` dos objetos e a lista de trabalho ainda abortam na falta de heap; o payload da mensagem e os índices usam `try_reserve`.
+
+### O canal de boot e o `init`
+
+A mensagem de boot do `init` leva agora `[Process, VMAR raiz, Console, Initramfs]`: o VMAR raiz com os direitos de VMAR e o initramfs como **VMO físico** (`READ`, `MAP`, `DUPLICATE`, `TRANSFER`), só para o `init` (a opção `initramfs` de `spawn_with`); os programas que o shell lança recebem só os três primeiros. O leitor casa por `kind`, então o programa que não conhece um item o ignora.
+
+O **`init` cria um filho** (`user/init`, com `user/rt/src/spawn.rs`): mapeia o initramfs pelo VMO, acha o `child` com o `core/cpio`, valida o ELF com o `core/elf`, cria o canal de boot e o processo (`process_create`, que move a ponta do filho para a tabela dele como o handle 1), preenche um VMO por `PT_LOAD` mapeando-o em si, mapeia o mesmo VMO no filho com a permissão do segmento e o endereço do linker, monta a pilha (um VMO de 18 páginas reservado sem permissão, as 16 do meio desmapeadas e remapeadas, de modo que as páginas de cada lado ficam reservadas e sempre faltam) com o `InitialStack` do `hal`, escreve a mensagem de boot com o processo, o VMAR raiz e o console duplicado, e chama `thread_create` com o handle de boot em `rdi`/`x0`. Depois espera o `TERMINATED`. O filho escreve pelo console que recebeu e sai: as linhas `[user] child: hello from a child process` e `[user] init: the child process ran and terminated`. A ABI não diz o tamanho de um VMO, e o `init` o acha por tentativa de mapeamento ([DEBT-0140](../tech-debt/0140-abi-sem-tamanho-de-vmo.md)).
+
+### Decisões do agente
+
+| Decisão | O que ficou | Por quê |
+| --- | --- | --- |
+| Os erros que o contrato deixava abertos | Tabela de `vmar_map` acima; `process_create` com `events` diferente de 0 é `NotSupported` (o canal de eventos é da 4d), consumindo `bootstrap` e `events`; nome maior que 32 bytes é `InvalidArgs`; o nome é validado e **não** guardado ([DEBT-0134](../tech-debt/0134-ps-mostra-user-como-nome-de-tarefa-de-processo.md)); `thread_create` valida o handle antes de `entry` e `sp` | Preenche o que o contrato numérico não dizia; **a confirmar pelo dono**, é o que o mundo de fora enxerga |
+| A última thread encerra o processo | `thread_exit` da última é `Exit` de código 0 | O processo sem thread não tem como voltar a rodar |
+| `PROCESS_KILLED_CODE` | -1024 | Um valor que `process_exit` não usa por engano; vira o `code` do evento na 4d |
+| Quem mata não espera | `process_kill` é assíncrona: devolve ao marcar e parar; o pai espera o `TERMINATED` | O Zircon também (`zx_task_kill`); a espera já existe |
+| Só o bit do slot para as threads | O fim de `dispatch` e de IRQ confere um `AtomicBool` do slot, e não o processo | Uma conferência pelo processo custava 3 vezes a syscall nula no TCG ([SDD 07](07_desempenho_e_recursos.md#processos-vmo-e-vmar-fatia-4c-parte-3)) |
+| O despacho segue mascarado | A IRQ não liga no despacho | A parada por IPI não precisa dela; [DEBT-0081](../tech-debt/0081-debug-write-de-512-bytes-com-a-irq-mascarada.md) reescrita |
+| `Process` é um `Arc` com a tabela dentro | O `init` tem um handle de si, e o ciclo se quebra no `drain` da morte | O processo que nunca roda e perde os handles é desfeito no `Drop` |
+| A pilha do filho com páginas reservadas sem permissão | Dois `vmar_map` sem flags e um `vmar_unmap` no meio | Nenhum `Attrs` de guarda na ABI; uma região sem permissão é a guarda |
+| `init` fora do boot normal | Segue só no modo de teste ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md), reescrita com o custo medido) | O orçamento do boot é do dono |
+| A dívida 0133 e a 0131 do M1 | Seguem abertas, com o gatilho reescrito | O shell e o `programs.rs` são do M1 |
+
+**O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs): os casos do VMO sem processo (cobrança, promessa, frame no primeiro toque, teto, devolução exata); o `init` com o filho; e o `procs` (`[user] procs: ok (N assertions)`, 113 hoje), com direitos errados em VMO e VMAR (sem `WRITE`, sem `MAP`, só `EXECUTE`, VMAR sem `WRITE`, o initramfs para escrita e para execução), W+X, bit reservado, tipo errado e handle forjado; `FIXED` sobre região (inteira, no meio, no fim, no começo), na faixa nula, abaixo do mínimo, no topo e na metade do kernel; tamanhos desalinhados, zerados e que dão a volta; o desmapeamento parcial (buraco no meio, as páginas em volta com o valor, remapear no buraco, o que cobre buracos e regiões) e a memória compartilhada entre dois mapeamentos do mesmo VMO; `process_create` sem `MANAGE_PROCESS`, com pai de outro tipo, `bootstrap` sem `TRANSFER`, nome longo, ponteiro de saída ruim, `events`, o mesmo handle nos dois e pai forjado, cada um consumindo os handles que se movem e sem criar nada; `thread_create` sem `MANAGE_THREAD`, com `entry` e `sp` ruins e em processo morto; `process_kill` sem `DESTROY`, duas vezes e de processo que nunca rodou; a thread que sai, o processo que acaba com a última, o `process_kill` de processo **bloqueado no kernel** (acorda pela morte e não pelo prazo, o que paga a dívida 0112), de processo com **quatro threads girando em usuário** (o kernel confere que o IPI alcançou até 3 CPUs de uma vez), de processo que se mata, e o estouro de pilha numa thread com outra girando; o teto em bytes (mensagens, VMOs, processos); 500 rodadas de criar, mapear, tocar e desmapear; e 300 processos criados e esperados (metade morta no meio) mais 2 000 idas e voltas entre dois processos. Nos pontos `A` e `C` o kernel confere que **nada sobrou**: os mesmos frames, os mesmos bytes de heap e a mesma promessa. O teste do heap exato achou, durante o desenvolvimento, o `Box` da thread que o `enter_user` (que não volta) não soltava.
+
 
 ## Entrada de syscall por ISA
 
@@ -1714,7 +1859,7 @@ usuário, então mexer no `init` não recompila o kernel.
 
 ### Linhas que o smoke passa a exigir
 
-Em inglês, como toda saída serial. As da 4a e da 4b valem hoje, no modo de teste; o boot normal as proíbe (o `init` só roda no modo de teste, [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)).
+Em inglês, como toda saída serial. As da 4a e da 4b valem hoje, no modo de teste; o boot normal as proíbe (o `init` só roda no modo de teste, [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)), na sessão do M1 só as três de lançar processo são permitidas; o smoke digita a sessão depois do prompt, nos dois modos.
 
 | Linha | Fatia |
 | --- | --- |
@@ -1722,9 +1867,11 @@ Em inglês, como toda saída serial. As da 4a e da 4b valem hoje, no modo de tes
 | `[rustos] user: fault contained (pid N)` | 4a |
 | `[rustos] user self-test: ok` (os casos acima) | 4a |
 | `[rustos] user: init loaded (N segments)`, `[rustos] user: pid 1 exited (code 0,` e, do `init`, `[user] init: ok` | 4b |
-| `[user] init: boot channel, console and handles ok` e `[user] handles: ok (` (os casos hostis); `[rustos] initramfs: 4 files,` | 4c, parte 1 |
+| `[user] init: boot channel, console and handles ok` e `[user] handles: ok (` (os casos hostis); `[rustos] initramfs: 10 files,` (o `init`, as quatro demonstrações e os cinco de teste) | 4c, parte 1 |
 | `[user] lazy: ok (` e `[rustos] user: demand paging: ` (a pilha e o `.bss` sob demanda, a página zero e a cópia dela) | 4c, paginação sob demanda (**feito**) |
+| `[user] child: hello from a child process`, `[user] init: the child process ran and terminated`, `[user] procs: ok (`, `[rustos] user: vmo cases: ok` e `[rustos] user: processes left 0 frames, 0 B of heap and 0 promised pages` | 4c, parte 3 (**feito**) |
 | `[rustos] tlb shootdown: ok (cpu` (o teste entre CPUs; na máquina de uma CPU só sai `skipped, one cpu`, que o smoke recusa) | 4c, *shootdown* (**feito**) |
+| Depois do prompt, nos dois modos: `[user] hello from a user process (`, `exit code 0 (pid`, `[user] sysinfo: up `, `[user] crash: going down the stack`, `[rustos] user: fault contained (pid`, `killed: page fault`, `started pid` e `[user] count: done` | M1 (**feito**) |
 | `[rustos] mitigations: ` (nos dois modos) | 4e, parte 1 (**feito**) |
 | `[rustos] cpu features: ` (só o modo de teste) | 4e, parte 1 (**feito**) |
 | `[rustos] user: self-test ok` (handles, SIMD, falha, canal) | 4d |
@@ -1790,7 +1937,7 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 | Dívida 0037, pilha sem medida de pico (paga no #19: 16 KiB pelo pico medido) e [DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) | A 4a remediu com syscall e falta fatal: 2,0 KiB e 1,6 KiB de 16 (`release`). Os 16 KiB ficam; a 0070 segue aberta até a 4c e a 4f medirem handles, canais e a falta resolvida |
 | [DEBT-0052](../tech-debt/0052-afinidade-so-no-spawn.md) Afinidade só no `spawn` | Não dispara: a ABI nativa não tem afinidade |
 | **Abertas pela 4a:** [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md) (limpeza da pilha até 128 bytes limpos), [DEBT-0077](../tech-debt/0077-iretq-sem-fixup-de-falha-fora-do-rip-e-do-rsp.md) (`iretq` sem *fixup*), [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md) (EL1h na pilha de falhas); [DEBT-0081](../tech-debt/0081-debug-write-de-512-bytes-com-a-irq-mascarada.md) (`debug_write` com a IRQ mascarada) e [DEBT-0082](../tech-debt/0082-sem-lfence-depois-do-swapgs-condicional.md) (sem `lfence` depois do `swapgs`); [DEBT-0072](../tech-debt/0072-pilhas-de-excecao-sem-medida-permanente.md) agora inclui a IST4 | A 4a fecha os itens dela |
-| **Pagas ou reescritas na parte 1 da 4c:** [DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) (a pilha foi remedida com handles e canais: 4,8 KiB de 16 no pico das tarefas, 5,0 KiB na syscall; resta a falta resolvida); [DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md) (a cobrança de 256 pontas existe); [DEBT-0091](../tech-debt/0091-fila-do-canal-com-armazenamento-inline.md) (agora com o custo do modelo do par); [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md) (a primeira metade do gatilho, o canal de boot, ocorreu; a outra, o lançamento de processos, é da parte 3). **Abertas:** [DEBT-0110](../tech-debt/0110-objeto-e-mensagem-abortam-na-falta-de-heap.md), [DEBT-0111](../tech-debt/0111-espera-de-objeto-por-mascara-de-slots-de-tarefa.md) e [DEBT-0112](../tech-debt/0112-process-terminated-sem-teste-de-espera-bloqueante.md).
+| **Pagas ou reescritas na parte 1 da 4c:** [DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) (a pilha foi remedida com handles e canais: 4,8 KiB de 16 no pico das tarefas, 5,0 KiB na syscall; resta a falta resolvida); [DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md) (a cobrança de 256 pontas existe); [DEBT-0091](../tech-debt/0091-fila-do-canal-com-armazenamento-inline.md) (agora com o custo do modelo do par); [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md) (a primeira metade do gatilho, o canal de boot, ocorreu; a outra, o lançamento de processos, é da parte 3). **Abertas:** [DEBT-0111](../tech-debt/0111-espera-de-objeto-por-mascara-de-slots-de-tarefa.md) (as 0110 e 0112 foram pagas na parte 3). **Da parte 3:** pagas a 0110, a 0112, a 0120 e a 0123; reescritas a 0081, a 0087, a 0111, a 0121 e a 0122; abertas a [0140](../tech-debt/0140-abi-sem-tamanho-de-vmo.md), a [0141](../tech-debt/0141-vmo-sem-pagina-zero.md) e a [0142](../tech-debt/0142-objeto-do-kernel-sem-try-new.md).
 
 **A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md), registrada com o `core/object`); imagem de usuário sem ASLR (4b; [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois), registrada: [DEBT-0083](../tech-debt/0083-imagem-de-usuario-sem-aslr.md)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
 
@@ -1812,7 +1959,7 @@ do dono. Cada uma vira texto no SDD e teste no mesmo PR.
 | L1 | Entre a reserva do slot e o *commit* do `channel_write`, a ponta oposta pode morrer em outra CPU (SMP) | O *commit* reconfere a ponta viva sob o lock do canal; se morreu, os handles seguem a regra de descarte. **Feita** ([seção](#o-que-fechou-das-lacunas)) |
 | L2 | A repetição do `channel_read` (sequência mudou) | A repetição libera as reservas do passo 2, e um valor de handle reservado e solto não reaparece. **Feita** |
 | L3 | Regra de lock dos canais não está escrita (**escrita**, [acima](#ordem-de-lock-lacuna-l3)) | Um lock por par de pontas (A→B e B→A pegam o mesmo); a destruição tira as mensagens sob o lock e fecha os handles **depois** de soltá-lo; o passo 1 do `channel_read` valida `ch` sob a tabela antes do canal; ordem global tabela → canal |
-| L4 | Chamadas que devolvem handle por ponteiro de saída (`channel_create`, `process_create`) | O mesmo padrão reserva → copia → *commit*: falha no `copy_to_user` desfaz a criação, sem objeto órfão. **Feita** para `channel_create`; `process_create` na parte 3 |
+| L4 | Chamadas que devolvem handle por ponteiro de saída (`channel_create`, `process_create`) | O mesmo padrão reserva → copia → *commit*: falha no `copy_to_user` desfaz a criação, sem objeto órfão. **Feita** para `channel_create` e `process_create` (parte 3) |
 | L5 | `fault_kind` contra a tabela do `ProcessEvent` | Já concordam (`breakpoint` incluído); manter um teste que compare as duas |
 | L6 | O `check-layers` não expressa "o `user/` depende só de `elf` e `cpio` entre os crates de `core/`", nem a isenção de `unsafe` só do `user/rt` | Lista por nome no `xtask`, com teste vermelho antes do verde (já pedido para a 4a, ver [guidelines 03](../guidelines/03_camadas_e_dependencias.md)) |
 

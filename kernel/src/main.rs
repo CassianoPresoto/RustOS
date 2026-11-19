@@ -32,6 +32,7 @@ mod panic;
 mod percpu;
 mod platform;
 mod process;
+mod programs;
 mod random;
 mod screen;
 mod scrub;
@@ -229,7 +230,7 @@ fn boot_kernel(handoff: Handoff) -> ! {
     }
     report_boot_time(selftest);
     kprintln!("{BOOT_OK_MARKER}");
-    let mut system = system::System::new(&boot, &memory, display);
+    let mut system = system::System::new(&boot, &memory, display, vm.initramfs());
     system::run_shell(&mut system)
 }
 

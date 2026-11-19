@@ -62,7 +62,9 @@ impl Vmo {
             .ok_or(Status::NoMemory)?;
         let cost = ByteCharge::new(quota, bytes).ok_or(Status::NoMemory)?;
         let mut slots = Vec::new();
-        slots.try_reserve_exact(count).map_err(|_| Status::NoMemory)?;
+        slots
+            .try_reserve_exact(count)
+            .map_err(|_| Status::NoMemory)?;
         slots.resize(count, 0);
         if !commit::reserve(pages, frames.free_frames() as u64) {
             return Err(Status::NoMemory);
@@ -72,7 +74,10 @@ impl Vmo {
             pages,
             kind: Kind::Anonymous,
             frames,
-            store: IrqLock::new(Store { slots, committed: 0 }),
+            store: IrqLock::new(Store {
+                slots,
+                committed: 0,
+            }),
             cost: Some(cost),
         }))
     }

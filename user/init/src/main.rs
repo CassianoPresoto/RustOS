@@ -1,8 +1,7 @@
-//! O `init`: o primeiro programa de usuário. Confere o que o kernel deixou na pilha inicial
-//! (auxv, alinhamento, handle de boot), lê a mensagem de boot e escreve pelo console que ela traz,
-//! exercita canal e espera com um canal próprio, cria um processo filho a partir do initramfs (lê o ELF
-//! pelo VMO, mapeia os segmentos, escreve a mensagem de boot com o console e o inicia), espera o
-//! `TERMINATED` dele, chama `clock_get_monotonic` e `random_get`, e sai com 0.
+//! O `init`: o primeiro programa de usuário. Confere a pilha inicial, lê a mensagem de boot, escreve
+//! pelo console que ela traz, exercita canal e espera, cria um filho do initramfs (lê o ELF pelo VMO,
+//! mapeia os segmentos, manda o console na mensagem de boot e o inicia), espera o `TERMINATED` dele,
+//! chama `clock_get_monotonic` e `random_get`, e sai com 0.
 
 #![no_std]
 #![no_main]

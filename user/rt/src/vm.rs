@@ -8,6 +8,15 @@ use rustos_hal::abi::{Handle, Status, vmar_flags};
 
 use crate::sys;
 
+/// Um `u64` do ABI como tamanho ou índice: o usuário só existe em 64 bits.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "o usuário só existe em 64 bits"
+)]
+pub(crate) const fn to_usize(value: u64) -> usize {
+    value as usize
+}
+
 /// Um VMO mapeado neste processo, `[addr, addr + len)`. Solto no `Drop`.
 #[derive(Debug)]
 pub struct Mapping {
@@ -39,7 +48,12 @@ impl Mapping {
     pub fn bytes(&self) -> &[u8] {
         // SAFETY: `[addr, addr + len)` é um mapeamento deste processo com `READ`, que `Drop` só solta
         // depois de o empréstimo acabar; o VMO é de quem o mapeou.
-        unsafe { slice::from_raw_parts(core::ptr::with_exposed_provenance(self.addr as usize), self.len) }
+        unsafe {
+            slice::from_raw_parts(
+                core::ptr::with_exposed_provenance(to_usize(self.addr)),
+                self.len,
+            )
+        }
     }
 
     /// Os bytes do mapeamento, para preencher. Só vale em mapeamento com `WRITE`.
@@ -47,7 +61,7 @@ impl Mapping {
         // SAFETY: como `bytes`, e `&mut self` impede outra visão do mesmo mapeamento.
         unsafe {
             slice::from_raw_parts_mut(
-                core::ptr::with_exposed_provenance_mut(self.addr as usize),
+                core::ptr::with_exposed_provenance_mut(to_usize(self.addr)),
                 self.len,
             )
         }
@@ -56,7 +70,11 @@ impl Mapping {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        let _ = sys::vmar_unmap(self.vmar, self.addr, (self.len as u64).next_multiple_of(PAGE_SIZE));
+        let _ = sys::vmar_unmap(
+            self.vmar,
+            self.addr,
+            (self.len as u64).next_multiple_of(PAGE_SIZE),
+        );
     }
 }
 
@@ -68,7 +86,7 @@ pub fn scratch(vmar: Handle, len: usize) -> Result<(Handle, Mapping), Status> {
         vmar,
         vmo,
         0,
-        size as usize,
+        to_usize(size),
         vmar_flags::READ | vmar_flags::WRITE,
     );
     match mapping {
@@ -93,7 +111,7 @@ impl Archive {
     /// aborta.
     pub fn open(vmar: Handle, vmo: Handle) -> Result<Self, Status> {
         let fits = |pages: u64| -> Result<bool, Status> {
-            match Mapping::new(vmar, vmo, 0, (pages * PAGE_SIZE) as usize, vmar_flags::READ) {
+            match Mapping::new(vmar, vmo, 0, to_usize(pages * PAGE_SIZE), vmar_flags::READ) {
                 Ok(_) => Ok(true),
                 Err(Status::OutOfRange) => Ok(false),
                 Err(status) => Err(status),
@@ -115,7 +133,7 @@ impl Archive {
         if low == 0 {
             return Err(Status::InvalidArgs);
         }
-        let map = Mapping::new(vmar, vmo, 0, (low * PAGE_SIZE) as usize, vmar_flags::READ)?;
+        let map = Mapping::new(vmar, vmo, 0, to_usize(low * PAGE_SIZE), vmar_flags::READ)?;
         Ok(Self { map })
     }
 

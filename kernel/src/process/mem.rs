@@ -51,8 +51,11 @@ const fn table_frames(pages: u64) -> u64 {
 
 fn vmar_status(error: VmarError) -> Status {
     match error {
-        VmarError::Misaligned | VmarError::Empty | VmarError::BadAlignment => Status::InvalidArgs,
-        VmarError::WriteExecute | VmarError::Overlap => Status::InvalidArgs,
+        VmarError::Misaligned
+        | VmarError::Empty
+        | VmarError::BadAlignment
+        | VmarError::WriteExecute
+        | VmarError::Overlap => Status::InvalidArgs,
         VmarError::OutOfRange => Status::OutOfRange,
         VmarError::Full | VmarError::NoSpace => Status::NoMemory,
     }
@@ -70,19 +73,17 @@ impl Mem {
             })
         };
         let base = aslr_base(MMAP_FLOOR, MMAP_ASLR_LIMIT, &mut rng);
-        match base.filter(|_| seeded) {
-            Some(mmap_base) => Ok(Self {
-                space,
-                regions,
-                maps: Vec::new(),
-                next_id: 1,
-                mmap_base,
-            }),
-            None => {
-                space.destroy();
-                Err(Status::NotSupported)
-            }
-        }
+        let Some(mmap_base) = base.filter(|_| seeded) else {
+            space.destroy();
+            return Err(Status::NotSupported);
+        };
+        Ok(Self {
+            space,
+            regions,
+            maps: Vec::new(),
+            next_id: 1,
+            mmap_base,
+        })
     }
 
     /// A falta de página de usuário em `address`.
@@ -115,18 +116,17 @@ impl Mem {
             object: id,
             page_offset: offset,
         });
-        let placed = match request.fixed {
-            Some(at) => self.regions.reserve(at, len, attrs).map(|()| at),
-            None => {
-                let fit = Fit {
-                    len,
-                    align: PAGE_SIZE,
-                    window: (self.mmap_base, MMAP_TOP),
-                    placement: Placement::Lowest,
-                };
-                self.regions
-                    .allocate(fit, attrs, &mut || random::next_u64().unwrap_or(0))
-            }
+        let placed = if let Some(at) = request.fixed {
+            self.regions.reserve(at, len, attrs).map(|()| at)
+        } else {
+            let fit = Fit {
+                len,
+                align: PAGE_SIZE,
+                window: (self.mmap_base, MMAP_TOP),
+                placement: Placement::Lowest,
+            };
+            self.regions
+                .allocate(fit, attrs, &mut || random::next_u64().unwrap_or(0))
         };
         match placed {
             Ok(at) => {
@@ -195,12 +195,6 @@ impl Mem {
             }
             used
         });
-    }
-
-    /// Há mapeamento ativo de algum VMO (o autoteste).
-    #[cfg(feature = "selftest")]
-    pub fn mappings(&self) -> usize {
-        self.maps.len()
     }
 
     /// Desfaz o espaço na morte do processo: as páginas de VMO saem das tabelas (os frames são do

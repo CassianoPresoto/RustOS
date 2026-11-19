@@ -1,6 +1,6 @@
 //! Formatação sem alocação e sem ponto flutuante: tamanhos, porcentagens e tempo.
 
-use core::fmt;
+use core::fmt::{self, Write as _};
 
 /// Texto de capacidade fixa; estourar a capacidade devolve `fmt::Error`.
 #[derive(Clone, Copy, Debug)]
@@ -54,6 +54,21 @@ impl fmt::Display for Bytes {
             None => fmt::write(&mut text, format_args!("{n} B")),
         };
         written?;
+        f.pad(text.as_str())
+    }
+}
+
+/// O número do processo, ou `-` na tarefa só de kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Pid(pub Option<u32>);
+
+impl fmt::Display for Pid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut text = StackStr::<12>::new();
+        match self.0 {
+            Some(pid) => fmt::write(&mut text, format_args!("{pid}"))?,
+            None => text.write_str("-")?,
+        }
         f.pad(text.as_str())
     }
 }

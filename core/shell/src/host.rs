@@ -50,6 +50,91 @@ pub trait Host {
     fn micro_bench(&self) -> Option<MicroBench> {
         None
     }
+    /// Chama `visit` uma vez por arquivo do initramfs, em ordem; é o que `ls` lista.
+    fn programs(&self, _visit: &mut dyn FnMut(&ProgramInfo<'_>)) -> Listing {
+        Listing::NoInitramfs
+    }
+    /// Carrega o programa `name` do initramfs e o roda como processo. Com `wait`, só volta quando
+    /// ele termina e diz como; sem `wait`, volta assim que ele começou.
+    fn run_program(&self, _name: &str, _wait: bool) -> RunOutcome {
+        RunOutcome::NoInitramfs
+    }
+}
+
+/// Um arquivo do initramfs, como `ls` o mostra.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProgramInfo<'a> {
+    pub name: &'a str,
+    pub bytes: u64,
+}
+
+/// Como terminou a leitura do initramfs por `Host::programs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Listing {
+    Done,
+    /// O boot não trouxe initramfs, ou não conseguiu mapeá-lo.
+    NoInitramfs,
+    /// O arquivo cpio está malformado.
+    Unreadable,
+}
+
+/// O que `Host::run_program` conta do programa.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// Terminou por conta própria, com este código de saída.
+    Exited {
+        pid: u32,
+        code: i64,
+    },
+    /// O kernel o encerrou: o processo fez algo que a CPU recusou.
+    Killed {
+        pid: u32,
+        cause: KillCause,
+    },
+    /// Começou e segue rodando (`run` sem esperar).
+    Started {
+        pid: u32,
+    },
+    /// Nenhum arquivo com esse nome no initramfs.
+    NotFound,
+    /// O arquivo existe mas não é um executável que o kernel aceite.
+    NotExecutable,
+    /// Faltou memória para criar o processo.
+    NoMemory,
+    /// A tabela de tarefas do kernel está cheia.
+    TooManyProcesses,
+    NoInitramfs,
+    /// Qualquer outra falha ao criar o processo.
+    Failed,
+}
+
+/// Por que o kernel encerrou um processo. Só valores de usuário: nenhum endereço do kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KillCause {
+    /// Acesso a endereço de usuário sem mapa ou sem permissão; abaixo de `USER_MIN` é nulo ou quase.
+    PageFault {
+        address: u64,
+        access: Access,
+    },
+    /// A falta foi na metade do kernel: o endereço não sai do kernel.
+    KernelPageFault {
+        access: Access,
+    },
+    IllegalInstruction,
+    Unaligned,
+    Arithmetic,
+    Breakpoint,
+    /// A falta de página não se resolveu por falta de frame.
+    OutOfMemory,
+    Other,
+}
+
+/// O tipo do acesso que faltou.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    Read,
+    Write,
+    Execute,
 }
 
 /// Zerar memória e gerar números aleatórios: o que o `bench` mostra além das tarefas.
@@ -100,6 +185,8 @@ pub struct CpuInfo {
 pub struct TaskInfo<'a> {
     pub id: u32,
     pub name: &'a str,
+    /// O processo de usuário que a tarefa roda; `None` na tarefa só de kernel.
+    pub pid: Option<u32>,
     pub state: TaskState,
     /// A CPU dona da tarefa (a fila em que ela está).
     pub cpu: u8,

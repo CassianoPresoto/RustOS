@@ -123,7 +123,7 @@ pub fn object_wait_one(raw: u64, wanted: u64, deadline_ns: u64) -> Outcome {
 fn wait(object: &Obj, wanted: u32, deadline_ns: u64) -> Result<u32, Status> {
     task::clear_permit();
     loop {
-        if process::with_current(Process::is_dying) == Some(true) {
+        if task::kill_requested() {
             return Err(Status::BadState);
         }
         let registered = object

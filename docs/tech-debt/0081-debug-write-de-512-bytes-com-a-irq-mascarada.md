@@ -3,7 +3,7 @@ id: DEBT-0081
 title: `debug_write` de até 512 bytes roda com a IRQ mascarada e o lock do console preso
 status: Open
 date: 2026-11-18
-trigger: Ligar a IRQ no despacho de syscall (a parte 3 da 4c, com `thread_create`), ou o primeiro boot com UART física
+trigger: Ligar a IRQ no despacho de syscall, ou o primeiro boot com UART física
 paid_date:
 ---
 
@@ -24,8 +24,7 @@ teste, são os que o chamam.
 
 ## Gatilho
 
-Ligar a IRQ no despacho (a chamada passa a poder ser interrompida; a parte 3 da 4c, com threads em
-várias CPUs), ou o primeiro boot com UART física, o que vier antes.
+Ligar a IRQ no despacho (a chamada passa a poder ser interrompida), ou o primeiro boot com UART física, o que vier antes. A parte 3 da 4c **não** a ligou: o `process_kill` para a thread no fim da syscall (`dispatch`) e por IPI no usuário, então uma thread presa num `debug_write` demora no máximo os 44 ms da conta acima para morrer.
 
 ## Como pagar
 
