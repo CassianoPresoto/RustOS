@@ -5,7 +5,7 @@
 > de syscall, handles, ABI nativa), como o primeiro programa chega à memória, e quais
 > decisões do dono o desenho aplica.
 
-**Estado: desenho aprovado no #9 (2026-11-18). As fatias 4a ([abaixo](#a-fatia-4a-como-entrou)) e 4b ([abaixo](#a-fatia-4b-como-entrou)) estão implementadas; da 4c, o crate puro `core/object` ([abaixo](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) a parte 1, objetos, handles, canais, espera e canal de boot no kernel ([abaixo](#a-fatia-4c-parte-1-como-entrou)), e a paginação sob demanda, a página zero e o *shootdown* de TLB ([abaixo](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou)); as demais, não.** A ABI de
+**Estado: desenho aprovado no #9 (2026-11-18). As fatias 4a ([abaixo](#a-fatia-4a-como-entrou)) e 4b ([abaixo](#a-fatia-4b-como-entrou)) estão implementadas; da 4c, o crate puro `core/object` ([abaixo](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) a parte 1, objetos, handles, canais, espera e canal de boot no kernel ([abaixo](#a-fatia-4c-parte-1-como-entrou)), a paginação sob demanda, a página zero e o *shootdown* de TLB ([abaixo](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou)); e a parte 3, VMO, VMAR, processos, threads, o teto em bytes e o `init` com um filho ([abaixo](#a-fatia-4c-parte-3-como-entrou)); as demais, não.** A ABI de
 syscall e o formato de executável são contrato que o mundo de fora enxerga (caso 6 do
 [`AGENTS.md`](../../AGENTS.md)), e crate novo em `core/` e pasta nova de primeiro nível são
 o caso 1; por isso o desenho nasceu num PR em Draft só com docs. O dono aprovou as nove
