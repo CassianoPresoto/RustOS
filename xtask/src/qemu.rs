@@ -342,8 +342,8 @@ pub fn smoke(root: &Path, arch: Arch, profile: Profile, mode: BootMode) -> Resul
     child.wait().ok();
 
     print_kernel_lines(&log);
-    // O boot normal não pode rodar programa: as linhas proibidas valem só até o prompt, e a sessão
-    // digitada tem as próprias exigências.
+    // O modo normal não pode ter rodado nada do modo de teste no boot (`boot_log`); a sessão
+    // digitada tem as próprias exigências e a lista de proibidas dela vale sobre o log inteiro.
     let judged = if mode == BootMode::Refused {
         &log
     } else {
@@ -351,8 +351,39 @@ pub fn smoke(root: &Path, arch: Arch, profile: Profile, mode: BootMode) -> Resul
     };
     report(arch, mode, outcome, judged)?;
     session
+        .and_then(|()| check_session_forbidden(mode, &log))
         .and_then(|()| check_no_kernel_address(&log[boot_log.len()..]))
         .map_err(|reason| failure(arch, &reason, &log))
+}
+
+/// As linhas que a sessão do shell produz de propósito no boot normal: lançar um processo imprime
+/// a entrada em usuário, o fim e a falha contida.
+const SESSION_OWN: [&str; 3] = [
+    "[rustos] user: entered ring3/el0",
+    "[rustos] user: pid 1 exited (code 0,",
+    "[rustos] user: fault contained (pid ",
+];
+
+/// O que o boot normal não imprime nem depois da sessão: `normal_forbidden` menos o que a sessão
+/// produz (`SESSION_OWN`). `init loaded`, `user self-test` e o resto do modo de teste seguem proibidos.
+fn session_forbidden() -> Vec<&'static str> {
+    normal_forbidden()
+        .into_iter()
+        .filter(|line| !SESSION_OWN.contains(line))
+        .collect()
+}
+
+/// No boot normal, o log inteiro (boot e sessão) não tem linha do modo de teste.
+fn check_session_forbidden(mode: BootMode, log: &str) -> Result<(), String> {
+    if mode != BootMode::Normal {
+        return Ok(());
+    }
+    match session_forbidden().iter().find(|line| has_mark(log, line)) {
+        Some(line) => Err(format!(
+            "o boot normal, com a sessão do shell, imprimiu `{line}`, que é do modo de teste"
+        )),
+        None => Ok(()),
+    }
 }
 
 /// O endereço do kernel que a sessão digitada deixou no log, se deixou (SDD 09).
@@ -429,7 +460,52 @@ fn type_session(
             Err(_) => return Err("a serial fechou antes de o `count` terminar".to_owned()),
         }
     }
+    check_no_heap_leak(child, receiver, log)
+}
+
+/// Quantos `run hello` entre os dois `mem` do teste de vazamento.
+const LEAK_RUNS: usize = 20;
+
+/// Cada processo que nasce e morre tem de devolver todo o heap do kernel: aquece com um `run hello`,
+/// lê o heap em uso no `mem`, roda `LEAK_RUNS` vezes e lê de novo. Um vazamento de centenas de bytes
+/// por processo sobe a leitura em alguns KiB, acima da resolução de 0,1 KiB do `mem`.
+fn check_no_heap_leak(
+    child: &mut std::process::Child,
+    receiver: &mpsc::Receiver<String>,
+    log: &mut String,
+) -> Result<(), String> {
+    type_command(child, receiver, log, "run hello")?;
+    let read = |child: &mut std::process::Child, log: &mut String| {
+        let answer = type_command(child, receiver, log, "mem")?;
+        heap_used(&answer).ok_or(format!("o `mem` não mostrou o heap em uso:\n{answer}"))
+    };
+    let before = read(child, log)?;
+    for _ in 0..LEAK_RUNS {
+        let answer = type_command(child, receiver, log, "run hello")?;
+        if !answer.contains("exit code 0 (pid ") {
+            return Err(format!("`run hello` não saiu com 0:\n{answer}"));
+        }
+    }
+    let after = read(child, log)?;
+    if before != after {
+        return Err(format!(
+            "o heap do kernel passou de {before} para {after} em {LEAK_RUNS} `run hello`: \
+             o processo vaza memória ao morrer"
+        ));
+    }
+    println!("xtask: heap em {after} antes e depois de {LEAK_RUNS} `run hello`");
     Ok(())
+}
+
+/// O heap em uso que o `mem` mostra (`heap  18.1 KiB  (11 pages, …)`), como texto: `18.1 KiB`.
+fn heap_used(answer: &str) -> Option<String> {
+    let line = answer
+        .lines()
+        .find(|line| line.split_whitespace().next() == Some("heap"))?;
+    let mut words = line.split_whitespace().skip(1);
+    let (number, unit) = (words.next()?, words.next()?);
+    number.parse::<f64>().ok()?;
+    Some(format!("{number} {unit}"))
 }
 
 /// Uma linha do `ps` de uma tarefa `user` com o número do processo na coluna `pid` (a terceira).
@@ -1024,6 +1100,38 @@ mod tests {
         assert!(ps_shows_a_process(ps));
         assert!(!ps_shows_a_process("  1  shell        -   0 run\n"));
         assert!(!ps_shows_a_process("  9  user         -   1 wait\n"));
+    }
+
+    #[test]
+    fn the_heap_line_of_mem_is_read_as_the_used_amount() {
+        let mem = "Memory\n  usable   249.3 MiB\n  heap           18.1 KiB  (11 pages, 44.0 KiB held)\n  kernel   340.0 KiB\n";
+        assert_eq!(heap_used(mem).as_deref(), Some("18.1 KiB"));
+        assert_eq!(
+            heap_used("  heap  512 B  (1 pages)").as_deref(),
+            Some("512 B")
+        );
+        assert_eq!(heap_used("sem heap aqui"), None);
+        let leaked = mem.replace("18.1 KiB  (", "23.9 KiB  (");
+        assert_ne!(heap_used(mem), heap_used(&leaked));
+    }
+
+    #[test]
+    fn the_whole_normal_log_keeps_the_self_test_lines_out_but_lets_the_session_launch_processes() {
+        let session = SESSION_OWN.join("\n");
+        assert!(check_session_forbidden(BootMode::Normal, &session).is_ok());
+        for line in [
+            "[rustos] user: init loaded (3 segments)",
+            "[rustos] user self-test: ok",
+            "[rustos] heap self-test: ok",
+            "[rustos] initramfs: 8 files, 1 bytes",
+            "[rustos] switch: 1 ns",
+        ] {
+            let log = format!("{session}\n{line}\n");
+            let result = check_session_forbidden(BootMode::Normal, &log);
+            assert!(result.unwrap_err().contains("do modo de teste"), "{line}");
+        }
+        // O modo de teste roda tudo isso: a conferência é só do normal.
+        assert!(check_session_forbidden(BootMode::SelfTest, "[rustos] heap self-test: ok").is_ok());
     }
 
     #[test]
