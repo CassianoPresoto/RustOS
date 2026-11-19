@@ -15,9 +15,24 @@ pub fn ns_to_ticks(ns: u64, frequency_hz: u64) -> u64 {
     u64::try_from(ticks).unwrap_or(u64::MAX)
 }
 
+/// O valor absoluto do comparador para `ticks` depois da época `origin`: satura em `u64::MAX`, que é
+/// "nunca". Com `wrapping_add` um prazo enorme dava a volta e armava o timer no passado.
+pub const fn absolute_deadline(origin: u64, ticks: u64) -> u64 {
+    origin.saturating_add(ticks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_huge_deadline_saturates_instead_of_wrapping_into_the_past() {
+        let origin = 5_000_000_000;
+        assert_eq!(absolute_deadline(origin, 1_000), origin + 1_000);
+        assert_eq!(absolute_deadline(origin, u64::MAX), u64::MAX);
+        assert_eq!(absolute_deadline(origin, u64::MAX - origin + 1), u64::MAX);
+        assert!(absolute_deadline(origin, ns_to_ticks(u64::MAX, 1_000_000_000)) >= origin);
+    }
 
     #[test]
     fn counts_convert_at_24_mhz() {

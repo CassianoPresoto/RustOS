@@ -4,6 +4,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod boot;
 mod console;
 mod env;
 #[cfg_attr(
@@ -14,9 +15,11 @@ mod heap;
 #[cfg(target_os = "none")]
 pub mod sys;
 
-pub use console::{LineBuffer, print_line};
+pub use console::{LineBuffer, print_line, set_console};
 pub use env::{Auxv, Env};
-pub use rustos_hal::abi::Status;
+#[cfg(feature = "raw-syscalls")]
+pub use rustos_hal::abi::Syscall;
+pub use rustos_hal::abi::{Handle, ReadActual, Rights, Status, signals};
 
 /// Declara o `main` do programa: `fn(&Env) -> i64`, cujo valor é o código de `process_exit`.
 #[macro_export]

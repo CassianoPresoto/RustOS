@@ -213,6 +213,9 @@ impl Slot {
     }
 }
 
+/// A máscara de espera de um objeto tem um bit por slot de tarefa.
+const _: () = assert!(MAX_TASKS <= 64);
+
 static TASKS: [Slot; MAX_TASKS] = [const { Slot::new() }; MAX_TASKS];
 
 fn slot(id: usize) -> &'static Slot {
@@ -868,6 +871,9 @@ enum Wake {
     Unpark,
     /// O prazo de quem dorme venceu.
     Timer,
+    /// Um sinal de objeto mudou: acorda a bloqueada e a que dorme com prazo (`block_until`); para
+    /// as outras vivas, deixa o aviso.
+    Signal,
 }
 
 /// Acorda a tarefa dormindo ou bloqueada, na CPU menos carregada que a afinidade permite. Se
@@ -877,10 +883,10 @@ fn wake_task(id: usize, why: Wake, now: u64) -> bool {
     let task = slot(id);
     let (home, mut queue) = lock_owner(id);
     let wakes = match (task.state(), why) {
-        (State::Blocked, Wake::Unpark) => true,
+        (State::Blocked, Wake::Unpark) | (State::Blocked | State::Sleeping, Wake::Signal) => true,
         (State::Sleeping, Wake::Timer) => task.wake_at_ns.load(Ordering::Relaxed) <= now,
         (State::Free | State::New | State::Exited, _) => return false,
-        (_, Wake::Unpark) => {
+        (_, Wake::Unpark | Wake::Signal) => {
             task.permit.store(true, Ordering::Release);
             return false;
         }
@@ -985,6 +991,64 @@ pub fn exit() -> ! {
 fn assert_task_context(here: &PerCpu) {
     assert!(!here.in_irq(), "yield, sleep or park inside an interrupt");
     debug_assert!(is_active(here), "escalonador sem `init`");
+}
+
+/// Bloqueia a tarefa corrente até um `wake_waiters` ou até `deadline_ns` (`u64::MAX`: sem prazo).
+/// Volta já se o aviso chegou antes; quem chama reavalia a condição, porque volta sem motivo certo.
+pub fn block_until(deadline_ns: u64) {
+    let cpu = platform::cpu();
+    let were_enabled = cpu.save_and_disable_interrupts();
+    let now = now();
+    let here = percpu::current();
+    assert_task_context(here);
+    let mut queue = here.queue.lock();
+    let current = here.current.load(Ordering::Relaxed) as usize;
+    let task = slot(current);
+    if task.permit.swap(false, Ordering::AcqRel) || now >= deadline_ns {
+        drop(queue);
+        cpu.restore_interrupts(were_enabled);
+        return;
+    }
+    if deadline_ns == u64::MAX {
+        task.set_state(State::Blocked);
+    } else {
+        task.wake_at_ns.store(deadline_ns, Ordering::Relaxed);
+        task.set_state(State::Sleeping);
+        queue.next_wake_ns = queue.next_wake_ns.min(deadline_ns);
+    }
+    queue.policy().sleep(id_of(current), now);
+    switch_from(here, queue, now);
+    cpu.restore_interrupts(were_enabled);
+}
+
+/// O bit da tarefa corrente na máscara de espera de um objeto (`wake_waiters`).
+pub fn wait_bit() -> u64 {
+    1 << current().as_u32()
+}
+
+/// Limpa o aviso pendente da tarefa corrente: vale antes de registrar uma espera nova.
+pub fn clear_permit() {
+    slot(current().as_u32() as usize)
+        .permit
+        .store(false, Ordering::Release);
+}
+
+/// Acorda as tarefas da máscara (um bit por slot). Pode rodar com `IrqLock` preso: só toma o lock
+/// das filas, que fica abaixo de todos; a troca, se pedida, vem na próxima IRQ (DEBT-0065).
+pub fn wake_waiters(mask: u64) {
+    let cpu = platform::cpu();
+    let were_enabled = cpu.save_and_disable_interrupts();
+    let now = now();
+    let mut preempt = false;
+    for id in FIRST_TASK..MAX_TASKS {
+        if mask >> id & 1 != 0 {
+            preempt |= wake_task(id, Wake::Signal, now);
+        }
+    }
+    if preempt {
+        preempt_now(were_enabled, now);
+    }
+    cpu.restore_interrupts(were_enabled);
 }
 
 /// A tarefa que roda agora nesta CPU.

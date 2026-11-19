@@ -246,7 +246,7 @@ Modo de teste (`make smoke`, imagem com a feature `selftest`). **Esta saída é 
 [rustos] cpus: 4 online (found 4, limit 8)
 [rustos] frame self-test: ok
 [rustos] w^x: ok (64992 pages)
-[rustos] initramfs: 3 files, 1362784 bytes
+[rustos] initramfs: 4 files, 1362784 bytes
 [rustos] exception self-test: ok
 [rustos] key residue: 0 chacha states, 0 key copies on the stack, probe 4 of 4: ok
 [rustos] heap self-test: ok

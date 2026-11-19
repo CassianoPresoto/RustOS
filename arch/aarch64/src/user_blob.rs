@@ -29,8 +29,9 @@ rustos_user_blob_start:
     .balign 4
 
 rustos_user_hello:
-    adr x0, .Lhello_msg
-    mov x1, #{hello_len}
+    mov x0, #1
+    adr x1, .Lhello_msg
+    mov x2, #{hello_len}
     mov x8, #{debug_write}
     svc #0
     cbnz x0, .Lfail1
@@ -53,8 +54,9 @@ rustos_user_hello:
     svc #0
     cmn x0, #7
     b.ne .Lfail4
-    mov x0, #0x20000
-    mov x1, #8
+    mov x0, #1
+    mov x1, #0x20000
+    mov x2, #8
     mov x8, #{debug_write}
     svc #0
     cmn x0, #8

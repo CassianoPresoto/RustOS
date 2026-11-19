@@ -517,7 +517,7 @@ fn the_peer_dying_between_reserve_and_commit_returns_the_message_for_closing() {
     close_handle(&pair.q, pair.hb).unwrap();
     let message = Message::new(std::sync::Arc::from(&b"late"[..]), taken).unwrap();
     let mut work = Stack::default();
-    let returned = with_chan(&pair.a, |chan| chan.commit(ticket, message, &mut work));
+    let returned = with_chan(&pair.a, |chan| chan.commit(ticket, message));
     let (_, handles) = returned.unwrap_err().into_parts();
     handles.close_all(&mut work);
     assert_eq!(count(&object), 0);
@@ -703,4 +703,65 @@ fn a_stale_remaining_count_does_not_kill_an_end_that_is_still_reachable() {
     drop(transit);
     close_handle(&tab, hb3).unwrap();
     assert!(dead(&a, Side::B));
+}
+
+#[test]
+fn the_worklist_is_never_fed_with_a_lock_held_when_an_end_dies() {
+    use super::support::Unlocked;
+    let pair = pair();
+    let (extra_a, extra_b) = new_channel();
+    let ha2 = handle_of(&pair.p, &extra_a, Rights::CHANNEL);
+    let hb2 = handle_of(&pair.p, &extra_b, Rights::CHANNEL);
+    let object = plain(1);
+    let ho = handle_of(&pair.p, &object, Rights::TRANSFER);
+    write(&pair.p, pair.ha, b"m", &[ha2, ho]).unwrap();
+    write(&pair.p, pair.ha, b"n", &[hb2]).unwrap();
+    let transit = pair.q.with(|t| t.remove(pair.hb)).unwrap();
+    let mut work = Unlocked::default();
+    close(transit, &mut work);
+    assert!(dead(&pair.b, Side::B));
+    assert_eq!(count(&object), 0);
+    assert_eq!(count(&extra_a), 0);
+    assert_eq!(count(&extra_b), 0);
+    assert_eq!(with_chan(&pair.b, |chan| chan.queued(Side::B)), 0);
+}
+
+#[test]
+fn an_end_that_dies_on_the_write_is_drained_outside_the_locks() {
+    use super::support::Unlocked;
+    let pair = pair();
+    let hb_here = pair
+        .p
+        .with(|t| t.insert(pair.b.clone(), Rights::CHANNEL))
+        .unwrap();
+    let mut work = Unlocked::default();
+    let written = crate::channel_write(
+        &pair.p,
+        pair.ha,
+        std::sync::Arc::from(&b"cycle"[..]),
+        &[hb_here],
+        &mut work,
+    );
+    assert_eq!(written, Ok(()));
+    pair.q
+        .with(|t| t.remove(pair.hb))
+        .map(|tr| close(tr, &mut work))
+        .unwrap();
+    assert!(dead(&pair.b, Side::B));
+    assert_eq!(count(&pair.b), 0);
+    assert_eq!(with_chan(&pair.b, |chan| chan.queued(Side::B)), 0);
+}
+
+#[test]
+fn discard_handles_closes_what_exists_and_ignores_the_rest() {
+    let pair = pair();
+    let (object, other) = (plain(1), plain(2));
+    let (h1, h2) = (
+        handle_of(&pair.p, &object, Rights::TRANSFER),
+        handle_of(&pair.p, &other, Rights::TRANSFER),
+    );
+    let forged = Handle::new(9, 3000).unwrap();
+    crate::discard_handles(&pair.p, &[h1, forged, h2], &mut Stack::default());
+    assert!(gone(&pair.p, h1) && gone(&pair.p, h2));
+    assert_eq!((count(&object), count(&other)), (0, 0));
 }

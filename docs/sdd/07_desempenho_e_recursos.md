@@ -485,6 +485,50 @@ o kernel real troca o `Mutex` do teste pelo `IrqLock`; serve para comparar o Rus
 do kernel pode chegar ao dobro pela capacidade); `Message` **224 bytes**; `Channel` (par de pontas,
 16 mensagens por ponta inline) **7 256 bytes**, ocupados ou não ([DEBT-0091](../tech-debt/0091-fila-do-canal-com-armazenamento-inline.md)).
 
+### Handles, canais e espera no kernel (fatia 4c, parte 1)
+
+Comando: `make smoke ARCH=<isa> PROFILE=release` (aarch64 com `RUSTOS_ACCEL=hvf`, QEMU 11.1.3, Apple M5; x86_64 em
+TCG, que só compara o RustOS consigo mesmo), cinco rodadas **alternadas** entre a `main` (`2083547`) e o branch.
+O programa `handles` (`user/tests/handles`) mede no mesmo processo, com `clock_get_monotonic`, 2 000 chamadas nulas,
+1 000 pares `handle_duplicate` + `handle_close` e 1 000 idas e voltas de 64 B (`channel_write`, `channel_read`,
+`channel_write`, `channel_read`: 4 chamadas), linha `[user] handles: null call …`. Ainda não há dois processos, então a
+ida e volta é na mesma tarefa, sem troca de contexto; a troca entre processos é da parte 3.
+
+| O quê | aarch64 HVF, `release` | x86_64 TCG, `release` |
+| --- | --- | --- |
+| Syscall nula, pilha limpa, `main` (linha do kernel) | 58,1 a 61,3 ns | 479,2 a 483,8 ns |
+| Syscall nula, pilha limpa, branch (linha do kernel) | 58,8 a 63,2 ns | 464,5 a 472,2 ns |
+| Chamada nula medida pelo `handles` (a mesma conta, em usuário) | 59,8 a 64,0 ns | 466,9 a 490,6 ns |
+| `handle_duplicate` + `handle_close` | 169,6 a 184,5 ns | 1 444 a 1 476 ns |
+| Ida e volta de 64 B por um canal (4 chamadas) | 1 393 a 1 493 ns | 15,0 a 18,3 us |
+
+- **A syscall nula não mudou** (mesma faixa nos dois, dentro do ruído do TCG): o despacho ganhou entradas na tabela, e
+  as chamadas novas não mexem no caminho de `nop`.
+- Uma chamada de canal custa cerca de 350 ns no aarch64 (o `Arc<[u8]>` dos bytes, dois `IrqLock`, a comparação de
+  sinais antes e depois, a cópia de usuário). Sem número de antes: as chamadas são novas; o de comparação é o da
+  chamada nula (cerca de 60 ns) e o do host ([tabela de handles e canal](#tabela-de-handles-e-canal-fatia-4c-medido-no-host)).
+- **Menor processo**, linha `user: init load` (`release`): 32 frames antes e **35** depois (21 de dados, 7 de tabelas, 7 do kernel: pilha,
+  FPU e heap), e o `init` carrega em 3 `PT_LOAD` nas duas ISAs (eram 3 no x86_64 e 2 no aarch64). Os 2 frames do kernel a mais são o
+  heap que cresceu pelo canal de boot (um par de 7 256 bytes, mais objetos e tabela) e 1 de dados é o `init` maior. Tempo até a
+  primeira chamada: aarch64 25 para 33 us; x86_64 TCG 3,2 para 5,8 ms (código frio em TCG, varia até 2x).
+- **Pilha do kernel** (`user: ... kernel stack depth`, `stacks:`, `release`): fundo numa syscall de 1,8 para 4,2 KiB (x86_64) e de 2,0 para
+  4,4 KiB (aarch64); pico das tarefas de 2,2 para 4,1 KiB (x86_64) e de 2,4 para 4,3 KiB (aarch64), de 16: abaixo de 8 KiB, e as 16 KiB
+  ficam ([DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md)). A maior parte é o `channel_write` e o `channel_read`, que
+  copiam até 1 KiB de bytes e 512 de handles pela pilha.
+- **Tamanho do kernel** (`make size`, antes e depois): `release` x86_64 `carregado` de 388,5 para **437,1 KiB** (`text` 316,8 para 355,3;
+  `rodata` 38,6 para 47,9, dos quais 7 KiB do modelo do par de canal), aarch64 de 326,1 para **374,2 KiB**; `release-small` x86_64 de 193,4
+  para **217,9 KiB** e aarch64 de 175,7 para **199,3 KiB**. É o custo do `core/object` instanciado para o `Obj`, das chamadas e dos `Arc`.
+  A imagem enxuta paga o código mesmo sem rodar processo (o despacho o liga): reduzir é medida futura (instanciação
+  genérica menor, `channel_read` e `channel_write` sem o buffer de 1 KiB na pilha), sem número ainda.
+- **Memória por unidade:** um canal custa 7 256 bytes de heap de fila mais os dois `Arc` de ponta (cerca de 100 bytes); um processo, a tabela de handles
+  (`Vec` de slots de 32 bytes, que cresce de um em um: o `init` usa 3 handles) e o `ProcessObj`. A cobrança limita um processo a 256 pontas, e o teto vale em
+  **pontas, não em bytes**: 128 pares de 7 256 bytes são **0,89 MiB de filas**, mais até cerca de **4 MiB de mensagens** (128 pares × 2 pontas × 16
+  mensagens × 1 KiB). Um processo hostil medido por revisor chegou a **17,7 MiB** de pico, e 127 ciclos entre canais (cerca de 1,5 mil
+  syscalls) **vazam 18,3 MiB para sempre** ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md),
+  [DEBT-0110](../tech-debt/0110-objeto-e-mensagem-abortam-na-falta-de-heap.md)): a parte 3, com `process_create`, precisa de um teto em **bytes** por processo.
+- **O custo do `EMPTY_PAIR`** (o modelo de 7 KiB que existe porque a fila é inline, [DEBT-0091](../tech-debt/0091-fila-do-canal-com-armazenamento-inline.md)):
+  sem ele a imagem seria **6,8 KiB menor no x86_64 e 6,6 KiB no aarch64** (medido pelo revisor, `release`). Sai quando a fila deixar de ser inline.
+
 ### Processo mínimo e carregador do init (fatia 4b)
 
 Medido na QEMU 11.1.3 num Mac com Apple Silicon: aarch64 em HVF, x86_64 em TCG (só se compara o RustOS consigo mesmo). `make smoke`

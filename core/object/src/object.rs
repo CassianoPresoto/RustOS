@@ -187,7 +187,8 @@ impl<T> Default for Transits<T> {
 }
 
 /// A lista de trabalho do fechamento: o que o kernel entrega para o laço não recursar.
-/// `push` não falha; quem implementa decide onde guardar (SDD 17, decisões do agente).
+/// `push` não falha e **nunca roda com lock preso** (nem o do par, nem o da tabela), então pode
+/// alocar; quem implementa decide onde guardar (SDD 17, decisões do agente).
 pub trait Worklist<T> {
     fn push(&mut self, transit: Transit<T>);
     fn pop(&mut self) -> Option<Transit<T>>;
@@ -219,12 +220,11 @@ pub trait Object: Sized {
     fn on_handle_closed<W: Worklist<Self>>(&self, remaining: u32, work: &mut W) {
         if let Some(end) = self.channel_end() {
             let died = self
-                .with_channel(|channel| {
-                    channel.on_handles_changed(end.side, self.handles().get(), work)
-                })
+                .with_channel(|channel| channel.on_handles_changed(end.side, self.handles().get()))
                 .unwrap_or(false);
             if died {
                 self.on_end_died(end.side);
+                drain_dead(self, end.side, work);
             }
         } else if remaining == 0 {
             self.on_zero_handles(work);
@@ -246,6 +246,18 @@ pub fn close<T: Object, W: Worklist<T>>(first: Transit<T>, work: &mut W) {
         let remaining = transit.object.handles().release();
         transit.object.on_handle_closed(remaining, work);
         current = work.pop();
+    }
+}
+
+/// Esvazia a fila de uma ponta morta: cada mensagem sai sob o lock do par (`pop_dead`), e os
+/// handles dela vão para a lista de trabalho **depois** de soltá-lo. `object` é qualquer ponta do
+/// par. Roda sem lock nenhum preso.
+pub fn drain_dead<T: Object, W: Worklist<T>>(object: &T, dead: Side, work: &mut W) {
+    while let Some(message) = object
+        .with_channel(|channel| channel.pop_dead(dead))
+        .flatten()
+    {
+        message.into_parts().1.push_all(work);
     }
 }
 

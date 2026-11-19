@@ -1,0 +1,20 @@
+[package]
+name = "rustos-user-test-handles"
+description = "Programa de teste dos handles, canais e da espera, com os casos hostis (SDD 17, fatia 4c)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "handles"
+path = "src/main.rs"
+test = false
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-user-rt = { workspace = true, features = ["raw-syscalls"] }

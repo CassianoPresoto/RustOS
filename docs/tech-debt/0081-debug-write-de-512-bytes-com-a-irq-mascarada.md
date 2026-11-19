@@ -3,7 +3,7 @@ id: DEBT-0081
 title: `debug_write` de até 512 bytes roda com a IRQ mascarada e o lock do console preso
 status: Open
 date: 2026-11-18
-trigger: A 4c ligar a IRQ no despacho de syscall, ou o primeiro boot com UART física
+trigger: Ligar a IRQ no despacho de syscall (a parte 3 da 4c, com `thread_create`), ou o primeiro boot com UART física
 paid_date:
 ---
 
@@ -18,13 +18,14 @@ atender a entrada. Na QEMU a serial é instantânea e a conta não aparece.
 
 ## Por que foi aceito
 
-O `debug_write` é provisório (a 4c troca a assinatura) e só o programa embutido do modo de teste o
-chama.
+A parte 1 da 4c deu o handle de console ao `debug_write`, mas manteve o despacho mascarado: o bloqueio de
+`object_wait_one` cede a CPU como o `sleep_until`, sem precisar da IRQ ligada. O `init` e o `handles`, no modo de
+teste, são os que o chamam.
 
 ## Gatilho
 
-A 4c ligar a IRQ no despacho (a chamada passa a poder ser interrompida), ou o primeiro boot com UART
-física, o que vier antes.
+Ligar a IRQ no despacho (a chamada passa a poder ser interrompida; a parte 3 da 4c, com threads em
+várias CPUs), ou o primeiro boot com UART física, o que vier antes.
 
 ## Como pagar
 

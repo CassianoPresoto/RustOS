@@ -5,12 +5,12 @@
 
 #![no_std]
 #![no_main]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 use core::hint::black_box;
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use rustos_user_rt::{Env, entry, println, sys};
+use rustos_user_rt::{Env, boot, entry, println, sys};
 
 entry!(main);
 
@@ -41,7 +41,8 @@ fn timed(body: impl FnOnce() -> bool) -> Option<(bool, u64)> {
     Some((ok, end.saturating_sub(start) * 10 / PAGES as u64))
 }
 
-fn main(_: &Env) -> i64 {
+fn main(env: &Env) -> i64 {
+    let _ = boot::attach_console(env);
     let stack = deep(11);
     let first = timed(|| {
         (0..PAGES).all(|page| {

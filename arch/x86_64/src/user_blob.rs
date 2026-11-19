@@ -32,8 +32,9 @@ rustos_user_blob_start:
 rustos_user_hello:
     test rdx, rdx
     jnz .Lfail6
-    lea rdi, [rip + .Lhello_msg]
-    mov esi, {hello_len}
+    mov edi, 1
+    lea rsi, [rip + .Lhello_msg]
+    mov edx, {hello_len}
     mov eax, {debug_write}
     syscall
     test rax, rax
@@ -60,8 +61,9 @@ rustos_user_hello:
     syscall
     cmp rax, -7
     jne .Lfail4
-    mov edi, 0x20000
-    mov esi, 8
+    mov edi, 1
+    mov esi, 0x20000
+    mov edx, 8
     mov eax, {debug_write}
     syscall
     cmp rax, -8

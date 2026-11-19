@@ -49,9 +49,20 @@ const REQUIRED: [(&str, &str); 7] = [
         "o autoteste de acordar uma tarefa de fatia curta na mesma CPU",
     ),
 ];
-/// A saída do `init` pelo `debug_write` (só o modo de teste o lança): o kernel a prefixa com
-/// `[user] `, e é a última linha dele.
-const INIT_OUTPUT: (&str, &str) = ("[user] init: ok", "a saída do `init` (prefixo `[user] `)");
+/// A saída dos programas de usuário pelo `debug_write` (só o modo de teste os lança): o kernel a
+/// prefixa com `[user] `. As do `init` provam o canal de boot e o console por handle; a do `handles`,
+/// os casos hostis das chamadas de handle, canal e espera.
+const USER_OUTPUT: [(&str, &str); 3] = [
+    (
+        "[user] init: boot channel, console and handles ok",
+        "a prova do `init` de que o canal de boot e o console por handle funcionam",
+    ),
+    ("[user] init: ok", "a saída do `init` (prefixo `[user] `)"),
+    (
+        "[user] handles: ok (",
+        "os casos hostis de handle, canal e espera",
+    ),
+];
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Como o `smoke` sobe o kernel: com os autotestes e os benchmarks, ou só o essencial (SDD 06).
@@ -127,8 +138,8 @@ const SELFTEST_LINES: [(&str, &str); 23] = [
         "o autoteste dos casos de usuário",
     ),
     (
-        "[rustos] initramfs: 3 files, ",
-        "a leitura do initramfs (o `init`, o `big` e o `lazy`)",
+        "[rustos] initramfs: 4 files, ",
+        "a leitura do initramfs (o `init`, o `big`, o `handles` e o `lazy`)",
     ),
     (
         "[user] lazy: ok (",
@@ -579,8 +590,12 @@ fn report(arch: Arch, mode: BootMode, outcome: Outcome, log: &str) -> Result<(),
                 let reason = format!("boot sem {what} (guidelines 09)");
                 return Err(failure(arch, &reason, log));
             }
-            if mode == BootMode::SelfTest && !has_user_line(log, INIT_OUTPUT.0) {
-                let reason = format!("boot sem {}", INIT_OUTPUT.1);
+            if mode == BootMode::SelfTest
+                && let Some((_, what)) = USER_OUTPUT
+                    .iter()
+                    .find(|(line, _)| !has_user_line(log, line))
+            {
+                let reason = format!("boot sem {what}");
                 return Err(failure(arch, &reason, log));
             }
             if mode != BootMode::SelfTest {
@@ -674,12 +689,14 @@ fn stream_chunks(mut stdout: impl Read, sender: &mpsc::Sender<String>) {
 }
 
 /// Imprime o que o kernel disse e, depois da marca, o que os programas de usuário disseram: o
-/// prefixo `[user]` mostra de quem é cada linha (só as do kernel valem para os gates).
+/// prefixo `[user]` mostra de quem é cada linha (só as do kernel valem para os gates). As sondas do
+/// `handles`, que só provam que um handle escreve, ficam de fora.
 fn print_kernel_lines(log: &str) {
     for line in log
         .split('\n')
         .map(|line| line.trim_end_matches('\r'))
         .filter(|line| line.starts_with("[rustos]") || line.starts_with("[user] "))
+        .filter(|line| !line.starts_with("[user] probe"))
     {
         println!("  {}", line.trim_end());
     }
@@ -792,7 +809,7 @@ mod tests {
             "[rustos] heap self-test: ok",
             "[rustos] timer: 100 Hz",
             "[rustos] initramfs: not mapped, the boot goes on without it",
-            "[rustos] initramfs: 2 files, 272 bytes",
+            "[rustos] initramfs: 4 files, 272 bytes",
             "[rustos] user: fault contained (pid 3)",
             "[rustos] user self-test: ok",
         ] {
@@ -847,14 +864,19 @@ mod tests {
             log.push('\n');
         }
         let result = report(Arch::X86_64, BootMode::SelfTest, outcome, &log);
-        assert!(result.unwrap_err().contains("saída do `init`"));
+        assert!(result.unwrap_err().contains("canal de boot"));
     }
 
     #[test]
     fn the_init_output_counts_only_as_a_user_line() {
-        assert!(has_user_line("[user] init: ok\r\n", INIT_OUTPUT.0));
-        assert!(!has_user_line("[rustos] [user] init: ok\n", INIT_OUTPUT.0));
-        assert!(!has_user_line("[user] init: FAILED clock\n", INIT_OUTPUT.0));
+        let ok = USER_OUTPUT[1].0;
+        assert!(has_user_line("[user] init: ok\r\n", ok));
+        assert!(!has_user_line("[rustos] [user] init: ok\n", ok));
+        assert!(!has_user_line("[user] init: FAILED clock\n", ok));
+        assert!(!has_user_line(
+            "[user] handles: FAILED 1 of 9 assertions\n",
+            USER_OUTPUT[2].0
+        ));
     }
 
     #[test]

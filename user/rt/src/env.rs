@@ -87,9 +87,14 @@ impl Env {
         env
     }
 
-    /// O handle de boot de `rdi`/`x0`: `0` até a 4c.
+    /// O valor de `rdi`/`x0` na entrada: a ponta do canal de boot, ou `0` sem ela.
     pub const fn boot_handle(&self) -> u64 {
         self.boot_handle
+    }
+
+    /// A ponta do canal de boot, se o programa nasceu com uma.
+    pub const fn boot_channel(&self) -> Option<rustos_hal::abi::Handle> {
+        rustos_hal::abi::Handle::from_raw(self.boot_handle)
     }
 
     /// O ponteiro de pilha da entrada.

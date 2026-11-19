@@ -25,6 +25,7 @@ members = [
     "user/rt",
     "user/init",
     "user/tests/big",
+    "user/tests/handles",
     "user/tests/lazy",
     "xtask",
 ]
@@ -71,6 +72,7 @@ rustos-gfx = { path = "core/gfx" }
 rustos-term = { path = "core/term" }
 rustos-cpio = { path = "core/cpio" }
 rustos-elf = { path = "core/elf" }
+rustos-object = { path = "core/object" }
 rustos-shell = { path = "core/shell", default-features = false }
 rustos-sync = { path = "lib/sync" }
 rustos-arch-x86_64 = { path = "arch/x86_64" }

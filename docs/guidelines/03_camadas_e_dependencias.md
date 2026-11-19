@@ -30,7 +30,11 @@
     não depende do `kernel/` nem de `arch/<isa>`. Sem `asm!`: o ponto de entrada e os
     stubs de syscall moram em `arch/<isa>-user`. `unsafe` só no `user/rt`, mínimo e com
     `// SAFETY:` (alocador global, leitura do auxv, `#[unsafe(no_mangle)]`); os programas
-    ficam em `#![forbid(unsafe_code)]`.
+    ficam em `#![forbid(unsafe_code)]`. **Exceção:** os programas de `user/tests/*` podem ter
+    `unsafe`, só para syscall crua em teste hostil (`rt::sys::raw`, feature `raw-syscalls`), com
+    `#![deny(unsafe_code)]` no crate e `#[allow(unsafe_code)]` pontual com `// SAFETY:`. Só ali
+    a feature liga, e o xtask compila cada programa numa invocação própria do cargo, para ela
+    não unificar no `init`.
 12. **`arch/<isa>-user` é adaptador do lado do usuário**: segue a regra 4 (só `core/hal`
     e `lib/`), é o lugar do `asm!` de `syscall`/`svc` e do ponto de entrada, e o `kernel/`
     nunca o liga.
@@ -41,7 +45,8 @@
 classifica pela pasta e falha em dependência proibida ou crate externo. O PR da fase 4a trouxe o
 `check-layers` conhecendo `user/` e `arch/<isa>-user` (regras 11 e 12), **com o teste vermelho
 antes do verde**: antes dele, `arch/x86_64-user` seria classificado como `Adapter` e o `Kernel`
-poderia depender dele. A regra 9:
+poderia depender dele. O mesmo comando confere a regra 11: `forbid(unsafe_code)` nos programas de
+`user/`, `deny(unsafe_code)` em `user/tests/*`, e o `raw-syscalls` do `rt` só nos de teste. A regra 9:
 
 ```sh
 grep -rn 'path = ' --include=Cargo.toml core lib arch boot drivers kernel xtask

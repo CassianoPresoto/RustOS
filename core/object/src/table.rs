@@ -73,6 +73,11 @@ pub trait SlotStorage<T> {
     fn slots_mut(&mut self) -> &mut [Slot<T>];
     /// Acrescenta um slot; `false` se faltou memória (a tabela responde `NoMemory`).
     fn try_push(&mut self, slot: Slot<T>) -> bool;
+    /// O único ponto de clamp do índice do handle contra o Spectre v1 (SDD 17, mitigações). Roda
+    /// depois da conferência `index < len`. O kernel o sobrescreve com o clamp de `arch/`.
+    fn clamp_index(&self, index: usize, len: usize) -> usize {
+        rustos_hal::nospec::array_index_nospec(index, len)
+    }
 }
 
 /// Capacidade fixa, sem alocação: serve a tabelas pequenas e ao teste.
@@ -238,6 +243,11 @@ impl<T: Object, S: SlotStorage<T>> HandleTable<T, S> {
         }
     }
 
+    /// A memória dos slots, para quem a entregou conferir o que ela guarda.
+    pub const fn storage(&self) -> &S {
+        &self.slots
+    }
+
     /// Handles vivos (sem contar as reservas).
     pub const fn len(&self) -> usize {
         self.used
@@ -265,14 +275,16 @@ impl<T: Object, S: SlotStorage<T>> HandleTable<T, S> {
         if handle.raw().trailing_zeros() >= 16 {
             return Err(Status::BadHandle);
         }
-        let index = handle.index();
-        match self.slots.slots().get(index) {
-            Some(slot)
-                if slot.state() == State::Used && slot.generation() == handle.generation() =>
-            {
-                Ok(index)
-            }
-            _ => Err(Status::BadHandle),
+        let slots = self.slots.slots();
+        if handle.index() >= slots.len() {
+            return Err(Status::BadHandle);
+        }
+        let index = self.slots.clamp_index(handle.index(), slots.len());
+        let slot = &slots[index];
+        if slot.state() == State::Used && slot.generation() == handle.generation() {
+            Ok(index)
+        } else {
+            Err(Status::BadHandle)
         }
     }
 

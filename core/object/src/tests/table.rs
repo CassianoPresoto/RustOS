@@ -546,3 +546,52 @@ fn drain_hands_every_live_handle_to_the_worklist() {
     assert!(objects.iter().all(|object| count(object) == 0));
     table.cancel(reservation);
 }
+
+#[test]
+fn a_handle_past_the_last_slot_is_bad_even_when_slot_zero_has_the_same_generation() {
+    let mut table = table();
+    let first = insert(&mut table, 1, Rights::READ);
+    let outside = Handle::new(first.generation(), 40).unwrap();
+    assert_eq!(
+        table.get(outside, Rights::NONE).err(),
+        Some(Status::BadHandle)
+    );
+    assert!(table.get(first, Rights::NONE).is_ok());
+}
+
+#[test]
+fn every_lookup_goes_through_the_clamp_of_the_storage() {
+    use core::cell::Cell;
+
+    use crate::SlotStorage;
+
+    #[derive(Default)]
+    struct Counting(Vec<Slot<TestObj>>, Cell<usize>);
+    impl SlotStorage<TestObj> for Counting {
+        fn slots(&self) -> &[Slot<TestObj>] {
+            &self.0
+        }
+        fn slots_mut(&mut self) -> &mut [Slot<TestObj>] {
+            &mut self.0
+        }
+        fn try_push(&mut self, slot: Slot<TestObj>) -> bool {
+            self.0.push(slot);
+            true
+        }
+        fn clamp_index(&self, index: usize, len: usize) -> usize {
+            self.1.set(self.1.get() + 1);
+            rustos_hal::nospec::array_index_nospec(index, len)
+        }
+    }
+    let mut table = HandleTable::new(Counting::default());
+    let handle = table.insert(plain(1), Rights::READ).unwrap();
+    assert!(table.get(handle, Rights::READ).is_ok());
+    assert!(
+        table
+            .get(Handle::new(0, 90).unwrap(), Rights::NONE)
+            .is_err()
+    );
+    assert_eq!(table.remove(handle).map(|_| ()), Ok(()));
+    let calls = table.storage().1.get();
+    assert_eq!(calls, 2, "só a busca dentro dos limites passa pelo clamp");
+}

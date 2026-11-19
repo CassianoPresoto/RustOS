@@ -4,12 +4,12 @@
 
 #![no_std]
 #![no_main]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 use core::hint::black_box;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use rustos_user_rt::{Env, entry, println};
+use rustos_user_rt::{Env, boot, entry, println};
 
 entry!(main);
 
@@ -38,7 +38,8 @@ fn bump(words: &[AtomicU32], delta: u32) -> u32 {
     })
 }
 
-fn main(_: &Env) -> i64 {
+fn main(env: &Env) -> i64 {
+    let _ = boot::attach_console(env);
     let rodata = rodata_sum();
     let data = bump(&DATA, 2);
     let bss = bump(&BSS, 3);

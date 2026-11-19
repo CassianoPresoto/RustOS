@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use rustos_hal::TickScale;
 
-use crate::time::ns_to_ticks;
+use crate::time::{absolute_deadline, ns_to_ticks};
 
 /// `CNTV_CTL_EL0`: `ENABLE` ligado, `IMASK` desligado.
 const CTL_ENABLE: u64 = 1;
@@ -69,7 +69,10 @@ pub unsafe fn start_secondary() {
 pub fn arm_ns(deadline_ns: u64) {
     let frequency = FREQUENCY_HZ.load(Ordering::Relaxed);
     let ticks = ns_to_ticks(deadline_ns, frequency);
-    write_deadline(EPOCH_TICKS.load(Ordering::Relaxed).wrapping_add(ticks));
+    write_deadline(absolute_deadline(
+        EPOCH_TICKS.load(Ordering::Relaxed),
+        ticks,
+    ));
 }
 
 fn write_deadline(deadline: u64) {

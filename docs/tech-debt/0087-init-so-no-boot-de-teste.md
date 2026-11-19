@@ -26,6 +26,8 @@ usuário. A regra "o boot normal só leva o que custa menos de ~2 ms em TCG" nã
 ## Gatilho
 
 A 4c dar trabalho ao `init` (recebe os handles pelo canal de boot e lança outros processos), ou a fase 5.
+A parte 1 da 4c cumpriu a primeira metade: o `init` recebe o canal de boot e escreve pelo console por
+handle. Falta lançar outros processos (`process_create`, parte 3), que é o que muda o orçamento do boot.
 
 ## Como pagar
 
