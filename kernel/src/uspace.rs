@@ -2,7 +2,7 @@
 //! (`CR3` ou `TTBR0_EL1`), frames que ele mapeia, a falta de página que cria a página no primeiro
 //! toque, o *shootdown* de TLB e a devolução dos frames, zerados, na morte (SDD 17).
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 #[cfg(feature = "selftest")]
 use rustos_hal::AddressSpace;
 use rustos_hal::abi::{USER_MIN, USER_TOP};
@@ -52,6 +52,23 @@ fn zero_page(frames: Frames) -> Option<PhysAddr> {
 #[cfg(feature = "selftest")]
 pub fn zero_page_frame() -> Option<PhysAddr> {
     zero_page_now()
+}
+
+/// A página zero segue inteira em zero (ninguém escreveu nela por um mapa gravável nem pelo mapa
+/// direto). Só o modo de teste.
+#[cfg(feature = "selftest")]
+pub fn zero_page_is_clean() -> bool {
+    let Some(frame) = zero_page_now() else {
+        return true;
+    };
+    let mut chunk = [0xFF_u8; 512];
+    (0..usize::try_from(PAGE_SIZE).unwrap_or(4096))
+        .step_by(512)
+        .all(|offset| {
+            // SAFETY: a página zero é um frame vivo, e o intervalo cabe nela.
+            unsafe { memory::read_frame(frame, offset, &mut chunk) };
+            chunk.iter().all(|&byte| byte == 0)
+        })
 }
 
 /// O que a falta resolveu.
@@ -161,8 +178,10 @@ pub struct UserSpace {
     table_frames: u64,
     /// CPUs que rodam o espaço agora, um bit por CPU; o endereço dela fica na tarefa (`bind_user`).
     active: AtomicU32,
-    /// Páginas preguiçosas prometidas e as que já ganharam frame próprio.
+    /// Páginas preguiçosas prometidas, o que a promessa devolve ao morrer (as páginas mais as
+    /// tabelas que elas pedem) e as páginas que já ganharam frame próprio.
     lazy_reserved: u64,
+    lazy_promised: u64,
     lazy_backed: u64,
 }
 
@@ -187,6 +206,7 @@ impl UserSpace {
             table_frames,
             active: AtomicU32::new(0),
             lazy_reserved: 0,
+            lazy_promised: 0,
             lazy_backed: 0,
         })
     }
@@ -198,21 +218,24 @@ impl UserSpace {
     }
 
     /// CPUs que rodam o espaço agora.
-    #[cfg_attr(
-        not(feature = "selftest"),
-        allow(dead_code, reason = "lido só pelo modo de teste")
-    )]
     pub fn active_cpus(&self) -> u32 {
         self.active.load(Ordering::SeqCst)
     }
 
-    /// Promete `pages` páginas preguiçosas contra os frames livres (SDD 17, decisão 9). A promessa
-    /// volta na morte do espaço, no que não ganhou frame.
+    /// Promete `pages` páginas preguiçosas contra os frames livres (SDD 17, decisão 9), mais as
+    /// tabelas de página que elas podem pedir (uma por 512 páginas e mais uma). Chamar depois de
+    /// mapear o que nasce com frame, para os livres refletirem o que já foi usado. A promessa volta
+    /// na morte do espaço, no que não ganhou frame.
     pub fn reserve_lazy(&mut self, pages: u64) -> Result<(), MapError> {
-        if !commit::reserve(pages, self.frames.free_frames() as u64) {
+        if pages == 0 {
+            return Ok(());
+        }
+        let promised = pages + pages.div_ceil(512) + 1;
+        if !commit::reserve(promised, self.frames.free_frames() as u64) {
             return Err(MapError::OutOfFrames);
         }
         self.lazy_reserved += pages;
+        self.lazy_promised += promised;
         Ok(())
     }
 
@@ -397,6 +420,7 @@ impl UserSpace {
 
     /// Invalida `virt` nas outras CPUs que rodam o espaço e espera todas: a entrada já mudou nesta.
     pub fn flush_remote(&self, virt: u64) {
+        fence(Ordering::SeqCst);
         tlb::shoot_page(virt, self.active.load(Ordering::SeqCst));
     }
 
@@ -482,9 +506,10 @@ impl UserSpace {
     }
 
     /// Devolve ao alocador todo frame de dado (menos a página zero), toda tabela e a raiz, zerados, e
-    /// a promessa que sobrou. Espera nenhuma CPU rodar o espaço.
+    /// a promessa que sobrou. Nenhuma CPU pode rodar o espaço: quem o ligou espera `wait_inactive`
+    /// antes de movê-lo para cá.
     pub fn destroy(mut self) {
-        self.wait_inactive();
+        assert_eq!(self.active_cpus(), 0, "espaço de usuário destruído em uso");
         let frames = self.frames;
         let zero = zero_page_now();
         self.tables.release_user_half(USER_TOP_ENTRIES, |frame| {
@@ -494,6 +519,6 @@ impl UserSpace {
             memory::zero_frame(frame);
             let _ = frames.deallocate(PhysFrame::containing(frame));
         });
-        commit::release(self.lazy_reserved - self.lazy_backed);
+        commit::release(self.lazy_promised - self.lazy_backed);
     }
 }

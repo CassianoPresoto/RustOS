@@ -103,6 +103,16 @@ pub fn dispatch(args: &SyscallArgs) -> SyscallReturn {
     }
 }
 
+/// Por que a cópia de usuário falhou: sem frame para a página preguiçosa, `NoMemory`; senão a faixa
+/// não está mapeada.
+fn copy_failure() -> Status {
+    if process::copy_ran_out_of_memory() {
+        Status::NoMemory
+    } else {
+        Status::OutOfRange
+    }
+}
+
 /// `debug_write(ptr, len)`: escreve no console até `DEBUG_WRITE_MAX` bytes, sem ESC nem controle
 /// (menos `\n` e `\t`), cada linha com o prefixo do processo. Devolve os bytes escritos.
 #[inline(never)]
@@ -117,7 +127,7 @@ fn debug_write(ptr: u64, len: u64) -> SyscallReturn {
     let mut buffer = [0_u8; DEBUG_BYTES];
     let bytes = &mut buffer[..usize::try_from(len).unwrap_or(0)];
     if !platform::copy_from_user(range, bytes) {
-        return SyscallReturn::err(Status::OutOfRange);
+        return SyscallReturn::err(copy_failure());
     }
     console::print(format_args!("{}", Filtered(bytes)));
     SyscallReturn::ok(len)
@@ -167,6 +177,6 @@ fn random_get(ptr: u64, len: u64) -> SyscallReturn {
     if copied {
         SyscallReturn::ok(0)
     } else {
-        SyscallReturn::err(Status::OutOfRange)
+        SyscallReturn::err(copy_failure())
     }
 }

@@ -10,6 +10,9 @@ static RESERVED: AtomicU64 = AtomicU64::new(0);
 /// Promete `pages` páginas se os `free` frames livres cobrem o que já está prometido mais elas.
 /// Só conta o usuário: o que o kernel aloca (heap, pilhas, tabelas) não entra na promessa.
 pub fn reserve(pages: u64, free: u64) -> bool {
+    if pages == 0 {
+        return true;
+    }
     RESERVED
         .try_update(Ordering::AcqRel, Ordering::Acquire, |held| {
             held.checked_add(pages).filter(|total| *total <= free)

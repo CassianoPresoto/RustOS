@@ -85,6 +85,7 @@ mod mailbox {
     /// Atende os pedidos de invalidação endereçados a esta CPU. Chamado pela IRQ do IPI e pelas
     /// esperas que giram com a IRQ mascarada.
     pub fn service() {
+        let were_enabled = platform::cpu().save_and_disable_interrupts();
         let me = percpu::current().index();
         for slot in &MAILBOX[me] {
             if slot.pending.load(Ordering::Acquire) {
@@ -96,6 +97,7 @@ mod mailbox {
                 slot.pending.store(false, Ordering::Release);
             }
         }
+        platform::cpu().restore_interrupts(were_enabled);
     }
 }
 

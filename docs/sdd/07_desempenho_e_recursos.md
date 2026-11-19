@@ -522,19 +522,19 @@ outro, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-lay
 
 ### Paginação sob demanda e *shootdown* (fatia 4c)
 
-Medido na QEMU 11.1.3 num Mac com Apple Silicon: aarch64 em HVF, x86_64 em TCG (só se compara o RustOS consigo mesmo). `make smoke ARCH=all PROFILE=release`, modo de teste; o `user/tests/lazy` mede por página, com `clock_get_monotonic`, três laços de 4 096 páginas (16 MiB) cada, e o autoteste mede o *shootdown*. Três execuções por ISA (a faixa é o mínimo e o máximo). **O tempo por página inclui a entrada e a saída da exceção e o tratador inteiro.** A [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md) segue aberta: o do x86_64 é de TCG e não decide `stosq` contra `stosb`.
+Medido na QEMU 11.1.3 num Mac com Apple Silicon: aarch64 em HVF, x86_64 em TCG (só se compara o RustOS consigo mesmo). `make smoke ARCH=all PROFILE=release`, modo de teste; o `user/tests/lazy` mede por página, com `clock_get_monotonic`, três laços de 4 096 páginas (16 MiB) cada, e o autoteste mede o *shootdown*. Três execuções por ISA, mais as do revisor independente (a faixa é o mínimo e o máximo). **O tempo por página inclui a entrada e a saída da exceção e o tratador inteiro.** A [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md) segue aberta: o do x86_64 é de TCG e não decide `stosq` contra `stosb`.
 
 | Por página | x86_64 (TCG) | aarch64 (HVF) |
 | --- | --- | --- |
-| Primeiro toque de escrita (aloca e zera um frame, mapeia) | 11,5 a 11,6 µs | 0,51 a 0,64 µs |
+| Primeiro toque de escrita (aloca e zera um frame, mapeia) | 11,5 a 11,6 µs | 0,51 a 0,69 µs |
 | Leitura de página não tocada (mapeia a página zero) | 1,33 a 1,37 µs | 0,150 a 0,152 µs |
-| Escrita sobre a página zero (aloca, zera, troca a folha, invalida) | 3,28 a 3,43 µs | 0,70 a 0,97 µs |
-| Invalidar uma página nas outras CPUs (x86_64: IPI de ida e volta a uma CPU, 200 invalidações; aarch64: `tlbi vaale1is` e `dsb ish`, 2 000) | 8,0 a 8,3 µs | 0,13 a 0,21 µs |
+| Escrita sobre a página zero (aloca, zera, troca a folha, invalida) | 3,28 a 3,43 µs | 0,70 a 1,11 µs |
+| Invalidar uma página nas outras CPUs (x86_64: IPI de ida e volta a uma CPU, 200 invalidações; aarch64: `tlbi vaale1is` e `dsb ish`, 2 000) | 8,0 a 8,3 µs (uma medida do revisor, 30,7 µs) | 0,13 a 0,32 µs |
 
 - A leitura custa o décimo da escrita porque não aloca nem zera. O aarch64 gasta 0,15 µs só para entrar na exceção, achar a região, mapear a página zero e voltar.
 - No x86_64 o primeiro toque custa o triplo da cópia da página zero, embora as duas aloquem e zerem um frame. **Hipótese, não medida:** o primeiro laço toca memória da máquina que o host da QEMU ainda não paginou (a primeira escrita num frame novo do convidado é uma falta do host); a cópia reaproveita frames que o primeiro laço já tocou. Não afeta o aarch64 em HVF.
 - O IPI de ida e volta de 8 µs bate com o `ipi round trip` de 8 a 10 µs da seção de SMP deste capítulo (o mesmo TCG): o custo é a QEMU entregar a interrupção à outra CPU, não o `invlpg`. Só vale para comparar o RustOS consigo mesmo ([DEBT-0122](../tech-debt/0122-shootdown-sem-medida-em-kvm-nem-lote.md)).
-- O controle do teste (a parte remota desligada) deixa a tradução velha viva no x86_64 em TCG e no aarch64 em TCG (`RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx`, o último passo do `make pr`) e **não** a deixa no aarch64 em HVF: a propagação do `tlbi` local no HVF é do hardware, e o gate é só o caso com a invalidação ligada.
+- O controle do teste (a parte remota desligada) deixa a tradução velha viva no x86_64 em TCG (26 553 leituras velhas em 120 000, no anel) e no aarch64 em TCG (`RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx`, o último passo do `make pr`); no aarch64 em HVF **não** tem dentes (0 em 240 000). O gate do aarch64 só distingue `is` de local em TCG.
 - **aarch64 em TCG** (uma execução, a do `make pr`): primeiro toque 13,4 µs, leitura 3,1 µs, cópia da página zero 25,9 µs e 4,0 µs por invalidação. A cópia custa 8 vezes o primeiro toque porque o `tlbi ...is` esvazia o TLB de software de todas as CPUs da QEMU; no HVF o mesmo `tlbi` custa 0,13 a 0,21 µs.
 
 **Memória do menor processo (o `init`), antes e depois**, linha `user: init load` (`make smoke`, as duas ISAs dão o mesmo):

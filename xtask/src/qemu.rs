@@ -89,7 +89,7 @@ const BENCH_REFUSED: &str = "bench: not in this build";
 
 /// O que só o modo de teste imprime: se uma destas faltar, a linha de comando se perdeu e o
 /// boot que passou foi o normal.
-const SELFTEST_LINES: [(&str, &str); 22] = [
+const SELFTEST_LINES: [(&str, &str); 23] = [
     (
         "[rustos] cpu features: ",
         "os recursos de CPU das mitigações",
@@ -141,6 +141,10 @@ const SELFTEST_LINES: [(&str, &str); 22] = [
     (
         "[rustos] tlb shootdown: ok (cpu ",
         "o teste de invalidação do TLB entre CPUs",
+    ),
+    (
+        "[rustos] tlb shootdown ring: ok (",
+        "o estresse de invalidação do TLB em anel com todas as CPUs",
     ),
 ];
 /// O que o boot normal confere, além do que o `REQUIRED` tem de comum aos dois modos.

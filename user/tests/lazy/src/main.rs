@@ -64,11 +64,20 @@ fn main(_: &Env) -> i64 {
         return 100;
     };
     let kept = (0..PAGES).all(|page| {
-        let (a, b) = (page * PAGE, page * PAGE + PAGE - 1);
-        FIRST[a + page % PAGE].load(Ordering::Relaxed) == 1
-            && FIRST[b].load(Ordering::Relaxed) == u8::from(page % PAGE == PAGE - 1)
-            && SECOND[a].load(Ordering::Relaxed) == 2
-            && SECOND[b].load(Ordering::Relaxed) == 0
+        let base = page * PAGE;
+        let mark = base + page % PAGE;
+        let rest = |array: &[AtomicU8], skip: usize| {
+            (0..PAGE)
+                .step_by(37)
+                .chain([1, 2, PAGE / 2, PAGE - 1])
+                .all(|offset| {
+                    base + offset == skip || array[base + offset].load(Ordering::Relaxed) == 0
+                })
+        };
+        FIRST[mark].load(Ordering::Relaxed) == 1
+            && rest(&FIRST, mark)
+            && SECOND[base].load(Ordering::Relaxed) == 2
+            && rest(&SECOND, base)
     });
     let checks = [stack, first_ok, read_ok, copy_ok, kept];
     println!(

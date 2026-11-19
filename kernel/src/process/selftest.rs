@@ -436,7 +436,9 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
     let refused = loader_leaves_no_frame_behind(frames, map_offset, archive);
     let unaligned = unaligned_segment_loads_zeroed(frames, map_offset);
     let lazy = resolver && lazy_program_runs(frames, map_offset, archive);
-    let shot = demand::shootdown(frames, map_offset);
+    let shot = demand::shootdown(frames, map_offset)
+        && demand::ring_stress(frames, map_offset, demand::RING_ROUNDS, false)
+        && demand::ring_stress(frames, map_offset, demand::RING_ROUNDS, true);
     let (syscall_depth, fault_depth) = (scrub::deepest(), fault_peak());
     scrub::set_measuring(false);
     let clean_found = residue(frames, map_offset);

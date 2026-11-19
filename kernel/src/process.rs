@@ -26,7 +26,7 @@ use crate::loader::{self, LoadError, Loaded, RegionTree};
 use crate::platform;
 use crate::sync::IrqLock;
 use crate::task::{self, Spawn, TaskError};
-use crate::uspace::{SpaceStats, UserSpace};
+use crate::uspace::{SpaceStats, Unresolved, UserSpace};
 
 #[derive(Debug)]
 pub enum ProcessError {
@@ -50,6 +50,8 @@ pub struct Process {
     sp: u64,
     /// O handle de boot de `rdi`/`x0`: `0` até a 4c.
     arg0: u64,
+    /// A última falta de página não se resolveu por falta de frame.
+    out_of_memory: bool,
 }
 
 /// De onde vem o código do processo: um ELF do initramfs ou, no modo de teste, um programa plano.
@@ -127,6 +129,7 @@ impl Process {
             entry: loaded.entry,
             sp,
             arg0,
+            out_of_memory: false,
         };
         Ok((process, loaded))
     }
@@ -250,10 +253,20 @@ pub fn resolve_user_fault(address: u64, write: bool, execute: bool) -> bool {
     } else {
         Access::Read
     };
-    process
+    let resolved = process
         .space
-        .resolve_fault(&process.regions, address, access)
-        .is_ok()
+        .resolve_fault(&process.regions, address, access);
+    process.out_of_memory = resolved == Err(Unresolved::OutOfMemory);
+    resolved.is_ok()
+}
+
+/// A última falta de página da tarefa corrente falhou por falta de frame (e não por endereço ruim):
+/// a cópia de uma syscall devolve `NoMemory` em vez de `OutOfRange`.
+pub fn copy_ran_out_of_memory() -> bool {
+    task::current_process().is_some_and(|raw| {
+        // SAFETY: como em `resolve_user_fault`.
+        unsafe { &*ptr::with_exposed_provenance::<Process>(raw) }.out_of_memory
+    })
 }
 
 /// Ocorreu a primeira chamada de usuário do boot: diz, uma vez, que o anel 3 ou EL0 ficou de pé.
@@ -329,6 +342,7 @@ fn terminate(event: ProcessEvent) -> ! {
     // SAFETY: `raw` é o `Box::into_raw` de `spawn`, guardado na tarefa e tirado dela agora.
     let process = unsafe { Box::from_raw(ptr::with_exposed_provenance_mut::<Process>(raw)) };
     let pid = process.pid;
+    let no_memory = process.out_of_memory;
     let cpu = crate::percpu::pinned(crate::percpu::PerCpu::index);
     process.space.wait_inactive();
     let Process { space, regions, .. } = *process;
@@ -344,7 +358,7 @@ fn terminate(event: ProcessEvent) -> ! {
             event.code
         );
     } else {
-        log_fault(pid, &event);
+        log_fault(pid, &event, no_memory);
         kprintln!("[rustos] user: fault contained (pid {pid})");
     }
     *LAST_EVENT.lock() = Some((pid, event));
@@ -360,13 +374,14 @@ fn terminate(event: ProcessEvent) -> ! {
     task::exit()
 }
 
-fn log_fault(pid: u32, event: &ProcessEvent) {
+fn log_fault(pid: u32, event: &ProcessEvent, no_memory: bool) {
     let name = fault_name(event.fault_kind);
+    let reason = if no_memory { " (out of memory)" } else { "" };
     if event.fault_kind == fault_kind::PAGE_FAULT && event.addr == 0 {
-        kprintln!("[rustos] user: pid {pid} stopped by a {name} outside the user half");
+        kprintln!("[rustos] user: pid {pid} stopped by a {name} outside the user half{reason}");
     } else if event.fault_kind == fault_kind::PAGE_FAULT {
         kprintln!(
-            "[rustos] user: pid {pid} stopped by a {name} at {:#x} (pc {:#x})",
+            "[rustos] user: pid {pid} stopped by a {name} at {:#x} (pc {:#x}){reason}",
             event.addr,
             event.pc
         );

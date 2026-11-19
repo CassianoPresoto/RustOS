@@ -11,7 +11,7 @@ paid_date:
 
 ## O que falta
 
-`commit::reserve` confere as páginas preguiçosas da pilha e do `.bss` contra os frames livres na criação do processo, e a falta de memória vira erro de `spawn`. Falta o resto da decisão 9 do SDD 17: `NoMemory` em `vmo_create` e `vmar_map`, o campo de política por processo (o modo heurístico do adaptador Linux), e contar o que o kernel aloca (tabelas, pilha, heap) na promessa.
+`commit::reserve` confere as páginas preguiçosas da pilha e do `.bss`, mais as tabelas que elas pedem (uma por 512 páginas e mais uma), contra os frames livres na criação do processo, e a falta de memória vira erro de `spawn`. Falta o resto da decisão 9 do SDD 17: `NoMemory` em `vmo_create` e `vmar_map`, o campo de política por processo (o modo heurístico do adaptador Linux). Ficam de fora da promessa: o que o kernel aloca depois (heap, pilhas), as tabelas das páginas que nascem mapeadas (imagem e argumentos), dois processos que criam ao mesmo tempo (cada um vê os frames livres antes do outro usar) e a página zero. Um processo pode morrer na falta de página por falta de frame (a linha da morte diz `out of memory`).
 
 ## Por que foi aceito
 

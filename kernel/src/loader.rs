@@ -153,8 +153,8 @@ fn map_segment(
         end - start,
         if eager < total { attrs.lazy() } else { attrs },
     )?;
-    space.reserve_lazy(total - eager)?;
     space.map_at(start, lead, bytes, eager, flags)?;
+    space.reserve_lazy(total - eager)?;
     Ok(())
 }
 
@@ -193,7 +193,6 @@ pub fn map_stack(
         .with_guards(true, true)
         .lazy();
     tree.reserve(start, STACK_PAGES * PAGE_SIZE, attrs)?;
-    space.reserve_lazy(STACK_PAGES - 1)?;
     let mut random_bytes = [0_u8; AT_RANDOM_LEN];
     for chunk in random_bytes.as_chunks_mut::<8>().0 {
         let word = random::next_u64().ok_or(LoadError::NoEntropy)?;
@@ -221,6 +220,7 @@ pub fn map_stack(
     let sp = initial.sp();
     rustos_crypto::wipe(initial.storage_mut());
     mapped?;
+    space.reserve_lazy(STACK_PAGES - 1)?;
     Ok(sp)
 }
 

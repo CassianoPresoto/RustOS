@@ -93,3 +93,4 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0120](0120-falta-de-pagina-sem-lock-por-espaco.md) | Falta de página e troca de folha sem lock por espaço de usuário | Open | O primeiro `thread_create`, com duas threads de um processo em CPUs diferentes |
 | [0121](0121-reserva-so-das-paginas-preguicosas.md) | Reserva estrita só das páginas preguiçosas que o carregador cria | Open | O PR de VMO e VMAR como objetos (`vmo_create`, `vmar_map`) da fatia 4c |
 | [0122](0122-shootdown-sem-medida-em-kvm-nem-lote.md) | Shootdown de TLB do x86_64 sem medida em KVM e uma invalidação por página | Open | O primeiro boot do x86_64 com KVM ou em metal, ou o primeiro `vmar_unmap` de mais de 32 páginas |
+| [0123](0123-unmap-page-sem-acertar-a-promessa.md) | `unmap_page` não acerta a promessa de páginas da região preguiçosa | Open | O primeiro `vmar_unmap` (ou `vmar_protect`) sobre região preguiçosa |

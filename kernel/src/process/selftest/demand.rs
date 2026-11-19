@@ -4,7 +4,7 @@
 
 use alloc::boxed::Box;
 use core::hint::spin_loop;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use rustos_hal::{Cpu, PAGE_SIZE, PageFlags};
 use rustos_mm::UserRange;
@@ -17,6 +17,7 @@ use crate::process::{Source, last_stats};
 use crate::task::{self, Spawn};
 use crate::uspace::{
     Resolved, Unresolved, UserSpace, fault_counts, reset_fault_counts, zero_page_frame,
+    zero_page_is_clean,
 };
 use crate::{commit, loader, platform, tlb};
 
@@ -89,7 +90,7 @@ fn resolver_walks_every_case(frames: Frames, map_offset: u64) -> bool {
     ok &= space.zero_page_is_read_only_everywhere();
     let promised = commit::reserved();
     space.destroy();
-    ok && promised >= 8 - 2 && zero == zero_page_frame()
+    ok && promised >= 8 - 2 && zero == zero_page_frame() && zero_page_is_clean()
 }
 
 /// Passa o resolvedor duas vezes (a primeira cria a página zero e aquece o heap) e confere que a
@@ -106,7 +107,22 @@ pub fn resolver_cases(frames: Frames, map_offset: u64) -> bool {
         refused
     });
     let kept = commit::reserved() == reserved;
-    warm && measured && balanced && greedy && kept
+    let tables = promise_covers_the_tables(frames, map_offset);
+    warm && measured && balanced && greedy && kept && tables
+}
+
+/// A promessa inclui as tabelas de página: pedir tantas páginas quantos são os frames livres falha,
+/// e pedir o que sobra depois das tabelas passa.
+fn promise_covers_the_tables(frames: Frames, map_offset: u64) -> bool {
+    // SAFETY: como em `build`.
+    let Ok(mut space) = (unsafe { UserSpace::new(frames, map_offset) }) else {
+        return false;
+    };
+    let free = frames.free_frames() as u64;
+    let too_many = space.reserve_lazy(free).is_err();
+    let fits = space.reserve_lazy(free - free.div_ceil(512) - 4).is_ok();
+    space.destroy();
+    too_many && fits
 }
 
 /// O `lazy` do initramfs toca a pilha e um `.bss` grande, lê antes de escrever e confere zero, e
@@ -130,6 +146,7 @@ pub fn lazy_program(frames: Frames, map_offset: u64, lazy: &[u8], slack: usize) 
         && zero >= PROGRAM_PAGES - EDGE
         && fresh >= PROGRAM_PAGES
         && copied >= PROGRAM_PAGES - EDGE
+        && backed.0 >= 2 * PROGRAM_PAGES + STACK_TOUCHED - EDGE
         && kept == slack
         && commit::reserved() == reserved
 }
@@ -139,6 +156,8 @@ const PROGRAM_PAGES: u64 = 4096;
 /// Páginas que um laço do `lazy` pode não fazer faltar: a da ponta do `.bss` que divide a página com o
 /// `.data` já vem com frame.
 const EDGE: u64 = 2;
+/// Páginas da pilha que o `lazy` desce além da dos argumentos.
+const STACK_TOUCHED: u64 = 8;
 
 /// Uma rodada do teste entre CPUs: a CPU `watch` roda uma tarefa com o espaço carregado e lê duas
 /// páginas; a CPU `drive` troca uma por um frame novo (a cópia da página zero) e remove a outra.
@@ -352,4 +371,233 @@ pub fn shootdown(frames: Frames, map_offset: u64) -> bool {
         flush % 10
     );
     proper
+}
+
+const RING_MAX: usize = rustos_hal::MAX_CPUS;
+/// Rodadas de cada passo do anel no autoteste (cada uma faz os três passos).
+pub const RING_ROUNDS: u64 = 300;
+
+struct Ring {
+    n: usize,
+    count: u32,
+    frames: Frames,
+    map_offset: u64,
+    iters: u64,
+    masked: bool,
+    boxes: [AtomicPtr<(UserSpace, loader::RegionTree)>; RING_MAX],
+    roots: [AtomicU64; RING_MAX],
+    actives: [AtomicUsize; RING_MAX],
+    state: [AtomicU64; RING_MAX],
+    ack: [AtomicU64; RING_MAX],
+    built: AtomicU32,
+    bound: AtomicU32,
+    finished: AtomicU32,
+    exited: AtomicU32,
+    bad: AtomicU64,
+    first_bad: AtomicU64,
+    checks: AtomicU64,
+}
+
+struct RingArg {
+    ring: *const Ring,
+    index: usize,
+}
+
+fn ring_pattern(step: u64) -> u64 {
+    0xC000_0000_0000_0000 | step
+}
+
+/// O espaço de uma CPU do anel: uma página preguiçosa, lida e depois copiada pelas outras.
+fn ring_build(ring: &Ring) -> Option<Box<(UserSpace, loader::RegionTree)>> {
+    // SAFETY: como em `build_shared`.
+    let mut space = unsafe { UserSpace::new(ring.frames, ring.map_offset) }.ok()?;
+    let mut tree = loader::new_tree().ok()?;
+    let lazy = Attrs::new(Kind::Mapping, RW).lazy();
+    (tree.reserve(LAZY, PAGE, lazy).is_ok() && space.reserve_lazy(1).is_ok()).then_some(())?;
+    Some(Box::new((space, tree)))
+}
+
+/// A tarefa de uma CPU do anel.
+fn ring_task(arg: usize) {
+    // SAFETY: o `RingArg` vive na pilha de quem espera as tarefas saírem.
+    let arg = unsafe { &*core::ptr::with_exposed_provenance::<RingArg>(arg) };
+    // SAFETY: como acima, para o `Ring`.
+    let ring = unsafe { &*arg.ring };
+    let (me, n) = (arg.index, ring.n);
+    let cpu = platform::cpu();
+    let built = ring_build(ring);
+    let Some(boxed) = built else {
+        ring.bad.fetch_add(1_000_000, Ordering::Relaxed);
+        ring.built.store(ring.count + 100, Ordering::Release);
+        ring.bound.fetch_add(1, Ordering::Release);
+        ring.finished.fetch_add(1, Ordering::Release);
+        ring.exited.fetch_add(1, Ordering::Release);
+        return;
+    };
+    let raw = Box::into_raw(boxed);
+    // SAFETY: acabou de sair de `Box::into_raw`.
+    let root = unsafe { (*raw).0.root().as_u64() };
+    // SAFETY: idem.
+    let active = unsafe { (*raw).0.active_addr() };
+    ring.roots[me].store(root, Ordering::Release);
+    ring.actives[me].store(active, Ordering::Release);
+    ring.boxes[me].store(raw, Ordering::Release);
+    ring.built.fetch_add(1, Ordering::AcqRel);
+    while ring.built.load(Ordering::Acquire) < ring.count {
+        spin_loop();
+    }
+    task::bind_user(root, 0, active);
+    cpu.restore_interrupts(true);
+    ring.bound.fetch_add(1, Ordering::AcqRel);
+    while ring.bound.load(Ordering::Acquire) < ring.count {
+        spin_loop();
+    }
+    let target = (me + 1) % n;
+    let steps = 3 * ring.iters;
+    let (mut drive, mut seen) = (1_u64, 0_u64);
+    while drive <= steps || seen < steps {
+        if drive <= steps && ring.ack[target].load(Ordering::Acquire) == drive - 1 {
+            // SAFETY: o alvo vive até todas as tarefas terminarem; só esta tarefa dirige as tabelas dele.
+            let (space, tree) = unsafe { &mut *ring.boxes[target].load(Ordering::Acquire) };
+            let were = if ring.masked {
+                cpu.save_and_disable_interrupts()
+            } else {
+                false
+            };
+            let ok = match (drive - 1) % 3 {
+                0 => space.resolve_fault(tree, LAZY, Access::Read) == Ok(Resolved::ZeroPage),
+                1 => {
+                    space.reserve_lazy(1).is_ok()
+                        && space.resolve_fault(tree, LAZY, Access::Write)
+                            == Ok(Resolved::CopiedZero)
+                        && space.write_private(LAZY, &ring_pattern(drive).to_le_bytes())
+                }
+                _ => space.unmap_page(LAZY),
+            };
+            if ring.masked {
+                cpu.restore_interrupts(were);
+            }
+            if !ok {
+                ring.bad.fetch_add(1_000, Ordering::Relaxed);
+                ring.first_bad
+                    .compare_exchange(0, 1000 + drive, Ordering::Relaxed, Ordering::Relaxed)
+                    .ok();
+            }
+            ring.state[target].store(drive, Ordering::Release);
+            drive += 1;
+        }
+        let published = ring.state[me].load(Ordering::Acquire);
+        if published > seen {
+            let value = read_word(LAZY);
+            let want = match (published - 1) % 3 {
+                0 => 0,
+                1 => ring_pattern(published),
+                _ => UNREADABLE,
+            };
+            ring.checks.fetch_add(1, Ordering::Relaxed);
+            if value != want {
+                ring.bad.fetch_add(1, Ordering::Relaxed);
+                ring.first_bad
+                    .compare_exchange(0, published, Ordering::Relaxed, Ordering::Relaxed)
+                    .ok();
+            }
+            seen = published;
+            ring.ack[me].store(published, Ordering::Release);
+        }
+        spin_loop();
+    }
+    cpu.save_and_disable_interrupts();
+    let _ = task::unbind_user();
+    ring.finished.fetch_add(1, Ordering::AcqRel);
+    while ring.finished.load(Ordering::Acquire) < ring.count {
+        tlb::service();
+        spin_loop();
+    }
+    // SAFETY: o `Box::into_raw` de acima; todas as tarefas já saíram da raiz (`finished`).
+    unsafe { (*raw).0.wait_inactive() };
+    // SAFETY: idem; cada espaço é destruído só pelo dono.
+    let boxed = unsafe { Box::from_raw(raw) };
+    let (space, tree) = *boxed;
+    space.wait_inactive();
+    space.destroy();
+    drop(tree);
+    ring.exited.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Anel de CPUs: a CPU i dirige o espaço da CPU i+1 (página zero, cópia e remoção, em laço) e vigia
+/// o seu, que a CPU i-1 dirige. Cada leitura tem de ver o valor do passo; com `masked` as mudanças
+/// rodam com a IRQ mascarada, como a falta de página.
+pub fn ring_stress(frames: Frames, map_offset: u64, iters: u64, masked: bool) -> bool {
+    let active = task::active_cpus();
+    let cpus: alloc::vec::Vec<usize> = (0..RING_MAX).filter(|cpu| active >> cpu & 1 != 0).collect();
+    let n = cpus.len();
+    if n < 2 {
+        kprintln!("[rustos] tlb shootdown ring: skipped, one cpu");
+        return true;
+    }
+    let ring = Ring {
+        n,
+        count: u32::try_from(n).unwrap_or(u32::MAX),
+        frames,
+        map_offset,
+        iters,
+        masked,
+        boxes: [const { AtomicPtr::new(core::ptr::null_mut()) }; RING_MAX],
+        roots: [const { AtomicU64::new(0) }; RING_MAX],
+        actives: [const { AtomicUsize::new(0) }; RING_MAX],
+        state: [const { AtomicU64::new(0) }; RING_MAX],
+        ack: [const { AtomicU64::new(0) }; RING_MAX],
+        built: AtomicU32::new(0),
+        bound: AtomicU32::new(0),
+        finished: AtomicU32::new(0),
+        exited: AtomicU32::new(0),
+        bad: AtomicU64::new(0),
+        first_bad: AtomicU64::new(0),
+        checks: AtomicU64::new(0),
+    };
+    let args: alloc::vec::Vec<RingArg> = (0..n)
+        .map(|index| RingArg {
+            ring: &raw const ring,
+            index,
+        })
+        .collect();
+    let started = platform::now_ns().unwrap_or(0);
+    for (index, &cpu) in cpus.iter().enumerate() {
+        let spawned = task::spawn(Spawn {
+            name: "ring",
+            entry: ring_task,
+            arg: core::ptr::from_ref(&args[index]).expose_provenance(),
+            simd: false,
+            params: SchedParams::fair(0),
+            affinity: 1 << cpu,
+        });
+        if spawned.is_err() {
+            kprintln!("[rustos] tlb shootdown ring: FAILED (spawn)");
+            return false;
+        }
+    }
+    let deadline = started + 120_000_000_000;
+    while ring.exited.load(Ordering::Acquire) < ring.count {
+        let now = platform::now_ns().unwrap_or(0);
+        if now > deadline {
+            kprintln!(
+                "[rustos] tlb shootdown ring: FAILED (timeout, exited {} bad {})",
+                ring.exited.load(Ordering::Relaxed),
+                ring.bad.load(Ordering::Relaxed)
+            );
+            return false;
+        }
+        task::sleep_until(now + 1_000_000);
+    }
+    let took = platform::now_ns().unwrap_or(0) - started;
+    let bad = ring.bad.load(Ordering::Relaxed);
+    kprintln!(
+        "[rustos] tlb shootdown ring: {} (cpus {n}, {iters} rounds, irq {}, {} reads checked, {bad} stale, first at step {}, {} ms)",
+        if bad == 0 { "ok" } else { "FAILED" },
+        if masked { "masked" } else { "open" },
+        ring.checks.load(Ordering::Relaxed),
+        ring.first_bad.load(Ordering::Relaxed),
+        took / 1_000_000
+    );
+    bad == 0
 }
