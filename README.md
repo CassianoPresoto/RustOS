@@ -83,3 +83,8 @@ repositório, também sem crate externo. Comandos em
 | [`docs/tech-debt/`](docs/tech-debt/README.md) | O que se sabe que falta, com gatilho |
 
 Assistentes de código: [`AGENTS.md`](AGENTS.md) é a fonte única de contexto.
+
+## Licença
+
+Sob a sua escolha, [MIT](LICENSE-MIT) ou [Apache-2.0](LICENSE-APACHE). Contribuição
+enviada para inclusão no projeto segue as duas licenças, sem termo adicional.
