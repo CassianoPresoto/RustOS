@@ -10,6 +10,7 @@ use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use rustos_hal::abi::{ProcessEvent, event_kind, fault_kind};
 
 mod demand;
+mod procs;
 
 use super::{Program, Source, fault_peak, last_event, spawn, spawn_keeping};
 use crate::frames::Frames;
@@ -19,7 +20,7 @@ use crate::{loader, platform, scrub, task};
 use rustos_mm::vmar::Access;
 
 /// Quanto o autoteste espera um processo acabar, e o passo da espera.
-const WAIT_NS: u64 = 15_000_000_000;
+pub(super) const WAIT_NS: u64 = 15_000_000_000;
 const POLL_NS: u64 = 1_000_000;
 /// Chamadas `nop` do laço de medida. O TCG do x86_64 é lento: só compara o RustOS consigo mesmo.
 const LOOP_CALLS: u64 = if cfg!(target_arch = "x86_64") {
@@ -131,7 +132,7 @@ fn run_source(
 }
 
 /// Espera o processo acabar e devolve o evento dele.
-fn finish(spawned: &super::Spawned) -> Option<(u32, ProcessEvent)> {
+pub(super) fn finish(spawned: &super::Spawned) -> Option<(u32, ProcessEvent)> {
     let deadline = platform::now_ns()? + WAIT_NS;
     while !task::has_exited(spawned.task) {
         let now = platform::now_ns()?;
@@ -384,7 +385,7 @@ fn spawned_data_frames(frames: Frames, map_offset: u64, file: &[u8]) -> Option<u
     Some(spawned.stats.data)
 }
 
-fn exited_with(result: Option<(u32, ProcessEvent)>, code: i64) -> bool {
+pub(super) fn exited_with(result: Option<(u32, ProcessEvent)>, code: i64) -> bool {
     result.is_some_and(|(_, event)| event.kind == event_kind::EXIT && event.code == code)
 }
 
@@ -483,6 +484,7 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
     let resolver = demand::resolver_cases(frames, map_offset);
     let big = big_program_runs(frames, map_offset, archive);
     let handles = handles_program_runs(frames, map_offset, archive);
+    let processes = procs::run(frames, map_offset, archive);
     let refused = loader_leaves_no_frame_behind(frames, map_offset, archive);
     let unaligned = unaligned_segment_loads_zeroed(frames, map_offset);
     let lazy = resolver && lazy_program_runs(frames, map_offset, archive);
@@ -530,6 +532,7 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
         && scrub_ok
         && big
         && handles
+        && processes
         && refused
         && unaligned
         && resolver
@@ -537,7 +540,7 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
         && shot
         && medians.is_some();
     kprintln!(
-        "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, flags {flags}, stack clean {scrub_ok}, big {big}, handles {handles}, bad executables {refused}, unaligned segment {unaligned}, fault resolver {resolver}, lazy program {lazy}, tlb shootdown {shot})",
+        "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, flags {flags}, stack clean {scrub_ok}, big {big}, handles {handles}, processes {processes}, bad executables {refused}, unaligned segment {unaligned}, fault resolver {resolver}, lazy program {lazy}, tlb shootdown {shot})",
         if ok { "ok" } else { "FAILED" }
     );
     ok

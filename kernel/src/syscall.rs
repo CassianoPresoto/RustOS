@@ -1,6 +1,7 @@
-//! O despacho das chamadas de sistema da ABI nativa (`hal::abi`, SDD 17). Atende as da 4a, as de
-//! handle, canal e espera da 4c (`handles`) e a `debug_write` com console; o que falta (VMO, VMAR,
-//! processo e thread) devolve `NotSupported` e o processo segue. Roda mascarado, na pilha da tarefa.
+//! O despacho das chamadas de sistema da ABI nativa (`hal::abi`, SDD 17). Atende todas as 19:
+//! as da 4a, as de handle, canal e espera (`handles`), as de memória (`memory`) e as de processo e
+//! thread (`tasks`). Roda mascarado, na pilha da tarefa; ao voltar, a thread de um processo que
+//! morre sai em vez de voltar ao usuário.
 
 use core::fmt::Write as _;
 use rustos_hal::abi::{
@@ -9,9 +10,11 @@ use rustos_hal::abi::{
 
 use rustos_mm::UserRange;
 
-use crate::{console, platform, process, random};
+use crate::{console, platform, process, random, task};
 
 mod handles;
+mod memory;
+mod tasks;
 
 #[allow(
     clippy::cast_possible_truncation,
@@ -84,7 +87,14 @@ fn lookup(number: u64) -> Option<Syscall> {
 
 /// `Handlers::syscall`: o número e os seis argumentos vindos do usuário.
 pub fn dispatch(args: &SyscallArgs) -> SyscallReturn {
+    let returned = call(args);
+    process::exit_if_dying();
+    returned
+}
+
+fn call(args: &SyscallArgs) -> SyscallReturn {
     process::note_first_syscall();
+    task::clear_retry();
     let Some(call) = lookup(args.number) else {
         return SyscallReturn::err(Status::NotSupported);
     };
@@ -96,6 +106,7 @@ pub fn dispatch(args: &SyscallArgs) -> SyscallReturn {
             SyscallReturn::ok(0)
         }
         Syscall::ProcessExit => process::exit(a0.cast_signed()),
+        Syscall::ThreadExit => process::thread_exit(),
         Syscall::DebugWrite => debug_write(a0, a1, a2),
         Syscall::HandleClose => handles::reply(handles::handle_close(a0)),
         Syscall::HandleDuplicate => handles::reply(handles::handle_duplicate(a0, a1)),
@@ -108,13 +119,12 @@ pub fn dispatch(args: &SyscallArgs) -> SyscallReturn {
             platform::now_ns().map_or(SyscallReturn::err(Status::NotSupported), SyscallReturn::ok)
         }
         Syscall::RandomGet => random_get(a0, a1),
-        Syscall::ThreadExit
-        | Syscall::VmoCreate
-        | Syscall::VmarMap
-        | Syscall::VmarUnmap
-        | Syscall::ProcessCreate
-        | Syscall::ThreadCreate
-        | Syscall::ProcessKill => SyscallReturn::err(Status::NotSupported),
+        Syscall::VmoCreate => handles::reply(memory::vmo_create(a0, a1)),
+        Syscall::VmarMap => handles::reply(memory::vmar_map(&args.args)),
+        Syscall::VmarUnmap => handles::reply(memory::vmar_unmap(a0, a1, a2)),
+        Syscall::ProcessCreate => handles::reply(tasks::process_create(&args.args)),
+        Syscall::ThreadCreate => handles::reply(tasks::thread_create(&args.args)),
+        Syscall::ProcessKill => handles::reply(tasks::process_kill(a0)),
     }
 }
 

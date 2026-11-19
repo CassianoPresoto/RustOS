@@ -58,6 +58,27 @@ impl<T> IrqLock<T> {
         }
     }
 
+    /// Como `lock`, e enquanto gira atende os pedidos de invalidação de TLB das outras CPUs: quem
+    /// segura este lock pode estar esperando a confirmação de quem gira aqui.
+    pub fn lock_serving(&self, serve: fn()) -> IrqGuard<'_, T> {
+        let were_enabled = platform::cpu().save_and_disable_interrupts();
+        let guard = loop {
+            if let Some(guard) = self.inner.try_lock() {
+                break guard;
+            }
+            while self.inner.is_locked() {
+                serve();
+                panic::stop_if_requested();
+                core::hint::spin_loop();
+            }
+        };
+        percpu::current().lock_taken();
+        IrqGuard {
+            guard: ManuallyDrop::new(guard),
+            were_enabled,
+        }
+    }
+
     pub fn try_lock(&self) -> Option<IrqGuard<'_, T>> {
         let cpu = platform::cpu();
         let were_enabled = cpu.save_and_disable_interrupts();

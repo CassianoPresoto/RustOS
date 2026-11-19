@@ -2,6 +2,8 @@
 //! (`CR3` ou `TTBR0_EL1`), frames que ele mapeia, a falta de página que cria a página no primeiro
 //! toque, o *shootdown* de TLB e a devolução dos frames, zerados, na morte (SDD 17).
 
+use alloc::sync::Arc;
+use core::num::NonZeroU32;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 #[cfg(feature = "selftest")]
 use rustos_hal::AddressSpace;
@@ -9,12 +11,39 @@ use rustos_hal::abi::{USER_MIN, USER_TOP};
 
 use rustos_hal::{FrameSource, MapError, PAGE_SIZE, PageFlags, PageMapper, PhysAddr, VirtAddr};
 use rustos_mm::PhysFrame;
-use rustos_mm::vmar::{Access, FaultError, FaultPlan, Mapped};
+use rustos_mm::vmar::{Access, FaultError, FaultPlan, Mapped, Perms};
 
 use crate::frames::Frames;
 use crate::loader::RegionTree;
 use crate::platform::{self, PlatformSpace};
+use crate::vmo::Vmo;
 use crate::{commit, memory, tlb};
+
+/// Quem é dono dos frames de um intervalo que sai do espaço.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pages {
+    /// Frames de um VMO ou do initramfs: a folha sai, o frame fica.
+    Borrowed,
+    /// Frames do espaço (imagem, pilha, `.bss`): voltam ao alocador, zerados.
+    Owned,
+    /// Como `Owned`, de região preguiçosa: acerta também a promessa (DEBT-0123).
+    OwnedLazy,
+}
+
+/// Páginas que um `unmap` invalida com um IPI só.
+const UNMAP_CHUNK: usize = 32;
+
+/// As permissões de uma região como flags de página: escrita ganha leitura (o x86 não tem só
+/// escrita) e execução vem sem escrita (W^X já foi recusado na árvore).
+const fn flags_of(perms: Perms) -> PageFlags {
+    if perms.contains(Perms::EXECUTE) {
+        PageFlags::USER_CODE
+    } else if perms.contains(Perms::WRITE) {
+        PageFlags::USER_DATA
+    } else {
+        PageFlags::USER_RODATA
+    }
+}
 
 /// O frame da página zero compartilhada, ou 0 enquanto nenhum processo leu página nunca tocada. Nasce
 /// no primeiro uso, zerado, e nunca volta ao alocador (SDD 17, "Página zero compartilhada e COW").
@@ -82,6 +111,8 @@ pub enum Resolved {
     CopiedZero,
     /// A página já servia ao acesso.
     Retried,
+    /// A página de um VMO: o frame é dele, só se mapeou.
+    Object,
 }
 
 /// Por que a falta não se resolve: o processo morre.
@@ -93,7 +124,7 @@ pub enum Unresolved {
 
 /// Faltas resolvidas desde o último `reset_fault_counts`, por tipo (só o modo de teste).
 #[cfg(feature = "selftest")]
-static RESOLVED: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static RESOLVED: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 
 /// Zera os contadores de falta resolvida.
 #[cfg(feature = "selftest")]
@@ -183,6 +214,9 @@ pub struct UserSpace {
     lazy_reserved: u64,
     lazy_promised: u64,
     lazy_backed: u64,
+    /// Páginas de região preguiçosa que nasceram com frame (contadas como prometidas e com frame
+    /// para que o `unmap` acerte cada página igual): fora do que `stats` diz.
+    lazy_eager: u64,
 }
 
 impl UserSpace {
@@ -208,6 +242,7 @@ impl UserSpace {
             lazy_reserved: 0,
             lazy_promised: 0,
             lazy_backed: 0,
+            lazy_eager: 0,
         })
     }
 
@@ -237,6 +272,30 @@ impl UserSpace {
         self.lazy_reserved += pages;
         self.lazy_promised += promised;
         Ok(())
+    }
+
+    /// Conta `pages` páginas de região preguiçosa que já nasceram com frame (a página de arquivo do
+    /// segmento com `.bss`, a primeira página da pilha): o `unmap` as trata como as outras.
+    pub const fn count_eager(&mut self, pages: u64) {
+        self.lazy_reserved += pages;
+        self.lazy_promised += pages;
+        self.lazy_backed += pages;
+        self.lazy_eager += pages;
+    }
+
+    /// Promete `frames` frames para as tabelas de um mapeamento (decisão 9). A promessa volta em
+    /// `release_promise`.
+    pub fn reserve_promise(&self, frames: u64) -> Result<(), MapError> {
+        if commit::reserve(frames, self.frames.free_frames() as u64) {
+            Ok(())
+        } else {
+            Err(MapError::OutOfFrames)
+        }
+    }
+
+    /// Devolve uma promessa de `reserve_promise`.
+    pub fn release_promise(&self, frames: u64) {
+        commit::release(frames);
     }
 
     /// A raiz que o `CR3` ou o `TTBR0_EL1` recebe.
@@ -316,8 +375,8 @@ impl UserSpace {
         SpaceStats {
             data: self.data_frames,
             tables: self.table_frames,
-            lazy_reserved: self.lazy_reserved,
-            lazy_backed: self.lazy_backed,
+            lazy_reserved: self.lazy_reserved.saturating_sub(self.lazy_eager),
+            lazy_backed: self.lazy_backed.saturating_sub(self.lazy_eager),
         }
     }
 
@@ -361,13 +420,24 @@ impl UserSpace {
     }
 
     /// Resolve a falta de página de usuário em `address`: página zero na leitura, frame novo na
-    /// escrita, cópia da página zero na escrita sobre ela. Só uma thread por espaço chama
-    /// (DEBT-0120).
+    /// escrita, cópia da página zero na escrita sobre ela. O chamador tem o lock do espaço.
+    #[cfg(feature = "selftest")]
     pub fn resolve_fault(
         &mut self,
         tree: &RegionTree,
         address: u64,
         access: Access,
+    ) -> Result<Resolved, Unresolved> {
+        self.resolve_fault_with(tree, address, access, &|_| None)
+    }
+
+    /// Como `resolve_fault`; `objects` acha o VMO de uma região com `Backing`.
+    pub fn resolve_fault_with<'a>(
+        &mut self,
+        tree: &RegionTree,
+        address: u64,
+        access: Access,
+        objects: &dyn Fn(NonZeroU32) -> Option<&'a Arc<Vmo>>,
     ) -> Result<Resolved, Unresolved> {
         let page = VirtAddr::new(address & !(PAGE_SIZE - 1));
         let zero = zero_page_now();
@@ -408,6 +478,22 @@ impl UserSpace {
                 self.backed();
                 Resolved::CopiedZero
             }
+            FaultPlan::MapObject => {
+                let region = tree
+                    .check_fault(address, access)
+                    .map_err(Unresolved::Region)?;
+                let (id, index) = region
+                    .object_page(address)
+                    .ok_or(Unresolved::Region(FaultError::Unbacked))?;
+                let vmo = objects(id).ok_or(Unresolved::Region(FaultError::Unbacked))?;
+                let frame = vmo.frame_at(index)?;
+                let flags = flags_of(region.attrs.perms);
+                self.map_resolved(page, frame, flags)?;
+                if flags.executable {
+                    memory::sync_code_frame(frame);
+                }
+                return Ok(Resolved::Object);
+            }
             FaultPlan::Retry => {
                 self.tables.forget(page);
                 Resolved::Retried
@@ -424,25 +510,78 @@ impl UserSpace {
         tlb::shoot_page(virt, self.active.load(Ordering::SeqCst));
     }
 
-    /// Remove a página de `virt`, invalida o TLB de todas as CPUs que rodam o espaço e só então
-    /// devolve o frame, zerado. A página zero nunca volta. `false` se não havia página. Quem remove
-    /// uma região preguiçosa acerta a promessa dela.
+    /// Remove a página de `virt` de região `kind`; `false` se não havia página.
     #[cfg_attr(
         not(feature = "selftest"),
-        allow(
-            dead_code,
-            reason = "o `vmar_unmap` da 4c a usa; hoje só o modo de teste"
-        )
+        allow(dead_code, reason = "o `vmar_unmap` usa `unmap_pages`; esta só o modo de teste")
     )]
-    pub fn unmap_page(&mut self, virt: u64) -> bool {
-        let Some(frame) = self.tables.unmap_page(VirtAddr::new(virt)) else {
-            return false;
-        };
-        self.flush_remote(virt);
-        if Some(frame) != zero_page_now() {
-            self.release(frame);
+    pub fn unmap_page(&mut self, virt: u64, kind: Pages) -> bool {
+        let had = self.tables.leaf(VirtAddr::new(virt)).is_some();
+        self.unmap_pages(virt, 1, kind);
+        had
+    }
+
+    /// Remove as folhas de `pages` páginas a partir de `virt`, invalida o TLB de todas as CPUs
+    /// que rodam o espaço (um IPI por 32 páginas) e só então devolve os frames que o espaço possui,
+    /// zerados. A página zero nunca volta. Em região preguiçosa a promessa de cada página volta ao
+    /// contador (DEBT-0123). O chamador tem o lock do espaço.
+    pub fn unmap_pages(&mut self, virt: u64, pages: u64, kind: Pages) {
+        let zero = zero_page_now();
+        let mut done = 0;
+        while done < pages {
+            let count = (pages - done).min(UNMAP_CHUNK as u64);
+            let start = virt + done * PAGE_SIZE;
+            let mut removed = [None::<PhysAddr>; UNMAP_CHUNK];
+            let mut any = false;
+            for (offset, slot) in removed.iter_mut().take(count as usize).enumerate() {
+                *slot = self
+                    .tables
+                    .unmap_page(VirtAddr::new(start + offset as u64 * PAGE_SIZE));
+                any |= slot.is_some();
+            }
+            if any {
+                self.flush_remote_range(start, count);
+            }
+            for frame in removed.into_iter().take(count as usize) {
+                self.settle(frame, zero, kind);
+            }
+            done += count;
         }
-        true
+    }
+
+    /// O destino de uma página que saiu: o frame volta se é do espaço e a promessa se acerta.
+    fn settle(&mut self, frame: Option<PhysAddr>, zero: Option<PhysAddr>, kind: Pages) {
+        let own = frame.filter(|&frame| Some(frame) != zero);
+        match kind {
+            Pages::Borrowed => {}
+            Pages::Owned => {
+                if let Some(frame) = own {
+                    self.release(frame);
+                }
+            }
+            Pages::OwnedLazy => {
+                if let Some(frame) = own {
+                    self.release(frame);
+                    self.lazy_backed -= 1;
+                } else {
+                    commit::release(1);
+                }
+                self.lazy_promised -= 1;
+                self.lazy_reserved -= 1;
+            }
+        }
+    }
+
+    /// Invalida `pages` páginas nas outras CPUs que rodam o espaço: as entradas já mudaram nesta.
+    fn flush_remote_range(&self, virt: u64, pages: u64) {
+        fence(Ordering::SeqCst);
+        tlb::shoot_range(virt, pages, self.active.load(Ordering::SeqCst));
+    }
+
+    /// Há folha na página de `virt` (só o modo de teste).
+    #[cfg(feature = "selftest")]
+    pub fn has_leaf(&self, virt: u64) -> bool {
+        self.tables.leaf(VirtAddr::new(virt)).is_some()
     }
 
     /// Invalida `virt` nesta CPU e nas outras do espaço sem mudar a tabela; mede o custo do

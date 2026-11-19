@@ -42,6 +42,7 @@ const INITRAMFS_STRING: &str = "initramfs";
 #[derive(Clone, Copy, Debug)]
 struct Initramfs {
     virt: u64,
+    phys: u64,
     len: u64,
 }
 
@@ -245,6 +246,7 @@ impl Vm {
             Ok(virt) => {
                 self.initramfs = Some(Initramfs {
                     virt: virt.as_u64(),
+                    phys: module.start.as_u64(),
                     len: module.len,
                 });
             }
@@ -272,6 +274,16 @@ impl Vm {
         // SAFETY: `map_initramfs` mapeou `len` bytes só de leitura, para sempre, e a memória
         // do módulo não volta ao alocador; ninguém a escreve.
         Some(unsafe { slice::from_raw_parts(start, usize::try_from(module.len).ok()?) })
+    }
+
+    /// Onde o initramfs está na memória física: início e bytes (o VMO físico do `init`).
+    #[cfg_attr(
+        not(feature = "selftest"),
+        allow(dead_code, reason = "lido só pelo modo de teste, até o init rodar no boot normal")
+    )]
+    pub fn initramfs_phys(&self) -> Option<(rustos_hal::PhysAddr, u64)> {
+        let module = self.initramfs.filter(|_| self.activated)?;
+        Some((rustos_hal::PhysAddr::new(module.phys), module.len))
     }
 
     /// Toda página do initramfs está mapeada só para leitura e sem execução.

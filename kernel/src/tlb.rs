@@ -145,10 +145,16 @@ fn remote_on() -> bool {
 /// Invalida a página de `virt` nas CPUs de `targets`: o que o espaço de usuário chama depois de
 /// remover uma entrada ou tirar permissão dela.
 pub fn shoot_page(virt: u64, targets: u32) {
+    shoot_range(virt, 1, targets);
+}
+
+/// Invalida `pages` páginas a partir de `virt` nas CPUs de `targets`, com um IPI só (acima de 32
+/// páginas o destino reescreve o `CR3`).
+pub fn shoot_range(virt: u64, pages: u64, targets: u32) {
     #[cfg(target_arch = "x86_64")]
     if remote_on() {
-        shoot(virt, 1, targets);
+        shoot(virt, pages, targets);
     }
     #[cfg(target_arch = "aarch64")]
-    shoot(virt, 1, targets);
+    shoot(virt, pages, targets);
 }

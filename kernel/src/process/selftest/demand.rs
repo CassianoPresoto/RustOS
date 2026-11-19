@@ -16,7 +16,7 @@ use crate::frames::Frames;
 use crate::process::{Source, last_stats};
 use crate::task::{self, Spawn};
 use crate::uspace::{
-    Resolved, Unresolved, UserSpace, fault_counts, reset_fault_counts, zero_page_frame,
+    Pages, Resolved, Unresolved, UserSpace, fault_counts, reset_fault_counts, zero_page_frame,
     zero_page_is_clean,
 };
 use crate::{commit, loader, platform, tlb};
@@ -254,7 +254,7 @@ fn driver(arg: usize) {
     tlb::set_remote(pass.remote);
     let copied = space_ref.resolve_fault(&tree, LAZY, Access::Write) == Ok(Resolved::CopiedZero)
         && space_ref.write_private(LAZY, &PATTERN.to_le_bytes());
-    let removed = space_ref.unmap_page(LAZY + PAGE);
+    let removed = space_ref.unmap_page(LAZY + PAGE, Pages::Owned);
     tlb::set_remote(true);
     pass.ok
         .fetch_and(watched && copied && removed, Ordering::Relaxed);
@@ -472,7 +472,7 @@ fn ring_task(arg: usize) {
                             == Ok(Resolved::CopiedZero)
                         && space.write_private(LAZY, &ring_pattern(drive).to_le_bytes())
                 }
-                _ => space.unmap_page(LAZY),
+                _ => space.unmap_page(LAZY, Pages::Owned),
             };
             if ring.masked {
                 cpu.restore_interrupts(were);

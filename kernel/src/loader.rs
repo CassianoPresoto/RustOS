@@ -1,7 +1,8 @@
 //! O carregador de executável do initramfs (SDD 17, fatia 4b): acha o arquivo no `cpio`, valida o
 //! ELF com o `core/elf`, copia cada `PT_LOAD` para frames novos, registra as regiões no `Vmar` do
 //! processo e monta a pilha inicial com guarda. A pilha e o `.bss` de páginas inteiras são regiões
-//! preguiçosas: reservadas, sem frames até o primeiro toque. Sem objeto VMO nem VMAR e sem handle.
+//! preguiçosas: reservadas, sem frames até o primeiro toque. Sem objeto VMO nem handle: só o `init`
+//! e os programas de teste nascem aqui; um filho do `init` é montado por ele pela ABI.
 #![cfg_attr(
     not(feature = "selftest"),
     allow(
@@ -31,8 +32,8 @@ pub type RegionTree = Vmar<Box<[Region]>>;
 /// 4c; 32 regiões custam 1 KiB por processo. O `.bss` preguiçoso não ganha região à parte.
 pub const REGION_CAPACITY: usize = 32;
 
-/// A pilha inicial: 16 páginas, com uma página de guarda abaixo e outra acima.
-pub const STACK_PAGES: u64 = 16;
+/// A pilha inicial, com uma página de guarda abaixo e outra acima.
+pub const STACK_PAGES: u64 = rustos_hal::abi::USER_STACK_PAGES;
 /// Onde o início da pilha cai: `2^28` páginas (1 TiB) a partir de `0x6000_0000_0000`.
 const STACK_WINDOW: (u64, u64) = (0x6000_0000_0000, 0x6100_0000_0000);
 
@@ -155,6 +156,9 @@ fn map_segment(
     )?;
     space.map_at(start, lead, bytes, eager, flags)?;
     space.reserve_lazy(total - eager)?;
+    if eager < total {
+        space.count_eager(eager);
+    }
     Ok(())
 }
 
@@ -221,6 +225,7 @@ pub fn map_stack(
     rustos_crypto::wipe(initial.storage_mut());
     mapped?;
     space.reserve_lazy(STACK_PAGES - 1)?;
+    space.count_eager(1);
     Ok(sp)
 }
 

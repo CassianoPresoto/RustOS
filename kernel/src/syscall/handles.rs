@@ -2,8 +2,6 @@
 //! e os direitos na tabela do processo, copia de e para o usuário sem lock preso e, nas que
 //! devolvem handle por ponteiro, reserva, copia e só então confirma (lacuna L4).
 
-use alloc::sync::Arc;
-
 use rustos_hal::abi::{
     CHANNEL_MAX_BYTES, Handle, ReadActual, Rights, Status, SyscallReturn, USER_HANDLE_ARRAY_MAX,
     signals, wait_deadline,
@@ -14,11 +12,11 @@ use rustos_object::{
     ReadFailed, ReplaceFailed, channel_read, channel_write, close, discard_handles, handle_from_raw,
 };
 
-use crate::object::{Charge, Obj, Work, new_channel};
+use crate::object::{Bytes, Charge, Obj, Work, new_channel};
 use crate::process::{self, Process};
 use crate::{platform, task};
 
-type Outcome = Result<u64, Status>;
+pub(super) type Outcome = Result<u64, Status>;
 
 /// A resposta da chamada: o valor em `rdx`/`x1` ou o erro.
 pub fn reply(outcome: Outcome) -> SyscallReturn {
@@ -29,17 +27,17 @@ pub fn reply(outcome: Outcome) -> SyscallReturn {
 }
 
 /// Roda `f` com o processo que chamou. Syscall sem processo não existe; `BadState` é a rede.
-fn current<R>(f: impl FnOnce(&Process) -> Result<R, Status>) -> Result<R, Status> {
+pub(super) fn current<R>(f: impl FnOnce(&Process) -> Result<R, Status>) -> Result<R, Status> {
     process::with_current(f).unwrap_or(Err(Status::BadState))
 }
 
 /// O valor cru como handle; o que não tem forma de handle vira `INVALID`, que a tabela recusa
 /// com `BadHandle` (e, num array que se move, consome os outros).
-fn lenient(raw: u64) -> Handle {
+pub(super) fn lenient(raw: u64) -> Handle {
     handle_from_raw(raw).unwrap_or(Handle::INVALID)
 }
 
-fn u32_arg(raw: u64) -> Result<u32, Status> {
+pub(super) fn u32_arg(raw: u64) -> Result<u32, Status> {
     u32::try_from(raw).map_err(|_| Status::InvalidArgs)
 }
 
@@ -125,6 +123,9 @@ pub fn object_wait_one(raw: u64, wanted: u64, deadline_ns: u64) -> Outcome {
 fn wait(object: &Obj, wanted: u32, deadline_ns: u64) -> Result<u32, Status> {
     task::clear_permit();
     loop {
+        if process::with_current(Process::is_dying) == Some(true) {
+            return Err(Status::BadState);
+        }
         let registered = object
             .waiters()
             .map(|waiters| (waiters, waiters.register()));
@@ -174,7 +175,7 @@ pub fn channel_create(flags: u64, out: u64) -> Outcome {
             table.cancel(first);
             table.cancel(second);
         };
-        let charges = (Charge::new(p.channels()), Charge::new(p.channels()));
+        let charges = (Charge::new(p.quota()), Charge::new(p.quota()));
         let (Some(charge_a), Some(charge_b)) = charges else {
             cancel(first, second);
             return Err(Status::NoMemory);
@@ -244,17 +245,24 @@ pub fn channel_write_call(args: &[u64; 6]) -> Outcome {
             return discard(Status::OutOfRange);
         }
     }
-    let bytes: Arc<[u8]> = Arc::from(&buffer[..nbytes]);
-    current(|p| {
-        channel_write(
+    let mut charge_failed = false;
+    let written = current(|p| {
+        let Some(bytes) = Bytes::charged(p.quota(), &buffer[..nbytes]) else {
+            charge_failed = true;
+            return Ok(Ok(()));
+        };
+        Ok(channel_write(
             p.table(),
             lenient(channel),
             bytes,
             handles,
             &mut Work::new(),
-        )
-    })
-    .map(|()| 0)
+        ))
+    })?;
+    if charge_failed {
+        return discard(Status::NoMemory);
+    }
+    written.map(|()| 0)
 }
 
 /// `channel_read(ch, bytes, bytes_cap, handles, handles_cap, actual*)`. Os tamanhos e os valores
