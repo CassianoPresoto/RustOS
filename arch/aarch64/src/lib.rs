@@ -61,6 +61,8 @@ pub use entropy::Aarch64Entropy;
 pub use gic_cpu::Aarch64Ipi;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use mmio::MmioBus;
+#[cfg(all(feature = "selftest", target_arch = "aarch64", target_os = "none"))]
+pub use mmu::set_local_only;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use mmu::{Aarch64Mmu, DirectMapTables, active_root, prepare_space, wxn_active};
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]

@@ -35,7 +35,7 @@ pub const fn has_error_code(vector: u8) -> bool {
 
 /// Bits do código de erro do #PF (SDM vol. 3A, seção 4.7).
 const PF_PRESENT: u64 = 1 << 0;
-const PF_WRITE: u64 = 1 << 1;
+pub const PF_WRITE: u64 = 1 << 1;
 const PF_USER: u64 = 1 << 2;
 const PF_INSTRUCTION: u64 = 1 << 4;
 

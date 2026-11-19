@@ -23,6 +23,12 @@ pub enum IrqSource {
     Keyboard,
     /// IPI: refazer a decisão de escalonamento desta CPU.
     Reschedule,
+    /// IPI: outro núcleo pede para invalidar entradas do TLB (só o x86_64; o aarch64 usa `tlbi is`).
+    #[cfg_attr(
+        target_arch = "aarch64",
+        allow(dead_code, reason = "o `tlbi is` dispensa o IPI")
+    )]
+    Shootdown,
     /// IPI: outro núcleo entrou em pânico, pare.
     Stop,
     Spurious,
@@ -40,6 +46,7 @@ pub enum FaultTest {
 
 static HANDLERS: Handlers = Handlers {
     fault: on_fault,
+    copy_fault: on_copy_fault,
     irq: on_irq,
     preempt: task::preempt,
     syscall: crate::syscall::dispatch,
@@ -157,6 +164,16 @@ fn on_fault(fault: &Fault) {
     #[cfg(feature = "selftest")]
     crate::process::check_ac();
     if fault.from_user {
+        if let FaultKind::PageFault {
+            address,
+            write,
+            execute,
+            ..
+        } = fault.kind
+            && crate::process::resolve_user_fault(address.as_u64(), write, execute)
+        {
+            return;
+        }
         crate::process::user_fault(fault);
     }
     if fault.kind.is_recoverable() {
@@ -166,6 +183,11 @@ fn on_fault(fault: &Fault) {
     panic::begin();
     console::print_panic(format_args!("{}", FaultLine(fault)));
     platform::cpu().halt_forever();
+}
+
+/// A cópia usuário↔kernel faltou numa página: se o processo a resolve, a cópia se repete.
+fn on_copy_fault(address: u64, write: bool) -> bool {
+    crate::process::resolve_user_fault(address, write, false)
 }
 
 /// A linha de relatório de uma exceção que para o kernel.
@@ -205,6 +227,7 @@ fn on_irq(irq: Irq) {
             task::notify_input();
         }
         IrqSource::Reschedule => task::on_reschedule_ipi(),
+        IrqSource::Shootdown => crate::tlb::service(),
         IrqSource::Stop => panic::stop_this_cpu(),
         IrqSource::Spurious | IrqSource::Unknown => {}
     }

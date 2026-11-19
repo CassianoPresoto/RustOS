@@ -40,6 +40,17 @@ pub unsafe fn prepare_space() {
     unsafe { asm!("msr mair_el1, {}", "isb", in(reg) mair, options(nostack, preserves_flags)) };
 }
 
+/// Só o modo de teste: `entry_removed` invalida só o TLB desta CPU, para provar que o teste de
+/// *shootdown* enxerga a entrada velha que a invalidação em todas as CPUs remove.
+#[cfg(feature = "selftest")]
+static LOCAL_ONLY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Liga ou desliga a invalidação só local de `entry_removed` (modo de teste).
+#[cfg(feature = "selftest")]
+pub fn set_local_only(on: bool) {
+    LOCAL_ONLY.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// A CPU do aarch64 para o mapeador: barreiras e `TTBR1_EL1`.
 #[derive(Debug)]
 pub struct Aarch64Mmu;
@@ -48,6 +59,31 @@ impl MmuControl for Aarch64Mmu {
     fn entry_changed(&self, _virt: VirtAddr) {
         // SAFETY: barreiras não têm pré-condição; publicam a entrada nova para a MMU.
         unsafe { asm!("dsb ishst", "isb", options(nostack, preserves_flags)) };
+    }
+
+    fn entry_removed(&self, virt: VirtAddr) {
+        let page = virt.as_u64() >> 12;
+        #[cfg(feature = "selftest")]
+        if LOCAL_ONLY.load(core::sync::atomic::Ordering::Relaxed) {
+            // SAFETY: invalidar uma tradução não tem pré-condição; só o TLB desta CPU.
+            unsafe {
+                asm!(
+                    "dsb nshst", "tlbi vaale1, {page}", "dsb nsh", "isb",
+                    page = in(reg) page,
+                    options(nostack, preserves_flags),
+                );
+            }
+            return;
+        }
+        // SAFETY: invalidar uma tradução não tem pré-condição; o `is` alcança todas as CPUs e o
+        // `dsb ish` espera todas.
+        unsafe {
+            asm!(
+                "dsb ishst", "tlbi vaale1is, {page}", "dsb ish", "isb",
+                page = in(reg) page,
+                options(nostack, preserves_flags),
+            );
+        }
     }
 
     fn activate(&self, root: PhysAddr) {

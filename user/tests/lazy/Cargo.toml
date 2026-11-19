@@ -1,0 +1,20 @@
+[package]
+name = "rustos-user-test-lazy"
+description = "Programa de teste da paginação sob demanda: pilha e `.bss` grande tocados, leitura antes da escrita e tempo por página (SDD 17)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lazy"
+path = "src/main.rs"
+test = false
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-user-rt.workspace = true

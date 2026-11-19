@@ -501,7 +501,7 @@ no modo de teste (a linha `user: init load`), `release-small` com `RUSTOS_SELFTE
 | Fase `init` do boot de teste (carregar, rodar, imprimir, sair e esperar) | 10 a 13 ms | 1,3 a 1,8 ms (a maior parte é a linha na serial e na tela) |
 | `big` (1,3 MiB de arquivo, 2,3 MiB mapeados) | sai com 0 | sai com 0 |
 
-Os 16 frames da pilha são metade do menor processo: eles saem com a falta de página resolvida ([DEBT-0085](../tech-debt/0085-pilha-de-usuario-mapeada-inteira.md)).
+Os 16 frames da pilha eram metade do menor processo: saíram com a falta de página resolvida na 4c ([abaixo](#paginação-sob-demanda-e-shootdown-fatia-4c)).
 
 **`boot time:` do boot normal, antes e depois: sem mudança**, porque o boot normal não lança o `init`. `release-small`, 3 boots em cada lado: aarch64
 **2 ms antes e 2 ms depois** (`2 ms`, `2 ms`, `2 ms` em cada); x86_64 em TCG **34, 39 e 42 ms antes; 31, 40 e 60 ms depois** (o TCG oscila de um boot para o
@@ -519,6 +519,54 @@ outro, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-lay
 | carregado | 195 367 | 195 511 | 177 329 | 177 605 |
 
 (+144 bytes no x86_64 e +276 no aarch64, 0,07% e 0,16% do carregado. **Causa**, de `llvm-nm -S` contra um build da `3acc35e`: o carregador, o `Vmar` e o código de usuário não entram na imagem; o que muda é o caminho de morte do processo, que a syscall `process_exit` da 4a mantém vivo: `process::terminate` agora solta a árvore de regiões do `Process`, `UserSpace` ganhou dois contadores de frames (`data_frames` e `table_frames`) e `map_at` e `destroy` os usam. O resto é reordenação de genéricos, com símbolos de até 300 bytes a mais e a menos, e preenchimento de alinhamento.)
+
+### Paginação sob demanda e *shootdown* (fatia 4c)
+
+Medido na QEMU 11.1.3 num Mac com Apple Silicon: aarch64 em HVF, x86_64 em TCG (só se compara o RustOS consigo mesmo). `make smoke ARCH=all PROFILE=release`, modo de teste; o `user/tests/lazy` mede por página, com `clock_get_monotonic`, três laços de 4 096 páginas (16 MiB) cada, e o autoteste mede o *shootdown*. Três execuções por ISA, mais as do revisor independente (a faixa é o mínimo e o máximo). **O tempo por página inclui a entrada e a saída da exceção e o tratador inteiro.** A [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md) segue aberta: o do x86_64 é de TCG e não decide `stosq` contra `stosb`.
+
+| Por página | x86_64 (TCG) | aarch64 (HVF) |
+| --- | --- | --- |
+| Primeiro toque de escrita (aloca e zera um frame, mapeia) | 11,5 a 11,6 µs | 0,51 a 0,69 µs |
+| Leitura de página não tocada (mapeia a página zero) | 1,33 a 1,37 µs | 0,150 a 0,152 µs |
+| Escrita sobre a página zero (aloca, zera, troca a folha, invalida) | 3,28 a 3,43 µs | 0,70 a 1,11 µs |
+| Invalidar uma página nas outras CPUs (x86_64: IPI de ida e volta a uma CPU, 200 invalidações; aarch64: `tlbi vaale1is` e `dsb ish`, 2 000) | 8,0 a 8,3 µs (uma medida do revisor, 30,7 µs) | 0,13 a 0,32 µs |
+
+- A leitura custa o décimo da escrita porque não aloca nem zera. O aarch64 gasta 0,15 µs só para entrar na exceção, achar a região, mapear a página zero e voltar.
+- No x86_64 o primeiro toque custa o triplo da cópia da página zero, embora as duas aloquem e zerem um frame. **Hipótese, não medida:** o primeiro laço toca memória da máquina que o host da QEMU ainda não paginou (a primeira escrita num frame novo do convidado é uma falta do host); a cópia reaproveita frames que o primeiro laço já tocou. Não afeta o aarch64 em HVF.
+- O IPI de ida e volta de 8 µs bate com o `ipi round trip` de 8 a 10 µs da seção de SMP deste capítulo (o mesmo TCG): o custo é a QEMU entregar a interrupção à outra CPU, não o `invlpg`. Só vale para comparar o RustOS consigo mesmo ([DEBT-0122](../tech-debt/0122-shootdown-sem-medida-em-kvm-nem-lote.md)).
+- O controle do teste (a parte remota desligada) deixa a tradução velha viva no x86_64 em TCG (26 553 leituras velhas em 120 000, no anel) e no aarch64 em TCG (`RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx`, o último passo do `make pr`); no aarch64 em HVF **não** tem dentes (0 em 240 000). O gate do aarch64 só distingue `is` de local em TCG.
+- **aarch64 em TCG** (uma execução, a do `make pr`): primeiro toque 13,4 µs, leitura 3,1 µs, cópia da página zero 25,9 µs e 4,0 µs por invalidação. A cópia custa 8 vezes o primeiro toque porque o `tlbi ...is` esvazia o TLB de software de todas as CPUs da QEMU; no HVF o mesmo `tlbi` custa 0,13 a 0,21 µs.
+
+**Memória do menor processo (o `init`), antes e depois**, linha `user: init load` (`make smoke`, as duas ISAs dão o mesmo):
+
+| | Antes (a `main` `2083547`) | Depois |
+| --- | --- | --- |
+| Frames na criação | **32** (128 KiB) | **17** (68 KiB) |
+| De dados | 20 (4 de imagem, 16 de pilha) | 5 (4 de imagem, 1 de pilha: a dos argumentos) |
+| De tabelas | 7 | 7 |
+| Do kernel (pilha da tarefa, FPU, heap) | 5 | 5 |
+| Ao sair | — | 5 de dados e 7 de tabelas: o `init` não toca as outras 15 páginas da pilha |
+
+Os 15 frames a menos são 47% do menor processo. A página zero custa 1 frame para a máquina inteira, criado na primeira leitura de página nunca tocada.
+
+**Custo por unidade** (guidelines 05): a região preguiçosa não custa byte (`Region` segue com 32 bytes: o `lazy` cabe no preenchimento de `Attrs`); o espaço ganhou 20 bytes (a máscara de CPUs e os dois contadores de páginas preguiçosas; `UserSpace` tem 56 bytes); as caixas do *shootdown* custam 8 x 8 x 24 = 1 536 bytes de `.bss` no x86_64 e nada no aarch64.
+
+**`boot time:` e `make size`, `release-small`, antes e depois.** O boot normal não lança processo nem toca a falta de página; os 3 boots de cada lado:
+
+| | x86_64 (TCG) | aarch64 (HVF) |
+| --- | --- | --- |
+| `boot time:` antes (`2083547`) | 28 e 28 ms | 2 e 3 ms |
+| `boot time:` depois | 32 e 30 ms (o TCG oscila de um boot para o outro, [DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md)) | 2 e 3 ms |
+
+| `make size` | x86_64 antes | x86_64 depois | aarch64 antes | aarch64 depois |
+| --- | --- | --- | --- | --- |
+| `text` | 129 815 | 132 551 | 117 220 | 119 344 |
+| `rodata` | 33 901 | 34 253 | 29 813 | 30 021 |
+| `data` | 18 482 | 18 922 | 18 288 | 18 632 |
+| `bss` | 15 857 | 17 409 | 14 640 | 14 656 |
+| carregado | 198 055 | 203 135 | 179 961 | 182 653 |
+
+(+5 080 bytes no x86_64 e +2 692 no aarch64, 2,6% e 1,5% do carregado. No x86_64, 1 536 do `bss` são as caixas do *shootdown*; o resto é o resolvedor da falta, a reserva de páginas, o `tlb` e o `destroy` que espera a CPU, que a imagem enxuta carrega porque a morte do processo é a mesma.)
 
 ### Escalonador (fase 3, medido no host; o alvo está acima)
 

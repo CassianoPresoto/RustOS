@@ -55,6 +55,10 @@ impl MmuControl for X86Mmu {
         }
     }
 
+    fn entry_removed(&self, virt: VirtAddr) {
+        self.entry_changed(virt);
+    }
+
     fn activate(&self, root: PhysAddr) {
         // SAFETY: quem criou o espaço pôs nele código, pilha e mapa direto; a escrita no
         // `CR3` descarta o TLB, sem páginas globais (`require_features`).
@@ -102,3 +106,24 @@ impl TableMemory for DirectMapTables {
         unsafe { ptr::write_bytes(self.entry(table, 0), 0, words) }
     }
 }
+
+/// Descarta a tradução de `pages` páginas de `virt` nesta CPU; acima de 32, o TLB inteiro.
+///
+/// # Safety
+/// Ring 0.
+pub unsafe fn flush_pages(virt: u64, pages: u64) {
+    if pages > FLUSH_ALL_ABOVE {
+        let cr3: u64;
+        // SAFETY: leitura de registrador de controle em ring 0, pelo contrato acima.
+        unsafe { asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags)) };
+        // SAFETY: reescrever o `CR3` com o próprio valor só esvazia o TLB.
+        unsafe { asm!("mov cr3, {}", in(reg) cr3, options(nostack, preserves_flags)) };
+        return;
+    }
+    for page in 0..pages {
+        X86Mmu.entry_changed(VirtAddr::new(virt + page * PAGE_SIZE));
+    }
+}
+
+/// Acima disto vale mais reescrever o `CR3` do que invalidar página a página.
+const FLUSH_ALL_ABOVE: u64 = 32;

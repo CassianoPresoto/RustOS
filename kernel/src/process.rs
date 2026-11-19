@@ -18,6 +18,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use rustos_hal::abi::{ProcessEvent, USER_TOP, event_kind, fault_access, fault_kind};
 use rustos_hal::{Cpu, Fault, FaultKind};
+use rustos_mm::vmar::Access;
 use rustos_sched::SchedParams;
 
 use crate::frames::Frames;
@@ -25,7 +26,7 @@ use crate::loader::{self, LoadError, Loaded, RegionTree};
 use crate::platform;
 use crate::sync::IrqLock;
 use crate::task::{self, Spawn, TaskError};
-use crate::uspace::{SpaceStats, UserSpace};
+use crate::uspace::{SpaceStats, Unresolved, UserSpace};
 
 #[derive(Debug)]
 pub enum ProcessError {
@@ -44,15 +45,13 @@ impl<E: Into<LoadError>> From<E> for ProcessError {
 pub struct Process {
     pid: u32,
     space: UserSpace,
-    #[allow(
-        dead_code,
-        reason = "lido pelo `vmar_map` e pela falta de página da 4c"
-    )]
     regions: RegionTree,
     entry: u64,
     sp: u64,
     /// O handle de boot de `rdi`/`x0`: `0` até a 4c.
     arg0: u64,
+    /// A última falta de página não se resolveu por falta de frame.
+    out_of_memory: bool,
 }
 
 /// De onde vem o código do processo: um ELF do initramfs ou, no modo de teste, um programa plano.
@@ -93,6 +92,9 @@ static FAULT_PEAK: AtomicUsize = AtomicUsize::new(0);
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 /// O último evento de fim de processo, para o modo de teste conferir.
 static LAST_EVENT: IrqLock<Option<(u32, ProcessEvent)>> = IrqLock::new(None);
+/// Os frames do último processo que morreu, no instante da morte (só o modo de teste).
+#[cfg(feature = "selftest")]
+static LAST_STATS: IrqLock<Option<(u32, SpaceStats)>> = IrqLock::new(None);
 /// A primeira syscall do boot já foi vista: o usuário entrou e voltou.
 static FIRST_SYSCALL: AtomicBool = AtomicBool::new(false);
 /// O contador de ciclos na primeira syscall do boot e na última entrada em usuário.
@@ -127,6 +129,7 @@ impl Process {
             entry: loaded.entry,
             sp,
             arg0,
+            out_of_memory: false,
         };
         Ok((process, loaded))
     }
@@ -217,15 +220,53 @@ pub fn spawn(
 fn process_main(arg: usize) {
     let process = ptr::with_exposed_provenance_mut::<Process>(arg);
     // SAFETY: `arg` é o `Box::into_raw` de `spawn`, entregue só a esta tarefa.
-    let (root, entry, sp, arg0) = unsafe {
+    let (root, entry, sp, arg0, active) = unsafe {
         let p = &*process;
-        (p.space.root().as_u64(), p.entry, p.sp, p.arg0)
+        (
+            p.space.root().as_u64(),
+            p.entry,
+            p.sp,
+            p.arg0,
+            p.space.active_addr(),
+        )
     };
-    let top = task::bind_user(root, arg);
+    let top = task::bind_user(root, arg, active);
     ENTRY_CYCLES.store(platform::cycles(), Ordering::Relaxed);
     // SAFETY: `bind_user` mascarou a IRQ e já pôs o espaço e a pilha de entrada desta CPU; `entry` e
     // `sp` vêm de `load`, dentro de `[USER_MIN, USER_TOP)`, `sp` alinhado a 16.
     unsafe { platform::enter_user(entry, sp, arg0, 0, top) }
+}
+
+/// Resolve a falta de página de usuário da tarefa corrente: região, permissão e guarda pelo `Vmar`, e
+/// então página zero, frame novo ou cópia da página zero. `false`: o processo morre.
+pub fn resolve_user_fault(address: u64, write: bool, execute: bool) -> bool {
+    let Some(raw) = task::current_process() else {
+        return false;
+    };
+    // SAFETY: `raw` é o `Box::into_raw` de `spawn`, vivo até `terminate`; só a thread do processo
+    // (a que falta) o toca, e roda mascarada (DEBT-0120).
+    let process = unsafe { &mut *ptr::with_exposed_provenance_mut::<Process>(raw) };
+    let access = if execute {
+        Access::Execute
+    } else if write {
+        Access::Write
+    } else {
+        Access::Read
+    };
+    let resolved = process
+        .space
+        .resolve_fault(&process.regions, address, access);
+    process.out_of_memory = resolved == Err(Unresolved::OutOfMemory);
+    resolved.is_ok()
+}
+
+/// A última falta de página da tarefa corrente falhou por falta de frame (e não por endereço ruim):
+/// a cópia de uma syscall devolve `NoMemory` em vez de `OutOfRange`.
+pub fn copy_ran_out_of_memory() -> bool {
+    task::current_process().is_some_and(|raw| {
+        // SAFETY: como em `resolve_user_fault`.
+        unsafe { &*ptr::with_exposed_provenance::<Process>(raw) }.out_of_memory
+    })
 }
 
 /// Ocorreu a primeira chamada de usuário do boot: diz, uma vez, que o anel 3 ou EL0 ficou de pé.
@@ -301,8 +342,14 @@ fn terminate(event: ProcessEvent) -> ! {
     // SAFETY: `raw` é o `Box::into_raw` de `spawn`, guardado na tarefa e tirado dela agora.
     let process = unsafe { Box::from_raw(ptr::with_exposed_provenance_mut::<Process>(raw)) };
     let pid = process.pid;
+    let no_memory = process.out_of_memory;
     let cpu = crate::percpu::pinned(crate::percpu::PerCpu::index);
+    process.space.wait_inactive();
     let Process { space, regions, .. } = *process;
+    #[cfg(feature = "selftest")]
+    {
+        *LAST_STATS.lock() = Some((pid, space.stats()));
+    }
     space.destroy();
     drop(regions);
     if event.kind == event_kind::EXIT {
@@ -311,7 +358,7 @@ fn terminate(event: ProcessEvent) -> ! {
             event.code
         );
     } else {
-        log_fault(pid, &event);
+        log_fault(pid, &event, no_memory);
         kprintln!("[rustos] user: fault contained (pid {pid})");
     }
     *LAST_EVENT.lock() = Some((pid, event));
@@ -327,13 +374,14 @@ fn terminate(event: ProcessEvent) -> ! {
     task::exit()
 }
 
-fn log_fault(pid: u32, event: &ProcessEvent) {
+fn log_fault(pid: u32, event: &ProcessEvent, no_memory: bool) {
     let name = fault_name(event.fault_kind);
+    let reason = if no_memory { " (out of memory)" } else { "" };
     if event.fault_kind == fault_kind::PAGE_FAULT && event.addr == 0 {
-        kprintln!("[rustos] user: pid {pid} stopped by a {name} outside the user half");
+        kprintln!("[rustos] user: pid {pid} stopped by a {name} outside the user half{reason}");
     } else if event.fault_kind == fault_kind::PAGE_FAULT {
         kprintln!(
-            "[rustos] user: pid {pid} stopped by a {name} at {:#x} (pc {:#x})",
+            "[rustos] user: pid {pid} stopped by a {name} at {:#x} (pc {:#x}){reason}",
             event.addr,
             event.pc
         );
@@ -362,6 +410,12 @@ pub fn entry_and_first_syscall_cycles() -> (u64, u64) {
 #[cfg(feature = "selftest")]
 pub fn fault_peak() -> usize {
     FAULT_PEAK.load(Ordering::Relaxed)
+}
+
+/// Os frames de dados e de tabelas do último processo que morreu, e de que processo foi.
+#[cfg(feature = "selftest")]
+pub fn last_stats() -> Option<(u32, SpaceStats)> {
+    *LAST_STATS.lock()
 }
 
 /// O último evento de fim de processo e de que processo foi.

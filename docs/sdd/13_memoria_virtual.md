@@ -94,9 +94,20 @@ Em todas as folhas do aarch64 o UXN fica ligado (página do kernel nunca executa
   desce os 4 níveis, cria tabelas zeradas, recusa folha em cima de folha e percorre
   as folhas com a permissão efetiva. Ela fala com três portas do `hal`: `PageFormat`
   (a codificação, em `pte.rs` e `descriptor.rs`), `TableMemory` (o mapa direto, em
-  `mmu.rs`) e `MmuControl` (`invlpg` ou barreiras, e a troca de `CR3` ou `TTBR1_EL1`).
+  `mmu.rs`) e `MmuControl` (`invlpg` ou barreiras e `tlbi`, e a troca de `CR3` ou `TTBR1_EL1`).
   Como `arch/` não depende de `core/mm` (guidelines 03), quem monta o espaço é
   `kernel/src/platform/`: `PlatformSpace = PageTables<X86Format, DirectMapTables, X86Mmu>`.
+- **Trocar e remover uma folha (4c).** `PageTables::leaf` lê a folha de 4 KiB de um endereço;
+  `remap_page` troca o frame e a permissão **apagando a entrada, chamando
+  `MmuControl::entry_removed` e só então gravando a nova** (o *break-before-make* que o aarch64
+  pede para mudar o endereço de saída de uma folha válida); `unmap_page` apaga e chama
+  `entry_removed`. `entry_removed` é o `invlpg` no x86_64 (só esta CPU: o *shootdown* é do núcleo,
+  [SDD 17](17_processos_isolamento_e_syscalls.md#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou))
+  e `dsb ishst`, `tlbi vaale1is`, `dsb ish`, `isb` no aarch64 (todas as CPUs). Entrada que passa de
+  ausente para presente continua só com `entry_changed`: não invalida nada fora desta CPU.
+  O mapeador recusa W+X também na troca. As folhas da metade de usuário carregam o bit de usuário; a
+  **página zero** (um frame global, só leitura, sem execução) é mapeada em qualquer espaço pelas
+  mesmas `PageFlags::USER_RODATA`.
 - **W^X na hora de mapear.** `map_page` e `map_large_page` devolvem
   `MapError::WriteExecute` para `PageFlags` gravável e executável, antes de tocar a
   tabela, nas duas ISAs. Os codificadores (`page_entry`, `page_descriptor`) seguem

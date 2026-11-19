@@ -5,13 +5,13 @@
 > de syscall, handles, ABI nativa), como o primeiro programa chega à memória, e quais
 > decisões do dono o desenho aplica.
 
-**Estado: desenho aprovado no #9 (2026-11-18). As fatias 4a ([abaixo](#a-fatia-4a-como-entrou)) e 4b ([abaixo](#a-fatia-4b-como-entrou)) estão implementadas; da 4c só o crate puro `core/object` ([abaixo](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)); as demais, não.** A ABI de
+**Estado: desenho aprovado no #9 (2026-11-18). As fatias 4a ([abaixo](#a-fatia-4a-como-entrou)) e 4b ([abaixo](#a-fatia-4b-como-entrou)) estão implementadas; da 4c, o crate puro `core/object` ([abaixo](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) e a paginação sob demanda, a página zero e o *shootdown* de TLB ([abaixo](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou)); as demais, não.** A ABI de
 syscall e o formato de executável são contrato que o mundo de fora enxerga (caso 6 do
 [`AGENTS.md`](../../AGENTS.md)), e crate novo em `core/` e pasta nova de primeiro nível são
 o caso 1; por isso o desenho nasceu num PR em Draft só com docs. O dono aprovou as nove
 [decisões pedidas](#as-decisões-do-dono) sem mudança. O código vem em PRs seguintes, e
 este capítulo passa a descritivo à medida que cada fatia entra: o que a 4a e a 4b tornaram verdade está
-em [A fatia 4a, como entrou](#a-fatia-4a-como-entrou) e [A fatia 4b, como entrou](#a-fatia-4b-como-entrou), e o resto do texto continua sendo desenho.
+em [A fatia 4a, como entrou](#a-fatia-4a-como-entrou), [A fatia 4b, como entrou](#a-fatia-4b-como-entrou) e [A fatia 4c, paginação sob demanda e *shootdown*, como entrou](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou), e o resto do texto continua sendo desenho.
 
 Fase 4 do [roadmap](08_roadmap.md). Pesquisa de origem, com as marcas de
 verificação: `syscalls-processes.md` (2026-11-17). O modelo de controle de acesso
@@ -44,7 +44,7 @@ que só diminuem, sem uid/gid no núcleo.
 | `Context`/`switch` de thread do kernel, `simd` por tarefa, EEVDF | [SDD 15](15_tarefas_e_preempcao.md) | O processo de usuário é uma tarefa com mais estado |
 | `MAX_TASKS = 32` (8 ociosas e 24 tarefas) e uma política `Composite<4, 32>` **por CPU**, no heap | `kernel/src/task.rs` ([SDD 15](15_tarefas_e_preempcao.md)) | Pouco para processos; a fase sobe a capacidade, e o custo agora **multiplica pelo número de CPUs** (a política de cada CPU cabe qualquer tarefa; 96 bytes por tarefa justa) |
 | Pilha de falha do aarch64 em `SP_EL0` (o `vector_fault` faz `msr spsel, #0` e empilha lá; `install_secondary` grava a de cada CPU); EL1h com `SP_EL1` por tarefa | [SDD 15](15_tarefas_e_preempcao.md), [SDD 10](10_interrupcoes.md) | Em EL0, `SP_EL0` é a pilha do **usuário**: o `vector_fault` passa a pegar a pilha de falhas pelo bloco por CPU, que o `TPIDR_EL1` já aponta ([aarch64](#aarch64-svc)) |
-| **SMP completo (#13):** um bloco `PerCpu` por núcleo (`IA32_GS_BASE` com `gs:[0]` = o endereço, e `IA32_KERNEL_GS_BASE` **zerado de propósito**, à espera do `swapgs`; `TPIDR_EL1` no aarch64); GDT, TSS e 3 pilhas IST por CPU, IDT compartilhada; IPI de reescalonar (`0xFD`, SGI 0) e de parar (`0xFE`, SGI 1); fila `Composite` por CPU, migração, `on_cpu` e `percpu::pinned` | [SDD 15](15_tarefas_e_preempcao.md), [SDD 10](10_interrupcoes.md) | A fase 4 **nasce em N núcleos**: tudo o que ela guarda por CPU vive no `PerCpu`; uma tarefa de usuário migra como as outras. [DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md) (sem *shootdown* de TLB) é o gatilho que a fase dispara |
+| **SMP completo (#13):** um bloco `PerCpu` por núcleo (`IA32_GS_BASE` com `gs:[0]` = o endereço, e `IA32_KERNEL_GS_BASE` **zerado de propósito**, à espera do `swapgs`; `TPIDR_EL1` no aarch64); GDT, TSS e 3 pilhas IST por CPU, IDT compartilhada; IPI de reescalonar (`0xFD`, SGI 0) e de parar (`0xFE`, SGI 1); fila `Composite` por CPU, migração, `on_cpu` e `percpu::pinned` | [SDD 15](15_tarefas_e_preempcao.md), [SDD 10](10_interrupcoes.md) | A fase 4 **nasce em N núcleos**: tudo o que ela guarda por CPU vive no `PerCpu`; uma tarefa de usuário migra como as outras. O *shootdown* de TLB (dívida 0055) foi o gatilho que a fase disparou e a 4c pagou |
 | `#DF`, NMI e `#MC` têm IST (IST1 a IST3); `#DB` não | `arch/x86_64/src/traps.rs` | `#DB` ganha IST própria e entrada paranoica ([exceções do anel 3](#exceções-vindas-do-anel-3)) |
 | Janela de pilhas só de avanço | [SDD 13](13_memoria_virtual.md) | Criar e matar processos em laço esgota endereço; precisa reciclar |
 
@@ -57,7 +57,7 @@ número novo no [SDD 07](07_desempenho_e_recursos.md).
 | --- | --- | --- |
 | 4a (**feita**) | Entrada de syscall e saída para anel 3/EL0 nas duas ISAs; `PageFlags.user`; `Fault.from_user`; `#DB` com IST; cópia usuário↔kernel; espaço de **um** processo, sem objetos; **limpeza da pilha do kernel na volta ao usuário** (pagou a dívida do resíduo do ChaCha20 na pilha); a troca para o par `swapgs` e os MSRs de syscall em cada CPU; `nop`, `clock_get_monotonic`, `random_get`, `process_exit` e **`debug_write(ptr, len)` provisória, sem handle**; um programa embutido no kernel só para esta fatia | `hello` imprime de anel 3 e de EL0; falha de usuário mata o processo e o kernel segue (pagou a dívida da exceção de usuário só para a CPU) |
 | 4b (**feita**) | `core/cpio`, `core/elf`; a árvore de regiões em `core/mm/src/vmar.rs`, **interna ao kernel** (o carregador mapeia frames direto, sem objeto VMO nem VMAR e sem handle); módulo do Limine; `user/` (runtime e `init`); o xtask monta o initramfs | O `init` do initramfs roda, imprime pelo `debug_write` provisório e sai; o smoke exige a linha dele (**no modo de teste**: [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)) |
-| 4c | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (muda a assinatura da 4a: a ABI é provisória até aqui); página zero; ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; ***shootdown* de TLB** e parada de thread em outra CPU na morte do processo (**paga** [DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md)); o `init` recebe os handles pelo canal de boot | Um processo cria outro, que escreve no console por um handle que recebeu |
+| 4c | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (muda a assinatura da 4a: a ABI é provisória até aqui); **página zero** e **falta de página de usuário resolvida** (**feitas**, [abaixo](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou)); ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; ***shootdown* de TLB** e espera da CPU que ainda roda o espaço na morte do processo (**feitos e pagos**: dívidas 0055 e 0085); o `init` recebe os handles pelo canal de boot | Um processo cria outro, que escreve no console por um handle que recebeu |
 | 4d | SIMD de usuário, canal de eventos do processo, teste de `xmm0`/`v0` entre processos | Dois processos preservam `xmm0`/`v0`; o culpado de uma falha chega ao pai (**paga** [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md)) |
 | 4e | KPTI, PCID/ASID com a regra de geração entre CPUs, mitigações de CPU ([seção](#mitigações-de-cpu)), relatório no boot. **Parte 1 (feita):** detecção de vulnerabilidade e de recurso nas duas ISAs, a linha `mitigations:`, a chave `kpti=` (só no relatório) e o clamp do Spectre v1. **Parte 2:** o KPTI, o PCID/ASID na troca e o IBPB na troca | Linha `mitigations:` no boot; custo de cada uma medida |
 | 4f | As medidas da fase (inclui a falta de página que zera, [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)) ([abaixo](#medidas-da-fase)) e este capítulo virando descritivo | Fecha a fase: "syscall nula medida; processo que toca o kernel morre sem derrubar nada" |
@@ -245,7 +245,7 @@ prefixo `[user] `.
 | O `init` só roda no modo de teste | O boot normal não o lança; o `release-small` não carrega o carregador ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)) | Na 4b o `init` é um autoteste, e o guidelines 05 manda o que roda tarefa para o modo de teste. Experimento com ele no boot normal: +1 a 3 ms no aarch64 em HVF (2 ms para 4–7) e cerca de +10 ms no x86_64 em TCG, sem ganho para o usuário. O boot normal sem initramfs ou sem `init` segue como antes |
 | `-C code-model=small` com `-C lto=off` no x86_64 | O `core` pré-compilado do alvo vem em `code-model=kernel`; com o LTO fat dos perfis `release`/`release-small` o LLVM recusa o módulo (`linking module flags 'Code Model': IDs have conflicting values`, `failed to load bitcode`). O `xtask user` liga `-C lto=off` no x86_64 ([DEBT-0084](../tech-debt/0084-usuario-do-x86-sem-lto-por-causa-do-code-model.md)) | O `small` é a decisão aprovada; o `init` custa 17 600 bytes sem LTO contra 15 176 com o modelo `kernel` e LTO. **O item "Por ler" do `small` fecha**: o `big` (1,3 MiB de arquivo, 2,3 MiB mapeados, `.rodata`, `.data` com cauda de 400 bytes e `.bss` de 1 MiB) liga em `0x40_0000` e roda nas duas ISAs. O `small` e o `kernel` geram o mesmo código a 4 MiB (17 920 bytes nos dois, sem LTO), então o teste continua sem distingui-los |
 | Layout do linker | Cabeçalhos e `.rodata` no primeiro `PT_LOAD` (R), `.text` (RX) numa página a partir de `0x40_1000`, `.data` e `.bss` (RW) juntos num `PT_LOAD` com `-z norelro`; `AT_PHDR` aponta `0x40_0040` | O primeiro `PT_LOAD` com os cabeçalhos faz o `AT_PHDR` existir; sem `norelro` o `.bss` virava um `PT_LOAD` de `p_filesz` 0 |
-| Pilha | 16 páginas mapeadas na criação, com uma página de guarda abaixo e outra acima e o início sorteado com `aslr_base` na janela `[0x6000_0000_0000, 0x6100_0000_0000)` (28 bits de página, o intervalo cheio); a imagem fica em endereço fixo ([DEBT-0083](../tech-debt/0083-imagem-de-usuario-sem-aslr.md)). Mapeada inteira, porque não há falta resolvida ([DEBT-0085](../tech-debt/0085-pilha-de-usuario-mapeada-inteira.md)) | Decisão 5 e o desenho de pilha; o `mmap_base` fica para a 4c |
+| Pilha | 16 páginas mapeadas na criação, com uma página de guarda abaixo e outra acima e o início sorteado com `aslr_base` na janela `[0x6000_0000_0000, 0x6100_0000_0000)` (28 bits de página, o intervalo cheio); a imagem fica em endereço fixo ([DEBT-0083](../tech-debt/0083-imagem-de-usuario-sem-aslr.md)). Mapeada inteira na 4b, porque não havia falta resolvida; **a 4c a tornou preguiçosa** (só a página dos argumentos nasce mapeada) | Decisão 5 e o desenho de pilha; o `mmap_base` fica para a 4c |
 | Capacidade da árvore | 32 regiões por processo (`REGION_CAPACITY`, 1 KiB de heap) | No máximo 16 `PT_LOAD` mais a pilha, com folga para a 4c; [DEBT-0075](../tech-debt/0075-vmar-com-capacidade-fixa-de-regioes.md) |
 | Teto de `p_memsz` | `EXEC_MAX_LOADS_BYTES = 64 MiB` em `hal::abi` | O "ex.: 64 MiB" da tabela de validação |
 | Auxv e pilha inicial em `hal::abi` | O kernel (`InitialStack::build`) e o `user/rt` (`Env::from_stack`) partilham as tags, e o teste do `rt` lê o que o `build` monta | Um lado só não deriva do outro |
@@ -273,6 +273,76 @@ numa falha **tardia** (depois de segmentos e de parte da pilha mapeados); e um E
 do espaço, sem rodar: um programa em `forbid(unsafe_code)` não lê antes do próprio `p_vaddr`). O teste exato achou um vazamento da 4a: o
 `Box<Process>` nunca era solto, porque `terminate` não volta; agora `terminate` solta a árvore de regiões antes de encerrar a tarefa. O
 `user/rt` não deixa o programa forjar ponteiro: `Env` tem campos privados e a contagem de `PT_LOAD` sai de `from_stack`, que é `unsafe`.
+
+## A fatia 4c, paginação sob demanda e *shootdown*, como entrou
+
+**Descritivo.** O que a parte da 4c que não mexe em handle nem em syscall (PR `feat/phase4c-demand-paging`) tornou verdade, nas duas ISAs: a falta de página de usuário resolvida, a página zero compartilhada, a reserva de páginas e o *shootdown* de TLB. O que o SDD já escrevia em [Página zero compartilhada e COW](#página-zero-compartilhada-e-cow) e em [*Shootdown* de TLB](#shootdown-de-tlb-paga-a-dívida-0055-na-4c) vale como estava; esta seção diz onde mora e o que mudou. Os números estão em [SDD 07](07_desempenho_e_recursos.md#paginação-sob-demanda-e-shootdown-fatia-4c).
+
+| Peça | Onde mora |
+| --- | --- |
+| Região preguiçosa (`Attrs::lazy`), a decisão da falta (`Vmar::plan_fault`: `Mapped`, `FaultPlan`, `FaultError::Unbacked`) | `core/mm/src/vmar.rs`, com teste de cada caso |
+| Folha de 4 KiB lida, trocada e removida (`PageTables::leaf`, `remap_page`, `unmap_page`, `forget`); `MmuControl::entry_removed`; `MapError::NotMapped` | `core/mm/src/tables.rs`, `core/hal/src/paging.rs` |
+| `Handlers.copy_fault`; o `fault` de origem de usuário volta se o núcleo resolveu | `core/hal/src/interrupt.rs`, `arch/{x86_64,aarch64}/src/{traps,exception}.rs` |
+| Vetor `0xFC` do IPI de invalidação, `X86Ipi::send_shootdown`, `flush_pages`; `entry_removed` com `invlpg` (x86_64) e `tlbi vaale1is` (aarch64) | `arch/x86_64/src/{lapic,apic,mmu}.rs`, `arch/aarch64/src/mmu.rs` |
+| A página zero (criada no primeiro uso), a resolução da falta, o `unmap_page`, a espera por CPU ativa, a promessa de páginas | `kernel/src/uspace.rs`, `kernel/src/commit.rs` |
+| Caixas e IPI de *shootdown* | `kernel/src/tlb.rs` |
+| Máscara de CPUs que rodam o espaço (`active`), mantida pela troca de tarefa | `kernel/src/task.rs` (`mark_active`, `bind_user`, `unbind_user`), `kernel/src/uspace.rs` |
+| Pilha preguiçosa e `.bss` preguiçoso | `kernel/src/loader.rs` |
+| A falta de página da tarefa corrente | `kernel/src/process.rs` (`resolve_user_fault`), `kernel/src/interrupts.rs` |
+| O programa de teste, o autoteste e as linhas do smoke | `user/tests/lazy`, `kernel/src/process/selftest/demand.rs`, `xtask/src/qemu.rs` |
+
+**O que a falta faz** (`UserSpace::resolve_fault`, o mesmo código nas duas ISAs):
+
+| Situação | Resultado |
+| --- | --- |
+| Endereço fora de região, na guarda, ou acesso que a região não permite | O processo morre, como na 4a (`FaultError::{NoRegion, Guard, Permission}`) |
+| Página ausente numa região **não** preguiçosa (imagem, `.data`) | O processo morre (`Unbacked`): o carregador mapeia tudo antes de rodar |
+| Leitura de página ausente, região preguiçosa | Mapeia a página zero (só leitura, sem execução, de usuário) |
+| Escrita em página ausente, região preguiçosa | Frame novo e zerado, gravável |
+| Escrita sobre a página zero | Frame novo e zerado; a folha é trocada (**apaga, invalida, grava**) e as outras CPUs do espaço são invalidadas e esperadas |
+| Página que já serve ao acesso (outra CPU a resolveu, ou o TLB estava velho) | `Retry`: esquece a tradução desta CPU e repete a instrução |
+| Execução numa região preguiçosa | O processo morre: página zero e frame novo nunca ganham execução |
+| Sem frame para a página nem para as tabelas | O processo morre com a falta de página, e a linha da morte diz `(out of memory)`; na cópia de uma syscall o erro é `NoMemory` em vez de `OutOfRange`. A promessa cobre as páginas preguiçosas e as tabelas delas, mas não o que o kernel aloca depois nem as tabelas das páginas que já nasceram mapeadas: [DEBT-0121](../tech-debt/0121-reserva-so-das-paginas-preguicosas.md). Medido: pedir tantas páginas quanto há frames livres é recusado (o `.bss` de 16 000 páginas com 16 100 frames livres, que a primeira versão deixava passar, falha no `spawn`) |
+
+A cópia usuário↔kernel resolve do mesmo jeito (`Handlers.copy_fault`): um `debug_write` sobre página nunca tocada lê zero em vez de devolver `OutOfRange`.
+
+**Regiões preguiçosas.** A pilha (15 das 16 páginas: a última, com `argc`, `argv`, `envp` e o auxv, nasce mapeada) e as páginas de um segmento `PT_LOAD` **gravável** que só têm `.bss` (depois da última página com bytes do arquivo). O resto dos `PT_LOAD` segue como na 4b: cópia na carga. Um segmento com `.bss` não ganha região à parte: a região inteira vale `lazy`, e as páginas com arquivo estão sempre mapeadas, então a falta nelas é só `Retry`. Segmento não gravável fica inteiro mapeado.
+
+**A página zero.** Um frame global, zerado, criado na primeira leitura de página nunca tocada (não no boot: o boot normal não paga 4 KiB nem o zerar) e nunca devolvido. Nenhuma contagem de referência. `destroy` o pula ao liberar as folhas. O autoteste percorre as tabelas de um espaço e confere que toda folha da metade de usuário que o mapeia é só leitura, sem execução e de usuário.
+
+**A promessa de páginas** ([decisão 9](#decisão-9--overcommit-na-abi-nativa), a parte que cabe aqui). `commit::reserve` promete as páginas preguiçosas de um processo na criação, **mais as tabelas de página que elas pedem** (uma por 512 páginas, e mais uma), contra os frames livres menos o que já foi prometido e ainda não ganhou frame; o carregador promete **depois** de mapear o que nasce com frame, para os livres refletirem o uso. Passa, ou o `spawn` falha com `OutOfFrames`. A página que ganha frame próprio devolve 1 da promessa, e a morte devolve o resto. O que falta (`NoMemory` em `vmo_create` e `vmar_map`, o modo por processo, contar o que o kernel aloca) é a [DEBT-0121](../tech-debt/0121-reserva-so-das-paginas-preguicosas.md) e entra com os VMOs.
+
+**O *shootdown*.**
+
+| | x86_64 | aarch64 |
+| --- | --- | --- |
+| Remover ou trocar a folha | `invlpg` local; depois `tlb::shoot_page` | `dsb ishst`, `tlbi vaale1is`, `dsb ish`, `isb`: alcança todas as CPUs sem IPI (só a última folha, de todos os ASIDs: a 4c usa o ASID 0 em tudo) |
+| Quem recebe | Vetor `0xFC`. Uma caixa por par (destino, origem), 8 x 8 x 24 bytes (1,5 KiB de `.bss`), com a faixa e um bit `pending`; o destino invalida e baixa o bit | — |
+| Espera | O iniciador manda o IPI a cada CPU de `active` (menos ele e as offline) e gira até todos os bits baixarem, **atendendo as caixas que chegam a ele** enquanto gira: duas CPUs que se invalidam com a IRQ mascarada não se travam. Sem resposta em 5 s o kernel entra em pânico | A espera é o `dsb ish` |
+| Faixa | Até 32 páginas, `invlpg` uma a uma; acima disso, reescreve o `CR3` | — |
+| Ordem da máscara | A troca de tarefa **sobe** o bit da CPU antes de a raiz entrar nela e **baixa** depois de a raiz sair; quem invalida grava a entrada, faz `fence(SeqCst)` (`UserSpace::flush_remote`) e só então lê a máscara: o store da entrada e a leitura precisam de StoreLoad, que a ordem `SeqCst` só da leitura não dá (o Linux sobe o `tlb_gen` antes de ler o `mm_cpumask` em `flush_tlb_mm_range`, `arch/x86/mm/tlb.c`). O bit sobe com `SeqCst` | idem |
+
+**A morte do processo** espera `active == 0` (`UserSpace::wait_inactive`, chamado por `terminate`) antes de liberar as tabelas; `destroy` só confere (`assert`) e vale para espaço que ninguém ligou ou que já esperou, porque esperar depois de mover o espaço olharia uma cópia. `tlb::service` mascara a IRQ ao entrar: o laço de espera não apaga um pedido novo que chegou entre a leitura e a baixa do bit. Com uma thread por processo a espera nunca gira: a thread já saiu da raiz no passo 3 da [ordem da morte](#falhas-de-usuário). O espaço **não pode se mover** enquanto alguma CPU o roda: a máscara que a tarefa guarda é o endereço do campo dele, e `terminate` espera antes de tirá-lo da `Box`. O parar de thread em outra CPU, com `thread_create`, é da fatia que o criar; a espera já está no lugar e entra em pânico se achar CPU ativa.
+
+**Decisões do agente** (nenhuma muda contrato nem regra):
+
+| Decisão | O que ficou | Por quê |
+| --- | --- | --- |
+| Trocar a folha apagando, invalidando e gravando, nas duas ISAs | `remap_page` | O aarch64 pede *break-before-make* para trocar o endereço de saída de uma folha válida (o `ptep_clear_flush` do Linux em `wp_page_copy`); no x86_64 custa uma escrita |
+| `fault` volta quando `from_user` e o núcleo resolveu | O `on_fault` só devolve se resolveu; senão `user_fault` não volta | O arch não precisa saber do resultado, e um erro do núcleo vira laço de falta, não memória alheia |
+| `copy_fault` à parte do `fault` | Um gancho novo em `Handlers` que diz se a cópia se repete | A falta da cópia chega do kernel (`from_user` falso) e o arch já tinha o ponto de recuperação dela |
+| A página zero nasce no primeiro uso | `ZERO_FRAME` por `compare_exchange` | O boot normal não a usa, e duas CPUs que a criam juntas ficam com uma só |
+| `.bss` preguiçoso só em segmento gravável | `eager = ceil((lead + filesz) / 4096)` páginas | Uma página que mistura arquivo e `.bss` já tem o arquivo; segmento só de leitura com cauda zero é raro |
+| Sem lock por espaço na falta | Uma thread por processo | [DEBT-0120](../tech-debt/0120-falta-de-pagina-sem-lock-por-espaco.md): o gatilho é o primeiro `thread_create` |
+| O controle do teste de *shootdown* é só informação | Sem a parte remota a tradução velha sobrevive: **sim** no x86_64 (TCG) e no aarch64 em TCG, **não** no aarch64 em HVF | Medido: no HVF o controle não tem dentes (0 leituras velhas em 240 000) e em TCG tem (26 553 em 120 000). O gate do aarch64 só distingue `is` de local em TCG, que o último passo do `make pr` cobre (`RUSTOS_ACCEL=tcg RUSTOS_CPU=a64fx`); em HVF ele só prova que nada velho aparece |
+
+**O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs; linha `user self-test:` com `fault resolver`, `lazy program` e `tlb shootdown`):
+
+- O resolvedor, num espaço montado à mão: leitura (página zero compartilhada), leitura de novo (`Retry`), escrita sobre ela (cópia, e a página segue zero), escrita em página ausente (frame novo), guarda de baixo e de cima, buraco, escrita em página de leitura, execução; a promessa sobe e volta, e rodado duas vezes devolve **exatamente** os frames; uma promessa maior que a memória é recusada.
+- O `lazy` (`user/tests/lazy`) desce a pilha por nove páginas que ninguém mapeou, lê antes de escrever um `.bss` de 32 MiB (página zero), escreve sobre ela e no `.bss` virgem, e confere que o que não foi escrito segue zero (`[user] lazy: ok (...)`); o kernel confere que passaram pela falta pelo menos 4 094 páginas de cada caminho, que o processo saiu com 0, que os frames voltaram como depois do `init` e que a promessa zerou (`[rustos] user: demand paging: ...`); as páginas com frame próprio ao sair passam de `2 x 4 096 + 6` (as duas matrizes e a pilha), e o programa confere vários bytes de cada página depois da cópia. A página zero é relida inteira depois dos casos do resolvedor e segue zero.
+- O *shootdown* entre CPUs (`[rustos] tlb shootdown: ok (cpu A -> cpu B: ...)`): a CPU B roda uma tarefa com o espaço carregado, lê uma página lida por ela (página zero) e uma página própria; a CPU A troca a primeira por um frame novo com dado (a cópia da página zero) e remove a segunda. Depois disso a leitora vê o dado novo e a falta, nunca a tradução velha. O mesmo roteiro com a parte remota desligada é o controle (a tradução velha sobrevive no x86_64 e no aarch64 em TCG). O dono do espaço espera a leitora sair antes do `destroy`.
+- O estresse em anel (`[rustos] tlb shootdown ring: ok (cpus N, ...)`), com todas as CPUs online: a CPU i dirige o espaço da CPU i+1 (página zero, cópia com dado novo, remoção, em laço) e vigia o seu, que a CPU i-1 dirige, com a IRQ aberta e depois mascarada como na falta. Cada leitura vê o valor do passo, nunca o velho: 300 rodadas por passo, 3 600 leituras conferidas. Sem a parte remota o mesmo anel vê 1 446 de 3 600 leituras velhas (x86_64, TCG). Veio do revisor independente, que o rodou com 4 e 8 CPUs em 25 boots por configuração (0 falhas; sem a parte remota, de 1 000 a 26 000 leituras velhas). O anel reserva 1 página a cada cópia porque `unmap_page` não devolve a promessa ([DEBT-0123](../tech-debt/0123-unmap-page-sem-acertar-a-promessa.md)).
+- O `init` imprime os frames que consome ao morrer (`init at exit: 5 data, 7 tables, 0 of 15 lazy pages backed`).
 
 ## Entrada de syscall por ISA
 
@@ -492,20 +562,20 @@ supunha o SMP "por vir".
 | 4e (com PCID/ASID) | Gerador global com **geração**; cada CPU guarda a `generation_seen`. Um valor de PCID/ASID só é **reusado** (geração nova) depois que **toda CPU** esvaziou o TLB desde que ele foi liberado: subir a geração marca `flush_pending` em todas as CPUs, e cada uma esvazia na próxima troca de processo, **antes** de carregar um valor da geração nova (x86_64: `INVPCID` tipo 2 ou 3, ou `mov cr3` sem `NOFLUSH`; aarch64: `tlbi vmalle1`) e atualiza a `generation_seen`. É o esquema do `arch/arm64/mm/context.c` do Linux, conferido pelo revisor do PR do gerador ([abaixo](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)) |
 | 4e, processo que migra | Com PCID/ASID o TLB da CPU antiga **guarda** o valor. Cada Process tem um `tlb_gen` que sobe a cada `unmap`; a CPU que volta a rodá-lo compara com o que ela viu e esvazia só aquele PCID/ASID (`INVPCID` tipo 1; `tlbi aside1`). A ideia é a do `tlb_gen` do Linux x86: **NÃO VERIFICADO** |
 
-#### *Shootdown* de TLB ([DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md))
+#### *Shootdown* de TLB (paga a dívida 0055 na 4c)
 
-Hoje `entry_changed` só invalida a CPU que mexeu, e isso basta porque o kernel **só
-acrescenta** mapeamentos depois do boot. A fase 4 **remove** mapeamentos de usuário.
+**Entrou na 4c** ([como entrou](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou)); a tabela abaixo é o desenho e vale. Antes dele `entry_changed` só invalidava a CPU que mexeu, e isso bastava porque o kernel **só
+acrescentava** mapeamentos depois do boot. A fase 4 **remove** mapeamentos de usuário.
 
 | Ponto | Desenho |
 | --- | --- |
 | Quando vira pré-requisito | **4c**, com `thread_create` (threads do mesmo processo em CPUs diferentes) e `process_kill`. Em 4a e 4b (uma thread por processo, sem `unmap`, sem PCID) não há CPU com entrada velha; o `exit` libera os frames só depois de o processo sair de **todas** as CPUs |
 | Dispara | `vmar_unmap` (e `vmar_protect`, se um dia existir) de um processo **com `active_cpus` além da CPU que chama**; a morte do processo com thread correndo noutra CPU |
 | x86_64 | **O mecanismo de IPI por máscara já existe** (ICR por CPU, `hw_id`); os dois vetores de hoje são reescalonar (`0xFD`) e parar (`0xFE`), então **entra um vetor novo**, `Shootdown`. O iniciador grava a faixa (ou "tudo") numa caixa por CPU, manda o IPI a `active_cpus`, faz o `invlpg` local e **espera todas as confirmações antes de liberar o frame ou reusar o endereço** |
-| aarch64 | `tlbi vae1is` / `aside1is`, `dsb ish`, `isb`: o domínio *inner shareable* alcança todas as CPUs **sem IPI** (a premissa da DEBT-0055, não conferida no Arm ARM); a espera é o próprio `dsb ish` |
+| aarch64 | `tlbi vae1is` / `aside1is`, `dsb ish`, `isb`: o domínio *inner shareable* alcança todas as CPUs **sem IPI** (a premissa da dívida 0055, não conferida no Arm ARM); a espera é o próprio `dsb ish` |
 | Morte com thread em outra CPU | Marca o processo "em morte" ([ordem da morte](#falhas-de-usuário)), manda o IPI de **reescalonar** à CPU da thread e espera o `on_cpu` baixar (o campo do #13) antes de liberar a pilha de kernel e as tabelas |
-| Kernel | A janela de pilhas passa a **reciclar endereço sem desmapear** (a pilha segue mapeada; só o slot volta à lista): não é remoção, não pede *shootdown*. Desmapear a pilha reabriria a DEBT-0055 para o kernel |
-| Teste | Duas CPUs leem uma página que uma terceira remove (o teste que a DEBT-0055 pede); depois do `unmap`, nenhuma lê o valor velho |
+| Kernel | A janela de pilhas passa a **reciclar endereço sem desmapear** (a pilha segue mapeada; só o slot volta à lista): não é remoção, não pede *shootdown*. Desmapear a pilha reabriria a dívida 0055 para o kernel |
+| Teste | Duas CPUs leem uma página que uma terceira remove (o teste que a dívida 0055 pedia); depois do `unmap`, nenhuma lê o valor velho |
 
 #### Outras dívidas do SMP que a fase toca
 
@@ -1438,7 +1508,7 @@ Antes da 4a toda exceção não recuperável parava a CPU. O desenho muda o dest
 
 | Evento vindo de usuário | O que acontece |
 | --- | --- |
-| Falta de página dentro de um VMAR, com permissão que serve | Resolve (página zero ou frame novo) e volta; o tratador **nunca bloqueia** (sem swap nem arquivo mapeado), roda mascarado como o resto |
+| Falta de página dentro de um VMAR, com permissão que serve | Resolve (página zero ou frame novo) e volta; o tratador **nunca bloqueia** (sem swap nem arquivo mapeado), roda mascarado como o resto (**feito na 4c**) |
 | Falta de página fora de região, na guarda, ou violação de permissão | Falha: processo morre |
 | `#UD`, `#GP`, `#DE`, `#AC`, `#XM`/`#MF`, `int3` (x86_64) | Falha |
 | `EC` `0x00`, `0x18`, `0x19`, `0x1D`, `0x20`/`0x24` sem resolução (aarch64) | Falha (SVE e SME trapeiam porque a fase 4 não os liga: [DEBT-0035](../tech-debt/0035-sve-sme-e-amx-sem-estado-por-tarefa.md)) |
@@ -1568,6 +1638,8 @@ Em inglês, como toda saída serial. As da 4a e da 4b valem hoje, no modo de tes
 | `[rustos] user: fault contained (pid N)` | 4a |
 | `[rustos] user self-test: ok` (os casos acima) | 4a |
 | `[rustos] user: init loaded (N segments)`, `[rustos] user: pid 1 exited (code 0,` e, do `init`, `[user] init: ok` | 4b |
+| `[rustos] initramfs: 3 files, `, `[user] lazy: ok (` e `[rustos] user: demand paging: ` (a pilha e o `.bss` sob demanda, a página zero e a cópia dela) | 4c, paginação sob demanda (**feito**) |
+| `[rustos] tlb shootdown: ok (cpu` (o teste entre CPUs; na máquina de uma CPU só sai `skipped, one cpu`, que o smoke recusa) | 4c, *shootdown* (**feito**) |
 | `[rustos] mitigations: ` (nos dois modos) | 4e, parte 1 (**feito**) |
 | `[rustos] cpu features: ` (só o modo de teste) | 4e, parte 1 (**feito**) |
 | `[rustos] user: self-test ok` (handles, SIMD, falha, canal) | 4d |
@@ -1581,7 +1653,7 @@ Regra do projeto: o mesmo comando antes e depois, nas duas ISAs ([SDD 07](07_des
 | **Syscall nula** | `user/tests/null_syscall`: 1 M de `nop`, tempo por `rdtsc`/`cntvct`, mediana de 5, aquecimento descartado |
 | **Entrada com KPTI** | O mesmo laço com `kpti=on` e `off` |
 | **Criação de processo** | `process_create`, VMOs e mapeamentos de um programa mínimo, `thread_create`, `process_exit` e espera do `TERMINATED`, em laço |
-| **Falta de página de usuário** | Três laços sobre 64 MiB: primeiro toque de escrita (zera um frame), leitura de página não tocada (página zero), escrita sobre a página zero (COW). Tempo por página |
+| **Falta de página de usuário** | Três laços sobre 64 MiB: primeiro toque de escrita (zera um frame), leitura de página não tocada (página zero), escrita sobre a página zero (COW). Tempo por página. **Medida na 4c** (`user/tests/lazy`, três laços de 16 MiB; [SDD 07](07_desempenho_e_recursos.md#paginação-sob-demanda-e-shootdown-fatia-4c)) |
 | **Troca entre processos** | Dois processos passam a vez por canal com `object_wait_one` (o análogo do `lat_ctx`), com e sem PCID/ASID e com e sem KPTI |
 | **Memória do menor processo** | Frames de um `hello`: tabelas de página, código, dados, pilha de usuário, pilha de kernel, tabela de handles. É a medida da meta de memória |
 | **Mitigações** | Custo de cada uma da [seção](#mitigações-de-cpu), ligada e desligada |
@@ -1621,7 +1693,8 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 | Dívida 0012, exceção de usuário só para a CPU | **Paga na 4a**: a origem se distingue pelo `CS` (x86_64) ou pelo grupo do vetor (aarch64), o processo morre e o kernel segue; o canal de eventos fecha na 4d |
 | [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md) SIMD sem trap | **Paga** na 4d: `simd: true` em toda thread de usuário |
 | Dívida 0059, estado do ChaCha20 derramado na pilha | **Paga na 4a**: a volta ao usuário repinta a pilha do kernel abaixo do quadro, até 128 bytes de pilha limpa (a heurística é a [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md)); custo medido no laço de syscall nula, com e sem a limpeza ([SDD 07](07_desempenho_e_recursos.md#syscall-nula-e-limpeza-da-pilha-fatia-4a)) |
-| [DEBT-0055](../tech-debt/0055-kernel-sem-tlb-shootdown.md) Kernel sem *shootdown* de TLB | O gatilho (espaço de usuário compartilhado entre núcleos) dispara. **Entra e é paga na 4c**, quando há thread em outra CPU e `unmap`: vetor novo de IPI no x86_64 sobre o mecanismo que já existe, `tlbi ...is` no aarch64 ([seção](#shootdown-de-tlb-debt-0055)). A regra de geração de PCID/ASID é da 4e |
+| Dívida 0055 Kernel sem *shootdown* de TLB | **Paga na 4c**: vetor novo de IPI no x86_64 sobre o mecanismo que já existe, `tlbi ...is` no aarch64 ([seção](#shootdown-de-tlb-paga-a-dívida-0055-na-4c)); o que sobra (medida em KVM, faixa em lote) é a [DEBT-0122](../tech-debt/0122-shootdown-sem-medida-em-kvm-nem-lote.md). A regra de geração de PCID/ASID é da 4e |
+| Dívida 0085 Pilha de usuário mapeada inteira | **Paga na 4c**: a pilha é região preguiçosa; o menor processo caiu de 32 para 17 frames ([SDD 07](07_desempenho_e_recursos.md#paginação-sob-demanda-e-shootdown-fatia-4c)) |
 | [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md) Zerar página no x86 sem medida em hardware | O zerar entra no caminho da **falta de página de usuário**. A 4f mede a falta (primeiro toque, página zero, COW) nas duas ISAs; o do x86_64 só decide `stosq` contra `stosb` sob KVM ou metal (o gatilho da dívida): sob TCG a 4f registra o número e **deixa a dívida aberta** |
 | [DEBT-0054](../tech-debt/0054-heap-com-lock-global.md) Heap com lock global | O gatilho dispara (4c, processos criados em N núcleos). Medir no `bench`; pagar se a disputa passar de 10% |
 | [DEBT-0057](../tech-debt/0057-tsc-entre-nucleos-sem-verificacao.md) TSC entre núcleos | Não paga; o contrato de `clock_get_monotonic` diz "monotônico por CPU" no x86_64 até lá |

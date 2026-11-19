@@ -89,7 +89,7 @@ const BENCH_REFUSED: &str = "bench: not in this build";
 
 /// O que só o modo de teste imprime: se uma destas faltar, a linha de comando se perdeu e o
 /// boot que passou foi o normal.
-const SELFTEST_LINES: [(&str, &str); 19] = [
+const SELFTEST_LINES: [(&str, &str); 23] = [
     (
         "[rustos] cpu features: ",
         "os recursos de CPU das mitigações",
@@ -127,8 +127,24 @@ const SELFTEST_LINES: [(&str, &str); 19] = [
         "o autoteste dos casos de usuário",
     ),
     (
-        "[rustos] initramfs: 2 files, ",
-        "a leitura do initramfs (o `init` e o `big`)",
+        "[rustos] initramfs: 3 files, ",
+        "a leitura do initramfs (o `init`, o `big` e o `lazy`)",
+    ),
+    (
+        "[user] lazy: ok (",
+        "o `lazy`: pilha e `.bss` sob demanda, com a página zero e a cópia dela",
+    ),
+    (
+        "[rustos] user: demand paging: ",
+        "as faltas de página resolvidas pelo kernel (página zero, frame novo, cópia)",
+    ),
+    (
+        "[rustos] tlb shootdown: ok (cpu ",
+        "o teste de invalidação do TLB entre CPUs",
+    ),
+    (
+        "[rustos] tlb shootdown ring: ok (",
+        "o estresse de invalidação do TLB em anel com todas as CPUs",
     ),
 ];
 /// O que o boot normal confere, além do que o `REQUIRED` tem de comum aos dois modos.
@@ -657,8 +673,14 @@ fn stream_chunks(mut stdout: impl Read, sender: &mpsc::Sender<String>) {
     }
 }
 
+/// Imprime o que o kernel disse e, depois da marca, o que os programas de usuário disseram: o
+/// prefixo `[user]` mostra de quem é cada linha (só as do kernel valem para os gates).
 fn print_kernel_lines(log: &str) {
-    for line in kernel_lines(log) {
+    for line in log
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| line.starts_with("[rustos]") || line.starts_with("[user] "))
+    {
         println!("  {}", line.trim_end());
     }
 }

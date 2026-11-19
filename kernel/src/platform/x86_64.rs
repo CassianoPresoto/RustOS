@@ -12,7 +12,8 @@ pub use rustos_arch_x86_64::fpu::{
 };
 use rustos_arch_x86_64::ioapic::{IOAPIC_BASE, IoApic};
 use rustos_arch_x86_64::lapic::{
-    VECTOR_KEYBOARD, VECTOR_RESCHEDULE, VECTOR_SERIAL, VECTOR_SPURIOUS, VECTOR_STOP, VECTOR_TIMER,
+    VECTOR_KEYBOARD, VECTOR_RESCHEDULE, VECTOR_SERIAL, VECTOR_SHOOTDOWN, VECTOR_SPURIOUS,
+    VECTOR_STOP, VECTOR_TIMER,
 };
 use rustos_arch_x86_64::pic;
 use rustos_arch_x86_64::pit::{self, Pit, Reading};
@@ -460,6 +461,7 @@ pub fn irq_source(irq: Irq) -> IrqSource {
         Ok(VECTOR_KEYBOARD) => IrqSource::Keyboard,
         Ok(VECTOR_RESCHEDULE) => IrqSource::Reschedule,
         Ok(VECTOR_STOP) => IrqSource::Stop,
+        Ok(VECTOR_SHOOTDOWN) => IrqSource::Shootdown,
         Ok(VECTOR_SPURIOUS) => IrqSource::Spurious,
         _ => IrqSource::Unknown,
     }
@@ -558,6 +560,18 @@ pub fn cpu_local() -> X86CpuLocal {
 pub unsafe fn ipi() -> X86Ipi {
     // SAFETY: o contrato desta função.
     unsafe { X86Ipi::new() }
+}
+
+/// Manda o IPI de invalidação do TLB à CPU `hw_id`.
+pub fn send_shootdown(hw_id: u64) {
+    // SAFETY: só há CPU de destino com outras CPUs online, e o APIC desta já foi publicado.
+    unsafe { ipi() }.send_shootdown(hw_id);
+}
+
+/// Invalida `pages` páginas a partir de `start` no TLB desta CPU.
+pub fn flush_pages(start: u64, pages: u64) {
+    // SAFETY: ring 0, com a IRQ mascarada ou dentro dela.
+    unsafe { rustos_arch_x86_64::flush_pages(start, pages) };
 }
 
 /// O identificador que o IPI usa para esta CPU: o LAPIC ID.

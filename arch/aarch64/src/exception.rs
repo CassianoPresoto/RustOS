@@ -377,10 +377,12 @@ fn synchronous(frame: &mut Frame, index: u64, handlers: &Handlers) {
     let kind = esr::decode(syndrome, far);
     if index == 4
         && usercopy::is_usercopy_fault(frame.elr)
-        && matches!(kind, FaultKind::PageFault { .. })
+        && let FaultKind::PageFault { write, .. } = kind
         && far < USER_TOP
     {
-        frame.elr = usercopy::recovery_address();
+        if !(handlers.copy_fault)(far, write) {
+            frame.elr = usercopy::recovery_address();
+        }
         return;
     }
     let from_user = index == EL0_SYNC;
@@ -392,7 +394,7 @@ fn synchronous(frame: &mut Frame, index: u64, handlers: &Handlers) {
         user_sp: if from_user { frame.sp_el0 } else { 0 },
     };
     (handlers.fault)(&fault);
-    if !kind.is_recoverable() {
+    if !kind.is_recoverable() && !from_user {
         park();
     }
     if kind == FaultKind::Breakpoint {

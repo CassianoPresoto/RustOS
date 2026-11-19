@@ -25,6 +25,7 @@ members = [
     "user/rt",
     "user/init",
     "user/tests/big",
+    "user/tests/lazy",
     "xtask",
 ]
 # `cargo build`/`test` sem `-p` rodam no host; o kernel só compila para os alvos

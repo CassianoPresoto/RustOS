@@ -95,6 +95,8 @@ pub enum MapError {
     HugePageInTheWay(VirtAddr),
     OutOfFrames,
     OutOfAddressSpace,
+    /// Não há folha de 4 KiB em `virt`: nada a trocar nem a remover.
+    NotMapped(VirtAddr),
     /// A CPU não tem o que o mapeamento pede (ex.: NX, write-combining).
     Unsupported(&'static str),
     /// Gravável e executável ao mesmo tempo: o mapeador recusa (guidelines 09).
@@ -169,6 +171,10 @@ pub trait PageFormat {
 pub trait MmuControl {
     /// A entrada de `virt` mudou: a CPU tem de enxergá-la (`invlpg`; barreiras).
     fn entry_changed(&self, virt: VirtAddr);
+    /// A entrada de `virt` foi removida ou perdeu permissão: nenhuma tradução velha dela pode
+    /// sobreviver quando a chamada volta. No x86_64 vale só para esta CPU (o *shootdown* é do
+    /// núcleo); no aarch64 o `tlbi ...is` alcança todas.
+    fn entry_removed(&self, virt: VirtAddr);
     /// Passa a traduzir pela raiz `root` e descarta o TLB.
     fn activate(&self, root: PhysAddr);
 }
