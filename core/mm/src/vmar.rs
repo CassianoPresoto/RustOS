@@ -233,6 +233,9 @@ pub enum FaultPlan {
     MapFresh,
     /// Aloca um frame zerado e o põe no lugar da página zero, gravável; invalida a entrada.
     CopyZero,
+    /// A página ausente é de um objeto (`Backing`): o chamador acha o frame dele, ou cria um, e
+    /// o mapeia com a permissão da região. A página zero compartilhada nunca serve a objeto.
+    MapObject,
     /// A página já serve ao acesso (outra CPU a resolveu antes, ou o TLB estava velho): só repete.
     Retry,
 }
@@ -465,7 +468,9 @@ impl<S: AsRef<[Region]> + AsMut<[Region]>> Vmar<S> {
     ) -> Result<FaultPlan, FaultError> {
         let region = self.check_fault(addr, access)?;
         match (mapped, access) {
-            (Mapped::Private, _) | (Mapped::ZeroPage, Access::Read) => Ok(FaultPlan::Retry),
+            (Mapped::Private, _) => Ok(FaultPlan::Retry),
+            (Mapped::Absent, _) if region.attrs.backing.is_some() => Ok(FaultPlan::MapObject),
+            (Mapped::ZeroPage, Access::Read) => Ok(FaultPlan::Retry),
             _ if !region.attrs.lazy => Err(FaultError::Unbacked),
             (_, Access::Execute) => Err(FaultError::Permission),
             (Mapped::Absent, Access::Read) => Ok(FaultPlan::MapZero),
@@ -1033,6 +1038,33 @@ mod tests {
             vmar.plan_fault(at, Access::Read, Mapped::ZeroPage),
             Ok(FaultPlan::Retry)
         );
+    }
+
+    #[test]
+    fn an_absent_page_of_an_object_goes_to_the_object_never_to_the_zero_page() {
+        let mut vmar = vmar::<4>();
+        let backing = Backing {
+            object: NonZeroU32::new(7).unwrap(),
+            page_offset: 3,
+        };
+        let attrs = Attrs::new(Kind::Mapping, Perms::READ.union(Perms::WRITE)).with_backing(backing);
+        vmar.reserve(LO, 2 * PAGE, attrs).unwrap();
+        for access in [Access::Read, Access::Write] {
+            assert_eq!(
+                vmar.plan_fault(LO + PAGE, access, Mapped::Absent),
+                Ok(FaultPlan::MapObject)
+            );
+        }
+        assert_eq!(
+            vmar.plan_fault(LO, Access::Execute, Mapped::Absent),
+            Err(FaultError::Permission)
+        );
+        assert_eq!(
+            vmar.plan_fault(LO, Access::Read, Mapped::Private),
+            Ok(FaultPlan::Retry)
+        );
+        let region = vmar.check_fault(LO + PAGE, Access::Read).unwrap();
+        assert_eq!(region.object_page(LO + PAGE), Some((backing.object, 4)));
     }
 
     #[test]

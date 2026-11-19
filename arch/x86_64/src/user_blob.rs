@@ -57,9 +57,10 @@ rustos_user_hello:
     syscall
     cmp rax, -7
     jne .Lfail4
-    mov eax, {thread_exit}
+    xor edi, edi
+    mov eax, {process_kill}
     syscall
-    cmp rax, -7
+    cmp rax, -2
     jne .Lfail4
     mov edi, 1
     mov esi, 0x20000
@@ -197,7 +198,7 @@ rustos_user_blob_end:
     process_exit = const Syscall::ProcessExit as u64,
     clock = const Syscall::ClockGetMonotonic as u64,
     random = const Syscall::RandomGet as u64,
-    thread_exit = const Syscall::ThreadExit as u64,
+    process_kill = const Syscall::ProcessKill as u64,
 );
 
 unsafe extern "C" {

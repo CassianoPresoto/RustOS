@@ -154,7 +154,9 @@ impl<T> Transits<T> {
         self.items[..self.len].iter().flatten()
     }
 
-    pub(crate) fn take(&mut self, index: usize) -> Option<Transit<T>> {
+    /// Tira o handle em trânsito da posição `index` (`None` se já saiu ou não existe): quem o recebe
+    /// o põe numa tabela com `commit_moved` ou o fecha com `close`.
+    pub fn take(&mut self, index: usize) -> Option<Transit<T>> {
         self.items.get_mut(index)?.take()
     }
 }
