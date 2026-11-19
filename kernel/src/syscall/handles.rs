@@ -6,7 +6,7 @@ use alloc::sync::Arc;
 
 use rustos_hal::abi::{
     CHANNEL_MAX_BYTES, Handle, ReadActual, Rights, Status, SyscallReturn, USER_HANDLE_ARRAY_MAX,
-    signals,
+    signals, wait_deadline,
 };
 use rustos_mm::UserRange;
 use rustos_object::rights::{self, required};
@@ -61,8 +61,23 @@ pub fn handle_duplicate(raw: u64, bits: u64) -> Outcome {
 /// `handle_replace(h, rights)`: o velho sai sempre que existe, e o fechamento é fora do lock.
 pub fn handle_replace(raw: u64, bits: u64) -> Outcome {
     let handle = handle_from_raw(raw)?;
-    let wanted = rights::parse(u32_arg(bits)?)?;
-    let replaced = current(|p| Ok(p.table().lock().replace(handle, wanted)))?;
+    let wanted = u32_arg(bits).and_then(rights::parse);
+    let replaced = current(|p| {
+        let mut table = p.table().lock();
+        Ok(match wanted {
+            Ok(wanted) => table.replace(handle, wanted),
+            Err(status) => Err(match table.remove(handle) {
+                Ok(closed) => ReplaceFailed {
+                    status,
+                    closed: Some(closed),
+                },
+                Err(status) => ReplaceFailed {
+                    status,
+                    closed: None,
+                },
+            }),
+        })
+    })?;
     match replaced {
         Ok(new) => Ok(new.raw()),
         Err(ReplaceFailed { status, closed }) => {
@@ -115,8 +130,11 @@ fn wait(object: &Obj, wanted: u32, deadline_ns: u64) -> Result<u32, Status> {
             .map(|waiters| (waiters, waiters.register()));
         let observed = object.signals();
         let now = platform::now_ns();
-        if observed & wanted == 0 && now.is_some_and(|now| now < deadline_ns) {
-            task::block_until(deadline_ns);
+        let until = now
+            .and_then(|now| wait_deadline(now, deadline_ns))
+            .unwrap_or(u64::MAX);
+        if observed & wanted == 0 && now.is_some_and(|now| now < until) {
+            task::block_until(until);
         }
         if let Some((waiters, bit)) = registered {
             waiters.unregister(bit);
@@ -126,7 +144,7 @@ fn wait(object: &Obj, wanted: u32, deadline_ns: u64) -> Result<u32, Status> {
         }
         match now {
             None => return Err(Status::NotSupported),
-            Some(now) if deadline_ns <= now => return Err(Status::TimedOut),
+            Some(now) if until <= now => return Err(Status::TimedOut),
             Some(_) => {}
         }
     }
@@ -250,8 +268,8 @@ pub fn channel_read_call(args: &[u64; 6]) -> Outcome {
         handles_cap,
         actual_ptr,
     ] = *args;
-    let actual_range = UserRange::new(actual_ptr, 16).map_err(|_| Status::OutOfRange)?;
     let channel = handle_from_raw(channel)?;
+    let actual_range = UserRange::new(actual_ptr, 16).map_err(|_| Status::OutOfRange)?;
     let cap = |raw: u64| usize::try_from(raw).unwrap_or(usize::MAX);
     let put_actual = |actual: ReadActual| {
         let mut raw = [0_u8; 16];

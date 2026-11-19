@@ -1,12 +1,11 @@
-//! Os objetos do kernel sobre o `core/object` (SDD 17, fatia 4c): o enum fechado de `Arc`s que
-//! entra na tabela de handles, o `Lock` sobre o `IrqLock`, a memória dos slots e a lista de
-//! trabalho do fechamento. A ordem de lock é tabela, depois o lock do par de pontas, depois as filas
-//! do escalonador; nenhum outro lock se toma por dentro destes.
+//! Os objetos do kernel sobre o `core/object` (SDD 17, fatia 4c): o enum fechado de `Arc`s, o `Lock`
+//! do `IrqLock`, a memória dos slots e a lista de trabalho. Ordem de lock: tabela, par de pontas,
+//! fila do escalonador; e tabela, heap, frames (o `try_reserve` dos slots). Nenhum outro se toma.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 
 use rustos_hal::abi::{MAX_CHANNEL_ENDS, signals};
 use rustos_object::{
@@ -193,7 +192,8 @@ fn empty_pair() -> Arc<Pair> {
     unsafe { pair.assume_init() }
 }
 
-static NEXT_CHANNEL_ID: AtomicU32 = AtomicU32::new(1);
+/// O número do próximo par: 64 bits, que não dão a volta (o kernel só existe em 64 bits).
+static NEXT_CHANNEL_ID: AtomicUsize = AtomicUsize::new(1);
 
 impl Pair {
     /// Roda `f` sob o lock do par e, solto o lock, acorda a ponta cujo sinal mudou.
@@ -231,12 +231,12 @@ pub struct ChannelEnd {
 pub fn new_channel(charges: [Option<Charge>; 2]) -> (Obj, Obj) {
     let id = NEXT_CHANNEL_ID.fetch_add(1, Ordering::Relaxed);
     let pair = empty_pair();
-    pair.channel.lock().assign_id(id as usize);
+    pair.channel.lock().assign_id(id);
     let [charge_a, charge_b] = charges;
     let end = |side, charge| {
         Obj::Channel(Arc::new(ChannelEnd {
             handles: HandleCount::new(0),
-            id: id as usize,
+            id,
             side,
             pair: Arc::clone(&pair),
             charge,

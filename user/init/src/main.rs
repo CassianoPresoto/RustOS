@@ -54,8 +54,7 @@ fn receive(channel: Handle) -> Option<([u8; 64], usize, Option<Handle>)> {
 }
 
 /// A mensagem de boot e o console por handle: o que o kernel entregou, com os direitos que disse.
-fn boot_channel(env: &Env) -> Result<(Boot, Handle), &'static str> {
-    let boot = boot::attach_console(env).ok_or("the boot message and its console")?;
+fn boot_channel(env: &Env, boot: Boot) -> Result<Handle, &'static str> {
     let channel = env.boot_channel().ok_or("a boot channel")?;
     let (process, console) = boot
         .process
@@ -76,7 +75,7 @@ fn boot_channel(env: &Env) -> Result<(Boot, Handle), &'static str> {
     if sys::object_wait_one(process, signals::TERMINATED, 0) != Err(Status::TimedOut) {
         return Err("the init not being terminated");
     }
-    Ok((boot, console))
+    Ok(console)
 }
 
 /// Canal, espera e transferência com um canal próprio: escreve, espera `READABLE`, lê, passa um
@@ -125,8 +124,8 @@ fn own_channel(console: Handle) -> Result<(), &'static str> {
     sys::handle_close(b).map_err(|_| "handle_close of the second end")
 }
 
-fn handles(env: &Env) -> bool {
-    let result = boot_channel(env).and_then(|(_, console)| own_channel(console));
+fn handles(env: &Env, boot: Boot) -> bool {
+    let result = boot_channel(env, boot).and_then(own_channel);
     match result {
         Ok(()) => {
             println!("init: boot channel, console and handles ok");
@@ -139,7 +138,14 @@ fn handles(env: &Env) -> bool {
     }
 }
 
+/// Código de saída quando o `init` não consegue anexar o console: sem ele nenhuma linha sai, então
+/// o número que o kernel registra (`pid 1 exited (code 99`) é o diagnóstico.
+const EXIT_NO_CONSOLE: i64 = 99;
+
 fn main(env: &Env) -> i64 {
+    let Some(boot) = boot::attach_console(env) else {
+        return EXIT_NO_CONSOLE;
+    };
     let mut code = 0;
     for (number, (what, ok)) in (1_i64..).zip(checks(env)) {
         if !ok {
@@ -149,7 +155,7 @@ fn main(env: &Env) -> i64 {
             }
         }
     }
-    if !handles(env) && code == 0 {
+    if !handles(env, boot) && code == 0 {
         code = 101;
     }
     let first = sys::clock_get_monotonic();
