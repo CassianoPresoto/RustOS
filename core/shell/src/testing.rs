@@ -5,8 +5,8 @@ use core::fmt;
 use rustos_hal::{BootTimeline, BootloaderId};
 
 use crate::{
-    BenchReport, CpuInfo, DisplayInfo, Host, MemoryInfo, MicroBench, ScaleSample, StormSample,
-    SystemInfo, TaskInfo, TaskState,
+    BenchReport, CpuInfo, DisplayInfo, Host, Listing, MemoryInfo, MicroBench, ProgramInfo,
+    RunOutcome, ScaleSample, StormSample, SystemInfo, TaskInfo, TaskState,
 };
 
 pub(crate) fn info() -> SystemInfo<'static> {
@@ -52,6 +52,10 @@ pub(crate) struct FakeHost {
     pub(crate) bench: Option<BenchReport>,
     pub(crate) micro: Option<MicroBench>,
     pub(crate) alternate: bool,
+    pub(crate) listing: Listing,
+    /// O que `run_program` responde, e o que ele recebeu da última chamada.
+    pub(crate) outcome: RunOutcome,
+    pub(crate) last_run: core::cell::RefCell<Option<(String, bool)>>,
 }
 
 impl FakeHost {
@@ -64,6 +68,9 @@ impl FakeHost {
             keymap: core::cell::Cell::new(Some("us")),
             random: Some(0x0123_4567_89ab_cdef),
             alternate: true,
+            listing: Listing::Done,
+            outcome: RunOutcome::Exited { pid: 4, code: 0 },
+            last_run: core::cell::RefCell::new(None),
             micro: Some(MicroBench {
                 zero_kib_tenths_ns: 153,
                 zero_page_tenths_ns: 205,
@@ -150,6 +157,7 @@ impl Host for FakeHost {
         let task = |id, name, state, cpu_ns, simd| TaskInfo {
             id,
             name,
+            pid: (name == "user").then_some(id + 40),
             state,
             cpu: u8::try_from(id).unwrap(),
             cpu_ns,
@@ -161,6 +169,7 @@ impl Host for FakeHost {
         visit(&task(0, "idle", TaskState::Ready, 250_000_000, false));
         visit(&task(1, "shell", TaskState::Running, 12_345_678_901, false));
         visit(&task(2, "worker", TaskState::Sleeping, 1_000_000, true));
+        visit(&task(3, "user", TaskState::Blocked, 2_000_000, true));
     }
 
     fn cpus(&self, visit: &mut dyn FnMut(&CpuInfo)) {
@@ -184,6 +193,25 @@ impl Host for FakeHost {
 
     fn bench(&self) -> Option<BenchReport> {
         self.bench
+    }
+
+    fn programs(&self, visit: &mut dyn FnMut(&ProgramInfo<'_>)) -> Listing {
+        if self.listing == Listing::Done {
+            visit(&ProgramInfo {
+                name: "init",
+                bytes: 11_584,
+            });
+            visit(&ProgramInfo {
+                name: "hello",
+                bytes: 4_096,
+            });
+        }
+        self.listing
+    }
+
+    fn run_program(&self, name: &str, wait: bool) -> RunOutcome {
+        *self.last_run.borrow_mut() = Some((name.to_owned(), wait));
+        self.outcome
     }
 
     fn micro_bench(&self) -> Option<MicroBench> {

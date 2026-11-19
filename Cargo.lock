@@ -146,6 +146,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-user-count"
+version = "0.1.0"
+dependencies = [
+ "rustos-user-rt",
+]
+
+[[package]]
+name = "rustos-user-crash"
+version = "0.1.0"
+dependencies = [
+ "rustos-user-rt",
+]
+
+[[package]]
+name = "rustos-user-hello"
+version = "0.1.0"
+dependencies = [
+ "rustos-user-rt",
+]
+
+[[package]]
 name = "rustos-user-init"
 version = "0.1.0"
 dependencies = [
@@ -159,6 +180,13 @@ dependencies = [
  "rustos-arch-aarch64-user",
  "rustos-arch-x86_64-user",
  "rustos-hal",
+]
+
+[[package]]
+name = "rustos-user-sysinfo"
+version = "0.1.0"
+dependencies = [
+ "rustos-user-rt",
 ]
 
 [[package]]

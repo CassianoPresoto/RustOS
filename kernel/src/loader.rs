@@ -2,13 +2,6 @@
 //! ELF com o `core/elf`, copia cada `PT_LOAD` para frames novos, registra as regiões no `Vmar` do
 //! processo e monta a pilha inicial com guarda. A pilha e o `.bss` de páginas inteiras são regiões
 //! preguiçosas: reservadas, sem frames até o primeiro toque. Sem objeto VMO nem VMAR e sem handle.
-#![cfg_attr(
-    not(feature = "selftest"),
-    allow(
-        dead_code,
-        reason = "só o modo de teste lança processo até a 4c dar trabalho ao init"
-    )
-)]
 
 use alloc::boxed::Box;
 use alloc::vec;
