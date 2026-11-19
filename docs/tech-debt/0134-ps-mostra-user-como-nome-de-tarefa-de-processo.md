@@ -3,7 +3,7 @@ id: DEBT-0134
 title: O `ps` mostra `user` como nome de toda tarefa de processo
 status: Open
 date: 2026-11-19
-trigger: O primeiro `ps` com dois programas diferentes rodando ao mesmo tempo, ou o `process_create` da parte 3 da 4c
+trigger: O primeiro `ps` com dois programas diferentes rodando ao mesmo tempo, ou o `ps` mostrar processos criados por `process_create`
 paid_date:
 ---
 
@@ -19,7 +19,7 @@ O nome do arquivo vive no initramfs, que é `'static`, mas o `ps` e a tarefa gua
 
 ## Gatilho
 
-O `ps` com mais de um processo vivo ao mesmo tempo em uso real, ou o `process_create` (o nome do filho vem do pai).
+O `ps` com mais de um processo vivo ao mesmo tempo em uso real, ou o `ps` mostrar o filho de um `process_create` (o nome vem do pai, e a chamada já valida `name_ptr` e `name_len` sem guardar).
 
 ## Como pagar
 

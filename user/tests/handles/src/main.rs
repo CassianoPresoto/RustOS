@@ -503,11 +503,11 @@ fn creation(c: &mut Checks) {
         }
     }
     c.expect(
-        "256 ends fit, so the failed creations left no charge",
-        made == 256,
+        "the charge stops the ends at the byte cap, never past 256, and a failed creation charges nothing",
+        (100..=256).contains(&made),
     );
     c.status(
-        "the 257th end",
+        "the end after the cap",
         sys::channel_create().map(|_| 0),
         Status::NoMemory,
     );

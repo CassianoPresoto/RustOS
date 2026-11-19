@@ -20,6 +20,10 @@ raw-syscalls = []
 [dependencies]
 rustos-hal.workspace = true
 
+[target.'cfg(target_os = "none")'.dependencies]
+rustos-elf.workspace = true
+rustos-cpio.workspace = true
+
 [target.'cfg(all(target_os = "none", target_arch = "x86_64"))'.dependencies]
 rustos-arch-x86_64-user.workspace = true
 

@@ -33,5 +33,5 @@ O primeiro programa que crie o ciclo, ou os grupos de recursos da fase 9, o que 
 ## Como pagar
 
 Marcar a partir dos handles em tabela e varrer os canais não marcados, ou contar a alcançabilidade
-por grupo de recursos na fase 9. Antes disso, o `process_create` da parte 3 precisa de um teto em **bytes**
-por processo (filas e mensagens), que a [DEBT-0110](0110-objeto-e-mensagem-abortam-na-falta-de-heap.md) também pede.
+por grupo de recursos na fase 9. O teto em **bytes** por processo (filas e mensagens) já limita cada ciclo à conta do criador
+(`PROCESS_BYTES_MAX`, 512 KiB), mas o ciclo cobrado a quem morreu segue vivo.

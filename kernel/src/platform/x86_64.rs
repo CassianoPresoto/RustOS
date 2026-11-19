@@ -548,6 +548,11 @@ pub fn trigger(test: FaultTest) -> bool {
     true
 }
 
+#[allow(
+    clippy::inline_always,
+    reason = "no caminho da syscall nula: um quadro a mais passa da janela que o `arch/` repinta"
+)]
+#[inline(always)]
 pub fn cpu_local() -> X86CpuLocal {
     // SAFETY: o kernel roda em ring 0.
     unsafe { X86CpuLocal::new() }

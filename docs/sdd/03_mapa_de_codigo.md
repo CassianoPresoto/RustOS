@@ -129,7 +129,7 @@ EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_es
 | Algoritmo ou política (alocador, escalonador, cache, fila) | crate de `core/` do assunto |
 | Estado por CPU (fila, carga, contadores) | `kernel/src/percpu.rs`; o registrador que o acha (`GS`, `TPIDR_EL1`) é da porta `hal::CpuLocal`, em `arch/` |
 | Subir um núcleo, o IPI | `kernel/src/smp.rs`, `task.rs`; o ICR e a SGI em `arch/` (porta `hal::Ipi`) |
-| Processo de usuário, espaço de endereçamento, carregador, syscall | `kernel/src/{process,uspace,loader,syscall}.rs`; a entrada e a saída (`SYSCALL`, `SVC`, `swapgs`, `eret`) e a cópia usuário↔kernel em `arch/<isa>/src/{traps,exception,user,usercopy}.rs`; o contrato em `core/hal/src/abi.rs` |
+| Processo de usuário, thread, espaço de endereçamento, VMO, carregador, syscall | `kernel/src/{process,uspace,loader,vmo,syscall}.rs` (a memória do processo e o VMAR em `process/mem.rs`; as chamadas de memória e de processo em `syscall/{memory,tasks}.rs`); a entrada e a saída (`SYSCALL`, `SVC`, `swapgs`, `eret`) e a cópia usuário↔kernel em `arch/<isa>/src/{traps,exception,user,usercopy}.rs`; o contrato em `core/hal/src/abi.rs` |
 | Estado de uma tarefa, pilha, troca de contexto, preempção, migração | `kernel/src/task.rs`; salvar e restaurar registrador, em `arch/<isa>/src/context.rs` e `fpu.rs` |
 | Cifra, hash ou gerador de números aleatórios | `core/crypto/`; a semente do hardware vem por porta do `hal` |
 | Desenho de pixel, glifo da fonte | `core/gfx/` |
@@ -138,6 +138,7 @@ EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_es
 | Tabela de handles, direitos, contagem de handles, fila e sinais do canal, transferência de handles | `core/object/`; os objetos reais (Process, Thread, VMO, VMAR, ponta de canal), o lock e a memória dos slots vêm do `kernel/` ([SDD 17](17_processos_isolamento_e_syscalls.md#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) |
 | Validar um executável ELF e dizer o que mapear | `core/elf/`; os limites da ISA e da faixa do usuário vêm do chamador (`elf::Limits`) |
 | Programa de usuário, o runtime dele, o `_start` e o stub de syscall | `user/` (programa e `rt`); `arch/<isa>-user` (o `asm!`) |
+| Criar um processo filho pela ABI (ler o ELF, preencher e mapear os VMOs, pilha, mensagem de boot) | `user/rt/src/{spawn,vm}.rs`; a pilha é o `hal::abi::InitialStack`, o mesmo código do carregador do kernel |
 | Comando do shell embutido | `core/shell/`; o dado do sistema chega pela porta `Host` |
 | Tema, barra do topo, como a grade vira pixel | `kernel/src/screen.rs` |
 | Vulnerabilidade de CPU, mitigação e a linha `mitigations:` | a decodificação do CPUID e dos registradores e a regra do Linux em `arch/<isa>/src/mitigation.rs` (puro); o tipo `Vulns`, a política `kpti=` e o texto da linha em `core/hal/src/mitigation.rs`; o clamp de índice em `core/hal/src/nospec.rs` (a `CSDB` do aarch64 em `arch/aarch64/src/nospec.rs`); a linha em `kernel/src/mitigation.rs` |

@@ -190,8 +190,8 @@ const SELFTEST_LINES: [(&str, &str); 23] = [
         "o autoteste dos casos de usuário",
     ),
     (
-        "[rustos] initramfs: 8 files, ",
-        "a leitura do initramfs (o `init`, as quatro demonstrações e os três de teste)",
+        "[rustos] initramfs: 10 files, ",
+        "a leitura do initramfs (o `init`, as quatro demonstrações e os cinco de teste)",
     ),
     (
         "[user] lazy: ok (",

@@ -165,8 +165,12 @@ struct Slot {
     user_root: AtomicU64,
     /// O topo da pilha do kernel da tarefa de usuário (a pilha de entrada de syscall e exceção).
     user_top: AtomicU64,
-    /// O `Process` da tarefa (`Box::into_raw`), ou zero.
+    /// A thread de usuário da tarefa (`Arc::into_raw` de um `ThreadObj`), ou zero.
     process: AtomicUsize,
+    /// `process_kill` pediu que a thread desta tarefa saia: a volta ao usuário confere só isto.
+    kill: AtomicBool,
+    /// A página da última falta que só repetiu (`Retry`), mais um; zero se a última não repetiu.
+    retry_page: AtomicU64,
     /// O número do processo que a tarefa roda, só para o `ps`; zero sem processo.
     pid: AtomicU32,
     /// O endereço da máscara de CPUs do espaço que a tarefa roda (`UserSpace::active_addr`), ou zero.
@@ -190,6 +194,8 @@ impl Slot {
             user_root: AtomicU64::new(0),
             user_top: AtomicU64::new(0),
             process: AtomicUsize::new(0),
+            kill: AtomicBool::new(false),
+            retry_page: AtomicU64::new(0),
             pid: AtomicU32::new(0),
             user_active: AtomicUsize::new(0),
             meta: IrqLock::new(Meta {
@@ -221,6 +227,11 @@ const _: () = assert!(MAX_TASKS <= 64);
 
 static TASKS: [Slot; MAX_TASKS] = [const { Slot::new() }; MAX_TASKS];
 
+#[allow(
+    clippy::inline_always,
+    reason = "no caminho da syscall nula: um quadro a mais passa da janela que o `arch/` repinta"
+)]
+#[inline(always)]
 fn slot(id: usize) -> &'static Slot {
     &TASKS[id]
 }
@@ -498,6 +509,8 @@ fn start(id: usize, config: Spawn) -> Result<bool, TaskError> {
     target.user_root.store(0, Ordering::Relaxed);
     target.user_top.store(0, Ordering::Relaxed);
     target.process.store(0, Ordering::Relaxed);
+    target.retry_page.store(0, Ordering::Relaxed);
+    target.kill.store(false, Ordering::Relaxed);
     target.pid.store(0, Ordering::Relaxed);
     target.user_active.store(0, Ordering::Relaxed);
     target.cpu_ns.store(0, Ordering::Relaxed);
@@ -1060,7 +1073,7 @@ pub fn current() -> TaskId {
     TaskId::new(percpu::pinned(|cpu| cpu.current.load(Ordering::Relaxed)))
 }
 
-/// Liga a tarefa corrente ao processo de usuário `process` (o `Box::into_raw` de um `Process`) com
+/// Liga a tarefa corrente à thread de usuário `process` (o `Arc::into_raw` de um `ThreadObj`) com
 /// a raiz `root`: o espaço e a pilha de entrada desta CPU passam a ser os dele e as próximas trocas
 /// os repõem. `active` é o endereço da máscara de CPUs do espaço, que vale até `unbind_user`. Deixa a
 /// IRQ mascarada, para a entrada no usuário. Devolve o topo da pilha do kernel.
@@ -1090,15 +1103,15 @@ pub fn set_pid(pid: u32) {
         .store(pid, Ordering::Relaxed);
 }
 
-/// O `Process` da tarefa corrente, ou `None` se ela não roda um. Para o tratador de falta de página.
+/// A thread de usuário da tarefa corrente, ou `None` se ela não roda uma. Para o tratador de falta.
 pub fn current_process() -> Option<usize> {
     let here = percpu::current();
     let current = slot(here.current.load(Ordering::Relaxed) as usize);
     Some(current.process.load(Ordering::Acquire)).filter(|&process| process != 0)
 }
 
-/// Desliga a tarefa corrente do processo: volta ao espaço do kernel nesta CPU e devolve o
-/// `Process` (ou `None` sem processo). Com a IRQ mascarada, antes de liberar qualquer tabela.
+/// Desliga a tarefa corrente da thread: volta ao espaço do kernel nesta CPU e devolve o
+/// ponteiro dela (ou `None` sem thread). Com a IRQ mascarada, antes de liberar qualquer tabela.
 pub fn unbind_user() -> Option<usize> {
     let here = percpu::current();
     let current = slot(here.current.load(Ordering::Relaxed) as usize);
@@ -1113,6 +1126,56 @@ pub fn unbind_user() -> Option<usize> {
     current.pid.store(0, Ordering::Relaxed);
     let process = current.process.swap(0, Ordering::AcqRel);
     (process != 0).then_some(process)
+}
+
+/// Conta uma falta de página que só repetiu em `page`: `true` na segunda seguida na mesma página (a
+/// tradução não se resolve: o processo morre em vez de prender a CPU). Outra página começa a conta.
+pub fn note_retry(page: u64) -> bool {
+    let here = percpu::current();
+    let current = slot(here.current.load(Ordering::Relaxed) as usize);
+    let mark = page | 1;
+    current.retry_page.swap(mark, Ordering::Relaxed) == mark
+}
+
+/// A falta de página da tarefa corrente resolveu de verdade: a próxima repetição volta a valer.
+pub fn clear_retry() {
+    let here = percpu::current();
+    slot(here.current.load(Ordering::Relaxed) as usize)
+        .retry_page
+        .store(0, Ordering::Relaxed);
+}
+
+/// A thread da tarefa corrente foi pedida para sair (`stop`).
+#[allow(
+    clippy::inline_always,
+    reason = "no caminho da syscall nula: um quadro a mais passa da janela que o `arch/` repinta"
+)]
+#[inline(always)]
+pub fn kill_requested() -> bool {
+    let here = percpu::current();
+    slot(here.current.load(Ordering::Relaxed) as usize)
+        .kill
+        .load(Ordering::SeqCst)
+}
+
+/// Pede à tarefa `id` (um slot que o chamador sabe vivo) que saia, e a faz passar logo por um ponto
+/// em que o kernel a vê: acorda a que espera e, se roda em outra CPU, manda o IPI de reescalonar. A
+/// morte de um processo usa para parar as threads dele.
+pub fn stop(id: usize) {
+    slot(id).kill.store(true, Ordering::SeqCst);
+    let cpu = platform::cpu();
+    let were_enabled = cpu.save_and_disable_interrupts();
+    let now = now();
+    let preempt = wake_task(id, Wake::Signal, now);
+    let task = slot(id);
+    let owner = task.cpu.load(Ordering::Acquire) as usize;
+    if owner != percpu::current().index() && task.state() == State::Running {
+        kick(percpu::get(owner));
+    }
+    if preempt {
+        preempt_now(were_enabled, now);
+    }
+    cpu.restore_interrupts(were_enabled);
 }
 
 /// Guarda o pico da pilha da tarefa corrente, que a morte do processo ainda não repintou.

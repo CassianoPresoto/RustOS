@@ -27,7 +27,7 @@ clippy: ## lint no host e nos dois alvos bare-metal (kernel com e sem `selftest`
 		for features in "" selftest debug-addrs,panic-tests selftest,debug-addrs,panic-tests; do \
 			cargo clippy --package rustos-kernel --target $$target $${features:+--features $$features} -- -D warnings || exit 1; \
 		done; \
-		for program in rustos-user-rt rustos-user-init rustos-user-hello rustos-user-crash rustos-user-sysinfo rustos-user-count rustos-user-test-big rustos-user-test-handles rustos-user-test-lazy; do \
+		for program in rustos-user-rt rustos-user-init rustos-user-hello rustos-user-crash rustos-user-sysinfo rustos-user-count rustos-user-test-big rustos-user-test-handles rustos-user-test-lazy rustos-user-test-child rustos-user-test-procs; do \
 			cargo clippy --package $$program --package rustos-arch-$${target%%-*}-user --target $$target -- -D warnings || exit 1; \
 		done; \
 	done

@@ -1,27 +1,39 @@
-//! Processos de usuário (fatias 4a e 4b do SDD 17): um espaço de endereçamento e uma thread, sem
-//! objetos nem handles. Nasce de um ELF do initramfs (o `init`), entra em anel 3 ou EL0, morre por
-//! `process_exit` ou por falha da CPU, e o kernel segue. O programa plano de teste só existe no
-//! modo de teste.
+//! Processos de usuário (SDD 17, fatias 4a a 4c): um espaço de endereçamento com a tabela de handles,
+//! a memória (`mem`) e uma ou mais threads. Nasce de um ELF do initramfs (o `init`) ou de
+//! `process_create`, entra em anel 3 ou EL0, morre por `process_exit`, por falha da CPU, por
+//! `process_kill` ou com a última thread. O programa plano de teste só existe no modo de teste.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::ptr;
 #[cfg(feature = "selftest")]
 use core::sync::atomic::AtomicUsize;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 
-use rustos_hal::abi::{ProcessEvent, Status, USER_TOP, event_kind, fault_access, fault_kind};
-use rustos_hal::{Cpu, Fault, FaultKind};
+use rustos_hal::abi::{
+    PROCESS_KILLED_CODE, ProcessEvent, Status, USER_TOP, event_kind, fault_access, fault_kind,
+};
+use rustos_hal::{Cpu, Fault, FaultKind, PhysAddr};
 use rustos_mm::vmar::Access;
+use rustos_object::HandleCount;
 use rustos_sched::SchedParams;
 
 use crate::frames::Frames;
-use crate::loader::{self, LoadError, Loaded, RegionTree};
-use crate::object::{ProcessObj, Quota, Table, VecSlots, Work};
-use crate::platform;
+use crate::loader::{self, LoadError, Loaded};
+use crate::object::{ByteCharge, Lifecycle, Quota, Table, VecSlots, Work};
 use crate::sync::IrqLock;
 use crate::task::{self, Spawn, TaskError};
 use crate::uspace::{SpaceStats, Unresolved, UserSpace};
+use crate::{platform, tlb};
+
+pub use mem::{MapRequest, Mem};
+
+/// O que um processo custa ao criador, em bytes de heap do kernel: o objeto, a árvore de regiões,
+/// os slots da tabela e o que o espaço guarda (as tabelas de página são frames, e entram na
+/// promessa de frames, não aqui).
+pub const PROCESS_BYTES: usize = 8 * 1024;
+/// O que uma thread custa ao criador: o objeto, a área de FPU/SIMD (até uns 2,7 KiB) e o início.
+pub const THREAD_BYTES: usize = 4 * 1024;
 
 #[derive(Debug)]
 pub enum ProcessError {
@@ -36,24 +48,123 @@ impl<E: Into<LoadError>> From<E> for ProcessError {
     }
 }
 
-/// Um processo: o espaço, a árvore de regiões e onde a primeira thread começa.
+/// O que `thread_create` e `process_create` precisam do sistema e o `Process` não guarda: o alocador
+/// de frames, o deslocamento do mapa direto e onde está o initramfs.
+#[derive(Clone, Copy, Debug)]
+struct System {
+    frames: Frames,
+    direct_map_offset: u64,
+    initramfs: Option<(PhysAddr, u64)>,
+}
+
+static SYSTEM: IrqLock<Option<System>> = IrqLock::new(None);
+
+/// Entrega ao módulo o que `process_create` usa. Uma vez, depois de `task::init`.
+pub fn install(frames: Frames, direct_map_offset: u64) {
+    *SYSTEM.lock() = Some(System {
+        frames,
+        direct_map_offset,
+        initramfs: None,
+    });
+}
+
+/// Diz onde o initramfs mora na memória física (início e bytes), para o `init` o receber como VMO.
+pub fn set_initramfs(range: Option<(PhysAddr, u64)>) {
+    if let Some(system) = SYSTEM.lock().as_mut() {
+        system.initramfs = range;
+    }
+}
+
+fn system() -> Option<System> {
+    *SYSTEM.lock()
+}
+
+/// O alocador de frames, para quem cria objeto que os guarda (o VMO).
+pub fn frames() -> Option<Frames> {
+    system().map(|system| system.frames)
+}
+
+/// Onde um processo está na vida.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// Sem thread ainda: `thread_create` o inicia.
+    Created,
+    Running,
+    /// Morrendo: nenhuma thread nova; as que existem saem na próxima volta ao usuário.
+    Dying,
+    Dead,
+}
+
+#[derive(Debug)]
+struct State {
+    phase: Phase,
+    /// Threads vivas, contadas de `thread_create` até a saída.
+    threads: u32,
+    /// Um bit por slot de tarefa das threads que já rodam (`MAX_TASKS <= 64`): quem mata acorda.
+    mask: u64,
+}
+
+/// Um processo: o objeto que os handles apontam, a tabela, a memória e o estado de vida. As threads
+/// seguram um `Arc` cada.
 #[derive(Debug)]
 pub struct Process {
+    life: Lifecycle,
     pid: u32,
-    space: UserSpace,
-    regions: RegionTree,
-    entry: u64,
-    sp: u64,
-    /// O handle de boot de `rdi`/`x0`: a ponta do canal de boot no `init`.
-    arg0: u64,
-    /// O processo como objeto, que os handles de fora apontam e `TERMINATED` espera.
-    object: Arc<ProcessObj>,
-    /// A tabela de handles; só a tarefa do processo e a morte dele a tocam.
+    mem: IrqLock<Option<Mem>>,
     table: IrqLock<Table>,
-    /// Pontas de canal cobradas a este processo.
-    channels: Arc<Quota>,
+    /// O que o processo cria no kernel: pontas, mensagens, VMOs, filhos e threads.
+    quota: Arc<Quota>,
+    /// O que o criador paga por este objeto, devolvido quando ele some.
+    #[allow(dead_code, reason = "só o `Drop` da cobrança importa")]
+    cost: Option<ByteCharge>,
+    state: IrqLock<State>,
+    dying: AtomicBool,
     /// A última falta de página não se resolveu por falta de frame.
-    out_of_memory: bool,
+    out_of_memory: AtomicBool,
+    /// A falha foi um acesso à metade do kernel (a frase da morte diz só isso).
+    kernel_half: AtomicBool,
+    /// O evento do fim: o primeiro que chega vale.
+    event: IrqLock<Option<ProcessEvent>>,
+}
+
+/// Uma thread como objeto: o que se espera (`TERMINATED`) e o processo dela.
+#[derive(Debug)]
+pub struct ThreadObj {
+    life: Lifecycle,
+    process: Arc<Process>,
+    #[allow(dead_code, reason = "só o `Drop` da cobrança importa")]
+    cost: Option<ByteCharge>,
+}
+
+/// O VMAR raiz de um processo como objeto: o teto de permissão é o dos direitos do handle.
+#[derive(Debug)]
+pub struct VmarObj {
+    handles: HandleCount,
+    process: Arc<Process>,
+}
+
+impl VmarObj {
+    pub fn new(process: &Arc<Process>) -> Arc<Self> {
+        Arc::new(Self {
+            handles: HandleCount::new(0),
+            process: Arc::clone(process),
+        })
+    }
+
+    pub const fn handles(&self) -> &HandleCount {
+        &self.handles
+    }
+
+    /// O processo dono do espaço.
+    pub const fn process(&self) -> &Arc<Process> {
+        &self.process
+    }
+}
+
+impl ThreadObj {
+    pub const fn lifecycle(&self) -> &Lifecycle {
+        &self.life
+    }
 }
 
 /// De onde vem o código do processo: um ELF do initramfs ou, no modo de teste, um programa plano.
@@ -100,6 +211,16 @@ pub struct Spawned {
 static FAULT_PEAK: AtomicUsize = AtomicUsize::new(0);
 
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
+/// O maior número de CPUs que rodavam um processo no instante em que `process_kill` o parou.
+#[cfg(feature = "selftest")]
+static KILL_CPUS: AtomicU32 = AtomicU32::new(0);
+
+/// O maior número de CPUs que rodavam um processo no instante de um `process_kill` (só o modo de teste).
+#[cfg(feature = "selftest")]
+pub fn kill_cpus_max() -> u32 {
+    KILL_CPUS.load(Ordering::Relaxed)
+}
+
 /// O último evento de fim de processo, para o modo de teste conferir.
 static LAST_EVENT: IrqLock<Option<(u32, ProcessEvent)>> = IrqLock::new(None);
 /// Os frames do último processo que morreu, no instante da morte (só o modo de teste).
@@ -112,86 +233,222 @@ static FIRST_SYSCALL_CYCLES: AtomicU64 = AtomicU64::new(0);
 static ENTRY_CYCLES: AtomicU64 = AtomicU64::new(0);
 
 impl Process {
-    /// Monta o espaço: a imagem (de `source`), a pilha inicial e a árvore de regiões.
-    fn load(
-        frames: Frames,
-        direct_map_offset: u64,
-        source: Source<'_>,
-        keep_peer: bool,
-    ) -> Result<(Self, Loaded, Option<boot::BootPeer>), ProcessError> {
+    /// Um processo novo sobre `mem`, sem thread e com a tabela vazia. `cost` é o que o criador paga.
+    fn new(mem: Mem, cost: Option<ByteCharge>) -> Arc<Self> {
+        Arc::new(Self {
+            life: Lifecycle::new(),
+            pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
+            mem: IrqLock::new(Some(mem)),
+            table: IrqLock::new(Table::new(VecSlots::default())),
+            quota: Arc::default(),
+            cost,
+            state: IrqLock::new(State {
+                phase: Phase::Created,
+                threads: 0,
+                mask: 0,
+            }),
+            dying: AtomicBool::new(false),
+            out_of_memory: AtomicBool::new(false),
+            kernel_half: AtomicBool::new(false),
+            event: IrqLock::new(None),
+        })
+    }
+
+    /// Um processo vazio para `process_create`: espaço sem imagem, árvore vazia e o `mmap_base`
+    /// sorteado. A memória do espaço vem do alocador de frames; `cost` é a cobrança ao pai.
+    pub fn create_empty(cost: ByteCharge) -> Result<Arc<Self>, Status> {
+        let system = system().ok_or(Status::NotSupported)?;
         // SAFETY: o mapa direto cobre todo frame do alocador, e o kernel já roda nas próprias tabelas.
-        let mut space = unsafe { UserSpace::new(frames, direct_map_offset) }?;
-        let built = Self::populate(&mut space, source);
-        let (regions, loaded, sp, arg0) = match built {
-            Ok(parts) => parts,
-            Err(error) => {
-                space.destroy();
-                return Err(error);
-            }
-        };
+        let space = unsafe { UserSpace::new(system.frames, system.direct_map_offset) }
+            .map_err(|_| Status::NoMemory)?;
         if !space.kernel_half_in_sync() {
             space.destroy();
-            return Err(rustos_hal::MapError::Unsupported("kernel half out of sync").into());
+            return Err(Status::NoMemory);
         }
-        let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
-        let object = ProcessObj::new();
-        let table = IrqLock::new(Table::new(VecSlots::default()));
-        let (arg0, peer) = match boot::handles_of(&object, &table, source, arg0, keep_peer) {
-            Ok(handed) => handed,
-            Err(status) => {
-                space.destroy();
-                return Err(ProcessError::Handles(status));
-            }
+        let Ok(regions) = loader::new_tree() else {
+            space.destroy();
+            return Err(Status::NoMemory);
         };
-        let process = Self {
-            pid,
-            space,
-            regions,
-            entry: loaded.entry,
-            sp,
-            arg0,
-            object,
-            table,
-            channels: Arc::default(),
-            out_of_memory: false,
-        };
-        Ok((process, loaded, peer))
+        let mem = Mem::new(space, regions)?;
+        Ok(Self::new(mem, Some(cost)))
     }
 
-    fn populate(
-        space: &mut UserSpace,
-        source: Source<'_>,
-    ) -> Result<(RegionTree, Loaded, u64, u64), ProcessError> {
-        let mut regions = loader::new_tree()?;
-        let (loaded, arg0) = match source {
-            Source::Elf(file) => (loader::load_image(space, &mut regions, file)?, 0),
-            #[cfg(feature = "selftest")]
-            Source::Flat(program) => (load_flat(space, &mut regions, program)?, program.arg0),
-        };
-        let sp = loader::map_stack(space, &mut regions, &loaded)?;
-        Ok((regions, loaded, sp, arg0))
+    pub const fn lifecycle(&self) -> &Lifecycle {
+        &self.life
     }
-}
 
-impl Process {
     /// A tabela de handles do processo.
     pub const fn table(&self) -> &IrqLock<Table> {
         &self.table
     }
 
-    /// As pontas de canal cobradas ao processo.
-    pub const fn channels(&self) -> &Arc<Quota> {
-        &self.channels
+    /// O que o processo cria no kernel: pontas, mensagens, VMOs, filhos e threads.
+    pub const fn quota(&self) -> &Arc<Quota> {
+        &self.quota
+    }
+
+    /// Roda `f` com a memória do processo, esperando o *shootdown* das outras CPUs enquanto gira no
+    /// lock. `BadState` se o processo já morreu.
+    pub fn with_mem<R>(&self, f: impl FnOnce(&mut Mem) -> R) -> Result<R, Status> {
+        let mut guard = self.mem.lock_serving(tlb::service);
+        guard.as_mut().map(f).ok_or(Status::BadState)
+    }
+
+    /// Está morrendo: toda thread que passa por um ponto de volta ao usuário sai.
+    pub fn is_dying(&self) -> bool {
+        self.dying.load(Ordering::SeqCst)
+    }
+
+    /// Reserva o lugar de uma thread nova: `BadState` se o processo morre ou morreu.
+    fn begin_thread(&self) -> Result<(), Status> {
+        let mut state = self.state.lock();
+        match state.phase {
+            Phase::Created | Phase::Running => {
+                state.phase = Phase::Running;
+                state.threads += 1;
+                Ok(())
+            }
+            Phase::Dying | Phase::Dead => Err(Status::BadState),
+        }
+    }
+
+    /// Desfaz `begin_thread` de uma thread que não chegou a nascer.
+    fn abort_thread(&self) {
+        let mut state = self.state.lock();
+        state.threads -= 1;
+        if state.threads == 0 && state.phase == Phase::Running && state.mask == 0 {
+            state.phase = Phase::Created;
+        }
+    }
+
+    /// A thread da tarefa `bit` começou a rodar.
+    fn thread_started(&self, bit: u64) {
+        self.state.lock().mask |= bit;
+    }
+
+    /// A thread saiu da raiz do espaço. `true` se foi a última: quem a recebe desfaz o processo.
+    fn thread_left(&self, bit: u64) -> bool {
+        let mut state = self.state.lock();
+        state.mask &= !bit;
+        state.threads -= 1;
+        if state.threads > 0 {
+            return false;
+        }
+        if state.phase == Phase::Running {
+            state.phase = Phase::Dying;
+            self.dying.store(true, Ordering::SeqCst);
+            let mut event = self.event.lock();
+            event.get_or_insert(ProcessEvent {
+                kind: event_kind::EXIT,
+                ..ProcessEvent::default()
+            });
+        }
+        state.phase == Phase::Dying
+    }
+
+    /// O processo começa a morrer com `event` (o primeiro vale) e as threads dos outros slots são
+    /// paradas: acordadas, ou com o IPI se rodam em outra CPU. `false` se já morria.
+    fn begin_death(&self, event: ProcessEvent, own_bit: u64) -> bool {
+        let mut state = self.state.lock();
+        if matches!(state.phase, Phase::Dying | Phase::Dead) {
+            return false;
+        }
+        state.phase = Phase::Dying;
+        self.dying.store(true, Ordering::SeqCst);
+        *self.event.lock() = Some(event);
+        fence(Ordering::SeqCst);
+        let mask = state.mask & !own_bit;
+        for id in (0..64).filter(|id| mask >> id & 1 != 0) {
+            task::stop(id);
+        }
+        true
+    }
+
+    /// `process_kill`: o processo morre com o código de kill. Sem thread, quem chama o desfaz já; com
+    /// threads, a última a sair o desfaz. `BadState` se já morria.
+    pub fn kill(self: &Arc<Self>) -> Result<(), Status> {
+        let event = ProcessEvent {
+            kind: event_kind::EXIT,
+            code: PROCESS_KILLED_CODE,
+            ..ProcessEvent::default()
+        };
+        #[cfg(feature = "selftest")]
+        if let Ok(active) = self.with_mem(|mem| mem.space.active_cpus()) {
+            KILL_CPUS.fetch_max(active.count_ones(), Ordering::Relaxed);
+        }
+        if !self.begin_death(event, 0) {
+            return Err(Status::BadState);
+        }
+        if self.state.lock().threads == 0 {
+            self.teardown();
+        }
+        Ok(())
+    }
+
+    /// Desfaz o processo: nenhuma thread roda mais, então nenhuma CPU o ativa. Fecha os handles,
+    /// devolve os frames, levanta `TERMINATED` e deixa o evento. Roda uma vez, na última thread a
+    /// sair ou em quem matou um processo que nunca rodou.
+    fn teardown(self: &Arc<Self>) {
+        let cpu = crate::percpu::pinned(crate::percpu::PerCpu::index);
+        let mem = self.mem.lock_serving(tlb::service).take();
+        close_handles(&self.table);
+        if let Some(mem) = mem {
+            mem.wait_inactive();
+            #[cfg(feature = "selftest")]
+            {
+                *LAST_STATS.lock() = Some((self.pid, mem.space.stats()));
+            }
+            mem.destroy();
+        }
+        let event = self.event.lock().take().unwrap_or_default();
+        let no_memory = self.out_of_memory.load(Ordering::Relaxed);
+        let kernel_half = self.kernel_half.load(Ordering::Relaxed);
+        self.state.lock().phase = Phase::Dead;
+        self.life.terminate();
+        let pid = self.pid;
+        if event.kind == event_kind::EXIT && event.code == PROCESS_KILLED_CODE {
+            kprintln_serial!("[rustos] user: pid {pid} killed (cpu {cpu})");
+        } else if event.kind == event_kind::EXIT {
+            kprintln_serial!(
+                "[rustos] user: pid {pid} exited (code {}, cpu {cpu})",
+                event.code
+            );
+        } else {
+            log_fault(pid, &event, no_memory, kernel_half);
+            kprintln_serial!("[rustos] user: fault contained (pid {pid})");
+        }
+        *LAST_EVENT.lock() = Some((pid, event));
+        crate::programs::finished(pid, &event, no_memory, kernel_half);
     }
 }
 
-/// Roda `f` com o processo da tarefa corrente; `None` numa tarefa só de kernel. `f` não pode matar
-/// o processo: só `terminate` o solta, e ele roda na própria tarefa, fora desta chamada.
-pub fn with_current<R>(f: impl FnOnce(&Process) -> R) -> Option<R> {
+/// O processo que nunca rodou (ou nunca foi desfeito) e perdeu o último handle: desfaz-se aqui.
+impl Drop for Process {
+    fn drop(&mut self) {
+        if self.state.lock().phase == Phase::Dead {
+            return;
+        }
+        let mem = self.mem.lock_serving(tlb::service).take();
+        close_handles(&self.table);
+        if let Some(mem) = mem {
+            mem.wait_inactive();
+            mem.destroy();
+        }
+    }
+}
+
+/// Roda `f` com a thread de usuário da tarefa corrente; `None` numa tarefa só de kernel. `f` não pode
+/// matar a thread: só `leave_current` a solta, e ela roda na própria tarefa, fora desta chamada.
+fn current_thread<R>(f: impl FnOnce(&ThreadObj) -> R) -> Option<R> {
     let raw = task::current_process()?;
-    // SAFETY: `raw` é o `Box::into_raw` de `spawn`, vivo até `terminate` rodar nesta mesma tarefa.
-    let process = unsafe { &*ptr::with_exposed_provenance::<Process>(raw) };
-    Some(f(process))
+    // SAFETY: `raw` é o `Arc::into_raw` de `thread_main`, vivo até `leave_current` rodar nesta tarefa.
+    let thread = unsafe { &*ptr::with_exposed_provenance::<ThreadObj>(raw) };
+    Some(f(thread))
+}
+
+/// Roda `f` com o processo da tarefa corrente; `None` numa tarefa só de kernel.
+pub fn with_current<R>(f: impl FnOnce(&Process) -> R) -> Option<R> {
+    current_thread(|thread| f(&thread.process))
 }
 
 /// Esvazia a tabela e fecha cada handle (SDD 17, a morte do processo): os objetos recebem os
@@ -207,7 +464,7 @@ fn close_handles(table: &IrqLock<Table>) {
 #[cfg(feature = "selftest")]
 fn load_flat(
     space: &mut UserSpace,
-    regions: &mut RegionTree,
+    regions: &mut loader::RegionTree,
     program: Program<'_>,
 ) -> Result<Loaded, LoadError> {
     use rustos_hal::abi::USER_IMAGE_BASE;
@@ -236,6 +493,15 @@ fn load_flat(
     })
 }
 
+/// Como `spawn`, com o que o processo recebe além do básico.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Options {
+    /// Devolve a ponta do kernel do canal de boot (só o modo de teste).
+    pub keep_peer: bool,
+    /// O initramfs vai ao programa como VMO físico, no canal de boot (só o `init`).
+    pub initramfs: bool,
+}
+
 /// Cria o processo e a tarefa que o roda. Devolve a tarefa e o número do processo.
 pub fn spawn(
     frames: Frames,
@@ -243,9 +509,23 @@ pub fn spawn(
     source: Source<'_>,
     affinity: u32,
 ) -> Result<Spawned, ProcessError> {
-    spawn_keeping(frames, direct_map_offset, source, affinity, false).map(|(spawned, _)| spawned)
+    spawn_with(
+        frames,
+        direct_map_offset,
+        source,
+        affinity,
+        Options::default(),
+    )
+    .map(|(spawned, _)| spawned)
 }
 
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(
+        dead_code,
+        reason = "só o modo de teste guarda a ponta do canal de boot"
+    )
+)]
 /// Como `spawn`; com `keep_peer`, devolve também a ponta do kernel do canal de boot, que fica
 /// aberta até quem a recebe fechá-la.
 pub fn spawn_keeping(
@@ -255,70 +535,202 @@ pub fn spawn_keeping(
     affinity: u32,
     keep_peer: bool,
 ) -> Result<(Spawned, Option<boot::BootPeer>), ProcessError> {
-    let (process, loaded, peer) = Process::load(frames, direct_map_offset, source, keep_peer)?;
-    let (pid, stats) = (process.pid, process.space.stats());
-    let raw = Box::into_raw(Box::new(process));
+    let options = Options {
+        keep_peer,
+        initramfs: false,
+    };
+    spawn_with(frames, direct_map_offset, source, affinity, options)
+}
+
+/// Monta o espaço (a imagem de `source`, a pilha inicial e as regiões), o processo, o canal de boot e
+/// a primeira thread.
+pub fn spawn_with(
+    frames: Frames,
+    direct_map_offset: u64,
+    source: Source<'_>,
+    affinity: u32,
+    options: Options,
+) -> Result<(Spawned, Option<boot::BootPeer>), ProcessError> {
+    // SAFETY: o mapa direto cobre todo frame do alocador, e o kernel já roda nas próprias tabelas.
+    let mut space = unsafe { UserSpace::new(frames, direct_map_offset) }?;
+    let built = populate(&mut space, source);
+    let (regions, loaded, sp, arg0) = match built {
+        Ok(parts) => parts,
+        Err(error) => {
+            space.destroy();
+            return Err(error);
+        }
+    };
+    if !space.kernel_half_in_sync() {
+        space.destroy();
+        return Err(rustos_hal::MapError::Unsupported("kernel half out of sync").into());
+    }
+    let mem = Mem::new(space, regions).map_err(ProcessError::Handles)?;
+    let stats = mem.space.stats();
+    let process = Process::new(mem, None);
+    let (arg0, peer) =
+        boot::handles_of(&process, source, arg0, options).map_err(ProcessError::Handles)?;
+    let thread = ThreadObj::new(&process, None);
+    let task = start_thread(
+        &process,
+        thread,
+        Entry {
+            pc: loaded.entry,
+            sp,
+            arg0,
+            arg1: 0,
+        },
+        affinity,
+    )
+    .map_err(|status| {
+        // O número só vale a um processo que existiu: devolve-o se ninguém pegou o seguinte.
+        let pid = process.pid;
+        let _ = NEXT_PID.compare_exchange(pid + 1, pid, Ordering::Relaxed, Ordering::Relaxed);
+        ProcessError::Task(task_error(status))
+    })?;
+    Ok((
+        Spawned {
+            task,
+            pid: process.pid,
+            segments: loaded.segments,
+            stats,
+        },
+        peer,
+    ))
+}
+
+fn task_error(status: Status) -> TaskError {
+    if status == Status::NoMemory {
+        TaskError::NoMemory
+    } else {
+        TaskError::NoSlot
+    }
+}
+
+fn populate(
+    space: &mut UserSpace,
+    source: Source<'_>,
+) -> Result<(loader::RegionTree, Loaded, u64, u64), ProcessError> {
+    let mut regions = loader::new_tree()?;
+    let (loaded, arg0) = match source {
+        Source::Elf(file) => (loader::load_image(space, &mut regions, file)?, 0),
+        #[cfg(feature = "selftest")]
+        Source::Flat(program) => (load_flat(space, &mut regions, program)?, program.arg0),
+    };
+    let sp = loader::map_stack(space, &mut regions, &loaded)?;
+    Ok((regions, loaded, sp, arg0))
+}
+
+impl ThreadObj {
+    /// Uma thread nova de `process`; `cost` é a cobrança ao criador.
+    pub fn new(process: &Arc<Process>, cost: Option<ByteCharge>) -> Arc<Self> {
+        Arc::new(Self {
+            life: Lifecycle::new(),
+            process: Arc::clone(process),
+            cost,
+        })
+    }
+}
+
+/// Onde a thread começa: entrada, pilha e os dois argumentos de `rdi`/`rsi` (`x0`/`x1`).
+#[derive(Clone, Copy, Debug)]
+pub struct Entry {
+    pub pc: u64,
+    pub sp: u64,
+    pub arg0: u64,
+    pub arg1: u64,
+}
+
+/// O que a tarefa nova recebe: a thread e onde ela começa.
+struct Start {
+    thread: Arc<ThreadObj>,
+    at: Entry,
+}
+
+/// Cria a tarefa de `thread` e a põe para rodar em `process`. `BadState` se o processo morre,
+/// `NoMemory` sem slot de tarefa ou sem memória (nada muda).
+pub fn start_thread(
+    process: &Arc<Process>,
+    thread: Arc<ThreadObj>,
+    at: Entry,
+    affinity: u32,
+) -> Result<rustos_sched::TaskId, Status> {
+    process.begin_thread()?;
+    let raw = Box::into_raw(Box::new(Start { thread, at }));
     let started = task::spawn(Spawn {
         name: "user",
-        entry: process_main,
+        entry: thread_main,
         arg: raw.expose_provenance(),
         simd: true,
         params: SchedParams::fair(0),
         affinity,
     });
-    match started {
-        Ok(task) => Ok((
-            Spawned {
-                task,
-                pid,
-                segments: loaded.segments,
-                stats,
-            },
-            peer,
-        )),
-        Err(error) => {
-            // SAFETY: `raw` veio de `Box::into_raw` acima e a tarefa não chegou a existir.
-            let process = unsafe { Box::from_raw(raw) };
-            // O número só vale a um processo que existiu: devolve-o se ninguém pegou o seguinte.
-            let _ = NEXT_PID.compare_exchange(pid + 1, pid, Ordering::Relaxed, Ordering::Relaxed);
-            process.space.destroy();
-            Err(ProcessError::Task(error))
-        }
+    if let Ok(id) = started {
+        return Ok(id);
+    }
+    // SAFETY: `raw` veio de `Box::into_raw` acima e a tarefa não chegou a existir.
+    drop(unsafe { Box::from_raw(raw) });
+    process.abort_thread();
+    Err(Status::NoMemory)
+}
+
+/// A primeira instrução da tarefa de uma thread: liga o espaço nesta CPU e entra no usuário, a menos
+/// que o processo já morra.
+fn thread_main(arg: usize) {
+    // SAFETY: `arg` é o `Box::into_raw` de `start_thread`, entregue só a esta tarefa. A caixa se
+    // desfaz neste comando: `enter_user` não volta, e nenhum local com `Drop` pode sobrar até ele.
+    let Start { thread, at } =
+        *unsafe { Box::from_raw(ptr::with_exposed_provenance_mut::<Start>(arg)) };
+    let process = Arc::clone(&thread.process);
+    let pid = process.pid;
+    let (root, active) = process
+        .with_mem(|mem| (mem.space.root().as_u64(), mem.space.active_addr()))
+        .expect("o processo só desfaz com zero threads, e esta conta");
+    process.thread_started(task::wait_bit());
+    let raw = Arc::into_raw(thread).expose_provenance();
+    drop(process);
+    let top = task::bind_user(root, raw, active);
+    task::set_pid(pid);
+    if process_is_dying() {
+        leave_current(None);
+    }
+    ENTRY_CYCLES.store(platform::cycles(), Ordering::Relaxed);
+    // SAFETY: `bind_user` mascarou a IRQ e já pôs o espaço e a pilha de entrada desta CPU; `entry` e
+    // `sp` foram conferidos pela quem criou a thread, dentro de `[USER_MIN, USER_TOP)`, `sp` alinhado a 16.
+    unsafe { platform::enter_user(at.pc, at.sp, at.arg0, at.arg1, top) }
+}
+
+/// O processo da tarefa corrente já morre (a conferência lenta, só na entrada da thread).
+fn process_is_dying() -> bool {
+    current_thread(|thread| thread.process.is_dying()) == Some(true)
+}
+
+/// Se o processo da tarefa corrente morre, a thread sai: chamado em todo ponto de volta ao usuário
+/// (fim de syscall, de falta resolvida, de IRQ e a entrada), com a IRQ mascarada.
+#[allow(
+    clippy::inline_always,
+    reason = "no caminho da syscall nula: um quadro a mais passa da janela que o `arch/` repinta"
+)]
+#[inline(always)]
+pub fn exit_if_dying() {
+    if task::kill_requested() {
+        leave_current(None);
     }
 }
 
-/// A primeira instrução da tarefa do processo: liga o espaço nesta CPU e entra no usuário.
-fn process_main(arg: usize) {
-    let process = ptr::with_exposed_provenance_mut::<Process>(arg);
-    // SAFETY: `arg` é o `Box::into_raw` de `spawn`, entregue só a esta tarefa.
-    let (root, entry, sp, arg0, active, pid) = unsafe {
-        let p = &*process;
-        (
-            p.space.root().as_u64(),
-            p.entry,
-            p.sp,
-            p.arg0,
-            p.space.active_addr(),
-            p.pid,
-        )
-    };
-    let top = task::bind_user(root, arg, active);
-    task::set_pid(pid);
-    ENTRY_CYCLES.store(platform::cycles(), Ordering::Relaxed);
-    // SAFETY: `bind_user` mascarou a IRQ e já pôs o espaço e a pilha de entrada desta CPU; `entry` e
-    // `sp` vêm de `load`, dentro de `[USER_MIN, USER_TOP)`, `sp` alinhado a 16.
-    unsafe { platform::enter_user(entry, sp, arg0, 0, top) }
+/// O fim de uma IRQ na tarefa de usuário: apaga a conta de repetição de falta e confere se o
+/// processo morre.
+pub fn after_irq() {
+    if task::current_process().is_some() {
+        task::clear_retry();
+        exit_if_dying();
+    }
 }
 
 /// Resolve a falta de página de usuário da tarefa corrente: região, permissão e guarda pelo `Vmar`, e
-/// então página zero, frame novo ou cópia da página zero. `false`: o processo morre.
+/// então página zero, frame novo, cópia da página zero ou frame de VMO. `false`: o processo morre
+/// (inclusive a segunda repetição seguida na mesma página, que não se resolve).
 pub fn resolve_user_fault(address: u64, write: bool, execute: bool) -> bool {
-    let Some(raw) = task::current_process() else {
-        return false;
-    };
-    // SAFETY: `raw` é o `Box::into_raw` de `spawn`, vivo até `terminate`; só a thread do processo
-    // (a que falta) o toca, e roda mascarada (DEBT-0120).
-    let process = unsafe { &mut *ptr::with_exposed_provenance_mut::<Process>(raw) };
     let access = if execute {
         Access::Execute
     } else if write {
@@ -326,20 +738,31 @@ pub fn resolve_user_fault(address: u64, write: bool, execute: bool) -> bool {
     } else {
         Access::Read
     };
-    let resolved = process
-        .space
-        .resolve_fault(&process.regions, address, access);
-    process.out_of_memory = resolved == Err(Unresolved::OutOfMemory);
-    resolved.is_ok()
+    current_thread(|thread| {
+        let process = &thread.process;
+        let resolved = process.with_mem(|mem| mem.resolve_fault(address, access));
+        let Ok(resolved) = resolved else {
+            return false;
+        };
+        process
+            .out_of_memory
+            .store(resolved == Err(Unresolved::OutOfMemory), Ordering::Relaxed);
+        match resolved {
+            Ok(crate::uspace::Resolved::Retried) => !task::note_retry(address & !4095),
+            Ok(_) => {
+                task::clear_retry();
+                true
+            }
+            Err(_) => false,
+        }
+    })
+    .unwrap_or(false)
 }
 
 /// A última falta de página da tarefa corrente falhou por falta de frame (e não por endereço ruim):
 /// a cópia de uma syscall devolve `NoMemory` em vez de `OutOfRange`.
 pub fn copy_ran_out_of_memory() -> bool {
-    task::current_process().is_some_and(|raw| {
-        // SAFETY: como em `resolve_user_fault`.
-        unsafe { &*ptr::with_exposed_provenance::<Process>(raw) }.out_of_memory
-    })
+    current_thread(|thread| thread.process.out_of_memory.load(Ordering::Relaxed)).unwrap_or(false)
 }
 
 /// Ocorreu a primeira chamada de usuário do boot: diz, uma vez, que o anel 3 ou EL0 ficou de pé.
@@ -352,14 +775,16 @@ pub fn note_first_syscall() {
 
 /// O fim do processo por `process_exit`. Nunca volta.
 pub fn exit(code: i64) -> ! {
-    terminate(
-        ProcessEvent {
-            kind: event_kind::EXIT,
-            code,
-            ..ProcessEvent::default()
-        },
-        false,
-    )
+    leave_current(Some(ProcessEvent {
+        kind: event_kind::EXIT,
+        code,
+        ..ProcessEvent::default()
+    }))
+}
+
+/// `thread_exit`: a thread sai; o processo segue com as outras e acaba com a última. Nunca volta.
+pub fn thread_exit() -> ! {
+    leave_current(None)
 }
 
 /// O fim do processo por uma falha da CPU: o processo morre e o kernel segue. Nenhum endereço do
@@ -387,19 +812,17 @@ pub fn user_fault(fault: &Fault) -> ! {
     };
     // O evento nunca leva endereço do kernel (vira 0); a frase da falta diz só que foi na metade dele.
     let kernel_half = kind == fault_kind::PAGE_FAULT && addr >= USER_TOP;
-    terminate(
-        ProcessEvent {
-            kind: event_kind::FAULT,
-            fault_kind: kind,
-            access,
-            pc: fault.pc.as_u64().min(USER_TOP),
-            sp: fault.user_sp,
-            addr: if addr < USER_TOP { addr } else { 0 },
-            isa_code: fault.code,
-            ..ProcessEvent::default()
-        },
-        kernel_half,
-    )
+    let _ = with_current(|process| process.kernel_half.store(kernel_half, Ordering::Relaxed));
+    leave_current(Some(ProcessEvent {
+        kind: event_kind::FAULT,
+        fault_kind: kind,
+        access,
+        pc: fault.pc.as_u64().min(USER_TOP),
+        sp: fault.user_sp,
+        addr: if addr < USER_TOP { addr } else { 0 },
+        isa_code: fault.code,
+        ..ProcessEvent::default()
+    }))
 }
 
 fn fault_name(kind: u32) -> &'static str {
@@ -413,60 +836,43 @@ fn fault_name(kind: u32) -> &'static str {
     }
 }
 
-/// Mata o processo da tarefa corrente, na ordem do SDD 17: sai da raiz do processo antes de
-/// liberar qualquer tabela, devolve os frames zerados e só então encerra a tarefa.
-fn terminate(event: ProcessEvent, kernel_half: bool) -> ! {
-    // Tudo o que tem dono (o `Box<Process>`, o `Arc<ProcessObj>`, a cota) cai neste bloco: o que
-    // sobrasse vivo até o `task::exit`, que não volta, nunca rodaria o `Drop` e vazaria heap.
-    let (pid, no_memory, cpu) = {
-        platform::cpu().save_and_disable_interrupts();
-        let Some(raw) = task::unbind_user() else {
-            panic!("falha de usuário sem processo na tarefa");
-        };
-        // SAFETY: `raw` é o `Box::into_raw` de `spawn`, guardado na tarefa e tirado dela agora.
-        let process = unsafe { Box::from_raw(ptr::with_exposed_provenance_mut::<Process>(raw)) };
-        let pid = process.pid;
-        let no_memory = process.out_of_memory;
-        let cpu = crate::percpu::pinned(crate::percpu::PerCpu::index);
-        process.space.wait_inactive();
-        let Process {
-            space,
-            regions,
-            object,
-            table,
-            ..
-        } = *process;
-        close_handles(&table);
-        drop(table);
-        #[cfg(feature = "selftest")]
-        {
-            *LAST_STATS.lock() = Some((pid, space.stats()));
-        }
-        space.destroy();
-        drop(regions);
-        object.terminate();
-        (pid, no_memory, cpu)
+/// A thread da tarefa corrente sai, na ordem do SDD 17: com `Some(event)` o processo inteiro começa a
+/// morrer e as outras threads são paradas; sai da raiz do espaço antes de qualquer tabela ser liberada;
+/// a última a sair desfaz o processo (handles, frames, `TERMINATED`); e só então a tarefa acaba.
+#[cold]
+#[inline(never)]
+fn leave_current(event: Option<ProcessEvent>) -> ! {
+    platform::cpu().save_and_disable_interrupts();
+    let bit = task::wait_bit();
+    let Some(raw) = task::current_process() else {
+        panic!("falha de usuário sem thread na tarefa");
     };
-    if event.kind == event_kind::EXIT {
-        kprintln_serial!(
-            "[rustos] user: pid {pid} exited (code {}, cpu {cpu})",
-            event.code
-        );
-    } else {
-        log_fault(pid, &event, no_memory, kernel_half);
-        kprintln_serial!("[rustos] user: fault contained (pid {pid})");
+    // SAFETY: `raw` é o `Arc::into_raw` de `thread_main`, vivo até esta saída.
+    let process = Arc::clone(&unsafe { &*ptr::with_exposed_provenance::<ThreadObj>(raw) }.process);
+    if let Some(event) = event {
+        process.begin_death(event, bit);
     }
-    *LAST_EVENT.lock() = Some((pid, event));
-    crate::programs::finished(pid, &event, no_memory, kernel_half);
-    if crate::scrub::measuring() {
-        let peak = task::note_stack_peak();
-        #[cfg(feature = "selftest")]
-        if event.kind == event_kind::FAULT {
-            FAULT_PEAK.fetch_max(peak, Ordering::Relaxed);
+    let _ = task::unbind_user();
+    // SAFETY: o ponteiro é o que `thread_main` guardou na tarefa e `unbind_user` acabou de tirar dela.
+    let thread = unsafe { Arc::from_raw(ptr::with_exposed_provenance::<ThreadObj>(raw)) };
+    thread.life.terminate();
+    if process.thread_left(bit) {
+        process.teardown();
+        if crate::scrub::measuring() {
+            let peak = task::note_stack_peak();
+            #[cfg(feature = "selftest")]
+            if LAST_EVENT
+                .lock()
+                .is_some_and(|(_, last)| last.kind == event_kind::FAULT)
+            {
+                FAULT_PEAK.fetch_max(peak, Ordering::Relaxed);
+            }
+            #[cfg(not(feature = "selftest"))]
+            let _ = peak;
         }
-        #[cfg(not(feature = "selftest"))]
-        let _ = peak;
     }
+    drop(thread);
+    drop(process);
     task::exit()
 }
 
@@ -524,6 +930,7 @@ pub fn last_event() -> Option<(u32, ProcessEvent)> {
 }
 
 mod boot;
+mod mem;
 #[cfg(feature = "selftest")]
 mod selftest;
 #[cfg(feature = "selftest")]

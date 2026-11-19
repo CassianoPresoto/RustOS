@@ -48,7 +48,7 @@ static HANDLERS: Handlers = Handlers {
     fault: on_fault,
     copy_fault: on_copy_fault,
     irq: on_irq,
-    preempt: task::preempt,
+    preempt: on_preempt,
     syscall: crate::syscall::dispatch,
     leave_user: crate::scrub::leave_user,
 };
@@ -95,6 +95,13 @@ pub fn arm_no_later_than(deadline_ns: u64) {
     if deadline_ns < percpu::current().armed_ns() {
         arm(deadline_ns);
     }
+}
+
+/// O fim de toda IRQ: a troca de tarefa que a fila pede e, na tarefa de usuário, a saída da thread
+/// de um processo que morre.
+fn on_preempt() {
+    task::preempt();
+    crate::process::after_irq();
 }
 
 /// IRQ do timer. Antes do escalonador, o tique periódico do autoteste. Depois, só o
@@ -172,6 +179,7 @@ fn on_fault(fault: &Fault) {
         } = fault.kind
             && crate::process::resolve_user_fault(address.as_u64(), write, execute)
         {
+            crate::process::exit_if_dying();
             return;
         }
         crate::process::user_fault(fault);

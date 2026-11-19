@@ -55,8 +55,9 @@ pub fn details(
 
 /// O `init`, as demonstrações do shell e os programas de teste que o `xtask image` põe no
 /// initramfs da imagem com `selftest`.
-const PROBE_NAMES: [&[u8]; 8] = [
-    b"init", b"hello", b"crash", b"sysinfo", b"count", b"big", b"handles", b"lazy",
+const PROBE_NAMES: [&[u8]; 10] = [
+    b"init", b"hello", b"crash", b"sysinfo", b"count", b"big", b"handles", b"lazy", b"child",
+    b"procs",
 ];
 const ELF_MAGIC: &[u8] = b"\x7fELF";
 

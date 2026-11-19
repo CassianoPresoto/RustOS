@@ -3,7 +3,7 @@ id: DEBT-0087
 title: O `init` não sobe sozinho no boot normal
 status: Open
 date: 2026-11-18
-trigger: O `process_create` da parte 3 da 4c (o `init` passa a lançar outros processos), ou a fase 5
+trigger: O dono fixar o orçamento do boot que cabe o `init` (com o filho), ou a fase 5
 paid_date:
 ---
 
@@ -19,7 +19,7 @@ O `init` ainda é um autoteste: confere o que o kernel deixou na pilha e sai. Ro
 
 ## Gatilho
 
-O `process_create` da parte 3 da 4c (o `init` passa a lançar outros processos) ou a fase 5. O gatilho de antes, o `init` receber o canal de boot, já foi cumprido na parte 1 da 4c, e o de levar o carregador à imagem de produção, no M1.
+O dono fixar o orçamento do boot que cabe o `init` (a parte 3 da 4c o fez criar um filho: medido em `procs`, de 0,6 ms por processo no aarch64 em HVF a 9 ms no x86_64 em TCG, fora o carregamento do próprio `init`), ou a fase 5. Os gatilhos de antes (o canal de boot, o carregador na imagem de produção e o `process_create`) já foram cumpridos.
 
 ## Como pagar
 

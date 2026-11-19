@@ -1,0 +1,20 @@
+[package]
+name = "rustos-user-test-procs"
+description = "Programa de teste de processos, threads, VMO e VMAR: casos hostis, teto em bytes, laço de criação e morte e as medidas (SDD 17, fatia 4c)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "procs"
+path = "src/main.rs"
+test = false
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-user-rt = { workspace = true, features = ["raw-syscalls"] }

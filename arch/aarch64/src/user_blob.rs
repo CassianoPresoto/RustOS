@@ -50,9 +50,10 @@ rustos_user_hello:
     svc #0
     cmn x0, #7
     b.ne .Lfail4
-    mov x8, #{thread_exit}
+    mov x0, #0
+    mov x8, #{process_kill}
     svc #0
-    cmn x0, #7
+    cmn x0, #2
     b.ne .Lfail4
     mov x0, #1
     mov x1, #0x20000
@@ -151,7 +152,7 @@ rustos_user_blob_end:
     hello_len = const HELLO.len(),
     debug_write = const Syscall::DebugWrite as u64,
     process_exit = const Syscall::ProcessExit as u64,
-    thread_exit = const Syscall::ThreadExit as u64,
+    process_kill = const Syscall::ProcessKill as u64,
     clock = const Syscall::ClockGetMonotonic as u64,
     random = const Syscall::RandomGet as u64,
 );
