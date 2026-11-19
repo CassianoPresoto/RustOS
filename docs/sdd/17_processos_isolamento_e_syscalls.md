@@ -436,7 +436,7 @@ que falha morrer sozinho sem derrubar o sistema. Nenhuma syscall, formato de exe
 **O que o `run` faz.** `System::run_program` acha o arquivo no `cpio`, chama `process::spawn(Source::Elf)` e, sem `&`,
 dorme (`block_until` sem prazo, registrado em `Waiters`) até `terminate` acordá-la. O processo é o mesmo do `init`: espaço
 próprio, pilha preguiçosa com guarda, canal de boot com `process` e `console`, e a saída `[user] …` pelo console por handle.
-O shell mostra `exit code N (pid P)` ou `killed: <causa> (pid P)`, com a causa tirada do evento de falha (falta de
+O shell mostra `exit code N (pid P)` ou `killed: <causa> (pid P)`, cada resposta numa **única escrita** (a saída de um processo em segundo plano não a rasga), com a causa tirada do evento de falha (falta de
 página com o endereço **de usuário** e o tipo do acesso, instrução ilegal, acesso desalinhado, falha aritmética, `out of
 memory` quando a falta de página não achou frame) e nunca um endereço do kernel (o gate de vazamento do smoke confere a
 sessão). A tarefa do processo se chama `user` no `ps` ([DEBT-0134](../tech-debt/0134-ps-mostra-user-como-nome-de-tarefa-de-processo.md)).
@@ -451,6 +451,10 @@ sessão). A tarefa do processo se chama `user` no `ps` ([DEBT-0134](../tech-debt
 | Não há Ctrl-C | O `run` em primeiro plano espera sem prazo; o kernel não mata processo de fora | Depende de `process_kill` e da morte de thread bloqueada ([DEBT-0131](../tech-debt/0131-sem-ctrl-c-nem-kill-de-processo.md)). Todo programa de demonstração termina sozinho |
 | O `init` não sobe no boot | O boot normal não lança processo nenhum; `run init` roda as conferências dele | O shell lança o que o usuário pede; o `init` como primeiro processo fica com a parte 3 ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)) |
 | `crash` é Rust seguro | Desce a pilha por recursão até a página de guarda; a falta de página não se resolve | O `rt` não tem leitura de endereço arbitrário em função segura (seria um `unsafe` que só o `rt` pode ter), e a guarda é um endereço proibido de verdade. Exercita também a paginação sob demanda |
+| Linhas do ciclo de vida só na serial | `entered ring3/el0`, `pid N exited (…)`, `stopped by …` e `fault contained` saem por `kprintln_serial!` (`console::print_serial`): serial sim, tela não. As de `[user]` (a saída do programa) seguem nas duas | O [guidelines 05](../guidelines/05_recursos_e_desempenho.md) manda o boot normal imprimir só o que um gate confere ou o que avisa, e a tela da imagem de produção mostra o que o shell já diz (`exit code`, `killed: …`). A serial é o diagnóstico do kernel e o smoke lê só ela, então o modo de teste não perde nada |
+| `terminate` solta os donos antes de sair | O `Box<Process>`, o `Arc<ProcessObj>` e a cota ficam num bloco interno que devolve `(pid, no_memory, cpu)`; `task::exit()` é `-> !` e **nunca roda o `Drop`** de local vivo | Sem o bloco, cada processo vazava cerca de 290 bytes de heap do kernel (200 `run hello`: 16,7 para 73,8 KiB). O smoke agora roda `mem`, 20 `run hello` e `mem` e exige o heap em uso igual; sem o bloco ele reprova (17,8 para 23,4 KiB no aarch64) |
+| O pid só existe para quem existiu | `spawn_keeping` devolve o número ao contador se a tarefa não nasce (`NEXT_PID.compare_exchange`) | A tabela de tarefas cheia (`TaskError::NoSlot`) gastava um pid; agora `run` responde `too many processes` e o número volta |
+| Falta no endereço nulo, baixo ou do kernel | O evento do processo (ABI) não muda: endereço de kernel segue virando 0. O kernel passa a `finished` e a `log_fault` um `kernel_half` à parte; o shell diz `(null or low address)` abaixo de `USER_MIN` e `a kernel address`, sem endereço, na metade do kernel | Antes as duas saíam como "outside the user half" |
 | Resultado por pid numa tabela, não `LAST_EVENT` | `LAST_EVENT` é um só, serve ao modo de teste; a tabela de 16 serve ao `run &` com vários processos | [DEBT-0133](../tech-debt/0133-fim-de-processo-numa-tabela-de-16-posicoes.md) |
 | `process.rs` só ganha | Uma linha em `terminate`, o `pid` em `process_main` e o `allow(dead_code)` do módulo sai (o de `Spawned`, `last_event` e `BootPeer` passa a ser por item, `cfg_attr(not(selftest))`) | A parte 3 da 4c reescreve `process_create` no mesmo arquivo |
 
@@ -458,8 +462,8 @@ sessão). A tarefa do processo se chama `user` no `ps` ([DEBT-0134](../tech-debt
 confere cada resposta: o `ls` lista as cinco entradas (`init`, `hello`, `crash`, `sysinfo`, `count`); `run hello` e
 `run sysinfo` imprimem a linha `[user]` e saem com `exit code 0`; `run crash` mostra `killed: page fault` e o kernel
 `user: fault contained`; um programa que não existe é recusado; `run count &` volta na hora e o `ps` mostra a linha
-`user` com o pid; e a última linha do `count` (`[user] count: done`) chega sozinha. No boot normal as linhas do modo de teste
-seguem proibidas **até o prompt**: a sessão roda depois e só o que ela digita lança processo.
+`user` com o pid; a última linha do `count` (`[user] count: done`) chega sozinha; e o heap do kernel em uso, lido no `mem` antes e depois de 20 `run hello`, é o mesmo (cada processo devolve tudo ao morrer). No boot normal as linhas do modo de teste
+seguem proibidas no log **inteiro**, boot e sessão, menos as três que lançar um processo produz (`entered ring3/el0`, `pid 1 exited (code 0,` e `fault contained`; `init loaded` e `user self-test:` continuam proibidas).
 
 **Números** (bytes e `boot time:`) estão no [SDD 07](07_desempenho_e_recursos.md#o-carregador-na-imagem-enxuta-m1).
 
@@ -1761,7 +1765,7 @@ usuário, então mexer no `init` não recompila o kernel.
 
 ### Linhas que o smoke passa a exigir
 
-Em inglês, como toda saída serial. As da 4a e da 4b valem hoje, no modo de teste; o boot normal as proíbe **até o prompt** (o `init` só roda no modo de teste, [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)); depois do prompt o smoke digita a sessão do M1, nos dois modos.
+Em inglês, como toda saída serial. As da 4a e da 4b valem hoje, no modo de teste; o boot normal as proíbe (o `init` só roda no modo de teste, [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)), na sessão do M1 só as três de lançar processo são permitidas; o smoke digita a sessão depois do prompt, nos dois modos.
 
 | Linha | Fatia |
 | --- | --- |

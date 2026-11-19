@@ -132,11 +132,10 @@ textos são em inglês, como a saída do sistema, e o `core/shell` segue puro e 
 | Comando | O que faz | Saída |
 | --- | --- | --- |
 | `ls` | Lista os arquivos do initramfs | `bytes  name` e uma linha por arquivo, em ordem; `ls: no initramfs in this boot` sem initramfs |
-| `run <programa> [&]` | Carrega o ELF, roda como processo isolado com o canal de boot e o console, **espera** e mostra como acabou. Com `&` (solto ou colado ao nome) não espera | `exit code N (pid P)`; `killed: <causa> (pid P)` (`page fault on a write to 0x…`, `illegal instruction`, `out of memory`…, só endereços de usuário); `started pid P` com `&`; `run: X: no such program (try 'ls')` |
+| `run <programa> [&]` | Carrega o ELF, roda como processo isolado com o canal de boot e o console, **espera** e mostra como acabou. Com `&` (solto ou colado ao nome) não espera | `exit code N (pid P)`; `killed: <causa> (pid P)` (`page fault on a write to 0x…`, `… (null or low address)`, `… a kernel address` sem endereço, `illegal instruction`, `out of memory`…); `started pid P` com `&`; `run: X: no such program (try 'ls')`; `run: X: too many processes` com a tabela de tarefas cheia. Cada resposta sai numa escrita só |
 | `ps` | Ganha a coluna `pid` (depois de `name`): o processo que a tarefa roda, ou `-` na tarefa de kernel | Uma linha `user` por processo vivo |
 
-A saída do programa (`[user] …`) e as linhas do kernel (`[rustos] user: pid N exited …`) aparecem no mesmo terminal e na
-serial, antes do `exit code`. Argumentos do programa ainda não passam ([DEBT-0130](../tech-debt/0130-run-sem-argumentos-para-o-programa.md)).
+A saída do programa (`[user] …`) aparece na tela e na serial, antes do `exit code`. As linhas do kernel sobre o ciclo de vida (`[rustos] user: pid N exited …`) vão só para a serial: a tela mostra só o que o shell já diz. Argumentos do programa ainda não passam ([DEBT-0130](../tech-debt/0130-run-sem-argumentos-para-o-programa.md)).
 O shell espera sem prazo e não há Ctrl-C que solte um processo travado ([DEBT-0131](../tech-debt/0131-sem-ctrl-c-nem-kill-de-processo.md)),
 e a saída de um processo em segundo plano cola no prompt ([DEBT-0132](../tech-debt/0132-saida-de-segundo-plano-cola-no-prompt.md)).
 O caminho do kernel está no [SDD 17](17_processos_isolamento_e_syscalls.md#o-m1-programas-pelo-shell-como-entrou).

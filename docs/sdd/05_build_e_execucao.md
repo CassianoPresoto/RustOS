@@ -62,12 +62,15 @@ Ctrl-A X encerra a QEMU. A sessão que mostra o M1:
 | Digite | Faz | Saída esperada (em essência) |
 | --- | --- | --- |
 | `ls` | Lista o initramfs | `bytes  name`, e as linhas `init`, `hello`, `crash`, `sysinfo`, `count` |
-| `run hello` | Roda e espera | `[user] hello from a user process (ring 3 on x86_64)` (ou `EL0 on aarch64`), `[rustos] user: pid 1 exited (code 0, cpu N)` e `exit code 0 (pid 1)` |
+| `run hello` | Roda e espera | `[user] hello from a user process (ring 3 on x86_64)` (ou `EL0 on aarch64`) e `exit code 0 (pid 1)` |
 | `run sysinfo` | Relógio, página e aleatório | `[user] sysinfo: up N ms, page 4096 B, 3 loads, random 0x…` e `exit code 0 (pid P)` |
-| `run crash` | Um programa que toca a página de guarda | `[user] crash: going down the stack…`, `[rustos] user: fault contained (pid P)` e `killed: page fault on a read of 0x… (pid P)` (ou `write to`); **o prompt volta** |
-| `run count &` | Em segundo plano, 2,5 s | `started pid P` e o prompt na hora; `[user] count: 1/5 …` até `done` aparecem depois |
+| `run crash` | Um programa que toca a página de guarda | `[user] crash: going down the stack…` e `killed: page fault on a read of 0x… (pid P)` (ou `write to`); **o prompt volta** |
+| `run nothere` | Programa que não existe | `run: nothere: no such program (try 'ls')` |
+| `run count &` | Em segundo plano, 2,5 s | `started pid P` e o prompt na hora; `[user] count: 1/5 …` até `done` aparecem depois, colados ao prompt |
 | `ps` | Tarefas e processos | A coluna `pid`; a linha `user` com o pid de `count` enquanto ele dorme |
 | `run init` | O autoteste do `init`, sob demanda | `[user] init: ok (…)` e `exit code 0 (pid P)` |
+
+**Na tela** só aparece isso (o que o programa escreve e a resposta do shell). As linhas de diagnóstico do kernel (`[rustos] user: entered ring3/el0`, `pid N exited (code 0, cpu C)`, `pid N stopped by a page fault at …`, `fault contained (pid N)`) vão **só para a serial**, que é o terminal do `make run`; quem lê o terminal as vê entre as respostas.
 
 `make smoke-fast ARCH=all PROFILE=release-small` digita essa mesma sessão e a confere.
 

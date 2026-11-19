@@ -11,7 +11,7 @@ paid_date:
 
 ## O que falta
 
-Com `run count &` o shell devolve o prompt e o processo segue escrevendo `[user] ...` pelo console. A primeira linha dele cai logo depois do `rustos ~ % ` (que não termina em `\n`), e a linha que o usuário digita no meio fica misturada com as do processo. O smoke só confere a última linha de `count`, que começa limpa.
+Com `run count &` o shell devolve o prompt e o processo segue escrevendo `[user] ...` pelo console. A primeira linha dele cai logo depois do `rustos ~ % ` (que não termina em `\n`), e a linha que o usuário digita no meio fica misturada com as do processo. Já rasgou a resposta do próprio `run` (`started pid [user] hello…` com o número na linha de baixo): isso foi corrigido escrevendo cada resposta do `run` numa chamada só, mas a linha de prompt e a linha em edição seguem sujeitas. O smoke só confere a última linha de `count`, que começa limpa.
 
 ## Por que foi aceito
 
