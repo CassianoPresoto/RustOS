@@ -98,6 +98,58 @@ impl BootMode {
 const SELFTEST_REFUSED: &str = "[rustos] selftest: not in this build";
 const BENCH_REFUSED: &str = "bench: not in this build";
 
+/// Um comando que o smoke digita no shell e o que a resposta dele (até o prompt voltar) tem de
+/// conter, em texto puro, sem as sequências de escape.
+struct Step {
+    command: &'static str,
+    expect: &'static [&'static str],
+}
+
+/// A sessão do M1 (SDD 17): listar o initramfs, rodar um programa como processo, ver o processo no
+/// `ps`, e um programa que morre contido sem derrubar o sistema. Vale no boot normal e no de teste.
+const SESSION: [Step; 7] = [
+    Step {
+        command: "ls",
+        expect: &["hello", "crash", "sysinfo", "count", "init"],
+    },
+    Step {
+        command: "run hello",
+        expect: &[
+            "[user] hello from a user process (",
+            "exited (code 0,",
+            "exit code 0 (pid ",
+        ],
+    },
+    Step {
+        command: "run sysinfo",
+        expect: &["[user] sysinfo: up ", "exit code 0 (pid "],
+    },
+    Step {
+        command: "run crash",
+        expect: &[
+            "[user] crash: going down the stack",
+            "[rustos] user: fault contained (pid ",
+            "killed: page fault",
+        ],
+    },
+    Step {
+        command: "run nothere",
+        expect: &["run: nothere: no such program"],
+    },
+    Step {
+        command: "run count &",
+        expect: &["started pid "],
+    },
+    Step {
+        command: "ps",
+        expect: &["pid", "shell"],
+    },
+];
+/// A última linha de `count`, que prova que o programa em segundo plano terminou sozinho.
+const COUNT_DONE: &str = "[user] count: done";
+/// `count` conta cinco vezes meio segundo; sob TCG sobra folga.
+const COUNT_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// O que só o modo de teste imprime: se uma destas faltar, a linha de comando se perdeu e o
 /// boot que passou foi o normal.
 const SELFTEST_LINES: [(&str, &str); 23] = [
@@ -138,8 +190,8 @@ const SELFTEST_LINES: [(&str, &str); 23] = [
         "o autoteste dos casos de usuário",
     ),
     (
-        "[rustos] initramfs: 4 files, ",
-        "a leitura do initramfs (o `init`, o `big`, o `handles` e o `lazy`)",
+        "[rustos] initramfs: 8 files, ",
+        "a leitura do initramfs (o `init`, as quatro demonstrações e os três de teste)",
     ),
     (
         "[user] lazy: ok (",
@@ -268,25 +320,124 @@ pub fn smoke(root: &Path, arch: Arch, profile: Profile, mode: BootMode) -> Resul
     };
     let mut qemu = command_with(root, arch, profile, &features, mode.cmdline())?;
     qemu.args(["-display", "none", "-serial", "stdio", "-monitor", "none"])
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-    if mode == BootMode::Refused {
-        qemu.stdin(Stdio::piped());
-    }
     let started = Instant::now();
     let mut child = qemu
         .spawn()
         .map_err(|error| format!("não consegui rodar {}: {error}", arch.qemu()))?;
     let receiver = stream_stdout(&mut child)?;
     let (outcome, mut log) = wait_for_boot(&receiver, started);
-    if mode == BootMode::Refused && matches!(outcome, Outcome::Booted(_)) {
-        type_lean_commands(&mut child, &receiver, &mut log);
+    let boot_log = log.clone();
+    let mut session = Ok(());
+    if matches!(outcome, Outcome::Booted(_)) {
+        if mode == BootMode::Refused {
+            type_lean_commands(&mut child, &receiver, &mut log);
+        } else {
+            session = type_session(&mut child, &receiver, &mut log);
+        }
     }
     child.kill().ok();
     child.wait().ok();
 
     print_kernel_lines(&log);
-    report(arch, mode, outcome, &log)
+    // O boot normal não pode rodar programa: as linhas proibidas valem só até o prompt, e a sessão
+    // digitada tem as próprias exigências.
+    let judged = if mode == BootMode::Refused {
+        &log
+    } else {
+        &boot_log
+    };
+    report(arch, mode, outcome, judged)?;
+    session
+        .and_then(|()| check_no_kernel_address(&log[boot_log.len()..]))
+        .map_err(|reason| failure(arch, &reason, &log))
+}
+
+/// O endereço do kernel que a sessão digitada deixou no log, se deixou (SDD 09).
+fn check_no_kernel_address(session: &str) -> Result<(), String> {
+    if cargo::has_feature(&cargo::listed_features(), "debug-addrs") {
+        return Ok(());
+    }
+    match leak::find_kernel_address(session) {
+        Some(address) => Err(format!(
+            "endereço do kernel na sessão do shell: `{address}`"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Digita `command` e lê para o `log` até o prompt voltar. Devolve a resposta em texto puro.
+fn type_command(
+    child: &mut std::process::Child,
+    receiver: &mpsc::Receiver<String>,
+    log: &mut String,
+    command: &str,
+) -> Result<String, String> {
+    let from = log.len();
+    let stdin = child.stdin.as_mut().ok_or("QEMU sem stdin")?;
+    stdin
+        .write_all(format!("{command}\r").as_bytes())
+        .and_then(|()| stdin.flush())
+        .map_err(|error| format!("digitar `{command}` na serial: {error}"))?;
+    read_to_prompt(receiver, log, from, Instant::now() + COMMAND_TIMEOUT);
+    if !ends_with_prompt(&log[from..]) {
+        return Err(format!(
+            "o shell não devolveu o prompt depois de `{command}`"
+        ));
+    }
+    Ok(strip_escapes(&log[from..]))
+}
+
+/// Digita a `SESSION` no shell, uma linha por vez, e confere cada resposta. No fim espera o
+/// `count` em segundo plano terminar sozinho. Escreve na tela o que cada comando respondeu.
+fn type_session(
+    child: &mut std::process::Child,
+    receiver: &mpsc::Receiver<String>,
+    log: &mut String,
+) -> Result<(), String> {
+    let deadline = Instant::now() + COMMAND_TIMEOUT;
+    read_to_prompt(receiver, log, 0, deadline);
+    if !ends_with_prompt(log) {
+        return Err("o shell não mostrou o prompt depois do boot".to_owned());
+    }
+    for step in &SESSION {
+        let answer = type_command(child, receiver, log, step.command)?;
+        if let Some(missing) = step.expect.iter().find(|text| !answer.contains(**text)) {
+            return Err(format!(
+                "`{}` respondeu sem `{missing}`:\n{answer}",
+                step.command
+            ));
+        }
+        if step.command == "ps" && !ps_shows_a_process(&answer) {
+            return Err(format!(
+                "o `ps` não mostrou o processo `count` com o pid:\n{answer}"
+            ));
+        }
+        println!("xtask: `{}` ok", step.command);
+    }
+    let deadline = Instant::now() + COUNT_TIMEOUT;
+    while !has_user_line(log, COUNT_DONE) {
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(format!(
+                "o `count` em segundo plano não terminou (`{COUNT_DONE}`)"
+            ));
+        };
+        match receiver.recv_timeout(left) {
+            Ok(chunk) => log.push_str(&chunk),
+            Err(_) => return Err("a serial fechou antes de o `count` terminar".to_owned()),
+        }
+    }
+    Ok(())
+}
+
+/// Uma linha do `ps` de uma tarefa `user` com o número do processo na coluna `pid` (a terceira).
+fn ps_shows_a_process(answer: &str) -> bool {
+    answer.lines().any(|line| {
+        let mut words = line.split_whitespace().skip(1);
+        words.next() == Some("user") && words.next().is_some_and(|pid| pid.parse::<u32>().is_ok())
+    })
 }
 
 /// Lê para o `log` até o prompt do shell voltar depois de `from`, ou o prazo acabar.
@@ -809,7 +960,7 @@ mod tests {
             "[rustos] heap self-test: ok",
             "[rustos] timer: 100 Hz",
             "[rustos] initramfs: not mapped, the boot goes on without it",
-            "[rustos] initramfs: 4 files, 272 bytes",
+            "[rustos] initramfs: 8 files, 272 bytes",
             "[rustos] user: fault contained (pid 3)",
             "[rustos] user self-test: ok",
         ] {
@@ -865,6 +1016,24 @@ mod tests {
         }
         let result = report(Arch::X86_64, BootMode::SelfTest, outcome, &log);
         assert!(result.unwrap_err().contains("canal de boot"));
+    }
+
+    #[test]
+    fn the_ps_check_wants_a_user_task_with_a_numeric_pid() {
+        let ps = "id  name       pid cpu state\n  1  shell        -   0 run\n  9  user         3   1 wait\n";
+        assert!(ps_shows_a_process(ps));
+        assert!(!ps_shows_a_process("  1  shell        -   0 run\n"));
+        assert!(!ps_shows_a_process("  9  user         -   1 wait\n"));
+    }
+
+    #[test]
+    fn the_session_has_no_command_without_an_expectation() {
+        for step in &SESSION {
+            assert!(!step.expect.is_empty(), "{}", step.command);
+        }
+        let commands: Vec<&str> = SESSION.iter().map(|step| step.command).collect();
+        assert!(commands.contains(&"run hello") && commands.contains(&"run crash"));
+        assert!(commands.contains(&"ls") && commands.contains(&"ps"));
     }
 
     #[test]
