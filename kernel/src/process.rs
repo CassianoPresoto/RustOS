@@ -2,13 +2,6 @@
 //! objetos nem handles. Nasce de um ELF do initramfs (o `init`), entra em anel 3 ou EL0, morre por
 //! `process_exit` ou por falha da CPU, e o kernel segue. O programa plano de teste só existe no
 //! modo de teste.
-#![cfg_attr(
-    not(feature = "selftest"),
-    allow(
-        dead_code,
-        reason = "só o modo de teste lança processo até a 4c dar trabalho ao init"
-    )
-)]
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -84,8 +77,16 @@ pub struct Program<'a> {
 /// O que `spawn` entrega: a tarefa, o número do processo e o que a carga custou.
 #[derive(Clone, Copy, Debug)]
 pub struct Spawned {
+    #[cfg_attr(
+        not(feature = "selftest"),
+        allow(dead_code, reason = "lido só pelo modo de teste")
+    )]
     pub task: rustos_sched::TaskId,
     pub pid: u32,
+    #[cfg_attr(
+        not(feature = "selftest"),
+        allow(dead_code, reason = "lido só pelo modo de teste")
+    )]
     pub segments: usize,
     #[cfg_attr(
         not(feature = "selftest"),
@@ -288,7 +289,7 @@ pub fn spawn_keeping(
 fn process_main(arg: usize) {
     let process = ptr::with_exposed_provenance_mut::<Process>(arg);
     // SAFETY: `arg` é o `Box::into_raw` de `spawn`, entregue só a esta tarefa.
-    let (root, entry, sp, arg0, active) = unsafe {
+    let (root, entry, sp, arg0, active, pid) = unsafe {
         let p = &*process;
         (
             p.space.root().as_u64(),
@@ -296,9 +297,11 @@ fn process_main(arg: usize) {
             p.sp,
             p.arg0,
             p.space.active_addr(),
+            p.pid,
         )
     };
     let top = task::bind_user(root, arg, active);
+    task::set_pid(pid);
     ENTRY_CYCLES.store(platform::cycles(), Ordering::Relaxed);
     // SAFETY: `bind_user` mascarou a IRQ e já pôs o espaço e a pilha de entrada desta CPU; `entry` e
     // `sp` vêm de `load`, dentro de `[USER_MIN, USER_TOP)`, `sp` alinhado a 16.
@@ -439,6 +442,7 @@ fn terminate(event: ProcessEvent) -> ! {
         kprintln!("[rustos] user: fault contained (pid {pid})");
     }
     *LAST_EVENT.lock() = Some((pid, event));
+    crate::programs::finished(pid, &event, no_memory);
     if crate::scrub::measuring() {
         let peak = task::note_stack_peak();
         #[cfg(feature = "selftest")]
@@ -496,6 +500,10 @@ pub fn last_stats() -> Option<(u32, SpaceStats)> {
 }
 
 /// O último evento de fim de processo e de que processo foi.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "lido só pelo modo de teste")
+)]
 pub fn last_event() -> Option<(u32, ProcessEvent)> {
     *LAST_EVENT.lock()
 }

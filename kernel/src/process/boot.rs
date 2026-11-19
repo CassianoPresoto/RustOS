@@ -18,12 +18,20 @@ const ITEMS: [u32; 2] = [boot_kind::PROCESS, boot_kind::CONSOLE];
 
 /// A ponta do canal de boot que o kernel guarda (só o modo de teste): fala com o programa por uma
 /// tabela de handles própria, como o pai de um processo falaria.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "só o modo de teste guarda a ponta")
+)]
 #[derive(Debug)]
 pub struct BootPeer {
     table: IrqLock<Table>,
     channel: Handle,
 }
 
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "só o modo de teste guarda a ponta")
+)]
 impl BootPeer {
     /// Escreve `bytes` na fila do programa.
     pub fn write(&self, bytes: &[u8]) -> Result<(), Status> {

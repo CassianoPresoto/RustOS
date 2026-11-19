@@ -167,6 +167,8 @@ struct Slot {
     user_top: AtomicU64,
     /// O `Process` da tarefa (`Box::into_raw`), ou zero.
     process: AtomicUsize,
+    /// O número do processo que a tarefa roda, só para o `ps`; zero sem processo.
+    pid: AtomicU32,
     /// O endereço da máscara de CPUs do espaço que a tarefa roda (`UserSpace::active_addr`), ou zero.
     user_active: AtomicUsize,
     meta: IrqLock<Meta>,
@@ -188,6 +190,7 @@ impl Slot {
             user_root: AtomicU64::new(0),
             user_top: AtomicU64::new(0),
             process: AtomicUsize::new(0),
+            pid: AtomicU32::new(0),
             user_active: AtomicUsize::new(0),
             meta: IrqLock::new(Meta {
                 name: "",
@@ -495,6 +498,7 @@ fn start(id: usize, config: Spawn) -> Result<bool, TaskError> {
     target.user_root.store(0, Ordering::Relaxed);
     target.user_top.store(0, Ordering::Relaxed);
     target.process.store(0, Ordering::Relaxed);
+    target.pid.store(0, Ordering::Relaxed);
     target.user_active.store(0, Ordering::Relaxed);
     target.cpu_ns.store(0, Ordering::Relaxed);
     target.switches.store(0, Ordering::Relaxed);
@@ -1078,6 +1082,14 @@ pub fn bind_user(root: u64, process: usize, active: usize) -> u64 {
     top
 }
 
+/// Diz ao `ps` qual processo a tarefa corrente roda; vale até `unbind_user`.
+pub fn set_pid(pid: u32) {
+    let here = percpu::current();
+    slot(here.current.load(Ordering::Relaxed) as usize)
+        .pid
+        .store(pid, Ordering::Relaxed);
+}
+
 /// O `Process` da tarefa corrente, ou `None` se ela não roda um. Para o tratador de falta de página.
 pub fn current_process() -> Option<usize> {
     let here = percpu::current();
@@ -1098,6 +1110,7 @@ pub fn unbind_user() -> Option<usize> {
     );
     current.user_root.store(0, Ordering::Relaxed);
     current.user_top.store(0, Ordering::Relaxed);
+    current.pid.store(0, Ordering::Relaxed);
     let process = current.process.swap(0, Ordering::AcqRel);
     (process != 0).then_some(process)
 }
@@ -1234,6 +1247,8 @@ pub fn notify_input() {
 pub struct Snapshot {
     pub id: u32,
     pub name: &'static str,
+    /// O processo de usuário da tarefa, se roda um.
+    pub pid: Option<u32>,
     pub state: State,
     pub cpu: usize,
     pub cpu_ns: u64,
@@ -1267,6 +1282,7 @@ pub fn for_each_snapshot(visit: &mut dyn FnMut(Snapshot)) {
         visit(Snapshot {
             id: slot_u32(id),
             name,
+            pid: Some(task.pid.load(Ordering::Relaxed)).filter(|&pid| pid != 0),
             state,
             cpu: task.cpu.load(Ordering::Relaxed) as usize,
             cpu_ns: task.cpu_ns.load(Ordering::Relaxed) + running,

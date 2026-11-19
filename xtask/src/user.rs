@@ -17,11 +17,32 @@ pub struct Program {
     pub selftest_only: bool,
 }
 
-/// Todos os programas de `user/`. O `init` vai em toda imagem; os de teste, só com `selftest`.
-pub const PROGRAMS: [Program; 4] = [
+/// Todos os programas de `user/`. O `init` e as demonstrações do shell vão em toda imagem; os de
+/// teste, só com `selftest`.
+pub const PROGRAMS: [Program; 8] = [
     Program {
         package: "rustos-user-init",
         file: "init",
+        selftest_only: false,
+    },
+    Program {
+        package: "rustos-user-hello",
+        file: "hello",
+        selftest_only: false,
+    },
+    Program {
+        package: "rustos-user-crash",
+        file: "crash",
+        selftest_only: false,
+    },
+    Program {
+        package: "rustos-user-sysinfo",
+        file: "sysinfo",
+        selftest_only: false,
+    },
+    Program {
+        package: "rustos-user-count",
+        file: "count",
         selftest_only: false,
     },
     Program {
@@ -41,7 +62,7 @@ pub const PROGRAMS: [Program; 4] = [
     },
 ];
 
-/// Os programas de uma imagem: o `init`, e os de teste se o kernel tem o modo de teste.
+/// Os programas de uma imagem: o `init` e as demonstrações, e os de teste se o kernel tem o modo de teste.
 pub fn programs_for(selftest: bool) -> Vec<Program> {
     PROGRAMS
         .into_iter()
@@ -284,8 +305,9 @@ mod tests {
     fn only_a_self_test_image_carries_the_test_programs() {
         let plain: Vec<&str> = programs_for(false).iter().map(|p| p.file).collect();
         let tested: Vec<&str> = programs_for(true).iter().map(|p| p.file).collect();
-        assert_eq!(plain, ["init"]);
-        assert_eq!(tested, ["init", "big", "handles", "lazy"]);
+        let demos = ["init", "hello", "crash", "sysinfo", "count"];
+        assert_eq!(plain, demos);
+        assert_eq!(tested, [&demos[..], &["big", "handles", "lazy"]].concat());
     }
 
     #[test]

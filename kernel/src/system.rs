@@ -5,7 +5,8 @@ use rustos_hal::{BootInfo, PAGE_SIZE, RegionKind};
 #[cfg(feature = "selftest")]
 use rustos_shell::{BenchReport, MicroBench};
 use rustos_shell::{
-    CpuInfo, DisplayInfo, FaultTest, Host, MemoryInfo, Shell, SystemInfo, TaskInfo, TaskState,
+    CpuInfo, DisplayInfo, FaultTest, Host, Listing, MemoryInfo, ProgramInfo, RunOutcome, Shell,
+    SystemInfo, TaskInfo, TaskState,
 };
 use rustos_sync::SpinLock;
 use rustos_term::Layout;
@@ -16,6 +17,7 @@ use crate::interrupts;
 use crate::memory::Memory;
 use crate::panic;
 use crate::platform;
+use crate::programs;
 use crate::random;
 use crate::task::{self, State};
 
@@ -50,14 +52,22 @@ pub struct System<'a, B> {
     boot: &'a B,
     memory: &'a Memory,
     display: Option<DisplayInfo>,
+    /// Os arquivos do initramfs, de onde `ls` lê e `run` carrega.
+    initramfs: Option<&'static [u8]>,
 }
 
 impl<'a, B: BootInfo> System<'a, B> {
-    pub fn new(boot: &'a B, memory: &'a Memory, display: Option<DisplayInfo>) -> Self {
+    pub fn new(
+        boot: &'a B,
+        memory: &'a Memory,
+        display: Option<DisplayInfo>,
+        initramfs: Option<&'static [u8]>,
+    ) -> Self {
         Self {
             boot,
             memory,
             display,
+            initramfs,
         }
     }
 
@@ -167,6 +177,7 @@ impl<B: BootInfo> Host for System<'_, B> {
             visit(&TaskInfo {
                 id: snapshot.id,
                 name: snapshot.name,
+                pid: snapshot.pid,
                 state,
                 cpu: u8::try_from(snapshot.cpu).unwrap_or(u8::MAX),
                 cpu_ns: snapshot.cpu_ns,
@@ -197,6 +208,15 @@ impl<B: BootInfo> Host for System<'_, B> {
         visit("frames", u64::from(crate::frames::contentions()));
         visit("console", u64::from(console::contentions()));
         visit("run queues", u64::from(task::queue_contentions()));
+    }
+
+    fn programs(&self, visit: &mut dyn FnMut(&ProgramInfo<'_>)) -> Listing {
+        programs::list(self.initramfs, visit)
+    }
+
+    fn run_program(&self, name: &str, wait: bool) -> RunOutcome {
+        let offset = self.boot.direct_map_offset();
+        programs::run(self.memory.frames, offset, self.initramfs, name, wait)
     }
 
     #[cfg(feature = "selftest")]
