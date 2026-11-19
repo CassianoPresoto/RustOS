@@ -17,9 +17,26 @@ pub fn ns_to_ticks(ns: u64, hz: u64) -> u64 {
     u64::try_from(ticks).unwrap_or(u64::MAX)
 }
 
+/// O valor absoluto do TSC-deadline para `ticks` depois da origem: satura em `u64::MAX`, que é
+/// "nunca". Com `wrapping_add` um prazo enorme dava a volta e armava o timer no passado.
+pub const fn absolute_deadline(origin: u64, ticks: u64) -> u64 {
+    origin.saturating_add(ticks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_huge_deadline_saturates_instead_of_wrapping_into_the_past() {
+        let origin = 9_000_000_000_000;
+        assert_eq!(absolute_deadline(origin, 1_000), origin + 1_000);
+        assert_eq!(absolute_deadline(origin, u64::MAX), u64::MAX);
+        assert_eq!(
+            absolute_deadline(origin, ns_to_ticks(u64::MAX, 3_000_000_000)),
+            u64::MAX
+        );
+    }
 
     #[test]
     fn one_second_of_ticks_is_a_billion_ns() {

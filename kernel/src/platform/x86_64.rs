@@ -6,7 +6,7 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use rustos_arch_x86_64::clock::ns_to_ticks;
+use rustos_arch_x86_64::clock::{absolute_deadline, ns_to_ticks};
 pub use rustos_arch_x86_64::fpu::{
     AREA_ALIGN as FPU_AREA_ALIGN, restore as fpu_restore, save as fpu_save,
 };
@@ -414,7 +414,7 @@ pub fn arm_timer(deadline_ns: u64) {
     if TSC_DEADLINE.load(Ordering::Relaxed) {
         let ticks = ns_to_ticks(deadline_ns, TSC_HZ.load(Ordering::Relaxed));
         // SAFETY: `TSC_DEADLINE` só vale com o CPUID anunciando o recurso e o modo ligado.
-        unsafe { arm_tsc_deadline(TSC_ORIGIN.load(Ordering::Relaxed).wrapping_add(ticks)) };
+        unsafe { arm_tsc_deadline(absolute_deadline(TSC_ORIGIN.load(Ordering::Relaxed), ticks)) };
         return;
     }
     let delta = deadline_ns.saturating_sub(now_ns().unwrap_or(0));

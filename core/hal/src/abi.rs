@@ -256,6 +256,19 @@ impl Rights {
         .union(Self::MAP);
 }
 
+/// Prazos de `object_wait_one` acima de `agora + WAIT_HORIZON_NS` (cerca de 73 anos) valem "sem prazo",
+/// como `u64::MAX`: o timer do hardware não recebe valor que dê a volta no contador.
+pub const WAIT_HORIZON_NS: u64 = 1 << 61;
+
+/// O prazo que o kernel arma para `deadline_ns` pedido às `now_ns`: `None` é sem prazo.
+pub const fn wait_deadline(now_ns: u64, deadline_ns: u64) -> Option<u64> {
+    if deadline_ns == u64::MAX || deadline_ns > now_ns.saturating_add(WAIT_HORIZON_NS) {
+        None
+    } else {
+        Some(deadline_ns)
+    }
+}
+
 /// Sinais de `object_wait_one` (nível, não borda).
 pub mod signals {
     pub const READABLE: u32 = 1 << 0;
@@ -805,6 +818,24 @@ mod tests {
 
     const _: () = assert!(16 + CHANNEL_MAX_HANDLES * 4 <= CHANNEL_MAX_BYTES);
     const _: () = assert!(USER_HANDLE_ARRAY_MAX >= CHANNEL_MAX_HANDLES);
+    #[test]
+    fn a_wait_deadline_beyond_the_horizon_means_no_deadline() {
+        let now = 5_000_000_000;
+        assert_eq!(wait_deadline(now, 0), Some(0));
+        assert_eq!(wait_deadline(now, now + 1), Some(now + 1));
+        assert_eq!(
+            wait_deadline(now, now + WAIT_HORIZON_NS),
+            Some(now + WAIT_HORIZON_NS)
+        );
+        assert_eq!(wait_deadline(now, now + WAIT_HORIZON_NS + 1), None);
+        assert_eq!(wait_deadline(now, 1 << 63), None);
+        assert_eq!(wait_deadline(now, u64::MAX), None);
+        assert_eq!(
+            wait_deadline(u64::MAX - 5, u64::MAX - 1),
+            Some(u64::MAX - 1)
+        );
+    }
+
     #[test]
     fn read_actual_is_two_u64_in_a_row() {
         assert_eq!(size_of::<ReadActual>(), 16);
