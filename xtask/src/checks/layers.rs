@@ -143,14 +143,9 @@ fn check_sources(root: &Path, member: &Member, violations: &mut Vec<String>) {
         violations.push(format!("{}: crate do kernel sem `no_std`", member.path));
     }
     let asm_allowed = member.path.starts_with("arch/") || member.layer == Layer::Tool;
-    if member.layer == Layer::User
-        && !member.path.ends_with("/rt")
-        && !crate_text.contains("#![forbid(unsafe_code)]")
-    {
-        violations.push(format!(
-            "{}: programa de usuário sem `#![forbid(unsafe_code)]` (só o `user/rt` tem `unsafe`, guidelines 03, regra 11)",
-            member.path
-        ));
+    if member.layer == Layer::User && !member.path.ends_with("/rt") {
+        let manifest = fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default();
+        violations.extend(user_unsafe_violations(&member.path, &crate_text, &manifest));
     }
     for file in workspace::files_with_extension(&dir.join("src"), "rs") {
         let text = fs::read_to_string(&file).unwrap_or_default();
@@ -163,6 +158,34 @@ fn check_sources(root: &Path, member: &Member, violations: &mut Vec<String>) {
     }
 }
 
+/// A regra 11 do guidelines 03 para um programa de `user/` que não é o `rt`: `forbid(unsafe_code)`
+/// e nenhum `raw-syscalls`; em `user/tests/*`, `deny(unsafe_code)` (o `unsafe` pontual da syscall
+/// crua leva `#[allow]` e `// SAFETY:`) e, só ali, o `raw-syscalls`.
+fn user_unsafe_violations(path: &str, crate_text: &str, manifest: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let forbids = crate_text.contains("#![forbid(unsafe_code)]");
+    let denies = crate_text.contains("#![deny(unsafe_code)]");
+    if path.starts_with("user/tests/") {
+        if forbids || !denies {
+            found.push(format!(
+                "{path}: programa de teste de usuário sem `#![deny(unsafe_code)]` (e sem `forbid`, que não deixa o `allow` pontual; guidelines 03, regra 11)"
+            ));
+        }
+    } else {
+        if !forbids {
+            found.push(format!(
+                "{path}: programa de usuário sem `#![forbid(unsafe_code)]` (só o `user/rt` tem `unsafe`, guidelines 03, regra 11)"
+            ));
+        }
+        if manifest.contains("raw-syscalls") {
+            found.push(format!(
+                "{path}: só `user/tests/*` liga o `raw-syscalls` do `rt` (guidelines 03, regra 11)"
+            ));
+        }
+    }
+    found
+}
+
 fn read(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| format!("ler {}: {error}", path.display()))
 }
@@ -170,6 +193,32 @@ fn read(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_normal_program_forbids_unsafe_and_never_links_the_raw_syscalls() {
+        let forbid = "#![forbid(unsafe_code)]";
+        assert_eq!(user_unsafe_violations("user/init", forbid, "").len(), 0);
+        assert_eq!(user_unsafe_violations("user/init", "", "").len(), 1);
+        assert_eq!(
+            user_unsafe_violations("user/init", "#![deny(unsafe_code)]", "").len(),
+            1
+        );
+        let raw = "rustos-user-rt = { workspace = true, features = [\"raw-syscalls\"] }";
+        assert_eq!(user_unsafe_violations("user/init", forbid, raw).len(), 1);
+    }
+
+    #[test]
+    fn a_test_program_denies_unsafe_and_may_link_the_raw_syscalls() {
+        let raw = "features = [\"raw-syscalls\"]";
+        let handles = user_unsafe_violations("user/tests/handles", "#![deny(unsafe_code)]", raw);
+        assert_eq!(handles.len(), 0);
+        assert_eq!(user_unsafe_violations("user/tests/big", "", "").len(), 1);
+        assert_eq!(
+            user_unsafe_violations("user/tests/big", "#![forbid(unsafe_code)]", "").len(),
+            1,
+            "forbid não deixa o allow pontual de um teste"
+        );
+    }
 
     #[test]
     fn classifies_members_by_folder() {

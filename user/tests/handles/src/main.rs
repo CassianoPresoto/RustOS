@@ -5,7 +5,7 @@
 
 #![no_std]
 #![no_main]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 use rustos_user_rt::{Env, Handle, Rights, Status, Syscall, boot, entry, println, signals, sys};
 
@@ -41,8 +41,14 @@ impl Checks {
     }
 }
 
+#[allow(
+    unsafe_code,
+    reason = "syscall crua do teste hostil; o contrato está no SAFETY"
+)]
 fn call(number: Syscall, args: [u64; 6]) -> Raw {
-    sys::raw::syscall(number, args)
+    // SAFETY: todo ponteiro que o kernel escreve é de um buffer vivo deste programa com o tamanho
+    // passado, ou um endereço que o kernel recusa; nenhum aponta para memória usada de outro jeito.
+    unsafe { sys::raw::syscall(number, args) }
 }
 
 fn addr(bytes: &[u8]) -> u64 {
@@ -208,12 +214,23 @@ fn rights(c: &mut Checks, console: Handle) {
             call(Syscall::HandleDuplicate, [console.raw(), bits, 0, 0, 0, 0]),
             Status::InvalidArgs,
         );
+        let spare = lent(console);
         c.status(
             "reserved right bits in replace",
-            call(Syscall::HandleReplace, [console.raw(), bits, 0, 0, 0, 0]),
+            call(Syscall::HandleReplace, [spare.raw(), bits, 0, 0, 0, 0]),
             Status::InvalidArgs,
         );
+        c.status(
+            "and the old handle is gone anyway",
+            sys::handle_close(spare).map(|()| 0),
+            Status::BadHandle,
+        );
     }
+    c.status(
+        "replace of a handle that does not exist, with bad rights",
+        call(Syscall::HandleReplace, [0xBAD0_0001, 1 << 20, 0, 0, 0, 0]),
+        Status::BadHandle,
+    );
     c.expect("the console survives them", writes(console));
     for handle in [can_duplicate, only_transfer, read_only, write_only] {
         let _ = sys::handle_close(handle);
@@ -258,6 +275,35 @@ fn transfers(c: &mut Checks, console: Handle) {
         sys::object_wait_one(b, signals::READABLE, 0).is_err(),
     );
     let _ = (sys::handle_close(a), sys::handle_close(b));
+    inside_a_dead_queue(c);
+}
+
+/// Uma ponta que viaja numa mensagem cujo receptor fecha sem ler: a fila morta se esvazia e a
+/// ponta que viajava morre, e a outra ponta do canal vê `PEER_CLOSED`.
+fn inside_a_dead_queue(c: &mut Checks) {
+    let (x1, x2) = pair();
+    let (y1, y2) = pair();
+    c.expect(
+        "writing an end inside a message",
+        sys::channel_write(y1, b"carry", &[x2]).is_ok(),
+    );
+    c.expect("the end left the table", sys::handle_close(x2).is_err());
+    c.expect(
+        "the other end of the channel is alive while the message waits",
+        sys::object_wait_one(x1, signals::PEER_CLOSED, 0).is_err(),
+    );
+    c.expect("closing the receiver unread", sys::handle_close(y2).is_ok());
+    c.expect(
+        "the end inside the message died with the queue",
+        sys::object_wait_one(x1, signals::PEER_CLOSED, 0)
+            .is_ok_and(|seen| seen & signals::PEER_CLOSED != 0),
+    );
+    c.expect(
+        "and the sender of the message sees its peer gone",
+        sys::object_wait_one(y1, signals::PEER_CLOSED, 0)
+            .is_ok_and(|seen| seen & signals::PEER_CLOSED != 0),
+    );
+    let _ = (sys::handle_close(x1), sys::handle_close(y1));
 }
 
 fn bad_pointers_and_sizes(c: &mut Checks, console: Handle) {
@@ -551,7 +597,7 @@ fn blocking(c: &mut Checks, channel: Handle) {
         sys::channel_write(channel, b"ready", &[]).is_ok(),
     );
     let start = sys::clock_get_monotonic().unwrap_or(0);
-    let woke = sys::object_wait_one(channel, signals::READABLE, start + 10 * SECOND);
+    let woke = sys::object_wait_one(channel, signals::READABLE, u64::MAX - 1);
     let waited = sys::clock_get_monotonic()
         .unwrap_or(0)
         .saturating_sub(start);
@@ -571,7 +617,7 @@ fn blocking(c: &mut Checks, channel: Handle) {
         sys::channel_write(channel, b"ready2", &[]).is_ok(),
     );
     let start = sys::clock_get_monotonic().unwrap_or(0);
-    let closed = sys::object_wait_one(channel, signals::PEER_CLOSED, start + 10 * SECOND);
+    let closed = sys::object_wait_one(channel, signals::PEER_CLOSED, 1 << 62);
     let waited = sys::clock_get_monotonic()
         .unwrap_or(0)
         .saturating_sub(start);
@@ -657,10 +703,10 @@ fn main(env: &Env) -> i64 {
     blocking(&mut c, channel);
     table_limit(&mut c, console);
     if c.failed == 0 {
-        println!("handles: ok ({} cases)", c.ran);
+        println!("handles: ok ({} assertions)", c.ran);
         0
     } else {
-        println!("handles: FAILED {} of {} cases", c.failed, c.ran);
+        println!("handles: FAILED {} of {} assertions", c.failed, c.ran);
         i64::from(c.failed)
     }
 }

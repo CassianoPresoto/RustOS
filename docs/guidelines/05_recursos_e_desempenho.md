@@ -11,8 +11,13 @@
 - **Estrutura do núcleo tem capacidade fixa ou recebe a memória de fora.** `RunQueue<N>`
   usa `const N`; `BuddyAllocator` recebe a fatia. Nada em `core/` chama o
   alocador global.
-- **Nada de alocação, `format!` ou laço sem limite no caminho quente** (interrupção,
-  escalonador, syscall). Formatação é só para o console.
+- **Nada de alocação, `format!` ou laço sem limite no caminho quente**: interrupção,
+  escalonador e a syscall que não cria nada (a nula, a de espera, o fechamento de handle).
+  Formatação é só para o console.
+- **A syscall que cria objeto ou handle, ou que carrega mensagem de IPC, pode alocar do heap, e só
+  com `try_*`:** a falta de memória vira `NoMemory` e nunca derruba o kernel. Vale para
+  `channel_create`, `channel_write`, `handle_duplicate` e as de criação que vierem. O que ainda
+  usa alocação que aborta é dívida registrada ([DEBT-0110](../tech-debt/0110-objeto-e-mensagem-abortam-na-falta-de-heap.md)).
 - **Nada de ponto flutuante no kernel.** Os alvos são soft-float de propósito: só a
   tarefa criada com `simd: true` salva e restaura FPU/SIMD na troca de contexto.
 - **Metadado por recurso tem custo escrito:** quem cria estrutura por frame, por

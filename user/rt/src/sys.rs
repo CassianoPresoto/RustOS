@@ -142,13 +142,16 @@ pub fn channel_read(
 
 /// Chamadas com valores crus, para o programa que testa o que o kernel recusa: um handle forjado, um
 /// ponteiro ruim, um tamanho acima do limite. O kernel valida tudo, mas um ponteiro válido do próprio
-/// programa é escrito de verdade: só o `user/tests/*` liga esta feature.
+/// programa é escrito de verdade: só o `user/tests/*` liga esta feature (o `check-layers` confere).
 #[cfg(feature = "raw-syscalls")]
 pub mod raw {
     use super::{Result, Syscall, call, checked};
 
-    /// Uma chamada com os seis argumentos como vierem. Devolve o valor ou o erro.
-    pub fn syscall(number: Syscall, args: [u64; 6]) -> Result<u64> {
+    /// Uma chamada com os argumentos como vierem.
+    /// # Safety
+    /// Todo ponteiro que o kernel escreve é de um buffer vivo do programa com o tamanho passado,
+    /// ou um endereço que o kernel recusa (nulo, não mapeado, do kernel).
+    pub unsafe fn syscall(number: Syscall, args: [u64; 6]) -> Result<u64> {
         checked(call(number, args))
     }
 }

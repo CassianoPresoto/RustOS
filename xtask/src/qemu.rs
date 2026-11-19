@@ -855,7 +855,7 @@ mod tests {
         assert!(!has_user_line("[rustos] [user] init: ok\n", ok));
         assert!(!has_user_line("[user] init: FAILED clock\n", ok));
         assert!(!has_user_line(
-            "[user] handles: FAILED 1 of 9 cases\n",
+            "[user] handles: FAILED 1 of 9 assertions\n",
             USER_OUTPUT[2].0
         ));
     }

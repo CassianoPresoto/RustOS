@@ -104,15 +104,18 @@ pub fn build_command(root: &Path, arch: Arch, profile: Profile, packages: &[&str
     command
 }
 
-/// Compila `programs` e devolve, de cada um, o nome no initramfs e o caminho do binário.
+/// Compila `programs` e devolve, de cada um, o nome no initramfs e o caminho do binário. **Cada
+/// programa numa invocação do cargo**: com vários `--package` juntos o cargo unifica as features do
+/// `rt`, e o `init` ligaria o `raw-syscalls` que só `user/tests/*` pode ter (guidelines 03, regra 11).
 pub fn build(
     root: &Path,
     arch: Arch,
     profile: Profile,
     programs: &[Program],
 ) -> Result<Vec<(&'static str, PathBuf)>, String> {
-    let packages: Vec<&str> = programs.iter().map(|program| program.package).collect();
-    workspace::run(&mut build_command(root, arch, profile, &packages))?;
+    for program in programs {
+        workspace::run(&mut build_command(root, arch, profile, &[program.package]))?;
+    }
     Ok(programs
         .iter()
         .map(|&program| (program.file, binary_path(root, arch, profile, program)))
@@ -205,6 +208,35 @@ mod tests {
         for arch in [Arch::X86_64, Arch::Aarch64] {
             let flags = encoded_rustflags(Path::new(ROOT), arch);
             assert!(!flags.contains("pie") && !flags.contains("pic"), "{flags}");
+        }
+    }
+
+    #[test]
+    fn each_program_is_built_alone_so_the_features_of_the_rt_do_not_unify() {
+        for program in PROGRAMS {
+            let command = build_command(
+                Path::new(ROOT),
+                Arch::X86_64,
+                Profile::Dev,
+                &[program.package],
+            );
+            let packages = args_of(&command)
+                .iter()
+                .filter(|arg| arg.starts_with("rustos-user"))
+                .count();
+            assert_eq!(packages, 1, "{}", program.file);
+        }
+    }
+
+    #[test]
+    fn only_the_test_programs_link_the_raw_syscalls_in_their_manifests() {
+        for program in PROGRAMS.iter().filter(|program| !program.selftest_only) {
+            let path = workspace::root()
+                .join("user")
+                .join(program.file)
+                .join("Cargo.toml");
+            let manifest = std::fs::read_to_string(path).unwrap();
+            assert!(!manifest.contains("raw-syscalls"), "{}", program.file);
         }
     }
 

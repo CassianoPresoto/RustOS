@@ -4,7 +4,7 @@
 
 #![no_std]
 #![no_main]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 use core::hint::black_box;
 use core::sync::atomic::{AtomicU32, Ordering};
