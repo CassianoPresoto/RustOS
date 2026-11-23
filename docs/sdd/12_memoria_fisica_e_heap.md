@@ -60,6 +60,12 @@ Duas portas, as duas definidas em `core/mm`, no padrão do `TableMemory` do `hal
 - **`release_range` e `reserve_range`** mantêm a semântica do bitmap: liberar só os
   frames inteiros, repetir é inócuo; reservar todo frame tocado, partindo os blocos.
   `reserve_range` custa O(frames × ordens): é de boot.
+- **O frame físico 0 nunca entra no alocador.** `release_range` começa em `PAGE_SIZE`
+  e não entrega o 0 a faixa nenhuma. O kernel usa o endereço 0 como sentinela de
+  "nenhuma" (raiz do kernel em `switch_space`, entrada vazia na tabela). No CI (Ubuntu,
+  QEMU 8.2 + OVMF) o firmware declarava o frame 0 como RAM livre; ele virava raiz de
+  processo, `bind_user` recebia raiz 0, e a CPU carregava a raiz do kernel com a pilha
+  de entrada zerada: double fault em `enter_user`.
 
 ### Por que bitmaps e não listas nos frames livres
 

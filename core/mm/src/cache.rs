@@ -198,10 +198,12 @@ mod tests {
         }
     }
 
+    /// Região de `frames` frames a partir do frame `frames`: o frame 0 não entra no alocador.
     fn buddy(storage: &mut Vec<u64>, frames: usize) -> BuddyAllocator<'_> {
         *storage = vec![0; BuddyAllocator::words_needed(frames)];
-        let mut buddy = BuddyAllocator::new(storage, PhysAddr::new(0), frames).unwrap();
-        buddy.release_range(PhysAddr::new(0), frames as u64 * FRAME_SIZE);
+        let base = PhysAddr::new(frames as u64 * FRAME_SIZE);
+        let mut buddy = BuddyAllocator::new(storage, base, frames).unwrap();
+        buddy.release_range(base, frames as u64 * FRAME_SIZE);
         buddy
     }
 
