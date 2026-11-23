@@ -41,8 +41,8 @@ fn close_taken(taken: Transits<Obj>) {
 
 /// `process_create(parent, name_ptr, name_len, bootstrap, events, out)`: um processo vazio, sem
 /// thread: o espaço, o VMAR raiz e o `bootstrap` na tabela dele, como o primeiro handle (valor 1).
-/// `parent` exige `MANAGE_PROCESS`; `bootstrap`, `TRANSFER`; `events`, `WRITE` e `TRANSFER`, e fica no
-/// processo, que escreve nele o evento do fim. Processo e VMAR raiz voltam em `out`, dois `u64`.
+/// `parent` exige `MANAGE_PROCESS`; `bootstrap`, `TRANSFER`; `events`, um canal com `WRITE` e
+/// `TRANSFER`, que fica no processo e recebe o evento do fim. Processo e VMAR raiz voltam em `out`, dois `u64`.
 pub fn process_create(args: &[u64; 6]) -> Outcome {
     let [parent, name_ptr, name_len, bootstrap, events, out] = *args;
     let items = [
@@ -58,7 +58,19 @@ pub fn process_create(args: &[u64; 6]) -> Outcome {
                 ObjectKind::Process,
                 required::PROCESS_CREATE_PARENT,
             )
-            .map(|_| ());
+            .map(|_| ())
+            .and_then(|()| {
+                if events == 0 {
+                    return Ok(());
+                }
+                table
+                    .get_of(
+                        lenient(events),
+                        ObjectKind::Channel,
+                        required::PROCESS_CREATE_EVENTS,
+                    )
+                    .map(|_| ())
+            });
         let taken = table.take_array(moved, None);
         Ok(match (authorized, taken) {
             (Ok(()), Ok(taken)) => Ok(taken),

@@ -511,28 +511,13 @@ impl Process {
     fn report(&self, event: &ProcessEvent) {
         let handle = Handle::from_raw(self.event_handle.load(Ordering::Acquire));
         if let Some(handle) = handle {
-            let bytes = Bytes::uncharged(&wire(event).to_bytes());
+            let bytes = Bytes::uncharged(&event.for_user().to_bytes());
             if let Some(bytes) = bytes {
                 let _ = channel_write(&self.events, handle, bytes, &[], &mut Work::new());
             }
         }
         close_handles(&self.events);
     }
-}
-
-/// O evento como sai do kernel: só endereço de usuário, o que passa do topo da metade baixa vira 0.
-fn wire(event: &ProcessEvent) -> ProcessEvent {
-    ProcessEvent {
-        pc: user_address(event.pc),
-        sp: user_address(event.sp),
-        addr: user_address(event.addr),
-        ..*event
-    }
-}
-
-/// Um endereço que sai para fora do kernel (evento, log): `0` se não está na metade de usuário.
-const fn user_address(value: u64) -> u64 {
-    if value < USER_TOP { value } else { 0 }
 }
 
 /// O processo que nunca rodou (ou nunca foi desfeito) e perdeu o último handle: desfaz-se aqui.
@@ -978,16 +963,19 @@ pub fn user_fault(fault: &Fault) -> ! {
     // O evento nunca leva endereço do kernel (vira 0); a frase da falta diz só que foi na metade dele.
     let kernel_half = kind == fault_kind::PAGE_FAULT && addr >= USER_TOP;
     let _ = with_current(|process| process.kernel_half.store(kernel_half, Ordering::Relaxed));
-    leave_current(Some(ProcessEvent {
-        kind: event_kind::FAULT,
-        fault_kind: kind,
-        access,
-        pc: user_address(fault.pc.as_u64()),
-        sp: user_address(fault.user_sp),
-        addr: user_address(addr),
-        isa_code: fault.code,
-        ..ProcessEvent::default()
-    }))
+    leave_current(Some(
+        ProcessEvent {
+            kind: event_kind::FAULT,
+            fault_kind: kind,
+            access,
+            pc: fault.pc.as_u64(),
+            sp: fault.user_sp,
+            addr,
+            isa_code: fault.code,
+            ..ProcessEvent::default()
+        }
+        .for_user(),
+    ))
 }
 
 fn fault_name(kind: u32) -> &'static str {

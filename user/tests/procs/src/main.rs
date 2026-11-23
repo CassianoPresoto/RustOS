@@ -32,8 +32,6 @@ const MODE_BLOCK: u8 = 3;
 const MODE_OVERFLOW: u8 = 4;
 const MODE_ECHO: u8 = 5;
 const MODE_SELF_KILL: u8 = 7;
-const MODE_WRITE_FAULT: u8 = 8;
-const MODE_KERNEL_READ: u8 = 9;
 /// O modo de sair com o código do segundo byte (`process_exit` do `child`).
 const MODE_EXIT_CODE: u8 = 6;
 const WORKER_SPIN: u64 = 0;
@@ -633,6 +631,109 @@ fn events_rights(c: &mut Checks, cx: &Cx<'_>) {
     }
 }
 
+/// `events` que não é canal (console, VMO) e `events` igual ao próprio pai: `WrongType`, consumindo.
+fn events_type(c: &mut Checks, cx: &Cx<'_>) {
+    let me = cx.parent.process;
+    let mut out = [0_u64; 2];
+    let out_ptr = out.as_mut_ptr().addr() as u64;
+    let Ok(console) = sys::handle_duplicate(cx.console, Rights::WRITE.union(Rights::TRANSFER))
+    else {
+        c.expect("a console handle to pass as events", false);
+        return;
+    };
+    let Ok(vmo) = sys::vmo_create(PAGE) else {
+        c.expect("a VMO to pass as events", false);
+        return;
+    };
+    let Ok(movable) = sys::handle_duplicate(vmo, Rights::WRITE.union(Rights::TRANSFER)) else {
+        c.expect("a VMO handle to pass as events", false);
+        return;
+    };
+    let Some((_, boot)) = pair() else {
+        c.expect("a channel for the type case", false);
+        return;
+    };
+    c.status(
+        "events as a console",
+        raw(
+            Syscall::ProcessCreate,
+            [me.raw(), 0, 0, boot.raw(), console.raw(), out_ptr],
+        ),
+        Status::WrongType,
+    );
+    c.status(
+        "the console handle was consumed",
+        sys::handle_close(console),
+        Status::BadHandle,
+    );
+    c.status(
+        "the bootstrap was consumed with it",
+        sys::handle_close(boot),
+        Status::BadHandle,
+    );
+    let Some((_, boot)) = pair() else {
+        c.expect("a channel for the VMO case", false);
+        return;
+    };
+    c.status(
+        "events as a VMO",
+        raw(
+            Syscall::ProcessCreate,
+            [me.raw(), 0, 0, boot.raw(), movable.raw(), out_ptr],
+        ),
+        Status::WrongType,
+    );
+    c.status(
+        "the VMO handle was consumed",
+        sys::handle_close(movable),
+        Status::BadHandle,
+    );
+    c.status(
+        "the bootstrap was consumed with the VMO",
+        sys::handle_close(boot),
+        Status::BadHandle,
+    );
+    let Ok(parent_copy) = sys::handle_duplicate(me, Rights::MANAGE_PROCESS.union(Rights::TRANSFER))
+    else {
+        c.expect("a copy of the parent to pass as events", false);
+        return;
+    };
+    let Some((_, boot)) = pair() else {
+        c.expect("a channel for the parent case", false);
+        return;
+    };
+    c.status(
+        "events equal to the parent",
+        raw(
+            Syscall::ProcessCreate,
+            [
+                parent_copy.raw(),
+                0,
+                0,
+                boot.raw(),
+                parent_copy.raw(),
+                out_ptr,
+            ],
+        ),
+        Status::WrongType,
+    );
+    c.status(
+        "the parent copy was consumed",
+        sys::handle_close(parent_copy),
+        Status::BadHandle,
+    );
+    c.status(
+        "the bootstrap was consumed with the parent copy",
+        sys::handle_close(boot),
+        Status::BadHandle,
+    );
+    c.expect("no refused call created anything", out == [0, 0]);
+    c.expect(
+        "the parent itself is still ours",
+        sys::handle_duplicate(me, Rights::WAIT).is_ok(),
+    );
+}
+
 /// Um canal novo, com as duas pontas.
 fn pair() -> Option<(Handle, Handle)> {
     sys::channel_create().ok()
@@ -702,21 +803,26 @@ fn events_channel(c: &mut Checks, cx: &Cx<'_>) {
         c.expect("a channel for the fault event", false);
         return;
     };
-    match start_with_events(cx, [MODE_WRITE_FAULT, 0], theirs) {
+    match start_with_events(cx, [MODE_OVERFLOW, 0], theirs) {
         Ok((child, thread)) => {
             c.expect(
-                "a child that writes an unmapped address terminates",
+                "a child that overflows its stack terminates",
                 child.wait(now() + 5 * SECOND).is_ok(),
             );
             let event = read_event(mine);
             c.expect(
-                "the write fault reads as a page fault at the address, with WRITE",
+                "the overflow reads as a page fault with WRITE, at a user address",
                 event.is_some_and(|e| {
                     e.kind == event_kind::FAULT
                         && e.fault_kind == fault_kind::PAGE_FAULT
-                        && e.addr == UNMAPPED
                         && e.access & fault_access::WRITE != 0
+                        && e.addr != 0
+                        && e.addr < USER_TOP
                 }),
+            );
+            c.expect(
+                "the fault address is within a page of the stack pointer",
+                event.is_some_and(|e| e.addr.abs_diff(e.sp) < PAGE),
             );
             c.expect(
                 "the fault pc is a user address",
@@ -730,35 +836,6 @@ fn events_channel(c: &mut Checks, cx: &Cx<'_>) {
             child.release();
         }
         Err(_) => c.expect("a child for the fault event", false),
-    }
-    let _ = sys::handle_close(mine);
-    let Some((mine, theirs)) = pair() else {
-        c.expect("a channel for the kernel-half fault", false);
-        return;
-    };
-    match start_with_events(cx, [MODE_KERNEL_READ, 0], theirs) {
-        Ok((child, thread)) => {
-            c.expect(
-                "a child that reads the kernel half terminates",
-                child.wait(now() + 5 * SECOND).is_ok(),
-            );
-            let event = read_event(mine);
-            c.expect(
-                "a kernel-half fault reads as a page fault with no address",
-                event.is_some_and(|e| {
-                    e.kind == event_kind::FAULT
-                        && e.fault_kind == fault_kind::PAGE_FAULT
-                        && e.addr == 0
-                }),
-            );
-            c.expect(
-                "the kernel-half fault pc is still a user address",
-                event.is_some_and(|e| (USER_MIN..USER_TOP).contains(&e.pc)),
-            );
-            let _ = sys::handle_close(thread);
-            child.release();
-        }
-        Err(_) => c.expect("a child for the kernel-half fault", false),
     }
     let _ = sys::handle_close(mine);
     events_kill_and_gone(c, cx);
@@ -1259,6 +1336,7 @@ fn main(env: &Env) -> i64 {
     sharing_and_partial_unmap(&mut c, &cx);
     process_rights(&mut c, &cx);
     events_rights(&mut c, &cx);
+    events_type(&mut c, &cx);
     events_channel(&mut c, &cx);
     thread_rules(&mut c, &cx);
     threads_and_kill(&mut c, &cx);

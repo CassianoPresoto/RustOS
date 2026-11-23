@@ -95,7 +95,15 @@ fn create_with(parent: Parent, file: &[u8], events: Option<Handle>) -> Result<Ch
             return Err(Error::Elf(error));
         }
     };
-    let (mine, theirs) = sys::channel_create()?;
+    let (mine, theirs) = match sys::channel_create() {
+        Ok(pair) => pair,
+        Err(status) => {
+            if let Some(events) = events {
+                let _ = sys::handle_close(events);
+            }
+            return Err(Error::Sys(status));
+        }
+    };
     let (process, vmar) = match sys::process_create_with_events(
         parent.process,
         b"child",

@@ -432,6 +432,18 @@ impl ProcessEvent {
         out
     }
 
+    /// O evento como sai do kernel: `pc` e `addr` fora de `[0, USER_TOP)` viram 0, e `sp` fora de
+    /// `[0, USER_TOP]` (um `sp` no topo é válido, como em `thread_create`). O resto fica igual.
+    #[must_use]
+    pub const fn for_user(self) -> Self {
+        Self {
+            pc: if self.pc < USER_TOP { self.pc } else { 0 },
+            sp: if self.sp <= USER_TOP { self.sp } else { 0 },
+            addr: if self.addr < USER_TOP { self.addr } else { 0 },
+            ..self
+        }
+    }
+
     /// Lê a mensagem de `bytes`; `None` se não tem exatamente 56 bytes.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let bytes: &[u8; Self::WIRE_LEN] = bytes.try_into().ok()?;
@@ -924,6 +936,53 @@ mod tests {
         let mut longer = [0_u8; 57];
         longer[..56].copy_from_slice(&bytes);
         assert_eq!(ProcessEvent::from_bytes(&longer), None);
+    }
+
+    #[test]
+    fn for_user_zeroes_kernel_addresses_and_keeps_the_rest() {
+        const KERNEL: u64 = 0xFFFF_8000_0000_0000;
+        let event = ProcessEvent {
+            kind: event_kind::FAULT,
+            fault_kind: fault_kind::PAGE_FAULT,
+            access: fault_access::WRITE,
+            reserved: 0,
+            code: -5,
+            pc: KERNEL,
+            sp: KERNEL,
+            addr: KERNEL,
+            isa_code: 0xE,
+        };
+        let out = event.for_user();
+        assert_eq!((out.pc, out.sp, out.addr), (0, 0, 0));
+        assert_eq!(
+            (out.kind, out.fault_kind, out.access, out.code, out.isa_code),
+            (
+                event.kind,
+                event.fault_kind,
+                event.access,
+                event.code,
+                event.isa_code
+            )
+        );
+    }
+
+    #[test]
+    fn for_user_keeps_user_addresses_and_the_sp_at_the_top() {
+        let user = ProcessEvent {
+            pc: 0x40_0010,
+            sp: USER_TOP,
+            addr: 0x2_0000,
+            ..ProcessEvent::default()
+        };
+        assert_eq!(user.for_user(), user);
+        let edge = ProcessEvent {
+            pc: USER_TOP,
+            sp: USER_TOP + 8,
+            addr: USER_TOP,
+            ..ProcessEvent::default()
+        };
+        let out = edge.for_user();
+        assert_eq!((out.pc, out.sp, out.addr), (0, 0, 0));
     }
 
     #[test]
