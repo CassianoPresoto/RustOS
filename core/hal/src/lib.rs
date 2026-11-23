@@ -22,6 +22,7 @@ pub mod mitigation;
 pub mod nospec;
 pub mod paging;
 pub mod redact;
+pub mod tag;
 
 pub use addr::{PhysAddr, VirtAddr};
 pub use boot::{BootInfo, BootModule, BootTimeline, BootloaderId, CpuDescriptor, KernelImage};
@@ -39,3 +40,4 @@ pub use paging::{
     AddressSpace, CacheMode, FrameSource, LARGE_PAGE_SIZE, MapError, Mapping, MmuControl,
     PAGE_SIZE, PageFlags, PageFormat, PageMapper, TableMemory,
 };
+pub use tag::{TagFlush, TlbTag};

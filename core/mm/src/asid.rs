@@ -13,6 +13,14 @@ impl Asid {
     pub const fn raw(self) -> u64 {
         self.0.get()
     }
+
+    /// O `Asid` que `raw` guardou (o espaço lê de volta o que a CPU carregou); zero não é um.
+    pub const fn from_raw(raw: u64) -> Option<Self> {
+        match NonZeroU64::new(raw) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
 }
 
 /// Por que o gerador recusou o pedido.
@@ -214,6 +222,14 @@ mod tests {
 
     fn switched(alloc: &mut Small, cpu: usize, current: Option<Asid>) -> Switch {
         alloc.switch(cpu, current).unwrap()
+    }
+
+    #[test]
+    fn from_raw_gives_back_what_raw_stored_and_refuses_zero() {
+        let mut alloc = Small::new(3, 1).unwrap();
+        let given = switched(&mut alloc, 0, None).asid;
+        assert_eq!(Asid::from_raw(given.raw()), Some(given));
+        assert_eq!(Asid::from_raw(0), None);
     }
 
     #[test]

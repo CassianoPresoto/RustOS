@@ -11,7 +11,7 @@ syscall e o formato de executável são contrato que o mundo de fora enxerga (ca
 o caso 1; por isso o desenho nasceu num PR em Draft só com docs. O dono aprovou as nove
 [decisões pedidas](#as-decisões-do-dono) sem mudança. O código vem em PRs seguintes, e
 este capítulo passa a descritivo à medida que cada fatia entra: o que a 4a e a 4b tornaram verdade está
-em [A fatia 4a, como entrou](#a-fatia-4a-como-entrou), [A fatia 4b, como entrou](#a-fatia-4b-como-entrou) [A fatia 4c, paginação sob demanda e *shootdown*, como entrou](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou) e [A fatia 4c, parte 3, como entrou](#a-fatia-4c-parte-3-como-entrou), o **M1**, em que o shell lança os programas do initramfs ([abaixo](#o-m1-programas-pelo-shell-como-entrou)); e o resto do texto continua sendo desenho.
+em [A fatia 4a, como entrou](#a-fatia-4a-como-entrou), [A fatia 4b, como entrou](#a-fatia-4b-como-entrou) [A fatia 4c, paginação sob demanda e *shootdown*, como entrou](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou) e [A fatia 4c, parte 3, como entrou](#a-fatia-4c-parte-3-como-entrou), a 4e, parte 2 ([PCID e ASID na troca, como entrou](#a-fatia-4e-parte-2-pcid-e-asid-na-troca-como-entrou)), o **M1**, em que o shell lança os programas do initramfs ([abaixo](#o-m1-programas-pelo-shell-como-entrou)); e o resto do texto continua sendo desenho.
 
 Fase 4 do [roadmap](08_roadmap.md). Pesquisa de origem, com as marcas de
 verificação: `syscalls-processes.md` (2026-11-17). O modelo de controle de acesso
@@ -60,7 +60,7 @@ número novo no [SDD 07](07_desempenho_e_recursos.md).
 | M1 (**feito**) | O shell (`ls`, `run`, `ps` com a coluna `pid`) lista os programas do initramfs e os roda como processos isolados **no boot normal**, na imagem `release-small`; quatro programas de demonstração em `user/` (`hello`, `crash`, `sysinfo`, `count`); o smoke digita a sessão no shell | O dono sobe a imagem, digita `ls`, `run hello`, `run crash` e `ps`, e vê o sistema sobreviver à morte contida ([abaixo](#o-m1-programas-pelo-shell-como-entrou)). Paga a metade do [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md) que dizia respeito ao carregador |
 | 4c (**feita**: a parte 1, handles, canais, espera e canal de boot; a paginação sob demanda e o *shootdown*; e a parte 3, VMO, VMAR, `process_create`, `thread_create`, `thread_exit` e `process_kill`, o teto em bytes e o `init` com um filho, [abaixo](#a-fatia-4c-parte-3-como-entrou)) | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (**feito**); **página zero** e **falta de página de usuário resolvida** (**feitas**, [abaixo](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou)); ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; ***shootdown* de TLB** e espera da CPU que ainda roda o espaço na morte do processo (**feitos e pagos**: dívidas 0055 e 0085); o `init` recebe os handles pelo canal de boot (**feitos**) | Um processo cria outro, que escreve no console por um handle que recebeu (**atingido**: o `init` cria o `child`) |
 | 4d (**feita**: a parte 1, o canal de eventos, [abaixo](#a-fatia-4d-parte-1-como-entrou); a parte 2, o SIMD entre processos e o teste de `xmm0`/`v0`, [abaixo](#a-fatia-4d-parte-2-como-entrou)) | SIMD de usuário, canal de eventos do processo, teste de `xmm0`/`v0` entre processos | Dois processos preservam `xmm0`/`v0`; o culpado de uma falha chega ao pai (**paga** o SIMD sem trap na parte 2) |
-| 4e | KPTI, PCID/ASID com a regra de geração entre CPUs, mitigações de CPU ([seção](#mitigações-de-cpu)), relatório no boot. **Parte 1 (feita):** detecção de vulnerabilidade e de recurso nas duas ISAs, a linha `mitigations:`, a chave `kpti=` (só no relatório) e o clamp do Spectre v1. **Parte 2:** o KPTI, o PCID/ASID na troca e o IBPB na troca | Linha `mitigations:` no boot; custo de cada uma medida |
+| 4e | KPTI, PCID/ASID com a regra de geração entre CPUs, mitigações de CPU ([seção](#mitigações-de-cpu)), relatório no boot. **Parte 1 (feita):** detecção de vulnerabilidade e de recurso nas duas ISAs, a linha `mitigations:`, a chave `kpti=` (só no relatório) e o clamp do Spectre v1. **Parte 2:** o PCID/ASID na troca (**feito**, [como entrou](#a-fatia-4e-parte-2-pcid-e-asid-na-troca-como-entrou)); o KPTI e o IBPB na troca são as próximas fatias da parte 2 | Linha `mitigations:` no boot; custo de cada uma medida |
 | 4f | As medidas da fase (inclui a falta de página que zera, [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)) ([abaixo](#medidas-da-fase)) e este capítulo virando descritivo | Fecha a fase: "syscall nula medida; processo que toca o kernel morre sem derrubar nada" |
 
 **A ABI da 4a e da 4b era provisória.** `debug_write` ganhou o argumento `console` na parte 1 da 4c e todas as chamadas já implementadas têm a forma final. A ABI nativa é experimental
@@ -635,6 +635,71 @@ processos disputando as CPUs ao mesmo tempo.
 **O que o autoteste confere** (parte 2): `procs: ok (153 assertions)` nas duas ISAs, dos quais 9 são
 deste caso (um de "os oito filhos começaram" e oito de "o filho manteve as duas metades de `xmm0`/`v0`").
 
+## A fatia 4e, parte 2 (PCID e ASID na troca), como entrou
+
+**Descritivo.** O que a fatia tornou verdade: a troca de processo não esvazia o TLB inteiro quando a CPU
+tem etiqueta (PCID no x86_64, ASID no aarch64). Um gerador global, atrás de um lock, dá a etiqueta; quando
+ela acaba, a geração sobe e cada CPU esvazia tudo **antes** de carregar uma etiqueta da geração nova; quando
+um espaço volta a uma CPU que o viu com uma versão velha dele (`tlb_gen`), a CPU esvazia só a etiqueta dele.
+O KPTI e o IBPB na troca são as próximas fatias da parte 2. Os números estão em
+[SDD 07](07_desempenho_e_recursos.md#pcid-e-asid-na-troca-fatia-4e-parte-2).
+
+| Peça | Onde mora |
+| --- | --- |
+| `Asid::from_raw`: o espaço lê de volta o valor que a CPU carregou (zero não é um `Asid`) | `core/mm/src/asid.rs` (com teste no host) |
+| `TlbTag` (`Untagged` ou `Tagged { index, flush }`) e `TagFlush` (`Keep`, `Space`, `All`): a etiqueta da troca e o que ela esvazia antes de carregar | `core/hal/src/tag.rs` |
+| O gerador global, `AsidAllocator<1024, MAX_CPUS>` (8 352 bytes) atrás de um `IrqLock`, a largura do boot, `for_switch` (a regra de geração e a migração) e os contadores do autoteste | `kernel/src/asid.rs` |
+| `Shared`: a máscara de CPUs que rodam o espaço (antes um `AtomicU32`), a etiqueta do espaço (`asid`), o `tlb_gen` e o `seen` por CPU. É o endereço que a tarefa guarda | `kernel/src/uspace.rs` |
+| `unmap_pages` sobe o `tlb_gen` **antes** de qualquer entrada sair (e antes de ler a máscara do *shootdown*) | `kernel/src/uspace.rs` |
+| `switch`, `bind_user` e `unbind_user` chamam `asid::for_switch` **depois** de marcar a CPU ativa e antes de `switch_space` | `kernel/src/task.rs` |
+| x86_64: `enable_tags` (no BSP, só se o `CR3` tem os 12 bits baixos zerados; liga `CR4.PCIDE`), `load_tags_cpu` (cada secundário; `panic` se o `CR3` dele tem bits de PCID), `invpcid` (tipos 1 e 2), e `switch_space` que põe o PCID no `CR3` com `NOFLUSH` | `arch/x86_64/src/user.rs`, `sysreg.rs` (`CR4_PCIDE`, `CR3_NOFLUSH`) |
+| aarch64: `asid_bits` lê `ID_AA64MMFR0_EL1.ASIDBits`; `init_user` liga `TCR_EL1.AS` se 16 bits; `switch_space` põe o ASID em `TTBR0_EL1[63:48]` e faz `tlbi aside1` ou `tlbi vmalle1` antes de carregar | `arch/aarch64/src/user.rs` |
+| `entry_removed` do aarch64 já usava `vaale1is` (todas as ASIDs): nada muda ali | `arch/aarch64/src/mmu.rs` (sem diff) |
+| A linha `[rustos] tlb tags: ` depois do `task::init` | `kernel/src/main.rs` |
+| Autoteste `isolation` (48 espaços que nascem e morrem entre duas visitas aos espaços `A` e `B`) e a medida `switch_ns` | `kernel/src/process/selftest/tags.rs` |
+
+**Decisões do agente**
+
+1. **O x86_64 fica desligado por constante** (`PCID_ENABLED = false`): ligar código sem execução em metal seria
+   levar um caminho não testado. O aarch64 fica ligado (HVF e TCG). Ligar o x86 é o gatilho da DEBT-0155.
+2. **Esvaziar tudo sem `INVPCID` é `CR4.PGE`**, e não o `mov cr3` sem `NOFLUSH` do desenho. Com `PCIDE` ligado,
+   o `mov cr3` sem `NOFLUSH` esvazia só o PCID carregado; a virada de geração exige que nenhuma entrada da geração
+   velha sobreviva numa CPU, senão um índice reusado acharia tradução de outro espaço. Desligar e ligar `PGE`
+   esvazia tudo (o kernel não usa páginas globais: `mmu.rs` recusa `PGE` ligado no espaço novo).
+3. **Modo de teste com etiquetas de 4 bits** (`TEST_BITS`, só com a feature `selftest`). São 15 etiquetas
+   para 8 CPUs: a geração vira dezenas de vezes em cada boot, e o autoteste exercita a virada o tempo todo.
+   A consequência é que a medida `switch_ns` roda no modo de teste com 4 bits; ela mede o regime estável
+   (dois espaços, sem virada), que não depende da largura.
+4. **Migração no aarch64 é redundante e fica**. O `tlbi ...is` já alcança todas as CPUs; o `tlbi aside1` local
+   a mais custa uma instrução por migração e deixa um caminho só nas duas ISAs.
+5. **A raiz do kernel usa a etiqueta 0** (PCID 0, com `NOFLUSH`) e a raiz vazia do aarch64 usa o ASID 0. O
+   gerador começa no índice 1 (`first = 1`), então nenhum espaço de usuário recebe 0.
+6. **A morte do processo não devolve nada ao gerador**, como a regra pede: o índice só volta no esgotamento
+   seguinte, e a tradução que sobra com a etiqueta dele não tem a quem servir.
+7. **A linha de etiqueta é `tlb tags:`, não um pedaço de `mitigations:`**. A linha `mitigations:` sai antes do
+   `task::init` (que é onde o gerador nasce), então ela não podia dizer o estado. Não há nova chave de boot.
+8. **A metade alta do kernel é premissa**: depois do boot só se acrescenta mapeamento nela (pilhas novas), e
+   nenhum caminho remove. Se um dia remover, o *shootdown* precisa invalidar em todas as etiquetas
+   ([DEBT-0156](../tech-debt/0156-metade-alta-sem-remocao-depois-do-boot.md)).
+9. **Sem caminho rápido sem lock**: toda troca com etiqueta toma o `IrqLock` do gerador. A
+   [DEBT-0076](../tech-debt/0076-asid-sem-caminho-rapido-sem-lock.md) segue aberta: a medida desta fatia roda
+   numa CPU, então não há disputa para medir.
+
+**O que a fatia não verificou (NÃO VERIFICADO)**
+
+- **x86_64 com PCID está desligado e não rodou.** A constante `PCID_ENABLED` (em `kernel/src/platform/x86_64.rs`)
+  é `false`, então o x86_64 segue o caminho sem etiqueta. A QEMU TCG recusa PCID e INVPCID (`TCG doesn't support
+  requested feature: CPUID[eax=01h].ECX.pcid`), e o host de desenvolvimento é um Mac sem KVM. A linha sai
+  `[rustos] tlb tags: pcid off (absent)` no TCG, e `pcid off (untested)` numa CPU que anuncie PCID. O caminho com
+  etiqueta está compilado e revisado, sem execução ([DEBT-0155](../tech-debt/0155-pcid-x86-sem-execucao.md)).
+- **ASID de 16 bits não rodou.** O aarch64 deste QEMU (TCG e HVF) anuncia `ASIDBits = 8`, e a linha sai
+  `asid 8-bit`. O ramo de `TCR_EL1.AS` está escrito e não foi executado.
+- **A migração não tem caso que a exija**: nenhum autoteste faz um espaço unmapear numa CPU e rodar noutra
+  com a tradução velha ainda na TLB da segunda. O autoteste de *shootdown* passa sem mudança, mas não cobre isso.
+
+**Linhas que o smoke passa a exigir (desta fatia)**: `[rustos] asid self-test: ok (` e `[rustos] asid bench: `.
+A linha `[rustos] tlb tags: ` sai nos dois modos, sem ser exigida.
+
 ## Entrada de syscall por ISA
 
 ### x86_64: SYSCALL/SYSRET
@@ -851,7 +916,7 @@ supunha o SMP "por vir".
 | --- | --- |
 | 4a a 4d (sem PCID/ASID) | Toda troca de processo esvazia o TLB local (x86_64: `mov cr3` sem `NOFLUSH`; aarch64: um ASID reservado só e `tlbi vmalle1`). Uma CPU que o processo deixou **não guarda entrada dele**: correto e mais lento |
 | 4e (com PCID/ASID) | Gerador global com **geração**; cada CPU guarda a `generation_seen`. Um valor de PCID/ASID só é **reusado** (geração nova) depois que **toda CPU** esvaziou o TLB desde que ele foi liberado: subir a geração marca `flush_pending` em todas as CPUs, e cada uma esvazia na próxima troca de processo, **antes** de carregar um valor da geração nova (x86_64: `INVPCID` tipo 2 ou 3, ou `mov cr3` sem `NOFLUSH`; aarch64: `tlbi vmalle1`) e atualiza a `generation_seen`. É o esquema do `arch/arm64/mm/context.c` do Linux, conferido pelo revisor do PR do gerador ([abaixo](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)) |
-| 4e, processo que migra | Com PCID/ASID o TLB da CPU antiga **guarda** o valor. Cada Process tem um `tlb_gen` que sobe a cada `unmap`; a CPU que volta a rodá-lo compara com o que ela viu e esvazia só aquele PCID/ASID (`INVPCID` tipo 1; `tlbi aside1`). A ideia é a do `tlb_gen` do Linux x86: **NÃO VERIFICADO** |
+| 4e, processo que migra | Com PCID/ASID o TLB da CPU antiga **guarda** o valor. Cada Process tem um `tlb_gen` que sobe a cada `unmap`; a CPU que volta a rodá-lo compara com o que ela viu e esvazia só aquele PCID/ASID (`INVPCID` tipo 1; `tlbi aside1`). A regra saiu do desenho, não do código do Linux (**NÃO CONFERIDO** contra o `tlb.c` dele): **entrou na 4e, parte 2** ([como entrou](#a-fatia-4e-parte-2-pcid-e-asid-na-troca-como-entrou)). No aarch64 o `tlbi ...is` já alcança todas as CPUs, então o esvaziamento por etiqueta ali é redundante e fica por ser uma instrução por migração |
 
 #### *Shootdown* de TLB (paga a dívida 0055 na 4c)
 
@@ -1037,7 +1102,7 @@ kernel. Entrada nova depois do boot dessincronizaria as raízes (o Linux resolve
 | Troca de processo | Escreve CR3 com o PCID do processo; sem esvaziar o TLB | Escreve `TTBR0_EL1` com o ASID; sem `tlbi` |
 | Alocação | Gerador global de ASID/PCID, com contador de geração: esgotou, esvazia tudo e começa outra geração. Módulo puro em `core/mm/src/asid.rs`, testado no host ([abaixo](#o-gerador-de-pcid-e-asid-coremmsrcasidrs)); o estado por CPU (`active`, `reserved`, `flush_pending`) mora dentro dele, indexado pela CPU | idem |
 | Com KPTI | Dois PCIDs por processo (raiz de kernel e raiz de usuário): o custo é metade do espaço de PCID | O ASID já distingue; o `USER_ASID_FLAG` do Linux marca a variante de usuário |
-| Fallback | Sem PCID, todo CR3 esvazia o TLB: correto e mais lento | Sem ASID útil, `tlbi` por troca |
+| Fallback | Sem PCID, todo CR3 esvazia o TLB: correto e mais lento. Com PCID e sem `INVPCID`, esvaziar tudo é `CR4.PGE` desligado e ligado: o `mov cr3` sem `NOFLUSH` esvazia só o PCID carregado, e a regra de geração precisa de todos (a [decisão](#a-fatia-4e-parte-2-pcid-e-asid-na-troca-como-entrou) corrige o desenho que dizia `mov cr3`) | Sem ASID útil, `tlbi` por troca |
 | `PageFlags` | `user` liga U/S (bit 2) | `user` liga o acesso de EL0 e `nG`; o kernel segue com UXN e PXN |
 
 Folhas de usuário: x86_64 `U/S = 1`, NX salvo se a permissão for execução; com SMEP o
@@ -1949,6 +2014,7 @@ Em inglês, como toda saída serial. As da 4a e da 4b valem hoje, no modo de tes
 | `[rustos] mitigations: ` (nos dois modos) | 4e, parte 1 (**feito**) |
 | `[rustos] cpu features: ` (só o modo de teste) | 4e, parte 1 (**feito**) |
 | `[rustos] user: self-test ok` (handles, SIMD, falha, canal) | 4d |
+| `[rustos] asid self-test: ok (` (nenhum espaço lê a página de outro depois da virada de geração) e `[rustos] asid bench: ` (o custo da troca entre dois espaços) | 4e, parte 2 (**feito**) |
 
 ## Medidas da fase
 
@@ -2014,7 +2080,7 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 | **Abertas pela 4a:** [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md) (limpeza da pilha até 128 bytes limpos), [DEBT-0077](../tech-debt/0077-iretq-sem-fixup-de-falha-fora-do-rip-e-do-rsp.md) (`iretq` sem *fixup*), [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md) (EL1h na pilha de falhas); [DEBT-0081](../tech-debt/0081-debug-write-de-512-bytes-com-a-irq-mascarada.md) (`debug_write` com a IRQ mascarada) e [DEBT-0082](../tech-debt/0082-sem-lfence-depois-do-swapgs-condicional.md) (sem `lfence` depois do `swapgs`); [DEBT-0072](../tech-debt/0072-pilhas-de-excecao-sem-medida-permanente.md) agora inclui a IST4 | A 4a fecha os itens dela |
 | **Pagas ou reescritas na parte 1 da 4c:** [DEBT-0070](../tech-debt/0070-pilha-de-16-kib-sem-syscall-nem-falta-de-usuario.md) (a pilha foi remedida com handles e canais: 4,8 KiB de 16 no pico das tarefas, 5,0 KiB na syscall; resta a falta resolvida); [DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md) (a cobrança de 256 pontas existe); [DEBT-0091](../tech-debt/0091-fila-do-canal-com-armazenamento-inline.md) (agora com o custo do modelo do par); [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md) (a primeira metade do gatilho, o canal de boot, ocorreu; a outra, o lançamento de processos, é da parte 3). **Abertas:** [DEBT-0111](../tech-debt/0111-espera-de-objeto-por-mascara-de-slots-de-tarefa.md) (as 0110 e 0112 foram pagas na parte 3). **Da parte 3:** pagas a 0110, a 0112, a 0120 e a 0123; reescritas a 0081, a 0087, a 0111, a 0121 e a 0122; abertas a [0140](../tech-debt/0140-abi-sem-tamanho-de-vmo.md), a [0141](../tech-debt/0141-vmo-sem-pagina-zero.md) e a [0142](../tech-debt/0142-objeto-do-kernel-sem-try-new.md).
 
-**A registrar no PR de cada fatia:** mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md), registrada com o `core/object`); imagem de usuário sem ASLR (4b; [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois), registrada: [DEBT-0083](../tech-debt/0083-imagem-de-usuario-sem-aslr.md)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
+**A registrar no PR de cada fatia:** etiquetas de TLB no x86_64 sem execução ([DEBT-0155](../tech-debt/0155-pcid-x86-sem-execucao.md)) e a metade alta sem remoção ([DEBT-0156](../tech-debt/0156-metade-alta-sem-remocao-depois-do-boot.md)), abertas pela 4e, parte 2; mitigações de CPU sem teste fora da QEMU (4e; gatilho: o primeiro boot em metal); ciclos entre filas de canais não coletados ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md), registrada com o `core/object`); imagem de usuário sem ASLR (4b; [decisão 5](#decisão-5--pie-de-usuário-agora-ou-depois), registrada: [DEBT-0083](../tech-debt/0083-imagem-de-usuario-sem-aslr.md)) | Cada uma com gatilho de evento, como manda o `AGENTS.md` |
 
 **Pagas antes da fase:** 0011 (GIC e timer só na CPU 0), 0018 (frames sem cache por CPU), 0036
 (estado de troca global) e 0039 (escalonador de uma CPU), no #13; 0020 (zerar página pelo `memset`) e

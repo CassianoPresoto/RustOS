@@ -121,6 +121,41 @@ indexada pelo número, sem clamp, **D** a primeira versão do clamp (máscara ar
   união por núcleo e a tabela de despacho (536 bytes de `.rodata`). O `.bss` cresceu 16 bytes (o
   lock da união).
 
+### PCID e ASID na troca (fatia 4e, parte 2)
+
+Como se mede: `make smoke` (modo de teste, perfil `dev`), linha `asid bench:`: ida e volta entre dois espaços,
+cada visita lê uma página; ns por troca, média de 2 000 trocas depois de aquecer. Na **`main`** a mesma medida
+roda como cópia temporária, sem o módulo de etiquetas (não commitada, a árvore foi restaurada). Linha de
+`null syscall` do mesmo smoke, com a pilha limpa, mediana das três ou cinco rodadas. Aceleração de cada número:
+**HVF** (`make smoke ARCH=aarch64`, Apple Silicon, QEMU), **TCG** (`RUSTOS_ACCEL=tcg`, emulado; só compara o
+RustOS consigo mesmo) e **x86_64 em TCG** (sem KVM).
+
+| Medida | `main` (sem etiqueta) | Branch | Aceleração |
+| --- | --- | --- | --- |
+| Troca entre dois espaços, aarch64, 5 boots | 543 a 991 ns (mediana 767) | **57 a 84 ns** (mediana 60) | HVF |
+| Troca entre dois espaços, aarch64, 3 boots | 7 483 a 7 679 ns (mediana 7 522) | 9 876 a 11 455 ns (mediana 10 887) | TCG |
+| Troca entre dois espaços, x86_64, 3 boots | 9 277 a 9 947 ns (mediana 9 945) | 8 966 a 9 204 ns (mediana 9 171) | TCG, **sem PCID** nos dois |
+| `null syscall`, aarch64, com a pilha limpa, 5 boots | 67,7 a 78,6 ns (mediana 69,8) | 67,5 a 68,1 ns (mediana 67,7) | HVF |
+| `null syscall`, aarch64, com a pilha limpa, 3 boots | 1 383 a 1 507 ns (mediana 1 414) | 1 466 a 1 578 ns (mediana 1 500) | TCG |
+| `null syscall`, x86_64, com a pilha limpa, 3 boots | 712 a 830 ns (mediana 816) | 774 a 939 ns (mediana 855) | TCG, sem PCID nos dois |
+
+- **aarch64 em HVF: a troca cai cerca de 13 vezes** (767 para 60 ns). É o efeito que a fatia buscava: a troca
+  deixa de fazer `tlbi vmalle1`, e a TLB das duas raízes sobrevive. O número é do Apple Silicon deste host; outros
+  núcleos não foram medidos.
+- **aarch64 em TCG: a troca do branch é mais lenta** (mediana 10 887 contra 7 522 ns, cerca de 45%). **NÃO EXPLICADO**:
+  o TCG não tem o custo real de `tlbi`, então o ganho de HVF não aparece aqui, e o trabalho extra que o branch faz
+  (o `for_switch` com o lock do gerador, a escrita do `Shared` e a conferência do `tlb_gen`) é o que sobra nesse
+  modelo. Não se trata como regressão aceita sem olhar: é o próximo número a investigar, e a DEBT-0076 (o lock do
+  gerador) é o primeiro suspeito a medir.
+- **x86_64 em TCG não mede PCID**: o TCG não tem PCID nem INVPCID, e `PCID_ENABLED` está desligado
+  ([DEBT-0155](../tech-debt/0155-pcid-x86-sem-execucao.md)). Os dois lados rodam o caminho sem etiqueta. As faixas
+  não se cruzam (o branch fica 8% abaixo da mediana da `main`), e nenhuma mudança da fatia explica isso no caminho
+  sem etiqueta: **NÃO EXPLICADO**, provavelmente variância do host, a conferir na próxima medida.
+- **`null syscall`**: no aarch64 em HVF a chamada nula não muda (67,7 contra 69,8 ns, dentro do ruído); no TCG a
+  diferença de 6% fica na faixa de ruído das duas medidas. No x86_64 a chamada não passa pelo caminho novo.
+- **Tamanho** (`make size ARCH=x86_64 PROFILE=release-small`, antes na `main`, depois no branch): `carregado`
+  277 527 para 278 175 bytes (+648, +0,2%); `.bss` 19 009 para 19 017 (+8 bytes); `arquivo` 374 624 para 374 960.
+
 ### Troca de contexto e jitter de acordar (fase 3)
 
 Como se mede: `make screenshot ARCH=… PROFILE=release CMDS="bench;bench;bench"` e a linha

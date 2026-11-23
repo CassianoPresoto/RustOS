@@ -10,6 +10,7 @@ extern crate alloc;
 compile_error!("o kernel só compila para alvos bare-metal: use `cargo xtask build`");
 
 mod addr;
+mod asid;
 #[cfg(feature = "selftest")]
 mod bench;
 mod boot;
@@ -289,6 +290,7 @@ fn report_tasks(
             return false;
         }
     };
+    kprintln!("[rustos] tlb tags: {}", asid::label());
     process::install(memory.frames, boot.direct_map_offset());
     process::set_initramfs(vm.initramfs_phys());
     smp::release();

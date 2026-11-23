@@ -20,6 +20,7 @@ use rustos_arch_aarch64::{
 pub use rustos_arch_aarch64::{Context, CpuPrefix, call_on_stack, switch};
 use rustos_driver_gicv3::{GicError, GicV3, affinity_from_mpidr, find_redistributor, router_for};
 use rustos_driver_pl011::Pl011;
+use rustos_hal::TlbTag;
 use rustos_hal::{
     BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, MmuControl, PAGE_SIZE, PageMapper,
     PhysAddr, VirtAddr,
@@ -519,6 +520,8 @@ pub fn user_init(frames: &mut impl FrameSource) -> Result<(), MapError> {
     let root = frames.allocate_frame().ok_or(MapError::OutOfFrames)?;
     crate::memory::zero_frame(root);
     EMPTY_ROOT.store(root.as_u64(), Ordering::Release);
+    // O ASID de 8 ou 16 bits que o hardware anuncia: sempre há um, a ARMv8 tem ao menos 8.
+    crate::asid::init(Some(rustos_arch_aarch64::asid_bits()));
     user_cpu_init();
     Ok(())
 }
@@ -528,15 +531,20 @@ pub fn user_init(frames: &mut impl FrameSource) -> Result<(), MapError> {
 pub fn user_cpu_init() {
     // SAFETY: EL1 com a MMU ligada e a IRQ mascarada, depois de `Vm::activate` nesta CPU; a raiz
     // vazia é um frame zerado que vive para sempre.
-    unsafe { rustos_arch_aarch64::init_user(EMPTY_ROOT.load(Ordering::Acquire)) };
+    unsafe {
+        rustos_arch_aarch64::init_user(
+            EMPTY_ROOT.load(Ordering::Acquire),
+            rustos_arch_aarch64::asid_bits() == 16,
+        );
+    }
 }
 
 /// Troca o espaço de endereçamento desta CPU para o da tarefa que vai rodar; `root` zero é
 /// tarefa do kernel. Com a IRQ mascarada. A pilha de entrada é a própria `SP_EL1`.
-pub fn switch_space(root: u64, _kernel_stack_top: u64) {
+pub fn switch_space(root: u64, tag: TlbTag, _kernel_stack_top: u64) {
     // SAFETY: o chamador mascara a IRQ, depois de `user_cpu_init` nesta CPU; `root` é de um
-    // espaço de `new_user_space`.
-    unsafe { rustos_arch_aarch64::switch_space(root) };
+    // espaço de `new_user_space` e a etiqueta é da geração do gerador.
+    unsafe { rustos_arch_aarch64::switch_space(root, tag) };
 }
 
 /// Primeira volta a EL0. Nunca volta.

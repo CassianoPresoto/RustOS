@@ -5,8 +5,10 @@
 use alloc::sync::Arc;
 use core::num::NonZeroU32;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
+
 #[cfg(feature = "selftest")]
 use rustos_hal::AddressSpace;
+use rustos_hal::MAX_CPUS;
 use rustos_hal::abi::{USER_MIN, USER_TOP};
 
 use rustos_hal::{FrameSource, MapError, PAGE_SIZE, PageFlags, PageMapper, PhysAddr, VirtAddr};
@@ -201,14 +203,39 @@ impl FrameSource for Counted<'_> {
     }
 }
 
+/// O que as CPUs compartilham sobre o espaço, e o endereço dele fica na tarefa (`bind_user`): a
+/// máscara de CPUs que o rodam agora e a etiqueta de TLB, com a regra de migração (SDD 17, "PCID e
+/// ASID com várias CPUs").
+#[derive(Debug)]
+pub struct Shared {
+    /// CPUs que rodam o espaço agora, um bit por CPU.
+    pub active: AtomicU32,
+    /// O `Asid` cru que o gerador deu ao espaço (zero: nenhum ainda).
+    pub asid: AtomicU64,
+    /// Sobe a cada `unmap`: a CPU que volta a rodar o espaço compara com `seen`.
+    pub tlb_gen: AtomicU64,
+    /// A `tlb_gen` que cada CPU viu ao carregar a etiqueta (ou esvaziou) para este espaço.
+    pub seen: [AtomicU64; MAX_CPUS],
+}
+
+impl Shared {
+    const fn new() -> Self {
+        Self {
+            active: AtomicU32::new(0),
+            asid: AtomicU64::new(0),
+            tlb_gen: AtomicU64::new(0),
+            seen: [const { AtomicU64::new(0) }; MAX_CPUS],
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct UserSpace {
     tables: PlatformSpace,
     frames: Frames,
     data_frames: u64,
     table_frames: u64,
-    /// CPUs que rodam o espaço agora, um bit por CPU; o endereço dela fica na tarefa (`bind_user`).
-    active: AtomicU32,
+    shared: Shared,
     /// Páginas preguiçosas prometidas, o que a promessa devolve ao morrer (as páginas mais as
     /// tabelas que elas pedem) e as páginas que já ganharam frame próprio.
     lazy_reserved: u64,
@@ -238,7 +265,7 @@ impl UserSpace {
             frames,
             data_frames: 0,
             table_frames,
-            active: AtomicU32::new(0),
+            shared: Shared::new(),
             lazy_reserved: 0,
             lazy_promised: 0,
             lazy_backed: 0,
@@ -249,12 +276,12 @@ impl UserSpace {
     /// O endereço da máscara de CPUs do espaço, para `task::bind_user`. O espaço não pode se mover
     /// enquanto alguma CPU o roda (`wait_inactive`).
     pub fn active_addr(&self) -> usize {
-        core::ptr::from_ref(&self.active).expose_provenance()
+        core::ptr::from_ref(&self.shared).expose_provenance()
     }
 
     /// CPUs que rodam o espaço agora.
     pub fn active_cpus(&self) -> u32 {
-        self.active.load(Ordering::SeqCst)
+        self.shared.active.load(Ordering::SeqCst)
     }
 
     /// Promete `pages` páginas preguiçosas contra os frames livres (SDD 17, decisão 9), mais as
@@ -511,7 +538,7 @@ impl UserSpace {
     /// Invalida `virt` nas outras CPUs que rodam o espaço e espera todas: a entrada já mudou nesta.
     pub fn flush_remote(&self, virt: u64) {
         fence(Ordering::SeqCst);
-        tlb::shoot_page(virt, self.active.load(Ordering::SeqCst));
+        tlb::shoot_page(virt, self.shared.active.load(Ordering::SeqCst));
     }
 
     /// Remove a página de `virt` de região `kind`; `false` se não havia página.
@@ -533,6 +560,9 @@ impl UserSpace {
     /// zerados. A página zero nunca volta. Em região preguiçosa a promessa de cada página volta ao
     /// contador. O chamador tem o lock do espaço.
     pub fn unmap_pages(&mut self, virt: u64, pages: u64, kind: Pages) {
+        // A geração sobe antes de qualquer entrada sair: a CPU que começa a rodar o espaço depois
+        // da leitura da máscara lê a geração nova e esvazia a sua etiqueta.
+        self.shared.tlb_gen.fetch_add(1, Ordering::SeqCst);
         let zero = zero_page_now();
         let mut done = 0;
         while done < pages {
@@ -589,7 +619,7 @@ impl UserSpace {
     /// Invalida `pages` páginas nas outras CPUs que rodam o espaço: as entradas já mudaram nesta.
     fn flush_remote_range(&self, virt: u64, pages: u64) {
         fence(Ordering::SeqCst);
-        tlb::shoot_range(virt, pages, self.active.load(Ordering::SeqCst));
+        tlb::shoot_range(virt, pages, self.shared.active.load(Ordering::SeqCst));
     }
 
     /// Invalida `virt` nesta CPU e nas outras do espaço sem mudar a tabela; mede o custo do
@@ -633,7 +663,7 @@ impl UserSpace {
     pub fn wait_inactive(&self) {
         let deadline = platform::now_ns().map(|now| now + 5_000_000_000);
         let mut spins = 0_u64;
-        while self.active.load(Ordering::SeqCst) != 0 {
+        while self.shared.active.load(Ordering::SeqCst) != 0 {
             tlb::service();
             spins += 1;
             let late = deadline

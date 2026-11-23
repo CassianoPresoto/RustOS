@@ -16,6 +16,7 @@ use rustos_hal::{Cpu, Ipi, IpiKind, MAX_CPUS, MapError};
 use rustos_sched::{Composite, SchedError, SchedParams, Scheduler, TaskId};
 use rustos_shell::TaskName;
 
+use crate::asid;
 #[cfg(feature = "selftest")]
 use crate::bench;
 use crate::frames::Frames;
@@ -25,6 +26,7 @@ use crate::percpu::{self, NO_TASK, PerCpu};
 use crate::platform::{self, FpuSummary, PlatformSpace};
 use crate::stack::Stack;
 use crate::sync::{IrqGuard, IrqLock, bump, locks_held};
+use crate::uspace::Shared;
 
 /// Os slots `0..MAX_CPUS` são as ociosas, uma por CPU; os 24 seguintes, das tarefas.
 pub const MAX_TASKS: usize = MAX_CPUS + 24;
@@ -772,8 +774,10 @@ fn switch_from(cpu: &PerCpu, mut queue: IrqGuard<'static, Queue>, now_ns: u64) {
     if leaving != entering {
         mark_active(entering, index, true);
     }
+    let tag = asid::for_switch(index, incoming.user_active.load(Ordering::Relaxed));
     platform::switch_space(
         incoming.user_root.load(Ordering::Relaxed),
+        tag,
         incoming.user_top.load(Ordering::Relaxed),
     );
     if leaving != entering {
@@ -792,13 +796,13 @@ fn mark_active(mask: usize, cpu: usize, on: bool) {
     if mask == 0 {
         return;
     }
-    // SAFETY: o endereço é o do `AtomicU32` de um `UserSpace` ligado por `bind_user`, que vive até
+    // SAFETY: o endereço é o do `Shared` de um `UserSpace` ligado por `bind_user`, que vive até
     // `unbind_user` e não se move enquanto a tarefa o roda.
-    let mask = unsafe { &*core::ptr::with_exposed_provenance::<AtomicU32>(mask) };
+    let shared = unsafe { &*core::ptr::with_exposed_provenance::<Shared>(mask) };
     if on {
-        mask.fetch_or(1 << cpu, Ordering::SeqCst);
+        shared.active.fetch_or(1 << cpu, Ordering::SeqCst);
     } else {
-        mask.fetch_and(!(1 << cpu), Ordering::SeqCst);
+        shared.active.fetch_and(!(1 << cpu), Ordering::SeqCst);
     }
 }
 
@@ -1097,7 +1101,7 @@ pub fn bind_user(root: u64, process: usize, active: usize) -> u64 {
     current.process.store(process, Ordering::Release);
     current.user_active.store(active, Ordering::Relaxed);
     mark_active(active, here.index(), true);
-    platform::switch_space(root, top);
+    platform::switch_space(root, asid::for_switch(here.index(), active), top);
     top
 }
 
@@ -1121,7 +1125,7 @@ pub fn current_process() -> Option<usize> {
 pub fn unbind_user() -> Option<usize> {
     let here = percpu::current();
     let current = slot(here.current.load(Ordering::Relaxed) as usize);
-    platform::switch_space(0, 0);
+    platform::switch_space(0, asid::for_switch(here.index(), 0), 0);
     mark_active(
         current.user_active.swap(0, Ordering::Relaxed),
         here.index(),
