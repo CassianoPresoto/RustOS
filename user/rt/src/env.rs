@@ -1,9 +1,10 @@
 //! O que o kernel deixa na pilha inicial: `argc`, `argv`, `envp` e o auxv (SDD 17). O programa
 //! lê tudo por aqui, em valores, sem ponteiro.
 
-use core::ptr;
+use core::marker::PhantomData;
+use core::{ptr, slice};
 
-use rustos_hal::abi::{AT_RANDOM_LEN, auxv};
+use rustos_hal::abi::{ARGS_BYTES_MAX, ARGS_MAX, AT_RANDOM_LEN, auxv};
 
 /// Palavras que a leitura percorre antes de desistir. É só um teto de sanidade: o `rt` não sabe
 /// onde a pilha acaba e confia que o kernel a montou com os zeros de `argv`, `envp` e o `AT_NULL`.
@@ -27,6 +28,38 @@ pub struct Auxv {
     pub has_random: bool,
 }
 
+/// Os argumentos do programa: o `argv` inteiro, com o nome primeiro. Cada item são os bytes da cadeia
+/// que o kernel pôs na pilha, sem o `0`; o texto é do programa, o kernel não diz a codificação.
+#[derive(Clone, Debug)]
+pub struct Args<'a> {
+    pointers: u64,
+    count: usize,
+    index: usize,
+    _life: PhantomData<&'a [u8]>,
+}
+
+impl<'a> Iterator for Args<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<&'a [u8]> {
+        if self.index >= self.count {
+            return None;
+        }
+        let slot = self.pointers + 8 * self.index as u64;
+        self.index += 1;
+        // SAFETY: `slot` é o `argv[index]` que `Env::from_stack` deixou contado em `argc`, e
+        // `count` não passa de `argc`; a cadeia dele vive enquanto o processo existe.
+        Some(unsafe { string_at(slot) })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.count - self.index;
+        (left, Some(left))
+    }
+}
+
+impl ExactSizeIterator for Args<'_> {}
+
 /// O ambiente do programa: o que o `_start` recebeu. Só `from_stack` o preenche e os campos são
 /// privados, para o programa em Rust seguro não forjar um ponteiro que o `rt` leria.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -34,6 +67,8 @@ pub struct Env {
     boot_handle: u64,
     initial_sp: u64,
     argc: u64,
+    /// Endereço do `argv[0]` na pilha (a palavra depois de `argc`).
+    argv: u64,
     auxv: Auxv,
     random: [u8; AT_RANDOM_LEN],
     loads: Option<usize>,
@@ -48,6 +83,7 @@ impl Env {
         let mut env = Self {
             boot_handle,
             initial_sp: stack.addr() as u64,
+            argv: stack.addr() as u64 + 8,
             ..Self::default()
         };
         // SAFETY: o contrato da função; `argc` é a primeira palavra.
@@ -106,6 +142,16 @@ impl Env {
         self.argc
     }
 
+    /// Os argumentos, com o nome do programa primeiro. Sem `argc`, nenhum.
+    pub fn args(&self) -> Args<'_> {
+        Args {
+            pointers: self.argv,
+            count: usize::try_from(self.argc).unwrap_or(ARGS_MAX).min(ARGS_MAX),
+            index: 0,
+            _life: PhantomData,
+        }
+    }
+
     pub const fn auxv(&self) -> &Auxv {
         &self.auxv
     }
@@ -150,6 +196,32 @@ impl Env {
     }
 }
 
+/// Lê a cadeia que `slot` aponta, até o `0`.
+///
+/// # Safety
+/// `slot` é um `argv[i]` da pilha: a cadeia tem `0` antes de `ARGS_BYTES_MAX` bytes.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "o usuário só existe em 64 bits"
+)]
+unsafe fn string_at<'a>(slot: u64) -> &'a [u8] {
+    let address = slot as usize;
+    // SAFETY: o contrato da função: `slot` é uma palavra da pilha, alinhada a 8.
+    let word = unsafe { ptr::with_exposed_provenance::<u64>(address).read() };
+    let start = ptr::with_exposed_provenance::<u8>(word as usize);
+    let mut len = 0;
+    while len < ARGS_BYTES_MAX {
+        // SAFETY: o contrato da função: a cadeia tem um `0` antes de `ARGS_BYTES_MAX` bytes.
+        let byte = unsafe { start.wrapping_add(len).read() };
+        if byte == 0 {
+            break;
+        }
+        len += 1;
+    }
+    // SAFETY: os `len` bytes de `start` são a cadeia que o laço acima acabou de ler.
+    unsafe { slice::from_raw_parts(start, len) }
+}
+
 #[cfg(test)]
 mod tests {
     use rustos_hal::abi::{InitialStack, StartInfo};
@@ -157,8 +229,12 @@ mod tests {
     use super::*;
 
     /// Uma pilha de mentira: os bytes de `InitialStack` copiados para um vetor de palavras, com os
-    /// ponteiros do auxv refeitos para o próprio vetor.
-    fn fake_stack(phdr: Option<u64>, random: [u8; AT_RANDOM_LEN]) -> (Vec<u64>, usize) {
+    /// ponteiros do auxv e de `argv` refeitos para o próprio vetor.
+    fn fake_stack(
+        phdr: Option<u64>,
+        random: [u8; AT_RANDOM_LEN],
+        args: &[&[u8]],
+    ) -> (Vec<u64>, usize) {
         let words = 64;
         let mut memory = vec![0_u64; words];
         let top = memory.as_ptr().addr() as u64 + (words as u64) * 8;
@@ -170,7 +246,7 @@ mod tests {
             phnum: 3,
             random,
         };
-        let stack = InitialStack::build(top, &info).unwrap();
+        let stack = InitialStack::build(top, &info, args).unwrap();
         let start = usize::try_from(stack.sp() - memory.as_ptr().addr() as u64).unwrap() / 8;
         for (index, chunk) in stack.bytes().as_chunks::<8>().0.iter().enumerate() {
             memory[start + index] = u64::from_le_bytes(*chunk);
@@ -185,7 +261,7 @@ mod tests {
         table[0..4].copy_from_slice(&6_u32.to_le_bytes());
         table[PHDR_LEN..PHDR_LEN + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
         table[2 * PHDR_LEN..2 * PHDR_LEN + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
-        let (memory, start) = fake_stack(Some(table.as_ptr().addr() as u64), random);
+        let (memory, start) = fake_stack(Some(table.as_ptr().addr() as u64), random, &[]);
         // SAFETY: o vetor tem a forma de uma pilha inicial; `AT_RANDOM` e `AT_PHDR` apontam para
         // memória viva do teste.
         let env = unsafe { Env::from_stack(memory[start..].as_ptr(), 0) };
@@ -202,7 +278,7 @@ mod tests {
 
     #[test]
     fn a_stack_without_phdr_has_no_load_count() {
-        let (memory, start) = fake_stack(None, [7; AT_RANDOM_LEN]);
+        let (memory, start) = fake_stack(None, [7; AT_RANDOM_LEN], &[]);
         // SAFETY: o mesmo vetor de pilha inicial.
         let env = unsafe { Env::from_stack(memory[start..].as_ptr(), 9) };
         assert_eq!((env.auxv().phdr, env.auxv().phnum), (0, 0));
@@ -272,5 +348,36 @@ mod tests {
         // SAFETY: o vetor é maior que o limite da leitura, que pára nele.
         let env = unsafe { Env::from_stack(memory.as_ptr(), 0) };
         assert_eq!(env.auxv(), &Auxv::default());
+    }
+
+    #[test]
+    fn args_are_the_strings_the_kernel_put_on_the_stack() {
+        let (memory, start) = fake_stack(None, [1; AT_RANDOM_LEN], &[b"count", b"3"]);
+        // SAFETY: o vetor tem a forma de uma pilha inicial, com `argv` nos endereços reais.
+        let env = unsafe { Env::from_stack(memory[start..].as_ptr(), 0) };
+        assert_eq!(env.argc(), 2);
+        let args: Vec<&[u8]> = env.args().collect();
+        assert_eq!(args, [&b"count"[..], &b"3"[..]]);
+        assert_eq!(env.args().len(), 2);
+    }
+
+    #[test]
+    fn a_hand_made_stack_with_argc_one_gives_the_program_name() {
+        let name = *b"count\0";
+        // argc 1, argv[0], o zero que fecha argv, o zero de envp, AT_NULL.
+        let memory = [1, name.as_ptr().addr() as u64, 0, 0, auxv::AT_NULL, 0];
+        // SAFETY: o vetor tem a forma de uma pilha inicial; `argv[0]` aponta para `name`, que vive aqui.
+        let env = unsafe { Env::from_stack(memory.as_ptr(), 0) };
+        let mut args = env.args();
+        assert_eq!(args.next(), Some(&b"count"[..]));
+        assert_eq!(args.next(), None);
+    }
+
+    #[test]
+    fn a_stack_without_argc_has_no_arguments() {
+        let memory = [0, 0, 0, auxv::AT_NULL, 0];
+        // SAFETY: o vetor tem a forma de uma pilha inicial sem argumentos.
+        let env = unsafe { Env::from_stack(memory.as_ptr(), 0) };
+        assert_eq!(env.args().count(), 0);
     }
 }

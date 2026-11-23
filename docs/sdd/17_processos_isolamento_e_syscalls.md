@@ -221,7 +221,7 @@ zera as contagens que estão em ciclos entre filas: é o limite documentado e a
 
 | Peça | Onde mora |
 | --- | --- |
-| Auxv (`AT_*`), `StartInfo`, `InitialStack` (monta `argc`, `argv`, `envp`, auxv e `AT_RANDOM` no topo da pilha, `sp` alinhado a 16) e o teto de `p_memsz` de um executável (`EXEC_MAX_LOADS_BYTES`, 64 MiB) | `core/hal/src/abi.rs`, com teste de layout e de cada tag |
+| Auxv (`AT_*`), `StartInfo`, `InitialStack` (monta `argc`, `argv` com as cadeias, `envp`, auxv e `AT_RANDOM` no topo da pilha, `sp` alinhado a 16, e os tetos `ARGS_MAX` e `ARGS_BYTES_MAX`) e o teto de `p_memsz` de um executável (`EXEC_MAX_LOADS_BYTES`, 64 MiB) | `core/hal/src/abi.rs`, com teste de layout e de cada tag |
 | Carregador: acha o arquivo (`core/cpio`), valida (`core/elf`, com os `Limits` de `hal::abi`), copia e mapeia cada `PT_LOAD`, registra as regiões no `Vmar` (`core/mm`) e monta a pilha com guarda e topo sorteado | `kernel/src/loader.rs` |
 | `Source::{Elf, Flat}` (o `Flat` é o blob da 4a, atrás de `selftest`), `Spawned`, a árvore de regiões em `Process` | `kernel/src/process.rs` |
 | `UserSpace::map_at` (o `p_vaddr` do segmento não é de página: o começo da primeira página e a cauda ficam zero) e `SpaceStats` | `kernel/src/uspace.rs` |
@@ -434,7 +434,7 @@ que falha morrer sozinho sem derrubar o sistema. Nenhuma syscall, formato de exe
 | O nome do programa chega por um ponto único: `process::spawn_keeping_as` (com `spawn_as` e os antigos `spawn` e `spawn_keeping`, que o chamam com `user`). `Process::name` o leva até `process_main`, que dá o nome à tarefa | `kernel/src/process.rs` (só acrescentando) |
 | A saída `[user]` e o shell: a fila de saída de segundo plano, o estado direto durante o `run` em primeiro plano e as linhas do ciclo de vida só da serial ([SDD 16](16_terminal.md#saída-de-segundo-plano)) | `kernel/src/userout.rs`, `core/shell/src/backlog.rs` |
 | `hello`, `crash`, `sysinfo`, `count` e `spin` (gira para sempre, para testar Ctrl-C e `kill`), `forbid(unsafe_code)` sobre o `user/rt`, na imagem de produção ao lado do `init`; os de teste (`big`, `handles`, `lazy`) seguem só na imagem com `selftest` | `user/{hello,crash,sysinfo,count,spin}`, `xtask/src/user.rs` |
-| A sessão que o smoke digita (`ls`, `run hello`, `run sysinfo`, `run crash`, `run nothere`, `run count &`, `ps`), o passo de Ctrl-C e `kill` (`run spin`, `^C`, `run spin &`, `kill N`) e confere, nos dois modos | `xtask/src/qemu.rs` (`SESSION`, `type_interrupt_and_kill`) |
+| A sessão que o smoke digita (`ls`, `run hello`, `run sysinfo`, `run crash`, `run nothere`, `run count 2`, `run count x`, `run count &`, `ps`), o passo de Ctrl-C e `kill` (`run spin`, `^C`, `run spin &`, `kill N`) e confere, nos dois modos | `xtask/src/qemu.rs` (`SESSION`, `type_interrupt_and_kill`) |
 
 **O que o `run` faz.** `System::run_program` acha o arquivo no `cpio`, chama `process::spawn(Source::Elf)` e, sem `&`,
 dorme (`block_until` sem prazo, registrado em `Waiters`) até `terminate` acordá-la, ou até Ctrl-C ([abaixo](#ctrl-c-e-kill)). O processo é o mesmo do `init`: espaço
@@ -450,7 +450,7 @@ sessão). A tarefa do processo leva o nome do programa no `ps` (`count`, `hello`
 | --- | --- | --- |
 | A porta é do `core/shell` | `Host::programs` e `Host::run_program` com tipos próprios (`RunOutcome`, `KillCause`); nenhuma porta nova no `hal` | O `core/shell` já é a porta de tudo o que o shell pede; um tipo do `hal` pediria um terceiro crate para dois consumidores |
 | `run <programa> &` cabe | Sem esperar, o `run` devolve `started pid P` e o `ps` mostra o processo enquanto ele roda (`count` dura 2,5 s). O resultado de quem termina fica só no log do kernel (`[rustos] user: pid N exited …`) | A espera é a mesma tabela de fins; o que o `&` poupa é só a espera. A saída dele espera a vez do shell e não cola no prompt ([SDD 16](16_terminal.md#saída-de-segundo-plano)) |
-| Argumentos não passam | `run hello x` é recusado no shell | `argv` mexe no `InitialStack` do `core/hal` e no `process_create` da parte 3 ([DEBT-0130](../tech-debt/0130-run-sem-argumentos-para-o-programa.md)) |
+| Argumentos passam por `argv` | `run count 3` dá `argc = 2`: o nome do programa é `argv[0]`, como no Unix. Tetos de 16 palavras (`ARGS_MAX`, o nome conta) e de 512 bytes de cadeias com os zeros (`ARGS_BYTES_MAX`); passar do teto é recusa (`TooManyArguments`), nunca corte | `InitialStack::build` devolve `None` e o `spawn` recusa antes de criar o espaço. O pior caso do bloco (832 bytes) cabe em `INITIAL_STACK_MAX` (1 KiB) na página que nasce mapeada. O shell tokeniza no máximo 16 palavras, com o `run` contando, e lê linhas de 256 bytes: por ele o teto nunca se atinge; ele vale para quem chamar o `spawn` por outro caminho ([DEBT-0152](../tech-debt/0152-filho-sem-argumentos-no-user-rt.md)) |
 | Ctrl-C e `kill` entram no M1 | O `run` em primeiro plano acorda com a entrada, e Ctrl-C mata o processo com o `Process::kill` que a parte 3 da 4c já tinha; `kill <pid>` acha o processo por uma tabela de pids. Nenhuma syscall nova | Os programas de demonstração terminam sozinhos, mas um `run` travado não tinha saída; `spin` existe para testar isto |
 | O `init` não sobe no boot | O boot normal não lança processo nenhum; `run init` roda as conferências dele | O shell lança o que o usuário pede; o `init` como primeiro processo fica com a parte 3 ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)) |
 | `crash` é Rust seguro | Desce a pilha por recursão até a página de guarda; a falta de página não se resolve | O `rt` não tem leitura de endereço arbitrário em função segura (seria um `unsafe` que só o `rt` pode ter), e a guarda é um endereço proibido de verdade. Exercita também a paginação sob demanda |
@@ -475,7 +475,7 @@ sessão). A tarefa do processo leva o nome do programa no `ps` (`count`, `hello`
 **O que o smoke confere.** Depois do `boot ok` e do prompt, nos dois modos e nas duas ISAs, o `xtask` digita a sessão e
 confere cada resposta: o `ls` lista as seis entradas (`init`, `hello`, `crash`, `sysinfo`, `count`, `spin`); `run hello` e
 `run sysinfo` imprimem a linha `[user]` e saem com `exit code 0`; `run crash` mostra `killed: page fault` e o kernel
-`user: fault contained`; um programa que não existe é recusado; `run count &` volta na hora e o `ps` mostra a linha
+`user: fault contained`; um programa que não existe é recusado; `run count 2` conta até 2 e sai com 0, e `run count x` imprime o uso e sai com 2; `run count &` volta na hora e o `ps` mostra a linha
 `count` com o pid, com a tabela de tarefas **contígua** (nenhuma linha `[user]` entre o cabeçalho e o das CPUs); a última linha do `count` (`[user] count: done`) chega sozinha; `run spin` gira, Ctrl-C (`0x03` na serial) devolve `interrupted (pid P)` e o prompt, `run spin &` lança outro e `kill P` responde `killed pid P` e o kernel registra `pid P killed`; e, no log inteiro da sessão, nenhuma linha mostra o prompt colado em texto de usuário (o shell apaga a linha do prompt com `\r` antes de a saída de fundo entrar: o terminal mostra o que vem depois do último `\r`, e o `xtask` lê assim); e o heap do kernel em uso, lido no `mem` antes e depois de 20 `run hello`, é o mesmo (cada processo devolve tudo ao morrer). No boot normal as linhas do modo de teste
 seguem proibidas no log **inteiro**, boot e sessão, menos as três que lançar um processo produz (`entered ring3/el0`, `pid 1 exited (code 0,` e `fault contained`; `init loaded` e `user self-test:` continuam proibidas).
 
@@ -838,7 +838,7 @@ usuário, `TTBR1` para o kernel, seleção pelo bit 55; faixa padrão de 48 bits
 Pilha inicial: 16 páginas (64 KiB), tamanho fixo, sem crescer sozinha. **Verificado**
 ([mmap(2)](https://man7.org/linux/man-pages/man2/mmap.2.html)): `MAP_GROWSDOWN` faz tocar a página de guarda crescer o mapeamento, e passado o
 limite dá `SIGSEGV`. O RustOS não copia isso: estouro de pilha cai na guarda e é falha
-de usuário ([falhas](#falhas-de-usuário)). `argc` é 0, `argv` e `envp` vazios.
+de usuário ([falhas](#falhas-de-usuário)). `argc` é 0 no `init`, que não recebe argumentos, com `argv` e `envp` vazios; o `run` passa `argv` com o nome do programa primeiro (ver "Pilha inicial", acima).
 
 Só o `init`, carregado pelo kernel, usa a janela de pilha dedicada. Um filho carregado
 pelo `user/rt` mapeia a pilha como mais um mapeamento `ANY`, que cai na região do
@@ -1396,7 +1396,7 @@ O contrato de como um programa **começa**, igual para o `init` e para qualquer 
 | Handle de boot | `process_create` **move** o `bootstrap` para a tabela do filho como o **primeiro handle, de valor `1`**. Quem chama `thread_create` passa `arg0` (o `user/rt` passa `1`); para o `init`, o kernel põe `arg0 = 1` (**feito na parte 1 da 4c**; na 4b era `0`) | idem |
 | Demais registradores | Zero, **`rdx` inclusive** (o psABI o lê como ponteiro de `atexit`) | Zero (a glibc lê o `x0` como `rtld_fini`: [conflito](#a-fatia-4b-como-entrou)) |
 | Pilha | `rsp = sp` de `thread_create`, **alinhado a 16 na entrada**: o psABI diz "guaranteed to be 16-byte aligned at process entry" (**verificado**, [x86-64 psABI](https://github.com/hjl-tools/x86-psABI), `low-level-sys-info.tex`) | `SP_EL0 = sp`, `sp mod 16 = 0` ("The stack must be quad-word aligned", **verificado**, [AAPCS64](https://github.com/ARM-software/abi-aa)) |
-| Conteúdo da pilha | O `init`: o kernel monta `argc = 0`, `argv`, `envp` e o [auxv](#auxv-mínimo). Filho: quem o criou (o `user/rt` do pai) monta o que quiser; o `user/rt` do filho lê o auxv se houver | idem |
+| Conteúdo da pilha | O `init`: o kernel monta `argc = 0`, `argv`, `envp` e o [auxv](#auxv-mínimo). Os programas do `run`: o kernel monta `argv` com o nome e os argumentos. Filho: quem o criou (o `user/rt` do pai) monta o que quiser, hoje sem argumentos ([DEBT-0152](../tech-debt/0152-filho-sem-argumentos-no-user-rt.md)); o `user/rt` do filho lê o auxv se houver | idem |
 | SIMD | Estado inicial do [SDD 15](15_tarefas_e_preempcao.md): `FCW` `0x037F`, `MXCSR` `0x1F80` | V0–V31, `FPSR`, `FPCR` zerados |
 | TLS | Nenhum: `FS`/`GS` base em zero | `TPIDR_EL0` zero |
 
@@ -1604,7 +1604,7 @@ direto ([SIMD de usuário](#simd-de-usuário)).
 
 **Pilha inicial.** x86-64, **verificado** no psABI: `rsp` aponta `argc`; acima vêm os ponteiros de
 `argv`, um zero, os de `envp`, um zero, e as entradas do auxv (dois `u64` cada) terminadas por
-uma entrada nula. O desenho monta isso para o `init`. **aarch64:** o AAPCS64 só exige
+uma entrada nula. O desenho monta isso: `argc`, os ponteiros de `argv` (com `argv[0]` o nome do programa) e as cadeias, cada uma com o `0`, acima do auxv e junto de `AT_RANDOM`. Tetos: `ARGS_MAX` = 16 palavras e `ARGS_BYTES_MAX` = 512 bytes (com os zeros); `INITIAL_STACK_MAX` = 1 KiB. Passou do teto, `build` devolve `None` e o `spawn` recusa. **aarch64:** o AAPCS64 só exige
 `sp mod 16 = 0`; o layout inicial do processo não é dele. O Linux o faz em `fs/binfmt_elf.c`
 (`STACK_ROUND(sp, items)` alinha a 16) e o RustOS usa **a mesma ordem** (`argc`, `argv`,
 `envp`, auxv), mas isso é **o Linux, não uma especificação independente: NÃO VERIFICADO**.

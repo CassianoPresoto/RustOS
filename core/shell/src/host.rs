@@ -54,9 +54,10 @@ pub trait Host {
     fn programs(&self, _visit: &mut dyn FnMut(&ProgramInfo<'_>)) -> Listing {
         Listing::NoInitramfs
     }
-    /// Carrega o programa `name` do initramfs e o roda como processo. Com `wait`, só volta quando
-    /// ele termina e diz como; sem `wait`, volta assim que ele começou.
-    fn run_program(&self, _name: &str, _wait: bool) -> RunOutcome {
+    /// Carrega o programa `name` do initramfs e o roda como processo, com `args` depois do nome (que
+    /// vira `argv[0]`). Com `wait`, só volta quando ele termina e diz como; sem `wait`, volta assim
+    /// que ele começou.
+    fn run_program(&self, _name: &str, _args: &[&str], _wait: bool) -> RunOutcome {
         RunOutcome::NoInitramfs
     }
     /// Mata o processo `pid` que `run` lançou; a plataforma sem processos diz `Unsupported`.
@@ -111,6 +112,12 @@ pub enum RunOutcome {
     NoMemory,
     /// A tabela de tarefas do kernel está cheia.
     TooManyProcesses,
+    /// Os argumentos passam do teto (`max_words` palavras, contando o nome, e `max_bytes` de texto
+    /// com os zeros): nenhum processo nasce.
+    TooManyArguments {
+        max_words: usize,
+        max_bytes: usize,
+    },
     NoInitramfs,
     /// Qualquer outra falha ao criar o processo.
     Failed,

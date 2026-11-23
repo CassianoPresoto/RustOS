@@ -166,11 +166,13 @@ fn permissions(segment: &Segment) -> (PageFlags, Perms) {
 }
 
 /// Registra a pilha (guarda abaixo e acima, topo sorteado, preguiçosa) e mapeia só a última página,
-/// com `argc`, `argv`, `envp` e o auxv; as outras nascem na falta. Devolve o `sp` de entrada, alinhado a 16.
+/// com `argc`, `argv` (de `args`), `envp` e o auxv; as outras nascem na falta. Devolve o `sp` de
+/// entrada, alinhado a 16.
 pub fn map_stack(
     space: &mut UserSpace,
     tree: &mut RegionTree,
     loaded: &Loaded,
+    args: &[&[u8]],
 ) -> Result<u64, LoadError> {
     let mut unseeded = false;
     let mut rng = || {
@@ -202,7 +204,7 @@ pub fn map_stack(
         random: random_bytes,
     };
     rustos_crypto::wipe(&mut random_bytes);
-    let built = InitialStack::build(top, &info);
+    let built = InitialStack::build(top, &info, args);
     rustos_crypto::wipe(&mut info.random);
     let mut initial = built.ok_or(LoadError::StackLayout)?;
     let lead = usize::try_from(PAGE_SIZE).unwrap_or(0) - initial.bytes().len();

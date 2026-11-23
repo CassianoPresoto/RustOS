@@ -5,7 +5,9 @@
 use alloc::sync::Arc;
 
 use rustos_cpio as cpio;
-use rustos_hal::abi::{ProcessEvent, event_kind, fault_access, fault_kind};
+use rustos_hal::abi::{
+    ARGS_BYTES_MAX, ARGS_MAX, ProcessEvent, event_kind, fault_access, fault_kind,
+};
 use rustos_shell::{Access, KillCause, KillOutcome, Listing, ProgramInfo, RunOutcome};
 
 use crate::frames::Frames;
@@ -166,13 +168,14 @@ pub fn list(archive: Option<&[u8]>, visit: &mut dyn FnMut(&ProgramInfo<'_>)) -> 
     Listing::Done
 }
 
-/// Carrega `name` do initramfs e o roda como processo. Com `wait`, a tarefa do shell dorme até o
-/// processo terminar.
+/// Carrega `name` do initramfs e o roda como processo, com `args` depois do nome (que é `argv[0]`).
+/// Com `wait`, a tarefa do shell dorme até o processo terminar.
 pub fn run(
     frames: Frames,
     direct_map_offset: u64,
     archive: Option<&[u8]>,
     name: &str,
+    extra: &[&str],
     wait: bool,
 ) -> RunOutcome {
     let Some(archive) = archive else {
@@ -183,7 +186,17 @@ pub fn run(
         Err(LoadError::Missing) => return RunOutcome::NotFound,
         Err(_) => return RunOutcome::Failed,
     };
-    let spawned = match process::spawn_as(frames, direct_map_offset, Source::Elf(file), 0, name) {
+    let Some((argv, count)) = argv_of(name, extra) else {
+        return too_many_arguments();
+    };
+    let spawned = match process::spawn_as(
+        frames,
+        direct_map_offset,
+        Source::Elf(file),
+        0,
+        name,
+        &argv[..count],
+    ) {
         Ok(spawned) => spawned,
         Err(error) => return refusal(&error),
     };
@@ -208,12 +221,36 @@ pub fn run(
     }
 }
 
+/// O `argv` de `run`: o nome do programa e cada argumento, na ordem, e quantas palavras são. `None` se
+/// não cabe em `ARGS_MAX`; o tamanho das cadeias é conferido pelo `spawn`.
+fn argv_of<'a>(name: &'a str, extra: &[&'a str]) -> Option<([&'a [u8]; ARGS_MAX], usize)> {
+    let count = extra
+        .len()
+        .checked_add(1)
+        .filter(|&count| count <= ARGS_MAX)?;
+    let mut argv: [&[u8]; ARGS_MAX] = [&[]; ARGS_MAX];
+    argv[0] = name.as_bytes();
+    for (slot, arg) in argv[1..count].iter_mut().zip(extra) {
+        *slot = arg.as_bytes();
+    }
+    Some((argv, count))
+}
+
+/// O `argv` passa dos tetos: o shell diz quais são.
+fn too_many_arguments() -> RunOutcome {
+    RunOutcome::TooManyArguments {
+        max_words: ARGS_MAX,
+        max_bytes: ARGS_BYTES_MAX,
+    }
+}
+
 /// Por que o programa não virou processo, no vocabulário do shell.
 fn refusal(error: &ProcessError) -> RunOutcome {
     use rustos_hal::MapError;
 
     use crate::task::TaskError;
     match error {
+        ProcessError::Arguments => too_many_arguments(),
         ProcessError::Load(LoadError::Elf(_)) => RunOutcome::NotExecutable,
         ProcessError::Task(TaskError::NoSlot) => RunOutcome::TooManyProcesses,
         ProcessError::Load(LoadError::Map(MapError::OutOfFrames))
