@@ -1282,8 +1282,12 @@ fn simd_across_processes(c: &mut Checks, cx: &Cx<'_>) {
         let value = SIMD_TAG | u64::try_from(i).unwrap_or(0);
         *slot = pair().and_then(|(mine, theirs)| {
             let msg = simd_message(value);
-            let (child, thread) = start_with_events(cx, &msg, theirs).ok()?;
-            Some((mine, child, thread))
+            // `theirs` sai com a chamada, que o `user/rt` consome em qualquer resultado.
+            let started = start_with_events(cx, &msg, theirs);
+            if started.is_err() {
+                let _ = sys::handle_close(mine);
+            }
+            started.ok().map(|(child, thread)| (mine, child, thread))
         });
     }
     c.expect(

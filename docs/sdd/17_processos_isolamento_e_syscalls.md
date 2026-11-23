@@ -615,8 +615,8 @@ processos disputando as CPUs ao mesmo tempo.
 
 | Peça | Onde mora |
 | --- | --- |
-| `simd_hold(value, rounds) -> bool`: função segura, um `asm!` só por ISA. Guarda os 128 bits do registrador numa área local, põe `value` na lane baixa, confere-a `rounds` vezes com `pause`/`yield` e restaura o registrador inteiro em todo caminho de saída. Clobber só de GPR e flags | `arch/x86_64-user/src/simd.rs`, `arch/aarch64-user/src/simd.rs`; exportada pelo `user/rt` como `rustos_user_rt::simd_hold` |
-| Modo `MODE_SIMD` do `child`: a segunda mensagem do pai é `[MODE_SIMD, valor em 8 bytes little-endian]`; o `child` roda `simd_hold` em laço por 300 ms (pelo `clock_get_monotonic`) e sai com 0 se o valor se manteve, ou 1 se não | `user/tests/child/src/main.rs` |
+| `simd_hold(value, rounds) -> bool`: função segura, um `asm!` só por ISA. Guarda os 128 bits do registrador numa área local, põe `value` na lane baixa e `!value` na alta, confere as duas `rounds` vezes com `pause`/`yield` e restaura o registrador inteiro em todo caminho de saída. Clobber só de GPR e flags | `arch/x86_64-user/src/simd.rs`, `arch/aarch64-user/src/simd.rs`; exportada pelo `user/rt` como `rustos_user_rt::simd_hold` |
+| Modo `MODE_SIMD` do `child`: a segunda mensagem do pai é `[MODE_SIMD, valor em 8 bytes little-endian]`; o `child` roda `simd_hold` em laço por 300 ms (pelo `clock_get_monotonic`) e sai com 0 se o valor se manteve, 1 se não, e 2 se o relógio falha | `user/tests/child/src/main.rs` |
 | Caso `simd_across_processes` do `procs`: oito filhos criados e iniciados antes de qualquer espera, cada um com `SIMD_TAG \| i`; espera todos com prazo de 20 s e lê o evento de saída de cada um, que tem de ser código 0 | `user/tests/procs/src/main.rs` |
 | `simd: true` em toda thread de usuário (já da 4a): o teste não mudou o kernel, só prova que o salvamento acontece | `kernel/src/process.rs` (sem diff) |
 
@@ -624,7 +624,7 @@ processos disputando as CPUs ao mesmo tempo.
 
 | Decisão | O que ficou | Por quê |
 | --- | --- | --- |
-| Estado guardado na memória, não num GPR | Os 128 bits vão para uma área local de 16 bytes (`movdqu` e `str q`), e o bloco declara só GPR e flags como clobber, com `nostack` | `movq` de GPR para `xmm0` e `fmov d0` zeram a lane alta, então um GPR não guardaria o registrador inteiro (o desenho dizia GPR) |
+| Estado guardado na memória, não num GPR | Na x86_64 os 128 bits vão para uma área local de 32 bytes (`[u128; 2]`: o original e o rascunho de cada volta, com `movdqu`); na aarch64, para 16 bytes (`str q`). O bloco declara só GPR e flags como clobber, com `nostack`. Na x86_64 a alta vem por `movhps` (só SSE2, sem `pinsrq`) e, na aarch64, por `mov v0.d[1]` | `movq` de GPR para `xmm0` e `fmov d0` zeram a lane alta, então um GPR não guardaria o registrador inteiro (o desenho dizia GPR) |
 | Valor na segunda mensagem | `[MODE_SIMD, valor]`, lido com buffer de 16 bytes; os outros modos seguem com o byte seguinte e não mudam | Um modo novo sem mexer no formato dos antigos |
 | Oito filhos | O dobro das 4 CPUs padrão da QEMU (`-smp 4`) | Só com mais filhos que núcleos eles dividem núcleo e trocam de contexto entre si |
 | Lugar no `procs` | Depois do laço de mapeamento e antes do aquecimento; todos os filhos morrem e os handles fecham antes do ponto `A` | Os pontos "nada sobrou" (frames, heap, promessa) continuam exatos |
@@ -632,7 +632,7 @@ processos disputando as CPUs ao mesmo tempo.
 | Prova de que o teste pega o defeito | Com `simd: false` na thread de usuário, o x86_64 falha 6 de 9 filhos (`procs: FAILED 6 of 153`) e o aarch64 falha 7 de 9. A injeção não entrou no commit | Medido com `make smoke` nas duas ISAs; sem falha com o defeito o teste não servia |
 
 **O que o autoteste confere** (parte 2): `procs: ok (153 assertions)` nas duas ISAs, dos quais 9 são
-deste caso (um de "os oito filhos começaram" e oito de "o filho manteve o valor de `xmm0`/`v0`").
+deste caso (um de "os oito filhos começaram" e oito de "o filho manteve as duas metades de `xmm0`/`v0`").
 
 ## Entrada de syscall por ISA
 
@@ -1862,7 +1862,7 @@ O adaptador Linux da fase 5 traduz o `Fault` em sinal. Como o canal entrou, na p
 | AMX | **Fora** do `XCR0` ([SDD 08](08_roadmap.md)); instrução de AMX dá `#UD` e o processo morre. O pedido de AMX só é preciso com sinais (sigframe), que a fase 4 não tem |
 | SVE e SME | `CPACR_EL1.ZEN`/`SMEN` seguem zero: acesso trapeia (`EC` `0x19`, `0x1D`) e o processo morre. [DEBT-0035](../tech-debt/0035-sve-sme-e-amx-sem-estado-por-tarefa.md) segue aberta, com o gatilho reescrito para o primeiro programa que use SVE, SME ou AMX, ou o primeiro sinal Linux |
 | `rdtsc` | `CR4.TSD = 0` já é o padrão. A opção por processo (`PR_SET_TSC`) **continua decisão futura**; a fase 4 não a oferece |
-| Teste | `user/tests/procs` lança oito filhos ao mesmo tempo, cada um com um valor em `xmm0`/`v0` que confere em laço por 300 ms; sai com 0 só se o valor se manteve. O `asm!` está em `arch/<isa>-user` ([onde mora](#onde-cada-peça-mora-no-hexágono)), e o caso é descrito na [parte 2](#a-fatia-4d-parte-2-como-entrou) |
+| Teste | `user/tests/procs` lança oito filhos ao mesmo tempo, cada um com um valor em `xmm0`/`v0` (e o NOT dele na lane alta) que confere em laço por 300 ms; sai com 0 só se as duas metades se mantiveram. O `asm!` está em `arch/<isa>-user` ([onde mora](#onde-cada-peça-mora-no-hexágono)), e o caso é descrito na [parte 2](#a-fatia-4d-parte-2-como-entrou) |
 
 ## Onde cada peça mora no hexágono
 
@@ -1996,7 +1996,7 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 | Dívida | O que a fase faz |
 | --- | --- |
 | Dívida 0012, exceção de usuário só para a CPU | **Paga na 4a**: a origem se distingue pelo `CS` (x86_64) ou pelo grupo do vetor (aarch64), o processo morre e o kernel segue; o canal de eventos fecha na 4d, parte 1 ([abaixo](#a-fatia-4d-parte-1-como-entrou)) |
-| SIMD sem trap de uso indevido | `simd: true` em toda thread de usuário já está na 4a e na 4c; **paga na 4d, parte 2**, com o teste de `xmm0`/`v0` entre processos ([abaixo](#a-fatia-4d-parte-2-como-entrou)) |
+| Dívida 0043, SIMD sem trap de uso indevido | `simd: true` em toda thread de usuário já está na 4a e na 4c; **paga na 4d, parte 2**, com o teste de `xmm0`/`v0` entre processos ([abaixo](#a-fatia-4d-parte-2-como-entrou)) |
 | [DEBT-0153](../tech-debt/0153-mensagem-de-evento-sem-cobranca-ao-pai.md) Mensagem do evento sem cobrança | **Abre** na 4d, parte 1: a mensagem do fim é escrita pelo kernel e não sai da conta de nenhum processo ([decisão](#a-fatia-4d-parte-1-como-entrou)) |
 | Dívida 0059, estado do ChaCha20 derramado na pilha | **Paga na 4a**: a volta ao usuário repinta a pilha do kernel abaixo do quadro, até 128 bytes de pilha limpa (a heurística é a [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md)); custo medido no laço de syscall nula, com e sem a limpeza ([SDD 07](07_desempenho_e_recursos.md#syscall-nula-e-limpeza-da-pilha-fatia-4a)) |
 | Dívida 0055 Kernel sem *shootdown* de TLB | **Paga na 4c**: vetor novo de IPI no x86_64 sobre o mecanismo que já existe, `tlbi ...is` no aarch64 ([seção](#shootdown-de-tlb-paga-a-dívida-0055-na-4c)); o que sobra (medida em KVM, faixa em lote) é a [DEBT-0122](../tech-debt/0122-shootdown-sem-medida-em-kvm-nem-lote.md). A regra de geração de PCID/ASID é da 4e |
