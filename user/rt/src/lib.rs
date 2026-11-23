@@ -23,7 +23,10 @@ pub use console::{LineBuffer, print_line, set_console};
 pub use env::{Args, Auxv, Env};
 #[cfg(feature = "raw-syscalls")]
 pub use rustos_hal::abi::Syscall;
-pub use rustos_hal::abi::{Handle, ReadActual, Rights, Status, boot_kind, signals, vmar_flags};
+pub use rustos_hal::abi::{
+    Handle, PROCESS_KILLED_CODE, ProcessEvent, ReadActual, Rights, Status, boot_kind, event_kind,
+    fault_access, fault_kind, signals, vmar_flags,
+};
 
 /// Declara o `main` do programa: `fn(&Env) -> i64`, cujo valor é o código de `process_exit`.
 #[macro_export]

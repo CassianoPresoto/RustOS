@@ -190,13 +190,24 @@ pub fn vmar_unmap(vmar: Handle, addr: u64, len: u64) -> Result<()> {
 /// `process_create`: um processo vazio sob `parent` (com `MANAGE_PROCESS`); `bootstrap` sai da tabela
 /// e vira o handle 1 dele. Devolve o processo e o VMAR raiz.
 pub fn process_create(parent: Handle, name: &[u8], bootstrap: Handle) -> Result<(Handle, Handle)> {
+    process_create_with_events(parent, name, bootstrap, Handle::INVALID)
+}
+
+/// Como `process_create`, com `events` (`WRITE` e `TRANSFER`; `Handle::INVALID` não leva nenhum): a
+/// ponta sai da tabela e fica no processo, que escreve nela o evento do fim.
+pub fn process_create_with_events(
+    parent: Handle,
+    name: &[u8],
+    bootstrap: Handle,
+    events: Handle,
+) -> Result<(Handle, Handle)> {
     let mut out = [0_u64; 2];
     let args = [
         parent.raw(),
         name.as_ptr().addr() as u64,
         name.len() as u64,
         bootstrap.raw(),
-        0,
+        events.raw(),
         out.as_mut_ptr().addr() as u64,
     ];
     checked(call(Syscall::ProcessCreate, args))?;

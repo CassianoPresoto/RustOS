@@ -59,7 +59,7 @@ número novo no [SDD 07](07_desempenho_e_recursos.md).
 | 4b (**feita**) | `core/cpio`, `core/elf`; a árvore de regiões em `core/mm/src/vmar.rs`, **interna ao kernel** (o carregador mapeia frames direto, sem objeto VMO nem VMAR e sem handle); módulo do Limine; `user/` (runtime e `init`); o xtask monta o initramfs | O `init` do initramfs roda, imprime pelo `debug_write` provisório e sai; o smoke exige a linha dele (**no modo de teste**: [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)) |
 | M1 (**feito**) | O shell (`ls`, `run`, `ps` com a coluna `pid`) lista os programas do initramfs e os roda como processos isolados **no boot normal**, na imagem `release-small`; quatro programas de demonstração em `user/` (`hello`, `crash`, `sysinfo`, `count`); o smoke digita a sessão no shell | O dono sobe a imagem, digita `ls`, `run hello`, `run crash` e `ps`, e vê o sistema sobreviver à morte contida ([abaixo](#o-m1-programas-pelo-shell-como-entrou)). Paga a metade do [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md) que dizia respeito ao carregador |
 | 4c (**feita**: a parte 1, handles, canais, espera e canal de boot; a paginação sob demanda e o *shootdown*; e a parte 3, VMO, VMAR, `process_create`, `thread_create`, `thread_exit` e `process_kill`, o teto em bytes e o `init` com um filho, [abaixo](#a-fatia-4c-parte-3-como-entrou)) | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (**feito**); **página zero** e **falta de página de usuário resolvida** (**feitas**, [abaixo](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou)); ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; ***shootdown* de TLB** e espera da CPU que ainda roda o espaço na morte do processo (**feitos e pagos**: dívidas 0055 e 0085); o `init` recebe os handles pelo canal de boot (**feitos**) | Um processo cria outro, que escreve no console por um handle que recebeu (**atingido**: o `init` cria o `child`) |
-| 4d | SIMD de usuário, canal de eventos do processo, teste de `xmm0`/`v0` entre processos | Dois processos preservam `xmm0`/`v0`; o culpado de uma falha chega ao pai (**paga** [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md)) |
+| 4d (**parte 1 feita**: o canal de eventos, [abaixo](#a-fatia-4d-parte-1-como-entrou); a parte 2 é o SIMD entre processos) | SIMD de usuário, canal de eventos do processo, teste de `xmm0`/`v0` entre processos | Dois processos preservam `xmm0`/`v0`; o culpado de uma falha chega ao pai (**paga** [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md) na parte 2) |
 | 4e | KPTI, PCID/ASID com a regra de geração entre CPUs, mitigações de CPU ([seção](#mitigações-de-cpu)), relatório no boot. **Parte 1 (feita):** detecção de vulnerabilidade e de recurso nas duas ISAs, a linha `mitigations:`, a chave `kpti=` (só no relatório) e o clamp do Spectre v1. **Parte 2:** o KPTI, o PCID/ASID na troca e o IBPB na troca | Linha `mitigations:` no boot; custo de cada uma medida |
 | 4f | As medidas da fase (inclui a falta de página que zera, [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)) ([abaixo](#medidas-da-fase)) e este capítulo virando descritivo | Fecha a fase: "syscall nula medida; processo que toca o kernel morre sem derrubar nada" |
 
@@ -561,7 +561,7 @@ O **`init` cria um filho** (`user/init`, com `user/rt/src/spawn.rs`): mapeia o i
 
 | Decisão | O que ficou | Por quê |
 | --- | --- | --- |
-| Os erros que o contrato deixava abertos | Tabela de `vmar_map` acima; `process_create` com `events` diferente de 0 é `NotSupported` (o canal de eventos é da 4d), consumindo `bootstrap` e `events`; nome maior que 32 bytes é `InvalidArgs`; o nome é guardado até o primeiro byte que não é UTF-8 (o `ps` o corta em 16 bytes), e vai à tarefa do filho; `thread_create` valida o handle antes de `entry` e `sp` | Preenche o que o contrato numérico não dizia; **a confirmar pelo dono**, é o que o mundo de fora enxerga |
+| Os erros que o contrato deixava abertos | Tabela de `vmar_map` acima; nome maior que 32 bytes é `InvalidArgs`; o nome é guardado até o primeiro byte que não é UTF-8 (o `ps` o corta em 16 bytes), e vai à tarefa do filho; `thread_create` valida o handle antes de `entry` e `sp` | Preenche o que o contrato numérico não dizia; **a confirmar pelo dono**, é o que o mundo de fora enxerga |
 | A última thread encerra o processo | `thread_exit` da última é `Exit` de código 0 | O processo sem thread não tem como voltar a rodar |
 | `PROCESS_KILLED_CODE` | -1024 | Um valor que `process_exit` não usa por engano; vira o `code` do evento na 4d |
 | Quem mata não espera | `process_kill` é assíncrona: devolve ao marcar e parar; o pai espera o `TERMINATED` | O Zircon também (`zx_task_kill`); a espera já existe |
@@ -572,8 +572,40 @@ O **`init` cria um filho** (`user/init`, com `user/rt/src/spawn.rs`): mapeia o i
 | `init` fora do boot normal | Segue só no modo de teste ([DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md), reescrita com o custo medido) | O orçamento do boot é do dono |
 | A dívida 0133 segue aberta; a 0131 do M1 foi paga depois ([Ctrl-C e `kill`](#ctrl-c-e-kill)) | Com o gatilho reescrito na época; o shell e o `programs.rs` são do M1 |
 
-**O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs): os casos do VMO sem processo (cobrança, promessa, frame no primeiro toque, teto, devolução exata); o `init` com o filho; e o `procs` (`[user] procs: ok (N assertions)`, 113 hoje), com direitos errados em VMO e VMAR (sem `WRITE`, sem `MAP`, só `EXECUTE`, VMAR sem `WRITE`, o initramfs para escrita e para execução), W+X, bit reservado, tipo errado e handle forjado; `FIXED` sobre região (inteira, no meio, no fim, no começo), na faixa nula, abaixo do mínimo, no topo e na metade do kernel; tamanhos desalinhados, zerados e que dão a volta; o desmapeamento parcial (buraco no meio, as páginas em volta com o valor, remapear no buraco, o que cobre buracos e regiões) e a memória compartilhada entre dois mapeamentos do mesmo VMO; `process_create` sem `MANAGE_PROCESS`, com pai de outro tipo, `bootstrap` sem `TRANSFER`, nome longo, ponteiro de saída ruim, `events`, o mesmo handle nos dois e pai forjado, cada um consumindo os handles que se movem e sem criar nada; `thread_create` sem `MANAGE_THREAD`, com `entry` e `sp` ruins e em processo morto; `process_kill` sem `DESTROY`, duas vezes e de processo que nunca rodou; a thread que sai, o processo que acaba com a última, o `process_kill` de processo **bloqueado no kernel** (acorda pela morte e não pelo prazo, o que paga a dívida 0112), de processo com **quatro threads girando em usuário** (o kernel confere que o IPI alcançou até 3 CPUs de uma vez), de processo que se mata, e o estouro de pilha numa thread com outra girando; o teto em bytes (mensagens, VMOs, processos); 500 rodadas de criar, mapear, tocar e desmapear; e 300 processos criados e esperados (metade morta no meio) mais 2 000 idas e voltas entre dois processos. Nos pontos `A` e `C` o kernel confere que **nada sobrou**: os mesmos frames, os mesmos bytes de heap e a mesma promessa. O teste do heap exato achou, durante o desenvolvimento, o `Box` da thread que o `enter_user` (que não volta) não soltava.
+**O que o autoteste confere** (`make smoke`, modo de teste, nas duas ISAs): os casos do VMO sem processo (cobrança, promessa, frame no primeiro toque, teto, devolução exata); o `init` com o filho; e o `procs` (`[user] procs: ok (N assertions)`, 144 hoje), com direitos errados em VMO e VMAR (sem `WRITE`, sem `MAP`, só `EXECUTE`, VMAR sem `WRITE`, o initramfs para escrita e para execução), W+X, bit reservado, tipo errado e handle forjado; `FIXED` sobre região (inteira, no meio, no fim, no começo), na faixa nula, abaixo do mínimo, no topo e na metade do kernel; tamanhos desalinhados, zerados e que dão a volta; o desmapeamento parcial (buraco no meio, as páginas em volta com o valor, remapear no buraco, o que cobre buracos e regiões) e a memória compartilhada entre dois mapeamentos do mesmo VMO; `process_create` sem `MANAGE_PROCESS`, com pai de outro tipo, `bootstrap` sem `TRANSFER`, nome longo, ponteiro de saída ruim, `events` sem `WRITE` ou sem `TRANSFER`, `events` que não é canal (console, VMO) ou igual ao pai (`WrongType`), o mesmo handle nos dois e pai forjado, cada um consumindo os handles que se movem e sem criar nada; o canal de eventos (saída com código, o evento já na ponta quando `TERMINATED` aparece, falta de escrita numa pilha que estoura, `process_kill`, e o pai que fechou a ponta) ([4d, parte 1](#a-fatia-4d-parte-1-como-entrou)); `thread_create` sem `MANAGE_THREAD`, com `entry` e `sp` ruins e em processo morto; `process_kill` sem `DESTROY`, duas vezes e de processo que nunca rodou; a thread que sai, o processo que acaba com a última, o `process_kill` de processo **bloqueado no kernel** (acorda pela morte e não pelo prazo, o que paga a dívida 0112), de processo com **quatro threads girando em usuário** (o kernel confere que o IPI alcançou até 3 CPUs de uma vez), de processo que se mata, e o estouro de pilha numa thread com outra girando; o teto em bytes (mensagens, VMOs, processos); 500 rodadas de criar, mapear, tocar e desmapear; e 300 processos criados e esperados (metade morta no meio) mais 2 000 idas e voltas entre dois processos. Nos pontos `A` e `C` o kernel confere que **nada sobrou**: os mesmos frames, os mesmos bytes de heap e a mesma promessa. O teste do heap exato achou, durante o desenvolvimento, o `Box` da thread que o `enter_user` (que não volta) não soltava.
 
+
+## A fatia 4d, parte 1, como entrou
+
+**Descritivo.** O que a parte 1 da 4d tornou verdade: o canal de eventos. O SIMD entre processos
+(a parte 2, [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md)) segue como desenho.
+
+| Peça | Onde mora |
+| --- | --- |
+| Codificação da mensagem: `ProcessEvent::to_bytes` e `from_bytes`, campo a campo em little-endian (sem `unsafe`), com 56 bytes | `core/hal/src/abi.rs`, com o teste de layout e o de ida e volta |
+| `process_create` com `events`: a ponta sai da tabela junto com `bootstrap`; o erro de direito consome os dois e não cria nada; a reserva da ponta é feita antes do `copy_to_user` do `out`, e se o `copy_to_user` falha ela é desfeita | `kernel/src/syscall/tasks.rs` |
+| A guarda da ponta: uma tabela de uma posição no `Process`, com o valor do handle em `event_handle`; o handle conta em `handle_count` como qualquer outro | `kernel/src/process.rs` (`reserve_events`, `keep_events`) |
+| A escrita e o fechamento: `Process::report`, chamado pelo `teardown` logo **antes** de levantar `TERMINATED`. Escreve com `channel_write`, o caminho de canal que já existe, e fecha a ponta | `kernel/src/process.rs` |
+| Endereço de usuário: `pc`, `sp` e `addr` que estiverem fora de `[0, USER_TOP)` saem como 0. Vale na falta (o log também usa o valor) e de novo na codificação | `kernel/src/process.rs` (`user_address`, `wire`) |
+| Autoteste: a saída com código 7; a falta de escrita de um estouro de pilha (`fault_kind` 1, o bit de escrita, `addr` a menos de uma página do `sp`); o `process_kill` (código -1024); `events` sem `WRITE`, sem `TRANSFER`, que não é canal ou igual ao pai; o pai que fechou a ponta antes da morte. A limpeza de endereço da metade do kernel é testada no host (`ProcessEvent::for_user`) | `user/tests/procs` e `user/tests/child` (modos `MODE_EXIT_CODE` e `MODE_OVERFLOW`, sem `unsafe`); `user/rt` ganhou `process_create_with_events` e `create_with_events` |
+
+**Ordem da morte.** O passo 6 da tabela *A morte do processo, em ordem* fica assim: escreve o
+evento, fecha a ponta e só então levanta `TERMINATED`. Assim o pai que acorda por `TERMINATED` já
+acha a mensagem na ponta dele, sem esperar `READABLE`. A ordem que o contrato fixa, a mensagem
+**antes** de `PEER_CLOSED`, segue: o fechamento da ponta do filho é o que levanta `PEER_CLOSED` no
+pai, depois da escrita.
+
+**Decisões do agente**
+
+| Decisão | O que ficou | Por quê |
+| --- | --- | --- |
+| Processo que nunca roda e perde o último handle | Fecha a ponta de eventos sem mensagem (no `Drop`) | Não houve morte: o pai só vê `PEER_CLOSED` |
+| Mensagem sem cobrança | O kernel escreve a mensagem e nenhum processo a paga; a conta fica fora do teto | O limite é o número de pares (uma mensagem por par, e cada par custa 8 KiB do pai). [DEBT-0153](../tech-debt/0153-mensagem-de-evento-sem-cobranca-ao-pai.md) |
+| Canal cheio ou ponta do pai fechada | `ShouldWait` e `PeerClosed` perdem a mensagem em silêncio, sem repetir e sem pânico; o processo morre do mesmo jeito | Com este desenho a fila da ponta do pai nunca passa de uma mensagem: a ponta do filho é movida uma vez e só o kernel escreve nela, uma vez. `ShouldWait` fica no código como guarda |
+| Limpeza de endereço | `pc` e `addr` ficam só com valores `< USER_TOP`; `sp` com `<= USER_TOP`, porque `thread_create` aceita `sp` no topo | `ProcessEvent::for_user` (`core/hal`), usado na falta e no `report` |
+| Ponta de eventos sem handle no processo | `event_handle` é `0` (`INVALID`) e o `report` não escreve nada | O processo sem `events` morre como antes |
+
+**O que a parte 1 não faz:** o SIMD entre processos, o teste de `xmm0`/`v0` e a [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md) ficam para a parte 2.
 
 ## Entrada de syscall por ISA
 
@@ -1281,7 +1313,7 @@ morreria ali.
 | `handle_close` | Remove o slot. Não pede direito. Se foi o último handle do objeto, `on_zero_handles` roda **depois** de soltar o lock da tabela |
 | `handle_duplicate(h, rights)` | `h` exige `DUPLICATE`; `rights ⊆ h.rights`; insere o handle novo e devolve o valor |
 | `handle_replace(h, rights)` | Remove `h` **sempre** que ele existe, em sucesso e em erro (lido no Zircon: "handle is always invalidated", sem separar sucesso de erro; a extensão ao erro é inferência). Se `rights ⊄ h.rights`: `InvalidArgs`, com o original já invalidado. `h` que não existe: `BadHandle` (nada a invalidar). **Nenhum direito é exigido** (lido: "Rights: None"); em particular, não pede `DUPLICATE` |
-| `process_create(parent, …, bootstrap, events)` | `parent` com `MANAGE_PROCESS` (erro: `bootstrap` e `events` são consumidos, como o `arg1` do Zircon). `bootstrap` (`TRANSFER`) e `events` (`WRITE` e `TRANSFER`) seguem a regra geral. O `bootstrap` vai para a tabela do filho; o `events` fica **no Process**, contado em `handle_count`, e o kernel o fecha depois de escrever o evento final (então o pai vê `PEER_CLOSED` depois do evento) |
+| `process_create(parent, …, bootstrap, events)` | `parent` com `MANAGE_PROCESS` (erro: `bootstrap` e `events` são consumidos, como o `arg1` do Zircon). `bootstrap` (`TRANSFER`) segue a regra geral. `events` é canal com `WRITE` e `TRANSFER` (outro tipo: `WrongType`), e segue a regra geral. O `bootstrap` vai para a tabela do filho; o `events` fica **no Process**, contado em `handle_count`, e o kernel o fecha depois de escrever o evento final (então o pai vê `PEER_CLOSED` depois do evento) |
 | `channel_write(ch, bytes, handles)` | Abaixo |
 | `channel_read(ch, …)` | Abaixo |
 
@@ -1441,7 +1473,7 @@ ilegal, falta sem região) mata, pelo [canal de eventos](#falhas-de-usuário).
 | `0x20` | `vmo_create` | `size`, `flags` (0) | handle do VMO | Nenhum (ver acima) |
 | `0x21` | `vmar_map` | `vmar`, `vmo`, `vmo_off`, `len`, `flags`, `vmar_off` | endereço mapeado | `vmar`: `MAP`; `vmo`: `MAP` e cada permissão pedida (`READ`/`WRITE`/`EXECUTE`), todas também no teto do `vmar` |
 | `0x22` | `vmar_unmap` | `vmar`, `addr`, `len` | — | `vmar`: `MAP` |
-| `0x30` | `process_create` | `parent`, `name_ptr`, `name_len`, `bootstrap`, `events`, `out` | — (processo e VMAR raiz, dois `u64`, em `out`) | `parent`: `MANAGE_PROCESS`; `bootstrap`: `TRANSFER` (move); `events`: `WRITE` e `TRANSFER` (move; 0 = nenhum) |
+| `0x30` | `process_create` | `parent`, `name_ptr`, `name_len`, `bootstrap`, `events`, `out` | — (processo e VMAR raiz, dois `u64`, em `out`) | `parent`: `MANAGE_PROCESS`; `bootstrap`: `TRANSFER` (move); `events`: canal com `WRITE` e `TRANSFER` (move; 0 = nenhum) |
 | `0x31` | `thread_create` | `process`, `entry`, `sp`, `arg0`, `arg1` | handle da thread | `process`: `MANAGE_THREAD`. Cria **e inicia**; a primeira thread inicia o processo |
 | `0x32` | `process_kill` | `process` | — | `process`: `DESTROY` |
 | `0x40` | `channel_create` | `flags` (0), `out` | — (as duas pontas, dois `u64`, em `out`) | Nenhum |
@@ -1768,7 +1800,7 @@ Antes da 4a toda exceção não recuperável parava a CPU. O desenho muda o dest
 | 3 | **Troca o `CR3`/`TTBR0` para a raiz do kernel (x86_64) ou a raiz vazia (aarch64)** antes de liberar qualquer tabela | A tabela liberada não pode estar em uso pela CPU; vale também quando a thread que morre é a que está rodando |
 | 4 | Fecha todos os handles (`on_zero_handles` nos objetos; canais ganham `PEER_CLOSED`) | Os objetos soltos destroem em cascata |
 | 5 | Desmapeia e devolve os frames, zerados ao liberar ([SDD 09](09_seguranca.md)); depois as tabelas de página e o ASID/PCID | Ver o passo 3 |
-| 6 | Levanta `TERMINATED` no Process e escreve o evento no canal de eventos | Quem espera já enxerga o estado final |
+| 6 | Escreve o evento na ponta de eventos e a fecha, e só então levanta `TERMINATED` no Process | Quem espera `TERMINATED` já acha o evento na ponta; o `PEER_CLOSED` do pai vem depois da mensagem |
 | 7 | **A pilha de kernel da thread que sai só é liberada depois do `switch`**, por quem entra (ou por uma lista de recolhimento que a ociosa esvazia) | A thread não pode liberar a pilha em que ela mesma roda; o slot `Exited` já mantém a pilha ([SDD 15](15_tarefas_e_preempcao.md)), e o endereço só volta à lista de livres depois |
 
 ### Canal de eventos ([decisão 6](#decisão-6--falha-de-usuário-canal-de-eventos-ou-sinal-síncrono))
@@ -1788,7 +1820,7 @@ Regras: **só endereço de usuário** na mensagem (o endereço do kernel não sa
 jeito e o pai só vê `TERMINATED`. Na fase 4 o fim é sempre a morte: **não há retomada**
 de exceção. O Linux usa sinais síncronos (SIGSEGV, SIGBUS, SIGILL, SIGFPE) entregues à
 thread, com ação padrão `Core` (**verificado**, [signal(7)](https://man7.org/linux/man-pages/man7/signal.7.html)); a ABI nativa não os copia.
-O adaptador Linux da fase 5 traduz o `Fault` em sinal.
+O adaptador Linux da fase 5 traduz o `Fault` em sinal. Como o canal entrou, na parte 1 da 4d: [abaixo](#a-fatia-4d-parte-1-como-entrou).
 
 ## SIMD de usuário
 
@@ -1936,8 +1968,9 @@ O #11 e o #13 pagaram as dívidas 0011, 0018, 0020, 0025, 0036 e 0039 (seus arqu
 
 | Dívida | O que a fase faz |
 | --- | --- |
-| Dívida 0012, exceção de usuário só para a CPU | **Paga na 4a**: a origem se distingue pelo `CS` (x86_64) ou pelo grupo do vetor (aarch64), o processo morre e o kernel segue; o canal de eventos fecha na 4d |
-| [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md) SIMD sem trap | **Paga** na 4d: `simd: true` em toda thread de usuário |
+| Dívida 0012, exceção de usuário só para a CPU | **Paga na 4a**: a origem se distingue pelo `CS` (x86_64) ou pelo grupo do vetor (aarch64), o processo morre e o kernel segue; o canal de eventos fecha na 4d, parte 1 ([abaixo](#a-fatia-4d-parte-1-como-entrou)) |
+| [DEBT-0043](../tech-debt/0043-simd-sem-trap-de-uso-indevido.md) SIMD sem trap | `simd: true` em toda thread de usuário já está na 4a e na 4c; **paga na 4d, parte 2**, com o teste de `xmm0`/`v0` entre processos |
+| [DEBT-0153](../tech-debt/0153-mensagem-de-evento-sem-cobranca-ao-pai.md) Mensagem do evento sem cobrança | **Abre** na 4d, parte 1: a mensagem do fim é escrita pelo kernel e não sai da conta de nenhum processo ([decisão](#a-fatia-4d-parte-1-como-entrou)) |
 | Dívida 0059, estado do ChaCha20 derramado na pilha | **Paga na 4a**: a volta ao usuário repinta a pilha do kernel abaixo do quadro, até 128 bytes de pilha limpa (a heurística é a [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md)); custo medido no laço de syscall nula, com e sem a limpeza ([SDD 07](07_desempenho_e_recursos.md#syscall-nula-e-limpeza-da-pilha-fatia-4a)) |
 | Dívida 0055 Kernel sem *shootdown* de TLB | **Paga na 4c**: vetor novo de IPI no x86_64 sobre o mecanismo que já existe, `tlbi ...is` no aarch64 ([seção](#shootdown-de-tlb-paga-a-dívida-0055-na-4c)); o que sobra (medida em KVM, faixa em lote) é a [DEBT-0122](../tech-debt/0122-shootdown-sem-medida-em-kvm-nem-lote.md). A regra de geração de PCID/ASID é da 4e |
 | Dívida 0085 Pilha de usuário mapeada inteira | **Paga na 4c**: a pilha é região preguiçosa; o menor processo caiu de 32 para 17 frames ([SDD 07](07_desempenho_e_recursos.md#paginação-sob-demanda-e-shootdown-fatia-4c)) |

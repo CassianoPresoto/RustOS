@@ -10,7 +10,8 @@ use rustos_user_rt::boot::{self, Boot};
 use rustos_user_rt::spawn::{self, Child, Parent};
 use rustos_user_rt::vm::{Archive, Mapping};
 use rustos_user_rt::{
-    Env, Handle, Rights, Status, Syscall, boot_kind, entry, println, signals, sys, vmar_flags,
+    Env, Handle, PROCESS_KILLED_CODE, ProcessEvent, Rights, Status, Syscall, boot_kind, entry,
+    event_kind, fault_access, fault_kind, println, signals, sys, vmar_flags,
 };
 
 entry!(main);
@@ -31,6 +32,8 @@ const MODE_BLOCK: u8 = 3;
 const MODE_OVERFLOW: u8 = 4;
 const MODE_ECHO: u8 = 5;
 const MODE_SELF_KILL: u8 = 7;
+/// O modo de sair com o código do segundo byte (`process_exit` do `child`).
+const MODE_EXIT_CODE: u8 = 6;
 const WORKER_SPIN: u64 = 0;
 const WORKER_EXIT: u64 = 7;
 /// Rodadas do laço de criar e matar, e idas e voltas do eco entre processos.
@@ -532,7 +535,7 @@ fn process_rights(c: &mut Checks, cx: &Cx<'_>) {
     let _ = sys::handle_close(keep);
 }
 
-/// Nome, ponteiro de saída e `events`: o que cada erro de argumento consome.
+/// Nome e ponteiro de saída: o que cada erro de argumento consome.
 fn process_args(c: &mut Checks, me: Handle, give: Handle) {
     let pair = || sys::channel_create().ok();
     let long = [b'n'; 33];
@@ -564,27 +567,6 @@ fn process_args(c: &mut Checks, me: Handle, give: Handle) {
         sys::handle_close(give),
         Status::BadHandle,
     );
-    let (Some((_, give)), Some((_, events))) = (pair(), pair()) else {
-        return;
-    };
-    c.status(
-        "an events handle (the event channel is for the 4d)",
-        raw(
-            Syscall::ProcessCreate,
-            [me.raw(), 0, 0, give.raw(), events.raw(), out_ptr],
-        ),
-        Status::NotSupported,
-    );
-    c.status(
-        "the bootstrap was consumed along with the events",
-        sys::handle_close(give),
-        Status::BadHandle,
-    );
-    c.status(
-        "the events handle was consumed",
-        sys::handle_close(events),
-        Status::BadHandle,
-    );
     let Some((_, give)) = pair() else {
         return;
     };
@@ -602,6 +584,306 @@ fn process_args(c: &mut Checks, me: Handle, give: Handle) {
         raw(Syscall::ProcessCreate, [0xBEEF_0001, 0, 0, 0, 0, out_ptr]),
         Status::BadHandle,
     );
+}
+
+/// `events` sem `WRITE` ou sem `TRANSFER`: o erro de direito consome os dois handles e não cria nada.
+fn events_rights(c: &mut Checks, cx: &Cx<'_>) {
+    let me = cx.parent.process;
+    let cases = [
+        ("events without WRITE", Rights::READ.union(Rights::TRANSFER)),
+        ("events without TRANSFER", Rights::READ.union(Rights::WRITE)),
+    ];
+    for (what, rights) in cases {
+        let (Some((keep, end)), Some((_, boot))) = (pair(), pair()) else {
+            c.expect("two channels for the events case", false);
+            return;
+        };
+        let Ok(weak) = sys::handle_duplicate(end, rights) else {
+            c.expect("handle_duplicate of the events end", false);
+            return;
+        };
+        let mut out = [0_u64; 2];
+        let out_ptr = out.as_mut_ptr().addr() as u64;
+        c.status(
+            what,
+            raw(
+                Syscall::ProcessCreate,
+                [me.raw(), 0, 0, boot.raw(), weak.raw(), out_ptr],
+            ),
+            Status::AccessDenied,
+        );
+        c.expect("the refused call created nothing", out == [0, 0]);
+        c.status(
+            "its bootstrap was consumed",
+            sys::handle_close(boot),
+            Status::BadHandle,
+        );
+        c.status(
+            "its events handle was consumed",
+            sys::handle_close(weak),
+            Status::BadHandle,
+        );
+        c.expect(
+            "the original events end is still ours",
+            sys::handle_close(end).is_ok(),
+        );
+        let _ = sys::handle_close(keep);
+    }
+}
+
+/// `events` que não é canal (console, VMO) e `events` igual ao próprio pai: `WrongType`, consumindo.
+fn events_type(c: &mut Checks, cx: &Cx<'_>) {
+    let me = cx.parent.process;
+    let mut out = [0_u64; 2];
+    let out_ptr = out.as_mut_ptr().addr() as u64;
+    let Ok(console) = sys::handle_duplicate(cx.console, Rights::WRITE.union(Rights::TRANSFER))
+    else {
+        c.expect("a console handle to pass as events", false);
+        return;
+    };
+    let Ok(vmo) = sys::vmo_create(PAGE) else {
+        c.expect("a VMO to pass as events", false);
+        return;
+    };
+    let Ok(movable) = sys::handle_duplicate(vmo, Rights::WRITE.union(Rights::TRANSFER)) else {
+        c.expect("a VMO handle to pass as events", false);
+        return;
+    };
+    let Some((_, boot)) = pair() else {
+        c.expect("a channel for the type case", false);
+        return;
+    };
+    c.status(
+        "events as a console",
+        raw(
+            Syscall::ProcessCreate,
+            [me.raw(), 0, 0, boot.raw(), console.raw(), out_ptr],
+        ),
+        Status::WrongType,
+    );
+    c.status(
+        "the console handle was consumed",
+        sys::handle_close(console),
+        Status::BadHandle,
+    );
+    c.status(
+        "the bootstrap was consumed with it",
+        sys::handle_close(boot),
+        Status::BadHandle,
+    );
+    let Some((_, boot)) = pair() else {
+        c.expect("a channel for the VMO case", false);
+        return;
+    };
+    c.status(
+        "events as a VMO",
+        raw(
+            Syscall::ProcessCreate,
+            [me.raw(), 0, 0, boot.raw(), movable.raw(), out_ptr],
+        ),
+        Status::WrongType,
+    );
+    c.status(
+        "the VMO handle was consumed",
+        sys::handle_close(movable),
+        Status::BadHandle,
+    );
+    c.status(
+        "the bootstrap was consumed with the VMO",
+        sys::handle_close(boot),
+        Status::BadHandle,
+    );
+    let Ok(parent_copy) = sys::handle_duplicate(me, Rights::MANAGE_PROCESS.union(Rights::TRANSFER))
+    else {
+        c.expect("a copy of the parent to pass as events", false);
+        return;
+    };
+    let Some((_, boot)) = pair() else {
+        c.expect("a channel for the parent case", false);
+        return;
+    };
+    c.status(
+        "events equal to the parent",
+        raw(
+            Syscall::ProcessCreate,
+            [
+                parent_copy.raw(),
+                0,
+                0,
+                boot.raw(),
+                parent_copy.raw(),
+                out_ptr,
+            ],
+        ),
+        Status::WrongType,
+    );
+    c.status(
+        "the parent copy was consumed",
+        sys::handle_close(parent_copy),
+        Status::BadHandle,
+    );
+    c.status(
+        "the bootstrap was consumed with the parent copy",
+        sys::handle_close(boot),
+        Status::BadHandle,
+    );
+    c.expect("no refused call created anything", out == [0, 0]);
+    c.expect(
+        "the parent itself is still ours",
+        sys::handle_duplicate(me, Rights::WAIT).is_ok(),
+    );
+}
+
+/// Um canal novo, com as duas pontas.
+fn pair() -> Option<(Handle, Handle)> {
+    sys::channel_create().ok()
+}
+
+/// Um filho com `events` como canal de eventos, com a mensagem `msg` (modo e argumento) e a thread
+/// iniciada. A ponta de `events` sai do pai.
+fn start_with_events(
+    cx: &Cx<'_>,
+    msg: [u8; 2],
+    events: Handle,
+) -> Result<(Child, Handle), spawn::Error> {
+    let child = spawn::create_with_events(cx.parent, cx.child, events)?;
+    child.send_boot(&[])?;
+    sys::channel_write(child.channel, &msg, &[]).map_err(spawn::Error::Sys)?;
+    let sp = child.stack()?;
+    let thread = child.start(sp)?;
+    Ok((child, thread))
+}
+
+/// O evento do fim, lido da ponta do pai: `None` se não chega em 5 s.
+fn read_event(end: Handle) -> Option<ProcessEvent> {
+    if !wait(end, signals::READABLE, 5 * SECOND) {
+        return None;
+    }
+    let mut bytes = [0_u8; ProcessEvent::WIRE_LEN];
+    let actual = sys::channel_read(end, &mut bytes, &mut []).ok()?;
+    if actual.bytes != ProcessEvent::WIRE_LEN as u64 {
+        return None;
+    }
+    ProcessEvent::from_bytes(&bytes)
+}
+
+/// O canal de eventos: a saída com código, a falta de escrita num endereço não mapeado, a morte por
+/// `process_kill` e o pai que já fechou a ponta. Em todos, o evento vem antes do `PEER_CLOSED`.
+fn events_channel(c: &mut Checks, cx: &Cx<'_>) {
+    let Some((mine, theirs)) = pair() else {
+        c.expect("a channel for the events", false);
+        return;
+    };
+    match start_with_events(cx, [MODE_EXIT_CODE, 7], theirs) {
+        Ok((child, thread)) => {
+            c.expect(
+                "a child that exits with 7 terminates",
+                child.wait(now() + 5 * SECOND).is_ok(),
+            );
+            c.expect(
+                "the event is already there when TERMINATED is seen",
+                wait(mine, signals::READABLE, 0),
+            );
+            let event = read_event(mine);
+            c.expect(
+                "the parent reads an Exit event with code 7",
+                event.is_some_and(|e| e.kind == event_kind::EXIT && e.code == 7),
+            );
+            c.expect(
+                "after the event the parent sees PEER_CLOSED",
+                wait(mine, signals::PEER_CLOSED, 5 * SECOND),
+            );
+            let _ = sys::handle_close(thread);
+            child.release();
+        }
+        Err(_) => c.expect("a child with an events channel", false),
+    }
+    let _ = sys::handle_close(mine);
+    let Some((mine, theirs)) = pair() else {
+        c.expect("a channel for the fault event", false);
+        return;
+    };
+    match start_with_events(cx, [MODE_OVERFLOW, 0], theirs) {
+        Ok((child, thread)) => {
+            c.expect(
+                "a child that overflows its stack terminates",
+                child.wait(now() + 5 * SECOND).is_ok(),
+            );
+            let event = read_event(mine);
+            c.expect(
+                "the overflow reads as a page fault with WRITE, at a user address",
+                event.is_some_and(|e| {
+                    e.kind == event_kind::FAULT
+                        && e.fault_kind == fault_kind::PAGE_FAULT
+                        && e.access & fault_access::WRITE != 0
+                        && e.addr != 0
+                        && e.addr < USER_TOP
+                }),
+            );
+            c.expect(
+                "the fault address is within a page of the stack pointer",
+                event.is_some_and(|e| e.addr.abs_diff(e.sp) < PAGE),
+            );
+            c.expect(
+                "the fault pc is a user address",
+                event.is_some_and(|e| (USER_MIN..USER_TOP).contains(&e.pc)),
+            );
+            c.expect(
+                "after the fault event the parent sees PEER_CLOSED",
+                wait(mine, signals::PEER_CLOSED, 5 * SECOND),
+            );
+            let _ = sys::handle_close(thread);
+            child.release();
+        }
+        Err(_) => c.expect("a child for the fault event", false),
+    }
+    let _ = sys::handle_close(mine);
+    events_kill_and_gone(c, cx);
+}
+
+/// O evento da morte por `process_kill`, e o pai que fechou a ponta antes de o filho morrer.
+fn events_kill_and_gone(c: &mut Checks, cx: &Cx<'_>) {
+    let Some((mine, theirs)) = pair() else {
+        c.expect("a channel for the kill event", false);
+        return;
+    };
+    match start_with_events(cx, [MODE_BLOCK, 0], theirs) {
+        Ok((child, thread)) => {
+            c.expect(
+                "process_kill of a blocked child",
+                sys::process_kill(child.process).is_ok(),
+            );
+            c.expect(
+                "the killed child terminates",
+                child.wait(now() + 5 * SECOND).is_ok(),
+            );
+            let event = read_event(mine);
+            c.expect(
+                "a killed process reads an Exit event with the kill code",
+                event.is_some_and(|e| e.kind == event_kind::EXIT && e.code == PROCESS_KILLED_CODE),
+            );
+            let _ = sys::handle_close(thread);
+            child.release();
+        }
+        Err(_) => c.expect("a child for the kill event", false),
+    }
+    let _ = sys::handle_close(mine);
+    let Some((mine, theirs)) = pair() else {
+        c.expect("a channel for the parent-gone case", false);
+        return;
+    };
+    let _ = sys::handle_close(mine);
+    match start_with_events(cx, [MODE_EXIT_CODE, 3], theirs) {
+        Ok((child, thread)) => {
+            c.expect(
+                "a child whose parent closed the events end still terminates",
+                child.wait(now() + 5 * SECOND).is_ok(),
+            );
+            let _ = sys::handle_close(thread);
+            child.release();
+        }
+        Err(_) => c.expect("a child with the events end closed by the parent", false),
+    }
 }
 
 /// Thread e kill sem o direito, argumentos ruins, e a vida de um processo que nunca rodou.
@@ -1053,6 +1335,9 @@ fn main(env: &Env) -> i64 {
     vmo_vmar(&mut c, &cx);
     sharing_and_partial_unmap(&mut c, &cx);
     process_rights(&mut c, &cx);
+    events_rights(&mut c, &cx);
+    events_type(&mut c, &cx);
+    events_channel(&mut c, &cx);
     thread_rules(&mut c, &cx);
     threads_and_kill(&mut c, &cx);
     byte_cap(&mut c, &cx);
