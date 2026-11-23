@@ -134,7 +134,7 @@ textos são em inglês, como a saída do sistema, e o `core/shell` segue puro e 
 | `ls` | Lista os arquivos do initramfs | `bytes  name` e uma linha por arquivo, em ordem; `ls: no initramfs in this boot` sem initramfs |
 | `run <programa> [&]` | Carrega o ELF, roda como processo isolado com o canal de boot e o console, **espera** e mostra como acabou. Com `&` (solto ou colado ao nome) não espera | `exit code N (pid P)`; `killed: <causa> (pid P)` (`page fault on a write to 0x…`, `… (null or low address)`, `… a kernel address` sem endereço, `illegal instruction`, `out of memory`…); `started pid P` com `&`; `run: X: no such program (try 'ls')`; `run: X: too many processes` com a tabela de tarefas cheia. Cada resposta sai numa escrita só |
 | `ps` | Ganha a coluna `pid` (depois de `name`): o processo que a tarefa roda, ou `-` na tarefa de kernel. A coluna `name` tem 16 caracteres e, na tarefa de um processo, mostra o programa (`count`, `hello`), cortado em 16 bytes sem partir um caractere | Uma linha por processo vivo, com o nome do programa |
-| `kill <pid>` | Mata o processo vivo `pid` que o `run` lançou. Não espera a morte | `killed pid P`; `kill: no process with pid P`; `kill: pid P is already ending`; `usage: kill <pid>` sem pid decimal |
+| `kill <pid>` | Mata o processo vivo `pid`, qualquer um do `ps` (inclusive o `init` e os filhos dele). Não espera a morte | `killed pid P`; `kill: no process with pid P`; `kill: pid P is already ending`; `usage: kill <pid>` sem pid, com pid que não é número ou com palavra a mais |
 
 Com Ctrl-C na espera do `run` em primeiro plano, a resposta é `interrupted (pid P)`, e o processo morre ([SDD 17](17_processos_isolamento_e_syscalls.md#ctrl-c-e-kill)).
 

@@ -401,11 +401,12 @@ impl Process {
     }
 
     /// O processo começa a morrer com `event` (o primeiro vale) e as threads dos outros slots são
-    /// paradas: acordadas, ou com o IPI se rodam em outra CPU. `false` se já morria.
-    fn begin_death(&self, event: ProcessEvent, own_bit: u64) -> bool {
+    /// paradas: acordadas, ou com o IPI se rodam em outra CPU. `None` se já morria; `Some(true)` se
+    /// não tinha thread, lido sob o mesmo lock: só então quem chama desfaz (senão, a última thread).
+    fn begin_death(&self, event: ProcessEvent, own_bit: u64) -> Option<bool> {
         let mut state = self.state.lock();
         if matches!(state.phase, Phase::Dying | Phase::Dead) {
-            return false;
+            return None;
         }
         state.phase = Phase::Dying;
         self.dying.store(true, Ordering::SeqCst);
@@ -415,7 +416,7 @@ impl Process {
         for id in (0..64).filter(|id| mask >> id & 1 != 0) {
             task::stop(id);
         }
-        true
+        Some(state.threads == 0)
     }
 
     /// `process_kill`: o processo morre com o código de kill. Sem thread, quem chama o desfaz já; com
@@ -430,10 +431,10 @@ impl Process {
         if let Ok(active) = self.with_mem(|mem| mem.space.active_cpus()) {
             KILL_CPUS.fetch_max(active.count_ones(), Ordering::Relaxed);
         }
-        if !self.begin_death(event, 0) {
+        let Some(idle) = self.begin_death(event, 0) else {
             return Err(Status::BadState);
-        }
-        if self.state.lock().threads == 0 {
+        };
+        if idle {
             self.teardown();
         }
         Ok(())

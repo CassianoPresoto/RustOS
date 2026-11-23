@@ -114,12 +114,17 @@ fn wait_for(pid: u32, process: &Arc<Process>) -> (Ended, bool) {
         // Armar a entrada antes de olhar a flag: um Ctrl-C que chegue agora acorda a tarefa.
         task::watch_input();
         let ended = take(pid);
-        if ended.is_none() && !interrupted && interrupts::take_interrupt() {
-            // `BadState`: o processo já morria por conta própria; o fim dele é o que se mostra.
-            interrupted = process.kill().is_ok();
+        // Toda volta consome a flag e descarta a entrada: um segundo Ctrl-C não sobra como `^C` no
+        // prompt. `BadState` (já morria por conta própria) mostra a causa real, não `interrupted`.
+        if interrupts::take_interrupt() {
+            if ended.is_none() {
+                interrupted |= process.kill().is_ok();
+            }
             interrupts::flush_input();
-            WAITERS.unregister(bit);
-            continue;
+            if ended.is_none() {
+                WAITERS.unregister(bit);
+                continue;
+            }
         }
         if ended.is_none() {
             task::block_until(u64::MAX);
