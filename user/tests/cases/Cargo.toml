@@ -1,0 +1,27 @@
+[package]
+name = "rustos-user-test-cases"
+description = "Programa de teste dos casos de falha de usuário: hello, falta de página, instrução privilegiada, TF, sp inválido, flags e laço de syscall nula (SDD 17, fatia 4a)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "cases"
+path = "src/main.rs"
+test = false
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-user-rt.workspace = true
+
+[target.'cfg(all(target_os = "none", target_arch = "x86_64"))'.dependencies]
+rustos-arch-x86_64-user = { workspace = true, features = ["test-cases"] }
+
+[target.'cfg(all(target_os = "none", target_arch = "aarch64"))'.dependencies]
+rustos-arch-aarch64-user = { workspace = true, features = ["test-cases"] }

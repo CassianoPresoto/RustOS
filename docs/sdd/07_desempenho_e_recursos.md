@@ -45,8 +45,8 @@
 
 ### Syscall nula e limpeza da pilha (fatia 4a)
 
-Como se mede: o caso `NullLoop` do autoteste de usuário (`make smoke ARCH=…`, linha `user: null
-syscall`): o programa embutido faz 200 000 chamadas `nop` (20 000 no x86_64, em TCG) e lê o contador
+Como se mede: o caso `null-loop` do programa `user/tests/cases` (`make smoke ARCH=…`, linha `user: null
+syscall`): o programa faz 200 000 chamadas `nop` (20 000 no x86_64, em TCG) e lê o contador
 no usuário (`cntvct_el0`, `rdtsc`); o kernel converte e divide. Mediana de 5 rodadas **alternadas**
 entre as configurações, a deriva da máquina cai igual em todas; o processo roda numa CPU só, sem
 migração. aarch64 sob **HVF** (`RUSTOS_ACCEL=hvf`), QEMU 11.1.3, Apple Silicon, 256 MiB. O x86_64 só

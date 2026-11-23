@@ -47,8 +47,6 @@ mod sysreg;
 mod traps;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod user;
-#[cfg(all(target_arch = "x86_64", target_os = "none", feature = "selftest"))]
-pub mod user_blob;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod usercopy;
 

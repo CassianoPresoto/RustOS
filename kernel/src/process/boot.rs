@@ -1,5 +1,5 @@
 //! O que o processo recebe ao nascer (SDD 17, "O canal de boot"): o programa do initramfs ganha a
-//! ponta de um canal com a mensagem de boot já escrita; o programa plano de teste, só o console.
+//! ponta de um canal com a mensagem de boot já escrita, na ordem dos handles que ela descreve.
 
 use alloc::sync::Arc;
 
@@ -9,7 +9,7 @@ use rustos_hal::abi::{
 };
 use rustos_object::{HandleTable, Lock, channel_read, channel_write, close};
 
-use super::{Options, Process, Source, VmarObj, system};
+use super::{Options, Process, VmarObj, system};
 use crate::object::{Bytes, ConsoleObj, Obj, Table, VecSlots, Work, new_channel};
 use crate::sync::IrqLock;
 use crate::vmo::Vmo;
@@ -72,26 +72,13 @@ impl BootPeer {
     }
 }
 
-/// Põe na tabela o que o `source` pede e devolve o valor de `rdi`/`x0` e, se `keep`, a ponta do
-/// kernel do canal de boot.
+/// Cria o canal de boot do processo e devolve o valor de `rdi`/`x0` (a ponta dele) e, se `keep`, a
+/// ponta do kernel.
 pub fn handles_of(
     process: &Arc<Process>,
-    source: Source<'_>,
-    #[allow(unused_variables, reason = "só o programa plano de teste lê")] flat_arg0: u64,
     options: Options,
 ) -> Result<(u64, Option<BootPeer>), Status> {
-    match source {
-        Source::Elf(_) => boot_channel(process, options),
-        #[cfg(feature = "selftest")]
-        Source::Flat(_) => {
-            let console = process
-                .table()
-                .with(|table| table.insert(Obj::Console(ConsoleObj::new()), Rights::CONSOLE))
-                .map_err(|_| Status::NoMemory)?;
-            let _ = console;
-            Ok((flat_arg0, None))
-        }
-    }
+    boot_channel(process, options)
 }
 
 /// Cria o par, escreve a mensagem de boot por uma tabela do próprio kernel (a mesma

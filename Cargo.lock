@@ -206,6 +206,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-user-test-cases"
+version = "0.1.0"
+dependencies = [
+ "rustos-arch-aarch64-user",
+ "rustos-arch-x86_64-user",
+ "rustos-user-rt",
+]
+
+[[package]]
 name = "rustos-user-test-child"
 version = "0.1.0"
 dependencies = [

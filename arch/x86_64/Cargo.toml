@@ -12,7 +12,7 @@ publish.workspace = true
 bench = false
 
 [features]
-# O programa de usuário de teste (`user_blob`): só na imagem com o modo de teste.
+# Sondas e caminhos de teste do adaptador: só na imagem com o modo de teste.
 selftest = []
 
 [lints]

@@ -23,7 +23,7 @@
 │       ├── console.rs          # console global e kprintln!: serial e tela
 │       ├── screen.rs           # tela: framebuffer + grade do term + desenho do gfx, tema e barra
 │       ├── interrupts.rs       # IRQ do timer (o que o escalonador pede: acordar, fim de fatia, próximo disparo), fila de entrada e o relatório de falha
-│       ├── process.rs          # processo de usuário (um espaço, uma thread, uma árvore de regiões, a tabela de handles): `spawn` de um ELF ou, no modo de teste, de um programa plano, `process_main`, `exit`, `user_fault` (mata o processo, esvazia a tabela e o kernel segue); `process/boot.rs`: o canal de boot; `process/selftest.rs`: o autoteste dos casos de usuário (feature `selftest`)
+│       ├── process.rs          # processo de usuário (um espaço, uma thread, uma árvore de regiões, a tabela de handles): `spawn` de um ELF, `process_main`, `exit`, `user_fault` (mata o processo, esvazia a tabela e o kernel segue); `process/boot.rs`: o canal de boot; `process/selftest.rs`: o autoteste dos casos de usuário (feature `selftest`)
 │       ├── object.rs           # os objetos do kernel sobre o `core/object` (4c): o enum `Obj` de `Arc`, o `Lock` do `IrqLock`, os slots da tabela, a espera por máscara de tarefas, o par de pontas de canal, a cobrança de pontas
 │       ├── loader.rs           # o carregador de ELF do initramfs (4b): `core/cpio` + `core/elf`, `PT_LOAD` em frames novos (o `.bss` de páginas inteiras e a pilha, regiões preguiçosas, 4c), `Vmar` do processo e a pilha inicial com guarda e topo sorteado
 │       ├── programs.rs         # o que o shell faz com programas (M1): `ls` lê o `cpio`, `run` carrega com `process::spawn_as` (o nome vai ao `ps`) e espera o fim do processo (a tabela de 16 fins que `process::terminate` alimenta)
@@ -116,8 +116,8 @@
 `kernel/` nunca liga um `arch/<isa>-user`, nada liga `user/`, o `user/` só liga `hal`, `elf`, `cpio` e os `arch-<isa>-user`, e
 só o `user/rt` pode ter `unsafe`. `user/` e `arch/*-user` ficam fora do `default-members` e só compilam para os alvos
 bare-metal (`cargo xtask user`); o `make clippy` os confere nos dois alvos e o `make test` roda os testes do `user/rt` no host. O
-programa de teste da 4a mora em `arch/<isa>/src/user_blob.rs`, atrás da feature `selftest`
-([DEBT-0086](../tech-debt/0086-casos-de-falha-de-usuario-no-blob-do-kernel.md)).
+programa de teste da 4a é `user/tests/cases` (o `asm!` de cada caso fica em `arch/<isa>-user/src/cases.rs`,
+atrás da feature `test-cases`, que só o `user/tests/cases` liga).
 
 O `rustos-sched` é usado pelo `kernel/src/task.rs` desde a fase 3: o `Composite` (FIFO e
 EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_escalonador.md),

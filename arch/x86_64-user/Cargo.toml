@@ -11,6 +11,10 @@ publish.workspace = true
 [lib]
 bench = false
 
+[features]
+# Os casos de falha do `user/tests/cases` (SDD 17): só o programa de teste liga.
+test-cases = []
+
 [lints]
 workspace = true
 

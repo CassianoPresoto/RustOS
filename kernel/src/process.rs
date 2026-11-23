@@ -177,22 +177,10 @@ impl ThreadObj {
     }
 }
 
-/// De onde vem o código do processo: um ELF do initramfs ou, no modo de teste, um programa plano.
+/// De onde vem o código do processo: um ELF do initramfs.
 #[derive(Clone, Copy, Debug)]
 pub enum Source<'a> {
     Elf(&'a [u8]),
-    #[cfg(feature = "selftest")]
-    Flat(Program<'a>),
-}
-
-/// O que um programa plano precisa para virar processo: os bytes de código (mapeados em
-/// `USER_IMAGE_BASE`), o deslocamento da entrada e o primeiro argumento.
-#[cfg(feature = "selftest")]
-#[derive(Clone, Copy, Debug)]
-pub struct Program<'a> {
-    pub code: &'a [u8],
-    pub entry_offset: usize,
-    pub arg0: u64,
 }
 
 /// O que `spawn` entrega: a tarefa, o número do processo, o que a carga custou e o processo, que quem
@@ -559,39 +547,6 @@ fn close_handles(table: &IrqLock<Table>) {
     rustos_object::close_pending(&mut work);
 }
 
-/// O programa plano: o código em `USER_IMAGE_BASE`, só leitura e execução.
-#[cfg(feature = "selftest")]
-fn load_flat(
-    space: &mut UserSpace,
-    regions: &mut loader::RegionTree,
-    program: Program<'_>,
-) -> Result<Loaded, LoadError> {
-    use rustos_hal::abi::USER_IMAGE_BASE;
-    use rustos_hal::{PAGE_SIZE, PageFlags};
-    use rustos_mm::vmar::{Attrs, Kind, Perms};
-
-    let pages = (program.code.len() as u64).div_ceil(PAGE_SIZE).max(1);
-    let perms = Perms::READ.union(Perms::EXECUTE);
-    regions.reserve(
-        USER_IMAGE_BASE,
-        pages * PAGE_SIZE,
-        Attrs::new(Kind::Image, perms),
-    )?;
-    space.map_at(
-        USER_IMAGE_BASE,
-        0,
-        program.code,
-        pages,
-        PageFlags::USER_CODE,
-    )?;
-    Ok(Loaded {
-        entry: USER_IMAGE_BASE + program.entry_offset as u64,
-        segments: 1,
-        phdr: None,
-        phnum: 0,
-    })
-}
-
 /// Como `spawn`, com o que o processo recebe além do básico.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
@@ -697,7 +652,7 @@ pub fn spawn_with(
     // SAFETY: o mapa direto cobre todo frame do alocador, e o kernel já roda nas próprias tabelas.
     let mut space = unsafe { UserSpace::new(frames, direct_map_offset) }?;
     let built = populate(&mut space, source, arguments);
-    let (regions, loaded, sp, arg0) = match built {
+    let (regions, loaded, sp) = match built {
         Ok(parts) => parts,
         Err(error) => {
             space.destroy();
@@ -711,8 +666,7 @@ pub fn spawn_with(
     let mem = Mem::new(space, regions).map_err(ProcessError::Handles)?;
     let stats = mem.space.stats();
     let process = Process::new(mem, None, TaskName::new(name));
-    let (arg0, peer) =
-        boot::handles_of(&process, source, arg0, options).map_err(ProcessError::Handles)?;
+    let (arg0, peer) = boot::handles_of(&process, options).map_err(ProcessError::Handles)?;
     let thread = ThreadObj::new(&process, None);
     let pid = process.pid;
     // Antes de a thread rodar: a morte, que tira o pid da tabela, nunca chega antes do registro.
@@ -758,15 +712,13 @@ fn populate(
     space: &mut UserSpace,
     source: Source<'_>,
     arguments: &[&[u8]],
-) -> Result<(loader::RegionTree, Loaded, u64, u64), ProcessError> {
+) -> Result<(loader::RegionTree, Loaded, u64), ProcessError> {
     let mut regions = loader::new_tree()?;
-    let (loaded, arg0) = match source {
-        Source::Elf(file) => (loader::load_image(space, &mut regions, file)?, 0),
-        #[cfg(feature = "selftest")]
-        Source::Flat(program) => (load_flat(space, &mut regions, program)?, program.arg0),
+    let loaded = match source {
+        Source::Elf(file) => loader::load_image(space, &mut regions, file)?,
     };
     let sp = loader::map_stack(space, &mut regions, &loaded, arguments)?;
-    Ok((regions, loaded, sp, arg0))
+    Ok((regions, loaded, sp))
 }
 
 impl ThreadObj {
