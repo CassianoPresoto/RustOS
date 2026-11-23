@@ -3,7 +3,7 @@ id: DEBT-0035
 title: SVE, SME e AMX sem estado por tarefa
 status: Open
 date: 2026-11-17
-trigger: O primeiro código de usuário (fase 4), ou a primeira CPU de teste com SVE, SME ou AMX
+trigger: O primeiro programa que use SVE, SME ou AMX, ou o primeiro sinal Linux
 paid_date:
 ---
 
@@ -19,7 +19,7 @@ O kernel não usa nenhum deles, e as áreas teriam de ser alocadas por tarefa e 
 
 ## Gatilho
 
-O primeiro código de usuário (fase 4): programa que usa SVE, SME ou AMX.
+O primeiro programa que use SVE, SME ou AMX, ou o primeiro sinal Linux.
 
 ## Como pagar
 

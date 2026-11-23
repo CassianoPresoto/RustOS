@@ -6,7 +6,12 @@
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod entry;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+mod simd;
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod syscall;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use syscall::syscall;
+
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub use simd::simd_hold;
