@@ -32,6 +32,11 @@ impl CpuLocal for X86CpuLocal {
         unsafe { wrmsr(MSR_KERNEL_GS_BASE, 0) };
     }
 
+    #[allow(
+        clippy::inline_always,
+        reason = "no caminho da syscall nula: um quadro a mais passa da janela que o `arch/` repinta"
+    )]
+    #[inline(always)]
     fn block(&self) -> usize {
         let block: usize;
         // SAFETY: o contrato de `install` põe o próprio endereço em `gs:[0]`. Sem `nomem`

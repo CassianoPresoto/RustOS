@@ -156,6 +156,73 @@ pub mod raw {
     }
 }
 
+/// `vmo_create`: um VMO anônimo e preguiçoso de `size` bytes (múltiplo de página).
+pub fn vmo_create(size: u64) -> Result<Handle> {
+    checked(call(Syscall::VmoCreate, [size, 0, 0, 0, 0, 0])).and_then(handle_of)
+}
+
+/// `vmar_map`: mapeia `len` bytes do VMO a partir de `vmo_off` com as permissões de `flags`
+/// (`vmar_flags`). Com `FIXED` o endereço é `vmar_off`; sem ele o kernel escolhe. Devolve o endereço.
+pub fn vmar_map(
+    vmar: Handle,
+    vmo: Handle,
+    vmo_off: u64,
+    len: u64,
+    flags: u32,
+    vmar_off: u64,
+) -> Result<u64> {
+    let args = [
+        vmar.raw(),
+        vmo.raw(),
+        vmo_off,
+        len,
+        u64::from(flags),
+        vmar_off,
+    ];
+    checked(call(Syscall::VmarMap, args))
+}
+
+/// `vmar_unmap`: solta `[addr, addr + len)` do VMAR.
+pub fn vmar_unmap(vmar: Handle, addr: u64, len: u64) -> Result<()> {
+    checked(call(Syscall::VmarUnmap, [vmar.raw(), addr, len, 0, 0, 0])).map(drop)
+}
+
+/// `process_create`: um processo vazio sob `parent` (com `MANAGE_PROCESS`); `bootstrap` sai da tabela
+/// e vira o handle 1 dele. Devolve o processo e o VMAR raiz.
+pub fn process_create(parent: Handle, name: &[u8], bootstrap: Handle) -> Result<(Handle, Handle)> {
+    let mut out = [0_u64; 2];
+    let args = [
+        parent.raw(),
+        name.as_ptr().addr() as u64,
+        name.len() as u64,
+        bootstrap.raw(),
+        0,
+        out.as_mut_ptr().addr() as u64,
+    ];
+    checked(call(Syscall::ProcessCreate, args))?;
+    Ok((handle_of(out[0])?, handle_of(out[1])?))
+}
+
+/// `thread_create`: cria e inicia uma thread em `process` (a primeira inicia o processo); `arg0` e
+/// `arg1` chegam em `rdi`/`rsi` (`x0`/`x1`).
+pub fn thread_create(process: Handle, entry: u64, sp: u64, arg0: u64, arg1: u64) -> Result<Handle> {
+    let values = [process.raw(), entry, sp, arg0, arg1, 0];
+    checked(call(Syscall::ThreadCreate, values)).and_then(handle_of)
+}
+
+/// `thread_exit`: a thread sai; o processo acaba com a última. Não volta.
+pub fn thread_exit() -> ! {
+    let _ = call(Syscall::ThreadExit, [0; 6]);
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// `process_kill`: o processo morre (`DESTROY`); a thread que o chama também, se for dele.
+pub fn process_kill(process: Handle) -> Result<()> {
+    checked(call(Syscall::ProcessKill, [process.raw(), 0, 0, 0, 0, 0])).map(drop)
+}
+
 /// `clock_get_monotonic`: nanossegundos desde o boot.
 pub fn clock_get_monotonic() -> Result<u64> {
     checked(call(Syscall::ClockGetMonotonic, [0; 6]))

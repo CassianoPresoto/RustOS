@@ -525,7 +525,7 @@ ida e volta é na mesma tarefa, sem troca de contexto; a troca entre processos �
   **pontas, não em bytes**: 128 pares de 7 256 bytes são **0,89 MiB de filas**, mais até cerca de **4 MiB de mensagens** (128 pares × 2 pontas × 16
   mensagens × 1 KiB). Um processo hostil medido por revisor chegou a **17,7 MiB** de pico, e 127 ciclos entre canais (cerca de 1,5 mil
   syscalls) **vazam 18,3 MiB para sempre** ([DEBT-0090](../tech-debt/0090-ciclos-entre-filas-de-canais-nao-coletados.md),
-  [DEBT-0110](../tech-debt/0110-objeto-e-mensagem-abortam-na-falta-de-heap.md)): a parte 3, com `process_create`, precisa de um teto em **bytes** por processo.
+  dívida 0110 (paga na parte 3)): a parte 3, com `process_create`, precisa de um teto em **bytes** por processo.
 - **O custo do `EMPTY_PAIR`** (o modelo de 7 KiB que existe porque a fila é inline, [DEBT-0091](../tech-debt/0091-fila-do-canal-com-armazenamento-inline.md)):
   sem ele a imagem seria **6,8 KiB menor no x86_64 e 6,6 KiB no aarch64** (medido pelo revisor, `release`). Sai quando a fila deixar de ser inline.
 
@@ -746,6 +746,31 @@ Leitura:
 - **O heap tem um lock só e disputa**: a tempestade de objetos de 64 bytes deu 3,3 ms (17 tentativas presas) no HVF, e o `bench` fecha com contenção acumulada de milhares de tentativas no lock do heap ([DEBT-0054](../tech-debt/0054-heap-com-lock-global.md)). Fila de execução: 277 a 279 tentativas em tudo o que o `bench` faz; console: 0.
 - **Migração:** o autoteste de SMP (8 tarefas, 40 ms) faz de 117 a 150 migrações em 565 a 631 voltas no x86_64 (TCG) e de 1 145 a 1 648 em 5 551 a 6 217 no aarch64 (HVF), 16 vezes sem falha.
 - **Memória do SMP:** ver a linha "Custo por CPU" acima. O cache de frames segura até 124 KiB por CPU fora do buddy.
+
+### Processos, VMO e VMAR (fatia 4c, parte 3)
+
+Medido em 2026-11-19, `make smoke` (modo de teste) e `make smoke-fast PROFILE=release-small`, rustc 1.100.0, QEMU 11.1.3 (x86_64 em TCG, aarch64 em HVF, `-smp 4`, 256 MiB). "Antes" é a `main` `0ec2104` (o M1), construída à parte com os mesmos comandos; "depois" é o PR. O TCG só compara o RustOS consigo mesmo.
+
+| Medida | x86_64 (TCG) | aarch64 (HVF) |
+| --- | --- | --- |
+| Criar um processo (`process_create`, mapear o programa de 3 segmentos e a pilha, `thread_create`, o filho sair, esperar `TERMINATED`, soltar os handles), 300 em laço, metade morta no meio | 1,4 ms (de 1,4 a 13,5 ms: o TCG e as duas linhas de log serial por processo) | **141 µs** (de 141 a 605 µs) |
+| Eco entre dois processos por canal com `object_wait_one`, ida e volta (o análogo do `lat_ctx`: duas trocas de processo), 2 000 voltas | 108 µs (de 108 a 116 µs) | **21,9 µs** (de 21,9 a 25,2 µs) |
+| `process_kill` de processo bloqueado no kernel, até o `TERMINATED` | 1,4 ms | 86 µs |
+| `process_kill` de processo com 4 threads girando em usuário (o IPI alcança até 3 CPUs de uma vez), até o `TERMINATED` | 1,4 a 2,7 ms | 38 a 44 µs |
+| **Menor processo filho** (`child` esperando: frames que a criação gasta, de 14 a 17 no x86_64 e 14 a 15 no aarch64, e o heap) | 17 frames (68 KiB) e 9 548 B | 15 frames (60 KiB) e 9 548 B |
+| Falta de página, primeiro toque / leitura da página zero / escrita sobre ela (o lock por espaço entrou; ns por página) | 15 145 / 4 192 / 7 237 (antes 14 414 / 3 709 / 6 740) | 640 / 247 / 760 (antes 750 / 251 / 1 104) |
+| Syscall nula, pilha limpa / sem limpar (ns) | 675 / 274 (antes 540 / 240) | 63,9 / 52,6 (antes 60,8 / 48,9) |
+| `make size` `release-small`, carregado (bytes) | 263 831 (antes 245 327: **+18 504, +7,5%**) | 238 141 (antes 222 269: **+15 872, +7,1%**) |
+| `boot time:` do `smoke-fast` `release-small` (3 boots) | 29, 32 e 36 ms (antes 32 e 32: o TCG oscila) | 2, 2 e 3 ms (antes 2 e 2) |
+
+- **O menor filho: 15 a 17 frames mais 9,5 KB de heap.** O `init`, carregado pelo kernel, gasta 24 a 25 (11 de dados, 7 de tabelas, 7 do kernel). Os frames do filho são os de VMO que alguém tocou, as tabelas de página, a pilha de kernel e a área de FPU; a conta é medida (frames livres antes e depois de o filho nascer e ficar bloqueado), **não** somada por origem, e inclui o que o heap do kernel cresce. Os 8 KiB cobrados ao pai por processo e os 4 KiB por thread (12 KiB) cobrem os 9,5 KB de heap com folga de 25%.
+- **O teto em bytes:** o `procs` esgota as mensagens em 10 pares e 311 a 322 KB (o teto é de 512 KiB, e cada ponta custa 4 096 mais o payload e 64 por mensagem), os VMOs de uma página em 1 590 a 1 637 e os processos que nunca rodam em 25 (8 KiB cada, 25 × 8 KiB = 200 KiB, mais o resto que o programa já guardava). Depois de fechar tudo a conta volta e a criação segue.
+- **Nada vaza:** de `A` (depois do aquecimento) a `C` (depois de 300 processos, 2 000 ecos e um filho bloqueado) o kernel confere **0 frames, 0 B de heap e 0 páginas prometidas** de diferença, nas duas ISAs. O mesmo confere o smoke do M1 (o heap igual depois de 20 `run hello`).
+- **O custo da parada de thread na syscall nula:** a conferência de "o processo morre?" no fim de `dispatch` custou 3 vezes a syscall nula no TCG enquanto era uma busca pelo processo (1 650 ns com a pilha limpa, contra 540). O bit `kill` do slot da tarefa, lido com leitura do bloco da CPU e do slot **embutidas** (`inline(always)`, que o clippy pede para justificar), levou a 675 ns: o que sobra, +25% no TCG e +5% no HVF, é a leitura. **Inferência, não conferida:** a causa dos 3 vezes seria o quadro a mais da chamada, que empurra a sujeira da pilha para além da janela de 256 bytes que o `arch/` repinta sem custo, e a repintura em Rust é cara no TCG; o que foi medido é só que embutir as leituras recuperou a maior parte.
+- **A falta de página com o lock por espaço** (a medida que a dívida 0120 pedia): no HVF não há diferença visível (o ruído é de 15%); no TCG, 5 a 13%. O custo do lock sem disputa é uma troca de máscara de IRQ e um `compare_exchange`.
+- **Tamanho:** +18,5 KB no x86_64 e +15,9 KB no aarch64 vêm das 7 chamadas novas, do `Mem`, do VMO, da cota, da morte com threads e do `ThreadObj`: quase tudo está no `text` (+18 608 e +15 828 bytes), 0,5 KB no `rodata` e 0,66 KB no `data`; o `bss` não mudou.
+- **Tempo de boot:** sem mudança, o boot normal não cria processo (o `init` segue só no modo de teste, [DEBT-0087](../tech-debt/0087-init-so-no-boot-de-teste.md)); a diferença do x86_64 é a oscilação do TCG ([DEBT-0068](../tech-debt/0068-boot-de-teste-do-x86-em-tcg-bimodal-por-layout.md)).
+- **O que não foi medido:** a latência do eco em KVM ou metal, o custo da criação com PCID/ASID (4e) e com o heap sob disputa em N CPUs ([DEBT-0054](../tech-debt/0054-heap-com-lock-global.md) disparou com a criação de processos em várias CPUs: o `procs` cria um por vez, e a disputa não foi medida).
 
 ### Para onde foi o tamanho do kernel
 

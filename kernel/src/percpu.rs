@@ -154,6 +154,11 @@ pub fn set_hw_id(index: usize, hw_id: u64) {
 /// O bloco da CPU que executa isto. Só depois de `install` nela: antes, o bloco é zero.
 /// Com a IRQ ligada, a tarefa pode migrar entre ler o bloco e ler um campo dele: quem lê
 /// campo da CPU "atual" fora de uma região mascarada usa `pinned`.
+#[allow(
+    clippy::inline_always,
+    reason = "no caminho da syscall nula: um quadro a mais passa da janela que o `arch/` repinta"
+)]
+#[inline(always)]
 pub fn current() -> &'static PerCpu {
     let block = platform::cpu_local().block();
     // SAFETY: `install` guardou o endereço de um elemento de `CPUS`, que vive para sempre.

@@ -3,7 +3,7 @@ id: DEBT-0130
 title: `run` não passa argumentos ao programa (`argc` é sempre 0)
 status: Open
 date: 2026-11-19
-trigger: O primeiro programa de `user/` que precise de argumentos, ou o `process_create` da parte 3 da 4c (quem cria o filho monta a pilha dele)
+trigger: O primeiro programa de `user/` que precise de argumentos
 paid_date:
 ---
 

@@ -51,6 +51,7 @@ mod tlb;
 mod userout;
 mod uspace;
 mod vm;
+mod vmo;
 
 use alloc::boxed::Box;
 
@@ -288,6 +289,8 @@ fn report_tasks(
             return false;
         }
     };
+    process::install(memory.frames, boot.direct_map_offset());
+    process::set_initramfs(vm.initramfs_phys());
     smp::release();
     !selftest || selftest::after_tasks(summary, memory.frames, boot.direct_map_offset(), vm)
 }

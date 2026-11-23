@@ -1,29 +1,31 @@
 //! Os objetos do kernel sobre o `core/object` (SDD 17, fatia 4c): o enum fechado de `Arc`s, o `Lock`
-//! do `IrqLock`, a memória dos slots e a lista de trabalho. Ordem de lock: tabela, par de pontas,
-//! fila do escalonador; e tabela, heap, frames (o `try_reserve` dos slots). Nenhum outro se toma.
+//! do `IrqLock`, a memória dos slots, a lista de trabalho e a cobrança de bytes por processo. Ordem
+//! de lock: tabela, memória do processo, VMO, par de pontas, fila do escalonador; e tabela, heap,
+//! frames (o `try_reserve` dos slots). Nenhum outro se toma.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 
-use rustos_hal::abi::{MAX_CHANNEL_ENDS, signals};
+use rustos_hal::abi::{MAX_CHANNEL_ENDS, PROCESS_BYTES_MAX, signals};
 use rustos_object::{
     Channel, EndId, HandleCount, HandleTable, Lock, Object, ObjectKind, Side, Slot, SlotStorage,
     Transit, Worklist,
 };
 
+use crate::process::{Process, ThreadObj, VmarObj};
 use crate::sync::IrqLock;
+use crate::vmo::Vmo;
 use crate::{platform, task};
 
-/// Os bytes de uma mensagem: copiados do usuário uma vez, e só lidos depois.
-pub type Bytes = Arc<[u8]>;
-
-/// O objeto que um handle aponta. Tag e ponteiro dão 16 bytes, e o slot da tabela, 32. `Vmo`, `Vmar`
-/// e `Thread` entram com `vmo_create`, `vmar_map` e `thread_create`.
+/// O objeto que um handle aponta. Tag e ponteiro dão 16 bytes, e o slot da tabela, 32.
 #[derive(Clone)]
 pub enum Obj {
-    Process(Arc<ProcessObj>),
+    Process(Arc<Process>),
+    Thread(Arc<ThreadObj>),
+    Vmo(Arc<Vmo>),
+    Vmar(Arc<VmarObj>),
     Channel(Arc<ChannelEnd>),
     Console(Arc<ConsoleObj>),
 }
@@ -101,27 +103,31 @@ impl Waiters {
     }
 }
 
-/// Um processo como objeto: o que os outros esperam (`TERMINATED`) e a contagem de handles.
-#[derive(Debug)]
-pub struct ProcessObj {
+/// O que todo objeto que termina tem: a contagem de handles, o sinal `TERMINATED` e quem espera.
+#[derive(Debug, Default)]
+pub struct Lifecycle {
     handles: HandleCount,
     terminated: AtomicBool,
     waiters: Waiters,
 }
 
-impl ProcessObj {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
+impl Lifecycle {
+    pub const fn new() -> Self {
+        Self {
             handles: HandleCount::new(0),
             terminated: AtomicBool::new(false),
             waiters: Waiters::new(),
-        })
+        }
     }
 
-    /// O processo terminou: levanta `TERMINATED` e acorda quem espera.
+    /// O objeto terminou: levanta `TERMINATED` e acorda quem espera.
     pub fn terminate(&self) {
         self.terminated.store(true, Ordering::SeqCst);
         self.waiters.wake();
+    }
+
+    pub fn is_terminated(&self) -> bool {
+        self.terminated.load(Ordering::SeqCst)
     }
 }
 
@@ -139,31 +145,136 @@ impl ConsoleObj {
     }
 }
 
-/// Pontas de canal cobradas a um processo (`MAX_CHANNEL_ENDS`): a ponta é cobrada ao criador
-/// enquanto existir, esteja o handle onde estiver.
+/// O que um processo gasta do kernel: pontas de canal (`MAX_CHANNEL_ENDS`) e bytes de heap
+/// (`PROCESS_BYTES_MAX`). A cobrança é do criador e dura enquanto o objeto existir, esteja o handle
+/// onde estiver (tabela ou fila de mensagem).
 #[derive(Debug, Default)]
-pub struct Quota(AtomicUsize);
+pub struct Quota {
+    ends: AtomicUsize,
+    bytes: AtomicUsize,
+}
 
-/// Uma ponta cobrada: devolve a cobrança ao ser solta.
+impl Quota {
+    /// Cobra `bytes` se a soma não passa de `PROCESS_BYTES_MAX`.
+    pub fn take_bytes(&self, bytes: usize) -> bool {
+        self.bytes
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes)
+                    .filter(|&sum| sum <= PROCESS_BYTES_MAX)
+            })
+            .is_ok()
+    }
+
+    pub fn give_bytes(&self, bytes: usize) {
+        let before = self.bytes.fetch_sub(bytes, Ordering::AcqRel);
+        debug_assert!(before >= bytes, "bytes devolvidos a mais");
+    }
+
+    /// Bytes cobrados agora.
+    #[cfg_attr(
+        not(feature = "selftest"),
+        allow(dead_code, reason = "lido só pelo modo de teste")
+    )]
+    pub fn bytes_used(&self) -> usize {
+        self.bytes.load(Ordering::Acquire)
+    }
+}
+
+/// Bytes cobrados a um processo; a devolução é o `Drop`.
 #[derive(Debug)]
-pub struct Charge(Arc<Quota>);
+pub struct ByteCharge {
+    quota: Arc<Quota>,
+    bytes: usize,
+}
+
+impl ByteCharge {
+    /// `None` se a soma passaria do teto do processo (`NoMemory` para quem chama).
+    pub fn new(quota: &Arc<Quota>, bytes: usize) -> Option<Self> {
+        quota.take_bytes(bytes).then(|| Self {
+            quota: Arc::clone(quota),
+            bytes,
+        })
+    }
+}
+
+impl Drop for ByteCharge {
+    fn drop(&mut self) {
+        self.quota.give_bytes(self.bytes);
+    }
+}
+
+/// Bytes que cada ponta de canal custa: metade do par, que mede 7,2 KiB (DEBT-0091).
+pub const END_BYTES: usize = 4096;
+const _: () = assert!(size_of::<Pair>() <= 2 * END_BYTES);
+/// Bytes que a cobrança soma a uma mensagem além do payload: o `Arc` e o cabeçalho do `Vec`.
+const MESSAGE_OVERHEAD: usize = 64;
+
+/// Uma ponta cobrada: uma ponta na conta e os bytes dela, devolvidos no `Drop`.
+#[derive(Debug)]
+pub struct Charge {
+    quota: Arc<Quota>,
+    #[allow(dead_code, reason = "só o `Drop` da cobrança importa")]
+    bytes: ByteCharge,
+}
 
 impl Charge {
-    /// `None` se a conta passaria de `MAX_CHANNEL_ENDS`.
+    /// `None` se a conta passaria de `MAX_CHANNEL_ENDS` pontas ou do teto de bytes.
     pub fn new(quota: &Arc<Quota>) -> Option<Self> {
+        let bytes = ByteCharge::new(quota, END_BYTES)?;
         quota
-            .0
+            .ends
             .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 (used < MAX_CHANNEL_ENDS).then_some(used + 1)
             })
             .ok()?;
-        Some(Self(Arc::clone(quota)))
+        Some(Self {
+            quota: Arc::clone(quota),
+            bytes,
+        })
     }
 }
 
 impl Drop for Charge {
     fn drop(&mut self) {
-        self.0.0.fetch_sub(1, Ordering::AcqRel);
+        self.quota.ends.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Os bytes de uma mensagem: copiados do usuário uma vez, só lidos depois, e cobrados ao processo que
+/// escreveu até a mensagem sair da fila. Clonar não cobra de novo.
+#[derive(Clone, Debug)]
+pub struct Bytes(Arc<Payload>);
+
+#[derive(Debug)]
+struct Payload {
+    data: Vec<u8>,
+    #[allow(dead_code, reason = "só o `Drop` da cobrança importa")]
+    charge: Option<ByteCharge>,
+}
+
+impl Bytes {
+    /// Copia `data` cobrando `data.len()` e o custo fixo de `quota`; `None` sem cota ou sem heap.
+    pub fn charged(quota: &Arc<Quota>, data: &[u8]) -> Option<Self> {
+        let charge = ByteCharge::new(quota, data.len() + MESSAGE_OVERHEAD)?;
+        Self::build(data, Some(charge))
+    }
+
+    /// Mensagem do próprio kernel (o canal de boot): sem cobrança.
+    pub fn uncharged(data: &[u8]) -> Option<Self> {
+        Self::build(data, None)
+    }
+
+    fn build(data: &[u8], charge: Option<ByteCharge>) -> Option<Self> {
+        let mut copy = Vec::new();
+        copy.try_reserve_exact(data.len()).ok()?;
+        copy.extend_from_slice(data);
+        Some(Self(Arc::new(Payload { data: copy, charge })))
+    }
+}
+
+impl AsRef<[u8]> for Bytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0.data
     }
 }
 
@@ -249,25 +360,29 @@ impl Obj {
     /// Os sinais de `object_wait_one` agora, por nível.
     pub fn signals(&self) -> u32 {
         match self {
-            Self::Process(process) => {
-                if process.terminated.load(Ordering::SeqCst) {
-                    signals::TERMINATED
-                } else {
-                    0
-                }
-            }
+            Self::Process(process) => terminated(process.lifecycle()),
+            Self::Thread(thread) => terminated(thread.lifecycle()),
             Self::Channel(end) => end.pair.channel.lock().signals(end.side),
-            Self::Console(_) => 0,
+            Self::Vmo(_) | Self::Vmar(_) | Self::Console(_) => 0,
         }
     }
 
     /// Onde registrar uma espera por sinal deste objeto.
     pub fn waiters(&self) -> Option<&Waiters> {
         match self {
-            Self::Process(process) => Some(&process.waiters),
+            Self::Process(process) => Some(&process.lifecycle().waiters),
+            Self::Thread(thread) => Some(&thread.lifecycle().waiters),
             Self::Channel(end) => Some(&end.pair.waiters[end.side as usize]),
-            Self::Console(_) => None,
+            Self::Vmo(_) | Self::Vmar(_) | Self::Console(_) => None,
         }
+    }
+}
+
+fn terminated(life: &Lifecycle) -> u32 {
+    if life.is_terminated() {
+        signals::TERMINATED
+    } else {
+        0
     }
 }
 
@@ -277,6 +392,9 @@ impl Object for Obj {
     fn kind(&self) -> ObjectKind {
         match self {
             Self::Process(_) => ObjectKind::Process,
+            Self::Thread(_) => ObjectKind::Thread,
+            Self::Vmo(_) => ObjectKind::Vmo,
+            Self::Vmar(_) => ObjectKind::Vmar,
             Self::Channel(_) => ObjectKind::Channel,
             Self::Console(_) => ObjectKind::Console,
         }
@@ -284,7 +402,10 @@ impl Object for Obj {
 
     fn handles(&self) -> &HandleCount {
         match self {
-            Self::Process(process) => &process.handles,
+            Self::Process(process) => &process.lifecycle().handles,
+            Self::Thread(thread) => &thread.lifecycle().handles,
+            Self::Vmo(vmo) => vmo.handles(),
+            Self::Vmar(vmar) => vmar.handles(),
             Self::Channel(end) => &end.handles,
             Self::Console(console) => &console.handles,
         }

@@ -29,6 +29,24 @@ pub const CHANNEL_QUEUE_LEN: usize = 16;
 pub const MAX_CHANNEL_ENDS: usize = 256;
 /// Handles que o kernel aceita copiar de um array de usuário; acima disso é `InvalidArgs`.
 pub const USER_HANDLE_ARRAY_MAX: usize = 64;
+/// Bytes de heap do kernel que um processo pode ter cobrados a ele (pontas, mensagens em fila,
+/// VMOs, processos e threads que criou); acima disso a criação é `NoMemory` (SDD 17).
+pub const PROCESS_BYTES_MAX: usize = 512 << 10;
+/// Bytes do nome que `process_create` aceita.
+pub const PROCESS_NAME_MAX: usize = 32;
+/// Maior VMO que `vmo_create` aceita; acima disso é `InvalidArgs`.
+pub const VMO_MAX_BYTES: u64 = 256 << 20;
+/// Páginas da pilha inicial de um programa: 64 KiB, de tamanho fixo (SDD 17, "Layout").
+pub const USER_STACK_PAGES: u64 = 16;
+/// Onde cai o `mmap_base` de um processo: sorteado entre `2^28` páginas a partir de 64 GiB, e os
+/// mapeamentos `ANY` ocupam `[mmap_base, MMAP_TOP)`, abaixo da janela da pilha do kernel.
+pub const MMAP_FLOOR: u64 = 0x10_0000_0000;
+/// Fim exclusivo do intervalo em que `mmap_base` é sorteado (1 TiB acima de `MMAP_FLOOR`).
+pub const MMAP_ASLR_LIMIT: u64 = 0x110_0000_0000;
+/// Fim exclusivo da região dos mapeamentos `ANY`.
+pub const MMAP_TOP: u64 = 0x6000_0000_0000;
+/// O `code` do evento de um processo que `process_kill` encerrou.
+pub const PROCESS_KILLED_CODE: i64 = -1024;
 
 /// As chamadas da ABI nativa, com o número que cada uma ocupa em `rax` (x86_64) ou `x8` (aarch64).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -818,6 +836,24 @@ mod tests {
 
     const _: () = assert!(16 + CHANNEL_MAX_HANDLES * 4 <= CHANNEL_MAX_BYTES);
     const _: () = assert!(USER_HANDLE_ARRAY_MAX >= CHANNEL_MAX_HANDLES);
+
+    #[test]
+    fn the_mmap_window_sits_between_the_image_and_the_stack_window() {
+        let page = PAGE_SIZE;
+        assert!(MMAP_FLOOR > USER_IMAGE_BASE && MMAP_FLOOR.is_multiple_of(page));
+        assert_eq!(MMAP_ASLR_LIMIT - MMAP_FLOOR, (1 << 28) * page);
+        const { assert!(MMAP_ASLR_LIMIT < MMAP_TOP && MMAP_TOP <= 0x6000_0000_0000) };
+        const { assert!(MMAP_TOP < USER_TOP) };
+    }
+
+    #[test]
+    fn the_byte_cap_and_the_limits_that_it_bounds_are_consistent() {
+        const { assert!(PROCESS_BYTES_MAX >= 64 * 1024) };
+        const { assert!(PROCESS_BYTES_MAX < MAX_CHANNEL_ENDS * 4096) };
+        assert!(VMO_MAX_BYTES.is_multiple_of(PAGE_SIZE));
+        const { assert!(PROCESS_KILLED_CODE < 0) };
+    }
+
     #[test]
     fn a_wait_deadline_beyond_the_horizon_means_no_deadline() {
         let now = 5_000_000_000;

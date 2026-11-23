@@ -6,7 +6,7 @@ use rustos_hal::abi::event_kind;
 
 use crate::frames::Frames;
 use crate::loader::{self, LoadError};
-use crate::process::{self, Source};
+use crate::process::{self, Options, Source};
 use crate::{platform, task, vm::Vm};
 
 /// O nome do arquivo no initramfs, sem `./`.
@@ -27,7 +27,14 @@ pub fn run(vm: &Vm, frames: Frames, map_offset: u64) -> bool {
     let free_before = frames.free_frames();
     let spawned = loader::find(archive, NAME)
         .map_err(process::ProcessError::Load)
-        .and_then(|file| process::spawn_as(frames, map_offset, Source::Elf(file), 0, "init"));
+        .and_then(|file| {
+            let options = Options {
+                keep_peer: false,
+                initramfs: true,
+            };
+            process::spawn_with(frames, map_offset, Source::Elf(file), 0, options, "init")
+                .map(|(spawned, _)| spawned)
+        });
     let spawned = match spawned {
         Ok(spawned) => spawned,
         Err(process::ProcessError::Load(LoadError::Missing)) => {

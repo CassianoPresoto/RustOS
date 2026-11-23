@@ -3,7 +3,7 @@ id: DEBT-0133
 title: O fim de processo que o `run` espera vive numa tabela de 16 posições
 status: Open
 date: 2026-11-19
-trigger: Mais de 16 processos poderem terminar entre o `spawn` e a espera de um `run`, ou o `process_create` da parte 3 da 4c (a espera passa a ser por handle)
+trigger: Mais de 16 processos poderem terminar entre o `spawn` e a espera de um `run`
 paid_date:
 ---
 
@@ -15,12 +15,12 @@ paid_date:
 
 ## Por que foi aceito
 
-A alternativa certa é esperar pelo `TERMINATED` do `ProcessObj`, com o evento guardado no objeto, e isso depende da parte 3 da 4c (que mexe em `process.rs` e em `object.rs`). O anel custa 512 bytes de estática.
+A alternativa certa é esperar pelo `TERMINATED` do `ProcessObj`, com o evento guardado no objeto, e o objeto `Process` da parte 3 da 4c já levanta `TERMINATED` e guarda o evento (`LAST_EVENT`). O anel custa 512 bytes de estática.
 
 ## Gatilho
 
-O `process_create` da parte 3 entrar, ou o primeiro programa que lance mais de 16 processos curtos.
+O primeiro programa que lance mais de 16 processos curtos.
 
 ## Como pagar
 
-`Process` entrega o `Arc<ProcessObj>` ao `Spawned`, o `ProcessObj` guarda o evento de saída, e o `run` espera `TERMINATED` nele (o mesmo `Waiters`); o anel e `programs::finished` saem.
+`Spawned` leva o `Arc<Process>`, o `Process` guarda o evento de saída, e o `run` espera `TERMINATED` nele (o mesmo `Waiters`); o anel e `programs::finished` saem.

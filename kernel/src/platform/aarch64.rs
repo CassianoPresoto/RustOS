@@ -422,6 +422,11 @@ pub fn trigger(test: FaultTest) -> bool {
     }
 }
 
+#[allow(
+    clippy::inline_always,
+    reason = "no caminho da syscall nula: um quadro a mais passa da janela que o `arch/` repinta"
+)]
+#[inline(always)]
 pub fn cpu_local() -> Aarch64CpuLocal {
     // SAFETY: o kernel roda em EL1.
     unsafe { Aarch64CpuLocal::new() }
