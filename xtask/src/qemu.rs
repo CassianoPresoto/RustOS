@@ -107,7 +107,7 @@ struct Step {
 
 /// A sessão do M1 (SDD 17): listar o initramfs, rodar um programa como processo, ver o processo no
 /// `ps`, e um programa que morre contido sem derrubar o sistema. Vale no boot normal e no de teste.
-const SESSION: [Step; 7] = [
+const SESSION: [Step; 9] = [
     Step {
         command: "ls",
         expect: &["hello", "crash", "sysinfo", "count", "spin", "init"],
@@ -137,6 +137,19 @@ const SESSION: [Step; 7] = [
         expect: &["run: nothere: no such program"],
     },
     Step {
+        command: "run count 2",
+        expect: &[
+            "count: 1/2",
+            "count: 2/2",
+            "count: done",
+            "exit code 0 (pid ",
+        ],
+    },
+    Step {
+        command: "run count x",
+        expect: &["count: usage:", "exit code 2 (pid "],
+    },
+    Step {
         command: "run count &",
         expect: &["started pid "],
     },
@@ -147,6 +160,9 @@ const SESSION: [Step; 7] = [
 ];
 /// A última linha de `count`, que prova que o programa em segundo plano terminou sozinho.
 const COUNT_DONE: &str = "[user] count: done";
+/// O comando que lança o `count` em segundo plano: a espera pela última linha começa depois dele, porque
+/// o `run count 2` da sessão já imprimiu a sua.
+const COUNT_BACKGROUND: &str = "run count &";
 /// A linha com que `spin` começa a girar: o `run spin` só é interrompido depois dela.
 const SPIN_LINE: &str = "[user] spin: spinning";
 /// `count` conta cinco vezes meio segundo; sob TCG sobra folga.
@@ -449,7 +465,11 @@ fn type_session(
     if !ends_with_prompt(log) {
         return Err("o shell não mostrou o prompt depois do boot".to_owned());
     }
+    let mut background_from = 0;
     for step in &SESSION {
+        if step.command == COUNT_BACKGROUND {
+            background_from = log.len();
+        }
         let answer = type_command(child, receiver, log, step.command)?;
         if let Some(missing) = step.expect.iter().find(|text| !answer.contains(**text)) {
             return Err(format!(
@@ -474,7 +494,7 @@ fn type_session(
     type_interrupt_and_kill(child, receiver, log)?;
     println!("xtask: Ctrl-C no `run` e `kill <pid>` ok");
     let deadline = Instant::now() + COUNT_TIMEOUT;
-    while !has_user_line(log, COUNT_DONE) {
+    while !has_user_line(&log[background_from..], COUNT_DONE) {
         let Some(left) = deadline.checked_duration_since(Instant::now()) else {
             return Err(format!(
                 "o `count` em segundo plano não terminou (`{COUNT_DONE}`)"

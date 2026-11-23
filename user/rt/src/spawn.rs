@@ -161,7 +161,7 @@ impl Child {
             phnum: u64::from(self.image.phnum),
             random,
         };
-        let mut initial = InitialStack::build(top, &info).ok_or(Error::Stack)?;
+        let mut initial = InitialStack::build(top, &info, &[]).ok_or(Error::Stack)?;
         let last = pages * PAGE_SIZE;
         let mut page = vm::Mapping::new(
             self.parent.vmar,

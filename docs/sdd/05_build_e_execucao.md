@@ -66,6 +66,7 @@ Ctrl-A X encerra a QEMU. A sessão que mostra o M1:
 | `run sysinfo` | Relógio, página e aleatório | `[user] sysinfo: up N ms, page 4096 B, 3 loads, random 0x…` e `exit code 0 (pid P)` |
 | `run crash` | Um programa que toca a página de guarda | `[user] crash: going down the stack…` e `killed: page fault on a read of 0x… (pid P)` (ou `write to`); **o prompt volta** |
 | `run nothere` | Programa que não existe | `run: nothere: no such program (try 'ls')` |
+| `run count 2` | Com argumento: conta até 2 e espera | `[user] count: 1/2`, `2/2`, `done` e `exit code 0 (pid P)` |
 | `run count &` | Em segundo plano, 2,5 s | `started pid P` e o prompt na hora; `[user] count: 1/5 …` até `done` aparecem depois, colados ao prompt |
 | `ps` | Tarefas e processos | A coluna `pid`; a linha `user` com o pid de `count` enquanto ele dorme |
 | `run init` | O autoteste do `init`, sob demanda | `[user] init: ok (…)` e `exit code 0 (pid P)` |

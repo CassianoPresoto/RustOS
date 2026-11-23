@@ -215,9 +215,9 @@ impl<B: BootInfo> Host for System<'_, B> {
         programs::list(self.initramfs, visit)
     }
 
-    fn run_program(&self, name: &str, wait: bool) -> RunOutcome {
+    fn run_program(&self, name: &str, args: &[&str], wait: bool) -> RunOutcome {
         let offset = self.boot.direct_map_offset();
-        programs::run(self.memory.frames, offset, self.initramfs, name, wait)
+        programs::run(self.memory.frames, offset, self.initramfs, name, args, wait)
     }
 
     fn kill_program(&self, pid: u32) -> KillOutcome {

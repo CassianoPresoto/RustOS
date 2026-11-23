@@ -132,13 +132,13 @@ textos são em inglês, como a saída do sistema, e o `core/shell` segue puro e 
 | Comando | O que faz | Saída |
 | --- | --- | --- |
 | `ls` | Lista os arquivos do initramfs | `bytes  name` e uma linha por arquivo, em ordem; `ls: no initramfs in this boot` sem initramfs |
-| `run <programa> [&]` | Carrega o ELF, roda como processo isolado com o canal de boot e o console, **espera** e mostra como acabou. Com `&` (solto ou colado ao nome) não espera | `exit code N (pid P)`; `killed: <causa> (pid P)` (`page fault on a write to 0x…`, `… (null or low address)`, `… a kernel address` sem endereço, `illegal instruction`, `out of memory`…); `started pid P` com `&`; `run: X: no such program (try 'ls')`; `run: X: too many processes` com a tabela de tarefas cheia. Cada resposta sai numa escrita só |
+| `run <programa> [args...] [&]` | Carrega o ELF, roda como processo isolado com o canal de boot e o console, com os argumentos em `argv` (o nome do programa é `argv[0]`), **espera** e mostra como acabou. Com `&` (solto ou colado à última palavra) não espera; só um `&` final é o operador (em `&&`, o outro vira argumento) | `exit code N (pid P)`; `killed: <causa> (pid P)` (`page fault on a write to 0x…`, `… (null or low address)`, `… a kernel address` sem endereço, `illegal instruction`, `out of memory`…); `started pid P` com `&`; `run: X: no such program (try 'ls')`; `run: X: too many processes` com a tabela de tarefas cheia; `run: too many arguments (max N words, M bytes)` com argumentos acima do teto. Cada resposta sai numa escrita só |
 | `ps` | Ganha a coluna `pid` (depois de `name`): o processo que a tarefa roda, ou `-` na tarefa de kernel. A coluna `name` tem 16 caracteres e, na tarefa de um processo, mostra o programa (`count`, `hello`), cortado em 16 bytes sem partir um caractere | Uma linha por processo vivo, com o nome do programa |
 | `kill <pid>` | Mata o processo vivo `pid`, qualquer um do `ps` (inclusive o `init` e os filhos dele). Não espera a morte | `killed pid P`; `kill: no process with pid P`; `kill: pid P is already ending`; `usage: kill <pid>` sem pid, com pid que não é número ou com palavra a mais |
 
 Com Ctrl-C na espera do `run` em primeiro plano, a resposta é `interrupted (pid P)`, e o processo morre ([SDD 17](17_processos_isolamento_e_syscalls.md#ctrl-c-e-kill)).
 
-A saída do programa (`[user] …`) aparece na tela e na serial, antes do `exit code`. As linhas do kernel sobre o ciclo de vida (`[rustos] user: pid N exited …`) vão só para a serial: a tela mostra só o que o shell já diz. Argumentos do programa ainda não passam ([DEBT-0130](../tech-debt/0130-run-sem-argumentos-para-o-programa.md)).
+A saída do programa (`[user] …`) aparece na tela e na serial, antes do `exit code`. As linhas do kernel sobre o ciclo de vida (`[rustos] user: pid N exited …`) vão só para a serial: a tela mostra só o que o shell já diz. Os argumentos chegam ao programa em `argv` ([SDD 17](17_processos_isolamento_e_syscalls.md), "Pilha inicial").
 O caminho do kernel está no [SDD 17](17_processos_isolamento_e_syscalls.md#o-m1-programas-pelo-shell-como-entrou).
 
 ## Saída de segundo plano
@@ -212,5 +212,4 @@ O que divergia e foi corrigido, cada um com teste em
 - Símbolos de controle do DEC, NRCS e G2/G3: [DEBT-0048](../tech-debt/0048-dec-sem-simbolos-de-controle-nem-nrcs.md).
 - Histórico sem rolagem no aarch64: [DEBT-0050](../tech-debt/0050-historico-sem-rolagem-no-aarch64.md).
 - Redesenho com IRQ mascarada: [DEBT-0051](../tech-debt/0051-redesenho-da-tela-com-irq-mascarada.md).
-- Argumentos para o programa: [DEBT-0130](../tech-debt/0130-run-sem-argumentos-para-o-programa.md).
 - Fila de saída de segundo plano que não descarta ao encher e saída de fundo na tela alternativa: [DEBT-0150](../tech-debt/0150-fila-de-saida-de-segundo-plano-descarta-ao-encher.md), [0151](../tech-debt/0151-saida-de-segundo-plano-entra-na-tela-alternativa.md).

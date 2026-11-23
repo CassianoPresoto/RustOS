@@ -55,7 +55,7 @@ pub(crate) struct FakeHost {
     pub(crate) listing: Listing,
     /// O que `run_program` responde, e o que ele recebeu da última chamada.
     pub(crate) outcome: RunOutcome,
-    pub(crate) last_run: core::cell::RefCell<Option<(String, bool)>>,
+    pub(crate) last_run: core::cell::RefCell<Option<(String, Vec<String>, bool)>>,
     /// O que `kill_program` responde, e o pid que ele recebeu da última chamada.
     pub(crate) kill: KillOutcome,
     pub(crate) last_kill: core::cell::Cell<Option<u32>>,
@@ -214,8 +214,9 @@ impl Host for FakeHost {
         self.listing
     }
 
-    fn run_program(&self, name: &str, wait: bool) -> RunOutcome {
-        *self.last_run.borrow_mut() = Some((name.to_owned(), wait));
+    fn run_program(&self, name: &str, args: &[&str], wait: bool) -> RunOutcome {
+        let args = args.iter().map(|arg| (*arg).to_owned()).collect();
+        *self.last_run.borrow_mut() = Some((name.to_owned(), args, wait));
         self.outcome
     }
 

@@ -5,6 +5,7 @@ use core::fmt::{self, Write as _};
 use crate::ansi::{ACCENT, CLEAR_SCREEN, DIM, LOGO, RESET};
 use crate::fmtutil::{Bytes, Millis, Percent, Pid, Seconds, StackStr, StackUse, Uptime};
 use crate::history::Entries;
+use crate::parse::MAX_ARGS;
 use rustos_hal::PAGE_SIZE;
 use rustos_hal::abi::USER_MIN;
 
@@ -121,7 +122,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
     Command {
         name: "run",
-        summary: "run a program from the initramfs as a process (run <program> [&] to not wait)",
+        summary: "run a program from the initramfs (run <program> [args...] [&] to not wait)",
         run,
     },
     Command {
@@ -421,27 +422,24 @@ fn ls(ctx: &mut Ctx<'_>) -> fmt::Result {
     }
 }
 
-/// O nome do programa, quantas palavras sobram e se pede para não esperar: um `&` no fim da linha,
-/// solto ou colado ao nome.
-fn run_operands<'a>(args: &[&'a str]) -> (Option<&'a str>, usize, bool) {
-    let (words, mut background) = match args {
-        [rest @ .., "&"] => (rest, true),
-        _ => (args, false),
+/// As palavras de `run` na ordem, sem o `&` do fim (solto ou colado à última palavra): quantas são,
+/// e se pede para não esperar.
+fn run_words<'a>(args: &[&'a str], words: &mut [&'a str; MAX_ARGS]) -> (usize, bool) {
+    let count = args.len().min(MAX_ARGS);
+    words[..count].copy_from_slice(&args[..count]);
+    let Some(last) = count.checked_sub(1) else {
+        return (0, false);
     };
-    let Some((&first, rest)) = words.split_first() else {
-        return (None, 0, background);
-    };
-    let mut name = first;
-    if rest.is_empty()
-        && let Some(stripped) = first.strip_suffix('&')
-    {
-        (name, background) = (stripped, true);
+    if words[last] == "&" {
+        return (last, true);
     }
-    (
-        Some(name).filter(|name| !name.is_empty()),
-        rest.len(),
-        background,
-    )
+    match words[last].strip_suffix('&') {
+        Some(stripped) => {
+            words[last] = stripped;
+            (count, true)
+        }
+        None => (count, false),
+    }
 }
 
 /// `kill <pid>`: um pid só, número decimal. Qualquer outra coisa é uso errado.
@@ -462,17 +460,16 @@ fn kill(ctx: &mut Ctx<'_>) -> fmt::Result {
 }
 
 fn run(ctx: &mut Ctx<'_>) -> fmt::Result {
-    let (name, extra, background) = run_operands(ctx.args);
-    let Some(name) = name else {
-        return ctx.out.write_str("usage: run <program> [&]\r\n");
+    let mut words = [""; MAX_ARGS];
+    let (count, background) = run_words(ctx.args, &mut words);
+    let Some((&name, operands)) = words[..count]
+        .split_first()
+        .filter(|(name, _)| !name.is_empty())
+    else {
+        return ctx.out.write_str("usage: run <program> [args...] [&]\r\n");
     };
-    if extra > 0 {
-        return ctx
-            .out
-            .write_str("run: programs take no arguments yet (usage: run <program> [&])\r\n");
-    }
     let mut line = StackStr::<160>::new();
-    let shown = match ctx.host.run_program(name, !background) {
+    let shown = match ctx.host.run_program(name, operands, !background) {
         RunOutcome::Exited { pid, code } => write!(line, "exit code {code} (pid {pid})\r\n"),
         RunOutcome::Killed { pid, cause } => write!(line, "killed: {cause} (pid {pid})\r\n"),
         RunOutcome::Started { pid } => write!(line, "started pid {pid}\r\n"),
@@ -486,6 +483,13 @@ fn run(ctx: &mut Ctx<'_>) -> fmt::Result {
         }
         RunOutcome::NoMemory => write!(line, "run: {name}: out of memory\r\n"),
         RunOutcome::TooManyProcesses => write!(line, "run: {name}: too many processes\r\n"),
+        RunOutcome::TooManyArguments {
+            max_words,
+            max_bytes,
+        } => write!(
+            line,
+            "run: too many arguments (max {max_words} words, {max_bytes} bytes)\r\n"
+        ),
         RunOutcome::NoInitramfs => write!(line, "run: no initramfs in this boot\r\n"),
         RunOutcome::Failed => write!(line, "run: {name}: could not start the process\r\n"),
     };
@@ -921,7 +925,9 @@ mod tests {
         assert_eq!(run("ls", &["x"], &host), "ls: extra operand 'x'\r\n");
     }
 
-    fn run_with(outcome: RunOutcome, args: &[&str]) -> (String, Option<(String, bool)>) {
+    type Seen = Option<(String, Vec<String>, bool)>;
+
+    fn run_with(outcome: RunOutcome, args: &[&str]) -> (String, Seen) {
         let mut host = FakeHost::new();
         host.outcome = outcome;
         let out = run("run", args, &host);
@@ -933,7 +939,7 @@ mod tests {
     fn run_waits_by_default_and_shows_the_exit_code() {
         let (out, seen) = run_with(RunOutcome::Exited { pid: 7, code: 3 }, &["hello"]);
         assert_eq!(out, "exit code 3 (pid 7)\r\n");
-        assert_eq!(seen, Some(("hello".to_owned(), true)));
+        assert_eq!(seen, Some(("hello".to_owned(), vec![], true)));
     }
 
     #[test]
@@ -941,8 +947,63 @@ mod tests {
         for args in [&["count", "&"][..], &["count&"][..]] {
             let (out, seen) = run_with(RunOutcome::Started { pid: 9 }, args);
             assert_eq!(out, "started pid 9\r\n");
-            assert_eq!(seen, Some(("count".to_owned(), false)));
+            assert_eq!(seen, Some(("count".to_owned(), vec![], false)));
         }
+    }
+
+    #[test]
+    fn run_passes_every_word_after_the_program_as_an_argument() {
+        let (_, seen) = run_with(
+            RunOutcome::Exited { pid: 2, code: 0 },
+            &["count", "3", "x y"],
+        );
+        assert_eq!(
+            seen,
+            Some((
+                "count".to_owned(),
+                vec!["3".to_owned(), "x y".to_owned()],
+                true
+            ))
+        );
+    }
+
+    #[test]
+    fn run_takes_the_ampersand_off_the_last_argument_or_alone() {
+        for args in [&["count", "3&"][..], &["count", "3", "&"][..]] {
+            let (out, seen) = run_with(RunOutcome::Started { pid: 9 }, args);
+            assert_eq!(out, "started pid 9\r\n");
+            assert_eq!(
+                seen,
+                Some(("count".to_owned(), vec!["3".to_owned()], false))
+            );
+        }
+        // Um `&` no meio é palavra como as outras: não pede segundo plano.
+        let (_, seen) = run_with(RunOutcome::Exited { pid: 9, code: 0 }, &["count", "&", "3"]);
+        assert_eq!(
+            seen,
+            Some((
+                "count".to_owned(),
+                vec!["&".to_owned(), "3".to_owned()],
+                true
+            ))
+        );
+        // Só um `&` final é o operador: em `&&`, o outro fica como argumento.
+        let (_, seen) = run_with(RunOutcome::Started { pid: 9 }, &["count", "&&"]);
+        assert_eq!(
+            seen,
+            Some(("count".to_owned(), vec!["&".to_owned()], false))
+        );
+    }
+
+    #[test]
+    fn run_says_the_limits_when_the_arguments_do_not_fit() {
+        let outcome = RunOutcome::TooManyArguments {
+            max_words: 16,
+            max_bytes: 512,
+        };
+        let (out, seen) = run_with(outcome, &["count", "3"]);
+        assert_eq!(out, "run: too many arguments (max 16 words, 512 bytes)\r\n");
+        assert!(seen.is_some());
     }
 
     /// Um `Write` que conta as chamadas: o console escreve por pedaço, e cada pedaço pega o lock.
@@ -1029,6 +1090,13 @@ mod tests {
             ),
             (RunOutcome::NoMemory, "run: x: out of memory"),
             (RunOutcome::TooManyProcesses, "run: x: too many processes"),
+            (
+                RunOutcome::TooManyArguments {
+                    max_words: 16,
+                    max_bytes: 512,
+                },
+                "run: too many arguments (max 16 words, 512 bytes)",
+            ),
             (RunOutcome::NoInitramfs, "run: no initramfs in this boot"),
             (RunOutcome::Failed, "run: x: could not start the process"),
         ];
@@ -1041,19 +1109,16 @@ mod tests {
     fn run_says_when_ctrl_c_stopped_the_wait() {
         let (out, seen) = run_with(RunOutcome::Interrupted { pid: 5 }, &["spin"]);
         assert_eq!(out, "interrupted (pid 5)\r\n");
-        assert_eq!(seen, Some(("spin".to_owned(), true)));
+        assert_eq!(seen, Some(("spin".to_owned(), vec![], true)));
     }
 
     #[test]
-    fn run_without_a_program_or_with_arguments_does_not_call_the_host() {
+    fn run_without_a_program_does_not_call_the_host() {
         for args in [&[][..], &["&"][..]] {
             let (out, seen) = run_with(RunOutcome::Failed, args);
-            assert_eq!(out, "usage: run <program> [&]\r\n");
+            assert_eq!(out, "usage: run <program> [args...] [&]\r\n");
             assert_eq!(seen, None);
         }
-        let (out, seen) = run_with(RunOutcome::Failed, &["hello", "world"]);
-        assert!(out.starts_with("run: programs take no arguments yet"));
-        assert_eq!(seen, None);
     }
 
     fn kill_with(outcome: KillOutcome, args: &[&str]) -> (String, Option<u32>) {

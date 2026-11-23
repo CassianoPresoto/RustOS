@@ -539,10 +539,17 @@ pub mod auxv {
 
 /// Bytes de `AT_RANDOM`.
 pub const AT_RANDOM_LEN: usize = 16;
-/// Tamanho do maior bloco que `InitialStack` monta.
-pub const INITIAL_STACK_MAX: usize = 256;
-/// `argc`, o fim de `argv` e o de `envp`, mais as 9 entradas do auxv (duas palavras cada).
-const MAX_WORDS: usize = 3 + 9 * 2;
+/// Tamanho do maior bloco que `InitialStack` monta. O pior caso (`ARGS_MAX` ponteiros, `ARGS_BYTES_MAX`
+/// bytes de cadeias, `AT_RANDOM` e o alinhamento) fica em 832 bytes; 1 KiB cabe na única página
+/// que nasce mapeada, com folga.
+pub const INITIAL_STACK_MAX: usize = 1024;
+/// Palavras de `argv`, contando `argv[0]` (o nome do programa): o teto de `argc`.
+pub const ARGS_MAX: usize = 16;
+/// Soma das cadeias de `argv`, cada uma com o `0` final.
+pub const ARGS_BYTES_MAX: usize = 512;
+/// `argc`, os ponteiros de `argv`, o zero que fecha `argv`, o de `envp` e as 9 entradas do auxv
+/// (duas palavras cada).
+const MAX_WORDS: usize = 3 + ARGS_MAX + 9 * 2;
 
 /// O que o kernel sabe do programa que vai começar, para o auxv.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -556,7 +563,8 @@ pub struct StartInfo {
 }
 
 /// Os bytes que o kernel grava no topo da pilha do primeiro programa. `bytes()` ocupa
-/// `[sp, top)`: `argc = 0`, `argv` e `envp` vazios, o auxv e, no fim, os bytes de `AT_RANDOM`.
+/// `[sp, top)`: `argc`, os ponteiros de `argv` (as cadeias ficam acima do auxv), `envp` vazio, o
+/// auxv e, no fim, os bytes de `AT_RANDOM`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct InitialStack {
     sp: u64,
@@ -588,15 +596,42 @@ impl core::fmt::Debug for InitialStack {
     }
 }
 
+/// Os argumentos cabem nos tetos e nenhum tem `0` dentro (a cadeia acabaria antes do fim).
+pub fn args_fit(args: &[&[u8]]) -> bool {
+    args.len() <= ARGS_MAX
+        && args_bytes(args) <= ARGS_BYTES_MAX
+        && args.iter().all(|arg| !arg.contains(&0))
+}
+
+/// Bytes que as cadeias ocupam, com o `0` de cada uma.
+fn args_bytes(args: &[&[u8]]) -> usize {
+    args.iter()
+        .fold(0_usize, |sum, arg| sum.saturating_add(arg.len() + 1))
+}
+
 impl InitialStack {
-    /// `top` é o fim exclusivo da pilha, alinhado a 16. `None` se não é.
-    pub fn build(top: u64, info: &StartInfo) -> Option<Self> {
+    /// `top` é o fim exclusivo da pilha, alinhado a 16. `args` é o `argv` inteiro, com o nome do
+    /// programa primeiro; vazio deixa `argc = 0`. `None` se `top` não serve ou se `args` passa dos
+    /// tetos: quem chama recusa, nada é cortado em silêncio.
+    pub fn build(top: u64, info: &StartInfo, args: &[&[u8]]) -> Option<Self> {
         if !top.is_multiple_of(16) || top < USER_MIN + INITIAL_STACK_MAX as u64 {
             return None;
         }
+        if !args_fit(args) {
+            return None;
+        }
         let random_at = top - AT_RANDOM_LEN as u64;
+        let strings_len = args_bytes(args);
+        let strings_at = random_at - strings_len as u64;
         let mut words = [0_u64; MAX_WORDS];
-        let mut count = 3;
+        words[0] = args.len() as u64;
+        // `argv[i]` em `words[1 + i]`; o zero que fecha `argv` e o de `envp` já são zero.
+        let mut next = strings_at;
+        for (slot, arg) in words[1..].iter_mut().zip(args) {
+            *slot = next;
+            next += arg.len() as u64 + 1;
+        }
+        let mut count = args.len() + 3;
         let mut push = |tag: u64, value: u64| {
             words[count] = tag;
             words[count + 1] = value;
@@ -614,10 +649,15 @@ impl InitialStack {
         push(auxv::AT_RANDOM, random_at);
         push(auxv::AT_NULL, 0);
         let head = count * 8;
-        let len = (head + AT_RANDOM_LEN).next_multiple_of(16);
+        let len = (head + strings_len + AT_RANDOM_LEN).next_multiple_of(16);
         let mut bytes = [0_u8; INITIAL_STACK_MAX];
         for (slot, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(&words[..count]) {
             slot.copy_from_slice(&word.to_le_bytes());
+        }
+        let mut at = len - AT_RANDOM_LEN - strings_len;
+        for arg in args {
+            bytes[at..at + arg.len()].copy_from_slice(arg);
+            at += arg.len() + 1;
         }
         bytes[len - AT_RANDOM_LEN..len].copy_from_slice(&info.random);
         Some(Self {
@@ -996,10 +1036,36 @@ mod tests {
         u64::from_le_bytes(bytes.try_into().unwrap())
     }
 
+    /// O argumento `index` como a pilha o entrega: o ponteiro de `argv[index]` cai dentro de
+    /// `[sp, TOP)` e a cadeia vai até o zero que a fecha.
+    fn arg_at(stack: &InitialStack, index: usize) -> Vec<u8> {
+        let pointer = word(stack, 1 + index);
+        assert!(
+            stack.sp() <= pointer && pointer < TOP,
+            "argv[{index}] = {pointer:#x}"
+        );
+        let rest = &stack.bytes()[usize::try_from(pointer - stack.sp()).unwrap()..];
+        let end = rest
+            .iter()
+            .position(|&byte| byte == 0)
+            .expect("zero no fim");
+        rest[..end].to_vec()
+    }
+
+    /// `argc` é `args.len()`, cada `argv[i]` aponta para `args[i]` e os dois zeros vêm depois.
+    fn assert_argv_is(stack: &InitialStack, args: &[&[u8]]) {
+        assert_eq!(word(stack, 0), args.len() as u64);
+        for (index, arg) in args.iter().enumerate() {
+            assert_eq!(arg_at(stack, index), *arg, "argv[{index}]");
+        }
+        let end = 1 + args.len();
+        assert_eq!((word(stack, end), word(stack, end + 1)), (0, 0));
+    }
+
     /// As entradas do auxv depois de `argc`, `argv` e `envp`, até `AT_NULL` inclusive.
     fn auxv_of(stack: &InitialStack) -> Vec<(u64, u64)> {
         let mut entries = Vec::new();
-        let mut index = 3;
+        let mut index = usize::try_from(word(stack, 0)).unwrap() + 3;
         loop {
             let pair = (word(stack, index), word(stack, index + 1));
             entries.push(pair);
@@ -1012,7 +1078,7 @@ mod tests {
 
     #[test]
     fn the_initial_stack_has_argc_empty_argv_and_envp_then_the_auxv() {
-        let stack = InitialStack::build(TOP, &start(Some(0x40_0040))).unwrap();
+        let stack = InitialStack::build(TOP, &start(Some(0x40_0040)), &[]).unwrap();
         assert_eq!(
             (word(&stack, 0), word(&stack, 1), word(&stack, 2)),
             (0, 0, 0)
@@ -1037,7 +1103,7 @@ mod tests {
     #[test]
     fn the_initial_stack_is_aligned_and_puts_the_random_bytes_at_the_top() {
         for phdr in [Some(0x40_0040), None] {
-            let stack = InitialStack::build(TOP, &start(phdr)).unwrap();
+            let stack = InitialStack::build(TOP, &start(phdr), &[]).unwrap();
             assert_eq!(stack.sp() % 16, 0);
             assert_eq!(stack.sp() + stack.bytes().len() as u64, TOP);
             assert_eq!(stack.bytes().len() % 16, 0);
@@ -1051,7 +1117,7 @@ mod tests {
 
     #[test]
     fn without_a_phdr_inside_a_load_the_auxv_leaves_the_three_entries_out() {
-        let stack = InitialStack::build(TOP, &start(None)).unwrap();
+        let stack = InitialStack::build(TOP, &start(None), &[]).unwrap();
         let tags: Vec<u64> = auxv_of(&stack).iter().map(|pair| pair.0).collect();
         assert!(!tags.contains(&auxv::AT_PHDR) && !tags.contains(&auxv::AT_PHNUM));
         assert!(tags.contains(&auxv::AT_RANDOM) && tags.contains(&auxv::AT_ENTRY));
@@ -1059,9 +1125,65 @@ mod tests {
 
     #[test]
     fn the_initial_stack_refuses_a_top_that_is_not_aligned_or_too_low() {
-        assert!(InitialStack::build(TOP + 8, &start(None)).is_none());
-        assert!(InitialStack::build(0, &start(None)).is_none());
-        assert!(InitialStack::build(USER_MIN, &start(None)).is_none());
+        assert!(InitialStack::build(TOP + 8, &start(None), &[]).is_none());
+        assert!(InitialStack::build(0, &start(None), &[]).is_none());
+        assert!(InitialStack::build(USER_MIN, &start(None), &[]).is_none());
+    }
+
+    #[test]
+    fn one_argument_puts_the_program_name_in_argv_zero() {
+        let stack = InitialStack::build(TOP, &start(Some(0x40_0040)), &[b"count"]).unwrap();
+        assert_argv_is(&stack, &[b"count"]);
+        assert_eq!(auxv_of(&stack)[0], (auxv::AT_PHDR, 0x40_0040));
+        assert_eq!(stack.sp() % 16, 0);
+        assert_eq!(stack.sp() + stack.bytes().len() as u64, TOP);
+    }
+
+    #[test]
+    fn an_empty_argument_is_just_its_zero() {
+        let args: [&[u8]; 3] = [b"count", b"", b"3"];
+        let stack = InitialStack::build(TOP, &start(None), &args).unwrap();
+        assert_argv_is(&stack, &args);
+        assert_eq!(stack.sp() % 16, 0);
+    }
+
+    #[test]
+    fn several_arguments_keep_their_order_and_their_own_strings() {
+        let args: [&[u8]; 3] = [b"count", b"3", b"x y"];
+        let stack = InitialStack::build(TOP, &start(None), &args).unwrap();
+        assert_argv_is(&stack, &args);
+        let random_at = TOP - AT_RANDOM_LEN as u64;
+        assert_eq!(auxv_of(&stack).last(), Some(&(auxv::AT_NULL, 0)));
+        assert!(auxv_of(&stack).contains(&(auxv::AT_RANDOM, random_at)));
+    }
+
+    #[test]
+    fn the_maximum_arguments_fit_and_each_pointer_names_its_own_string() {
+        let owned: Vec<Vec<u8>> = (0..ARGS_MAX)
+            .map(|index| format!("{index:02}-{}", "x".repeat(28)).into_bytes())
+            .collect();
+        let args: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        assert_eq!(args_bytes(&args), ARGS_BYTES_MAX);
+        let stack = InitialStack::build(TOP, &start(Some(0x40_0040)), &args).unwrap();
+        assert_argv_is(&stack, &args);
+        // O pior caso: 37 palavras (296 bytes), 512 de cadeias e 16 de `AT_RANDOM`, arredondados.
+        assert_eq!(stack.bytes().len(), 832);
+        assert!(stack.bytes().len() <= INITIAL_STACK_MAX);
+        assert_eq!(stack.sp() % 16, 0);
+        assert_eq!(stack.sp() + stack.bytes().len() as u64, TOP);
+    }
+
+    #[test]
+    fn arguments_past_a_limit_are_refused_not_cut() {
+        let many: Vec<&[u8]> = vec![&b"a"[..]; ARGS_MAX + 1];
+        assert!(InitialStack::build(TOP, &start(None), &many).is_none());
+        let long = [b'x'; ARGS_BYTES_MAX];
+        assert!(InitialStack::build(TOP, &start(None), &[&long[..]]).is_none());
+        let exact = [b'x'; ARGS_BYTES_MAX - 1];
+        assert!(InitialStack::build(TOP, &start(None), &[&exact[..]]).is_some());
+        let inside = [&b"a\0b"[..]];
+        assert!(InitialStack::build(TOP, &start(None), &inside).is_none());
+        assert!(!args_fit(&inside) && args_fit(&[&b"ok"[..]]));
     }
 
     #[test]
@@ -1090,7 +1212,7 @@ mod tests {
     #[test]
     fn debug_never_prints_the_random_bytes() {
         let info = start(Some(0x40_0040));
-        let stack = InitialStack::build(TOP, &info).unwrap();
+        let stack = InitialStack::build(TOP, &info, &[]).unwrap();
         for text in [format!("{info:?}"), format!("{stack:?}")] {
             assert!(text.contains("<redacted>"), "{text}");
             assert!(

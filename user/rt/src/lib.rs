@@ -20,7 +20,7 @@ pub mod sys;
 pub mod vm;
 
 pub use console::{LineBuffer, print_line, set_console};
-pub use env::{Auxv, Env};
+pub use env::{Args, Auxv, Env};
 #[cfg(feature = "raw-syscalls")]
 pub use rustos_hal::abi::Syscall;
 pub use rustos_hal::abi::{Handle, ReadActual, Rights, Status, boot_kind, signals, vmar_flags};

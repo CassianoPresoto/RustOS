@@ -11,7 +11,7 @@ use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 
 use rustos_hal::abi::{
-    PROCESS_KILLED_CODE, ProcessEvent, Status, USER_TOP, event_kind, fault_access, fault_kind,
+    self, PROCESS_KILLED_CODE, ProcessEvent, Status, USER_TOP, event_kind, fault_access, fault_kind,
 };
 use rustos_hal::{Cpu, Fault, FaultKind, PhysAddr};
 use rustos_mm::vmar::Access;
@@ -41,6 +41,8 @@ pub enum ProcessError {
     Load(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] LoadError),
     Task(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] TaskError),
     Handles(#[allow(dead_code, reason = "lido pelo Debug da mensagem")] Status),
+    /// Os argumentos passam dos tetos de `abi::args_fit`: nenhum processo nasce.
+    Arguments,
 }
 
 impl<E: Into<LoadError>> From<E> for ProcessError {
@@ -579,17 +581,20 @@ pub fn spawn(
         affinity,
         Options::default(),
         DEFAULT_NAME,
+        &[],
     )
     .map(|(spawned, _)| spawned)
 }
 
-/// Como `spawn`, com o nome do programa que a tarefa mostra no `ps` (cortado ao tamanho do campo).
+/// Como `spawn`, com o nome do programa que a tarefa mostra no `ps` (cortado ao tamanho do campo) e
+/// o `argv` inteiro, com o nome do programa primeiro (vazio deixa `argc` em 0).
 pub fn spawn_as(
     frames: Frames,
     direct_map_offset: u64,
     source: Source<'_>,
     affinity: u32,
     name: &str,
+    arguments: &[&[u8]],
 ) -> Result<Spawned, ProcessError> {
     spawn_with(
         frames,
@@ -598,6 +603,7 @@ pub fn spawn_as(
         affinity,
         Options::default(),
         name,
+        arguments,
     )
     .map(|(spawned, _)| spawned)
 }
@@ -629,11 +635,12 @@ pub fn spawn_keeping(
         affinity,
         options,
         DEFAULT_NAME,
+        &[],
     )
 }
 
-/// Monta o espaço (a imagem de `source`, a pilha inicial e as regiões), o processo, o canal de boot e
-/// a primeira thread. `name` é o que o `ps` mostra da tarefa (o ponto único de criação).
+/// Monta o espaço (a imagem de `source`, a pilha inicial com `args` e as regiões), o processo, o canal
+/// de boot e a primeira thread. `name` é o que o `ps` mostra da tarefa (o ponto único de criação).
 pub fn spawn_with(
     frames: Frames,
     direct_map_offset: u64,
@@ -641,10 +648,14 @@ pub fn spawn_with(
     affinity: u32,
     options: Options,
     name: &str,
+    arguments: &[&[u8]],
 ) -> Result<(Spawned, Option<boot::BootPeer>), ProcessError> {
+    if !abi::args_fit(arguments) {
+        return Err(ProcessError::Arguments);
+    }
     // SAFETY: o mapa direto cobre todo frame do alocador, e o kernel já roda nas próprias tabelas.
     let mut space = unsafe { UserSpace::new(frames, direct_map_offset) }?;
-    let built = populate(&mut space, source);
+    let built = populate(&mut space, source, arguments);
     let (regions, loaded, sp, arg0) = match built {
         Ok(parts) => parts,
         Err(error) => {
@@ -705,6 +716,7 @@ fn task_error(status: Status) -> TaskError {
 fn populate(
     space: &mut UserSpace,
     source: Source<'_>,
+    arguments: &[&[u8]],
 ) -> Result<(loader::RegionTree, Loaded, u64, u64), ProcessError> {
     let mut regions = loader::new_tree()?;
     let (loaded, arg0) = match source {
@@ -712,7 +724,7 @@ fn populate(
         #[cfg(feature = "selftest")]
         Source::Flat(program) => (load_flat(space, &mut regions, program)?, program.arg0),
     };
-    let sp = loader::map_stack(space, &mut regions, &loaded)?;
+    let sp = loader::map_stack(space, &mut regions, &loaded, arguments)?;
     Ok((regions, loaded, sp, arg0))
 }
 
