@@ -679,6 +679,10 @@ fn events_channel(c: &mut Checks, cx: &Cx<'_>) {
                 "a child that exits with 7 terminates",
                 child.wait(now() + 5 * SECOND).is_ok(),
             );
+            c.expect(
+                "the event is already there when TERMINATED is seen",
+                wait(mine, signals::READABLE, 0),
+            );
             let event = read_event(mine);
             c.expect(
                 "the parent reads an Exit event with code 7",

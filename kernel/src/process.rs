@@ -485,8 +485,9 @@ impl Process {
         let no_memory = self.out_of_memory.load(Ordering::Relaxed);
         let kernel_half = self.kernel_half.load(Ordering::Relaxed);
         self.state.lock().phase = Phase::Dead;
-        self.life.terminate();
+        // O evento antes de `TERMINATED`: quem acorda pelo sinal já acha a mensagem na ponta.
         self.report(&event);
+        self.life.terminate();
         let pid = self.pid;
         if event.kind == event_kind::EXIT && event.code == PROCESS_KILLED_CODE {
             kprintln_serial!("[rustos] user: pid {pid} killed (cpu {cpu})");
