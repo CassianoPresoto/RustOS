@@ -19,7 +19,7 @@ pub struct Program {
 
 /// Todos os programas de `user/`. O `init` e as demonstrações do shell vão em toda imagem; os de
 /// teste, só com `selftest`.
-pub const PROGRAMS: [Program; 10] = [
+pub const PROGRAMS: [Program; 11] = [
     Program {
         package: "rustos-user-init",
         file: "init",
@@ -43,6 +43,11 @@ pub const PROGRAMS: [Program; 10] = [
     Program {
         package: "rustos-user-count",
         file: "count",
+        selftest_only: false,
+    },
+    Program {
+        package: "rustos-user-spin",
+        file: "spin",
         selftest_only: false,
     },
     Program {
@@ -315,7 +320,7 @@ mod tests {
     fn only_a_self_test_image_carries_the_test_programs() {
         let plain: Vec<&str> = programs_for(false).iter().map(|p| p.file).collect();
         let tested: Vec<&str> = programs_for(true).iter().map(|p| p.file).collect();
-        let demos = ["init", "hello", "crash", "sysinfo", "count"];
+        let demos = ["init", "hello", "crash", "sysinfo", "count", "spin"];
         assert_eq!(plain, demos);
         assert_eq!(
             tested,

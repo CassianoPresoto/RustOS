@@ -59,6 +59,10 @@ pub trait Host {
     fn run_program(&self, _name: &str, _wait: bool) -> RunOutcome {
         RunOutcome::NoInitramfs
     }
+    /// Mata o processo `pid` que `run` lançou; a plataforma sem processos diz `Unsupported`.
+    fn kill_program(&self, _pid: u32) -> KillOutcome {
+        KillOutcome::Unsupported
+    }
 }
 
 /// Um arquivo do initramfs, como `ls` o mostra.
@@ -95,6 +99,10 @@ pub enum RunOutcome {
     Started {
         pid: u32,
     },
+    /// Ctrl-C na espera: o processo foi morto e o shell voltou ao prompt.
+    Interrupted {
+        pid: u32,
+    },
     /// Nenhum arquivo com esse nome no initramfs.
     NotFound,
     /// O arquivo existe mas não é um executável que o kernel aceite.
@@ -106,6 +114,18 @@ pub enum RunOutcome {
     NoInitramfs,
     /// Qualquer outra falha ao criar o processo.
     Failed,
+}
+
+/// Como `Host::kill_program` respondeu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KillOutcome {
+    Killed,
+    /// Nenhum processo vivo com esse pid.
+    NotFound,
+    /// O processo já está morrendo: o pedido chegou tarde, nada mais a fazer.
+    AlreadyEnding,
+    /// A plataforma não mata processos.
+    Unsupported,
 }
 
 /// Por que o kernel encerrou um processo. Só valores de usuário: nenhum endereço do kernel.

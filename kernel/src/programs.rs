@@ -2,14 +2,17 @@
 //! como processo, esperando ou não. O fim de cada processo chega por `finished`, numa tabela curta
 //! que quem espera consulta; o processo morre na própria tarefa, sem ninguém o esperar por handle.
 
+use alloc::sync::Arc;
+
 use rustos_cpio as cpio;
 use rustos_hal::abi::{ProcessEvent, event_kind, fault_access, fault_kind};
-use rustos_shell::{Access, KillCause, Listing, ProgramInfo, RunOutcome};
+use rustos_shell::{Access, KillCause, KillOutcome, Listing, ProgramInfo, RunOutcome};
 
 use crate::frames::Frames;
+use crate::interrupts;
 use crate::loader::{self, LoadError};
 use crate::object::Waiters;
-use crate::process::{self, ProcessError, Source};
+use crate::process::{self, Process, ProcessError, Source};
 use crate::sync::IrqLock;
 use crate::task;
 use crate::userout;
@@ -100,19 +103,47 @@ fn take(pid: u32) -> Option<Ended> {
     Some(entry.ended)
 }
 
-/// Espera o fim do processo `pid`: a tarefa dorme até `finished` acordá-la, sem prazo.
-fn wait_for(pid: u32) -> Ended {
+/// Espera o fim do processo `pid`: a tarefa dorme até `finished` ou um Ctrl-C acordá-la, sem prazo.
+/// Ctrl-C mata o processo e a espera segue até o fim dele; o bool diz que houve interrupção.
+fn wait_for(pid: u32, process: &Arc<Process>) -> (Ended, bool) {
+    interrupts::clear_interrupt();
     task::clear_permit();
+    let mut interrupted = false;
     loop {
         let bit = WAITERS.register();
+        // Armar a entrada antes de olhar a flag: um Ctrl-C que chegue agora acorda a tarefa.
+        task::watch_input();
         let ended = take(pid);
+        // Toda volta consome a flag e descarta a entrada: um segundo Ctrl-C não sobra como `^C` no
+        // prompt. `BadState` (já morria por conta própria) mostra a causa real, não `interrupted`.
+        if interrupts::take_interrupt() {
+            if ended.is_none() {
+                interrupted |= process.kill().is_ok();
+            }
+            interrupts::flush_input();
+            if ended.is_none() {
+                WAITERS.unregister(bit);
+                continue;
+            }
+        }
         if ended.is_none() {
             task::block_until(u64::MAX);
         }
         WAITERS.unregister(bit);
         if let Some(ended) = ended {
-            return ended;
+            return (ended, interrupted);
         }
+    }
+}
+
+/// Mata o processo `pid` que ainda vive: `Killed`, `NotFound` se não há, `AlreadyEnding` se já morre.
+pub fn kill(pid: u32) -> KillOutcome {
+    let Some(process) = process::find(pid) else {
+        return KillOutcome::NotFound;
+    };
+    match process.kill() {
+        Ok(()) => KillOutcome::Killed,
+        Err(_) => KillOutcome::AlreadyEnding,
     }
 }
 
@@ -160,8 +191,11 @@ pub fn run(
         return RunOutcome::Started { pid: spawned.pid };
     }
     userout::direct();
-    let ended = wait_for(spawned.pid);
+    let (ended, interrupted) = wait_for(spawned.pid, &spawned.process);
     userout::queued();
+    if interrupted {
+        return RunOutcome::Interrupted { pid: spawned.pid };
+    }
     match ended {
         Ended::Exit(code) => RunOutcome::Exited {
             pid: spawned.pid,

@@ -28,6 +28,7 @@ members = [
     "user/crash",
     "user/sysinfo",
     "user/count",
+    "user/spin",
     "user/tests/big",
     "user/tests/child",
     "user/tests/procs",

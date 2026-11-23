@@ -1,0 +1,21 @@
+[package]
+name = "rustos-user-spin"
+description = "Programa de demonstração do shell: imprime uma linha e gira para sempre, para testar Ctrl-C e `kill`."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "spin"
+path = "src/main.rs"
+test = false
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rustos-user-rt.workspace = true
