@@ -8,7 +8,9 @@ use crate::history::Entries;
 use rustos_hal::PAGE_SIZE;
 use rustos_hal::abi::USER_MIN;
 
-use crate::host::{Access, FaultTest, Host, KillCause, Listing, RunOutcome, SystemInfo, TaskState};
+use crate::host::{
+    Access, FaultTest, Host, KillCause, KillOutcome, Listing, RunOutcome, SystemInfo, TaskState,
+};
 
 #[cfg(feature = "bench")]
 use crate::bench::run as bench;
@@ -86,6 +88,11 @@ pub(crate) const COMMANDS: &[Command] = &[
         name: "keymap",
         summary: "show or change the keyboard layout (us | br)",
         run: keymap,
+    },
+    Command {
+        name: "kill",
+        summary: "stop a process started by run (kill <pid>)",
+        run: kill,
     },
     Command {
         name: "lines",
@@ -437,6 +444,23 @@ fn run_operands<'a>(args: &[&'a str]) -> (Option<&'a str>, usize, bool) {
     )
 }
 
+/// `kill <pid>`: um pid só, número decimal. Qualquer outra coisa é uso errado.
+fn kill(ctx: &mut Ctx<'_>) -> fmt::Result {
+    let pid = match ctx.args {
+        [word] => word.parse::<u32>().ok(),
+        _ => None,
+    };
+    let Some(pid) = pid else {
+        return ctx.out.write_str("usage: kill <pid>\r\n");
+    };
+    match ctx.host.kill_program(pid) {
+        KillOutcome::Killed => write!(ctx.out, "killed pid {pid}\r\n"),
+        KillOutcome::NotFound => write!(ctx.out, "kill: no process with pid {pid}\r\n"),
+        KillOutcome::AlreadyEnding => write!(ctx.out, "kill: pid {pid} is already ending\r\n"),
+        KillOutcome::Unsupported => ctx.out.write_str("kill: not in this build\r\n"),
+    }
+}
+
 fn run(ctx: &mut Ctx<'_>) -> fmt::Result {
     let (name, extra, background) = run_operands(ctx.args);
     let Some(name) = name else {
@@ -452,6 +476,7 @@ fn run(ctx: &mut Ctx<'_>) -> fmt::Result {
         RunOutcome::Exited { pid, code } => write!(line, "exit code {code} (pid {pid})\r\n"),
         RunOutcome::Killed { pid, cause } => write!(line, "killed: {cause} (pid {pid})\r\n"),
         RunOutcome::Started { pid } => write!(line, "started pid {pid}\r\n"),
+        RunOutcome::Interrupted { pid } => write!(line, "interrupted (pid {pid})\r\n"),
         RunOutcome::NotFound => write!(line, "run: {name}: no such program (try 'ls')\r\n"),
         RunOutcome::NotExecutable => {
             write!(
@@ -737,7 +762,7 @@ fn fetch(ctx: &mut Ctx<'_>) -> fmt::Result {
 mod tests {
     use super::*;
     use crate::testing::{FakeHost, info};
-    use crate::{Listing, RunOutcome};
+    use crate::{KillOutcome, Listing, RunOutcome};
 
     fn run(name: &str, args: &[&str], host: &FakeHost) -> String {
         let mut out = String::new();
@@ -936,6 +961,7 @@ mod tests {
         let mut host = FakeHost::new();
         for outcome in [
             RunOutcome::Started { pid: 12 },
+            RunOutcome::Interrupted { pid: 3 },
             RunOutcome::Exited { pid: 3, code: -1 },
             RunOutcome::Killed {
                 pid: 3,
@@ -1012,6 +1038,13 @@ mod tests {
     }
 
     #[test]
+    fn run_says_when_ctrl_c_stopped_the_wait() {
+        let (out, seen) = run_with(RunOutcome::Interrupted { pid: 5 }, &["spin"]);
+        assert_eq!(out, "interrupted (pid 5)\r\n");
+        assert_eq!(seen, Some(("spin".to_owned(), true)));
+    }
+
+    #[test]
     fn run_without_a_program_or_with_arguments_does_not_call_the_host() {
         for args in [&[][..], &["&"][..]] {
             let (out, seen) = run_with(RunOutcome::Failed, args);
@@ -1021,6 +1054,50 @@ mod tests {
         let (out, seen) = run_with(RunOutcome::Failed, &["hello", "world"]);
         assert!(out.starts_with("run: programs take no arguments yet"));
         assert_eq!(seen, None);
+    }
+
+    fn kill_with(outcome: KillOutcome, args: &[&str]) -> (String, Option<u32>) {
+        let mut host = FakeHost::new();
+        host.kill = outcome;
+        let out = run("kill", args, &host);
+        (out, host.last_kill.get())
+    }
+
+    #[test]
+    fn kill_stops_the_process_and_names_it() {
+        let (out, seen) = kill_with(KillOutcome::Killed, &["7"]);
+        assert_eq!(out, "killed pid 7\r\n");
+        assert_eq!(seen, Some(7));
+    }
+
+    #[test]
+    fn kill_explains_why_it_did_not_kill() {
+        let cases = [
+            (KillOutcome::NotFound, "kill: no process with pid 7\r\n"),
+            (
+                KillOutcome::AlreadyEnding,
+                "kill: pid 7 is already ending\r\n",
+            ),
+            (KillOutcome::Unsupported, "kill: not in this build\r\n"),
+        ];
+        for (outcome, expected) in cases {
+            assert_eq!(kill_with(outcome, &["7"]).0, expected);
+        }
+    }
+
+    #[test]
+    fn kill_without_a_valid_pid_prints_usage_and_does_not_call_the_host() {
+        for args in [&[][..], &["x"][..], &["-1"][..], &["7", "8"][..]] {
+            let (out, seen) = kill_with(KillOutcome::Killed, args);
+            assert_eq!(out, "usage: kill <pid>\r\n", "{args:?}");
+            assert_eq!(seen, None);
+        }
+    }
+
+    #[test]
+    fn kill_is_listed_in_help() {
+        let out = run("help", &[], &FakeHost::new());
+        assert!(out.contains("kill"), "{out}");
     }
 
     #[cfg(feature = "bench")]

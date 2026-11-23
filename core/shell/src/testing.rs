@@ -5,8 +5,8 @@ use core::fmt;
 use rustos_hal::{BootTimeline, BootloaderId};
 
 use crate::{
-    BenchReport, CpuInfo, DisplayInfo, Host, Listing, MemoryInfo, MicroBench, ProgramInfo,
-    RunOutcome, ScaleSample, StormSample, SystemInfo, TaskInfo, TaskState,
+    BenchReport, CpuInfo, DisplayInfo, Host, KillOutcome, Listing, MemoryInfo, MicroBench,
+    ProgramInfo, RunOutcome, ScaleSample, StormSample, SystemInfo, TaskInfo, TaskState,
 };
 
 pub(crate) fn info() -> SystemInfo<'static> {
@@ -56,6 +56,9 @@ pub(crate) struct FakeHost {
     /// O que `run_program` responde, e o que ele recebeu da última chamada.
     pub(crate) outcome: RunOutcome,
     pub(crate) last_run: core::cell::RefCell<Option<(String, bool)>>,
+    /// O que `kill_program` responde, e o pid que ele recebeu da última chamada.
+    pub(crate) kill: KillOutcome,
+    pub(crate) last_kill: core::cell::Cell<Option<u32>>,
 }
 
 impl FakeHost {
@@ -71,6 +74,8 @@ impl FakeHost {
             listing: Listing::Done,
             outcome: RunOutcome::Exited { pid: 4, code: 0 },
             last_run: core::cell::RefCell::new(None),
+            kill: KillOutcome::Killed,
+            last_kill: core::cell::Cell::new(None),
             micro: Some(MicroBench {
                 zero_kib_tenths_ns: 153,
                 zero_page_tenths_ns: 205,
@@ -212,6 +217,11 @@ impl Host for FakeHost {
     fn run_program(&self, name: &str, wait: bool) -> RunOutcome {
         *self.last_run.borrow_mut() = Some((name.to_owned(), wait));
         self.outcome
+    }
+
+    fn kill_program(&self, pid: u32) -> KillOutcome {
+        self.last_kill.set(Some(pid));
+        self.kill
     }
 
     fn micro_bench(&self) -> Option<MicroBench> {

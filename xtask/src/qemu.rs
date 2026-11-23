@@ -110,7 +110,7 @@ struct Step {
 const SESSION: [Step; 7] = [
     Step {
         command: "ls",
-        expect: &["hello", "crash", "sysinfo", "count", "init"],
+        expect: &["hello", "crash", "sysinfo", "count", "spin", "init"],
     },
     Step {
         command: "run hello",
@@ -147,6 +147,8 @@ const SESSION: [Step; 7] = [
 ];
 /// A última linha de `count`, que prova que o programa em segundo plano terminou sozinho.
 const COUNT_DONE: &str = "[user] count: done";
+/// A linha com que `spin` começa a girar: o `run spin` só é interrompido depois dela.
+const SPIN_LINE: &str = "[user] spin: spinning";
 /// `count` conta cinco vezes meio segundo; sob TCG sobra folga.
 const COUNT_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -190,8 +192,8 @@ const SELFTEST_LINES: [(&str, &str); 23] = [
         "o autoteste dos casos de usuário",
     ),
     (
-        "[rustos] initramfs: 10 files, ",
-        "a leitura do initramfs (o `init`, as quatro demonstrações e os cinco de teste)",
+        "[rustos] initramfs: 11 files, ",
+        "a leitura do initramfs (o `init`, as cinco demonstrações e os cinco de teste)",
     ),
     (
         "[user] lazy: ok (",
@@ -469,6 +471,8 @@ fn type_session(
         }
         println!("xtask: `{}` ok", step.command);
     }
+    type_interrupt_and_kill(child, receiver, log)?;
+    println!("xtask: Ctrl-C no `run` e `kill <pid>` ok");
     let deadline = Instant::now() + COUNT_TIMEOUT;
     while !has_user_line(log, COUNT_DONE) {
         let Some(left) = deadline.checked_duration_since(Instant::now()) else {
@@ -483,6 +487,76 @@ fn type_session(
     }
     check_no_prompt_glue(log)?;
     check_no_heap_leak(child, receiver, log)
+}
+
+/// Digita `run spin`, espera o programa girar, manda Ctrl-C e confere que o shell voltou ao prompt. Depois
+/// lança `spin` em segundo plano, lê o pid e o mata com `kill`, e espera o kernel dizer que morreu.
+fn type_interrupt_and_kill(
+    child: &mut std::process::Child,
+    receiver: &mpsc::Receiver<String>,
+    log: &mut String,
+) -> Result<(), String> {
+    let from = log.len();
+    send(child, "run spin\r")?;
+    wait_until(receiver, log, from, |text| has_user_line(text, SPIN_LINE))
+        .map_err(|()| format!("`run spin` não imprimiu `{SPIN_LINE}`"))?;
+
+    let from = log.len();
+    send(child, "\x03")?;
+    read_to_prompt(receiver, log, from, Instant::now() + COMMAND_TIMEOUT);
+    let answer = strip_escapes(&log[from..]);
+    if !answer.contains("interrupted (pid ") || !ends_with_prompt(&log[from..]) {
+        return Err(format!(
+            "Ctrl-C não interrompeu o `run spin` e não devolveu o prompt:\n{answer}"
+        ));
+    }
+
+    let answer = type_command(child, receiver, log, "run spin &")?;
+    let pid =
+        started_pid(&answer).ok_or_else(|| format!("`run spin &` não disse o pid:\n{answer}"))?;
+    let from = log.len();
+    let answer = type_command(child, receiver, log, &format!("kill {pid}"))?;
+    if !answer.contains(&format!("killed pid {pid}")) {
+        return Err(format!("`kill {pid}` não confirmou a morte:\n{answer}"));
+    }
+    let death = format!("[rustos] user: pid {pid} killed (");
+    wait_until(receiver, log, from, |text| text.contains(&death))
+        .map_err(|()| format!("o kernel não registrou a morte do pid {pid} (`{death}`)"))
+}
+
+/// Manda `bytes` pela serial da QEMU, sem Enter.
+fn send(child: &mut std::process::Child, bytes: &str) -> Result<(), String> {
+    let stdin = child.stdin.as_mut().ok_or("QEMU sem stdin")?;
+    stdin
+        .write_all(bytes.as_bytes())
+        .and_then(|()| stdin.flush())
+        .map_err(|error| format!("mandar `{bytes:?}` pela serial: {error}"))
+}
+
+/// O pid que `run <programa> &` respondeu (`started pid N`).
+fn started_pid(answer: &str) -> Option<u32> {
+    let rest = answer.split("started pid ").nth(1)?;
+    rest.split_whitespace().next()?.parse().ok()
+}
+
+/// Lê para o `log` até `done` dizer que o texto desde `from` basta, ou o prazo acabar.
+fn wait_until(
+    receiver: &mpsc::Receiver<String>,
+    log: &mut String,
+    from: usize,
+    done: impl Fn(&str) -> bool,
+) -> Result<(), ()> {
+    let deadline = Instant::now() + COMMAND_TIMEOUT;
+    while !done(&log[from..]) {
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(());
+        };
+        match receiver.recv_timeout(left) {
+            Ok(chunk) => log.push_str(&chunk),
+            Err(_) => return Err(()),
+        }
+    }
+    Ok(())
 }
 
 /// Quantos `run hello` entre os dois `mem` do teste de vazamento.

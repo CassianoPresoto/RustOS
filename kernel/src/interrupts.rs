@@ -1,7 +1,7 @@
 //! Exceções e interrupções do lado do núcleo: relatório de falha, tique do timer
 //! e a fila de entrada que a IRQ enche e o laço do shell esvazia.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rustos_hal::{BootInfo, Cpu, Fault, FaultKind, Handlers, Irq};
 use rustos_sync::ByteRing;
@@ -60,6 +60,10 @@ static NEXT_TICK_NS: AtomicU64 = AtomicU64::new(0);
 static BREAKPOINTS: AtomicU64 = AtomicU64::new(0);
 /// Produtor: só `on_irq`. Consumidor: só `pop_input`, no laço do shell.
 static INPUT: ByteRing<256> = ByteRing::new();
+/// Ctrl-C chegou desde o último `clear_interrupt`; o `run` em primeiro plano o consome.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+/// O byte que Ctrl-C manda pela serial e pelo teclado.
+const CTRL_C: u8 = 0x03;
 
 /// Liga exceções, controlador, timer e entrada, e destrava as interrupções da CPU.
 /// `false` se a plataforma falhou: sem interrupção o shell não tem entrada.
@@ -144,6 +148,25 @@ pub fn pop_input() -> Option<u8> {
     unsafe { INPUT.pop() }
 }
 
+/// Esquece um Ctrl-C antigo: o do prompt não mata o próximo `run`.
+pub fn clear_interrupt() {
+    INTERRUPTED.store(false, Ordering::SeqCst);
+}
+
+/// Diz se chegou Ctrl-C desde a última limpeza, e o esquece.
+pub fn take_interrupt() -> bool {
+    INTERRUPTED.swap(false, Ordering::SeqCst)
+}
+
+/// Descarta a entrada que já chegou, como a tty do Unix faz no Ctrl-C: o `^C` não sobra para o prompt.
+/// Chamar só da tarefa do shell, como `pop_input`.
+pub fn flush_input() {
+    let cpu = platform::cpu();
+    let were_enabled = cpu.save_and_disable_interrupts();
+    while pop_input().is_some() {}
+    cpu.restore_interrupts(were_enabled);
+}
+
 /// O que acordou o laço do shell.
 #[derive(Clone, Copy, Debug)]
 pub enum Input {
@@ -178,6 +201,10 @@ pub fn read_input_blocking(output_waiting: impl Fn() -> bool) -> Input {
 fn push_input(byte: u8) {
     // SAFETY: `on_irq` é o único produtor e roda com IRQ mascarada, sem reentrar.
     unsafe { INPUT.push(byte) };
+    // Depois do `push`: quem vê a flag já acha o byte na fila.
+    if byte == CTRL_C {
+        INTERRUPTED.store(true, Ordering::SeqCst);
+    }
 }
 
 fn on_fault(fault: &Fault) {

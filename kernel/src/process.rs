@@ -4,7 +4,7 @@
 //! `process_kill` ou com a última thread. O programa plano de teste só existe no modo de teste.
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use core::ptr;
 #[cfg(feature = "selftest")]
 use core::sync::atomic::AtomicUsize;
@@ -23,7 +23,7 @@ use crate::frames::Frames;
 use crate::loader::{self, LoadError, Loaded};
 use crate::object::{ByteCharge, Lifecycle, Quota, Table, VecSlots, Work};
 use crate::sync::IrqLock;
-use crate::task::{self, Spawn, TaskError};
+use crate::task::{self, MAX_TASKS, Spawn, TaskError};
 use crate::uspace::{SpaceStats, Unresolved, UserSpace};
 use crate::{platform, tlb};
 
@@ -188,8 +188,9 @@ pub struct Program<'a> {
     pub arg0: u64,
 }
 
-/// O que `spawn` entrega: a tarefa, o número do processo e o que a carga custou.
-#[derive(Clone, Copy, Debug)]
+/// O que `spawn` entrega: a tarefa, o número do processo, o que a carga custou e o processo, que quem
+/// lança segura para esperá-lo ou matá-lo (as threads seguram as delas).
+#[derive(Debug)]
 pub struct Spawned {
     #[cfg_attr(
         not(feature = "selftest"),
@@ -207,6 +208,52 @@ pub struct Spawned {
         allow(dead_code, reason = "lido só pelo modo de teste")
     )]
     pub stats: SpaceStats,
+    pub process: Arc<Process>,
+}
+
+/// Os processos vivos por pid, para `kill` achar um. Uma posição por tarefa: um processo vivo tem
+/// pelo menos uma thread, e com a tabela cheia o processo só fica sem `kill`.
+type Registered = Option<(u32, Weak<Process>)>;
+static PROCESSES: IrqLock<[Registered; MAX_TASKS]> = IrqLock::new([const { None }; MAX_TASKS]);
+
+/// Põe `process` na tabela, numa posição vazia ou de um processo que já não existe. Tabela cheia: o
+/// processo fica sem `kill`, sem pânico. O `Weak` que sai é solto fora do lock.
+fn register(pid: u32, process: &Arc<Process>) {
+    let displaced = {
+        let mut table = PROCESSES.lock();
+        let Some(slot) = table.iter_mut().find(|slot| {
+            slot.as_ref()
+                .is_none_or(|(_, weak)| weak.strong_count() == 0)
+        }) else {
+            return;
+        };
+        slot.replace((pid, Arc::downgrade(process)))
+    };
+    drop(displaced);
+}
+
+/// Tira `pid` da tabela na morte: o processo morto não fica achável e o `Weak` não segura a memória
+/// do objeto até a posição ser reusada. O `Weak` que sai é solto fora do lock.
+fn forget(pid: u32) {
+    let displaced = {
+        let mut table = PROCESSES.lock();
+        table
+            .iter_mut()
+            .find(|slot| slot.as_ref().is_some_and(|(owner, _)| *owner == pid))
+            .and_then(Option::take)
+    };
+    drop(displaced);
+}
+
+/// O processo vivo de `pid`, se a tabela ainda o tem.
+pub fn find(pid: u32) -> Option<Arc<Process>> {
+    let table = PROCESSES.lock();
+    table
+        .iter()
+        .flatten()
+        .find(|(owner, _)| *owner == pid)?
+        .1
+        .upgrade()
 }
 
 /// O maior fundo da pilha do kernel que uma falha de usuário alcançou, em bytes.
@@ -425,6 +472,7 @@ impl Process {
             kprintln_serial!("[rustos] user: fault contained (pid {pid})");
         }
         *LAST_EVENT.lock() = Some((pid, event));
+        forget(pid);
         crate::programs::finished(pid, &event, no_memory, kernel_half);
     }
 }
@@ -613,6 +661,9 @@ pub fn spawn_with(
     let (arg0, peer) =
         boot::handles_of(&process, source, arg0, options).map_err(ProcessError::Handles)?;
     let thread = ThreadObj::new(&process, None);
+    let pid = process.pid;
+    // Antes de a thread rodar: a morte, que tira o pid da tabela, nunca chega antes do registro.
+    register(pid, &process);
     let task = start_thread(
         &process,
         thread,
@@ -625,17 +676,18 @@ pub fn spawn_with(
         affinity,
     )
     .map_err(|status| {
+        forget(pid);
         // O número só vale a um processo que existiu: devolve-o se ninguém pegou o seguinte.
-        let pid = process.pid;
         let _ = NEXT_PID.compare_exchange(pid + 1, pid, Ordering::Relaxed, Ordering::Relaxed);
         ProcessError::Task(task_error(status))
     })?;
     Ok((
         Spawned {
             task,
-            pid: process.pid,
+            pid,
             segments: loaded.segments,
             stats,
+            process,
         },
         peer,
     ))

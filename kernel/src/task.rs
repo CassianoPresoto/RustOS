@@ -1307,6 +1307,14 @@ pub fn wait_for_input(has_input: impl Fn() -> bool) {
     park_masked();
 }
 
+/// Registra a tarefa atual como a que espera entrada, sem dormir: a IRQ a acorda com `unpark`, que
+/// deixa a permissão se ela ainda não dorme. Quem chama confere a condição e só então dorme.
+pub fn watch_input() {
+    let current = current().as_u32() as usize;
+    INPUT_WAITER.store(current + 1, Ordering::SeqCst);
+    fence(Ordering::SeqCst);
+}
+
 /// Chamado da IRQ quando entrou byte na fila de entrada.
 pub fn notify_input() {
     fence(Ordering::SeqCst);

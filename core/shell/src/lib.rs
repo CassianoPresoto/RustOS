@@ -21,8 +21,8 @@ mod testing;
 
 pub use backlog::Backlog;
 pub use host::{
-    Access, BenchReport, CpuInfo, DisplayInfo, FaultTest, Host, KillCause, Listing, MemoryInfo,
-    MicroBench, ProgramInfo, RunOutcome, ScaleSample, StormSample, SystemInfo, TaskInfo, TaskName,
-    TaskState,
+    Access, BenchReport, CpuInfo, DisplayInfo, FaultTest, Host, KillCause, KillOutcome, Listing,
+    MemoryInfo, MicroBench, ProgramInfo, RunOutcome, ScaleSample, StormSample, SystemInfo,
+    TaskInfo, TaskName, TaskState,
 };
 pub use shell::Shell;

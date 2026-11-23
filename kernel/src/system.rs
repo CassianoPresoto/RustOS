@@ -5,8 +5,8 @@ use rustos_hal::{BootInfo, PAGE_SIZE, RegionKind};
 #[cfg(feature = "selftest")]
 use rustos_shell::{BenchReport, MicroBench};
 use rustos_shell::{
-    CpuInfo, DisplayInfo, FaultTest, Host, Listing, MemoryInfo, ProgramInfo, RunOutcome, Shell,
-    SystemInfo, TaskInfo, TaskState,
+    CpuInfo, DisplayInfo, FaultTest, Host, KillOutcome, Listing, MemoryInfo, ProgramInfo,
+    RunOutcome, Shell, SystemInfo, TaskInfo, TaskState,
 };
 use rustos_sync::SpinLock;
 use rustos_term::Layout;
@@ -218,6 +218,10 @@ impl<B: BootInfo> Host for System<'_, B> {
     fn run_program(&self, name: &str, wait: bool) -> RunOutcome {
         let offset = self.boot.direct_map_offset();
         programs::run(self.memory.frames, offset, self.initramfs, name, wait)
+    }
+
+    fn kill_program(&self, pid: u32) -> KillOutcome {
+        programs::kill(pid)
     }
 
     #[cfg(feature = "selftest")]
