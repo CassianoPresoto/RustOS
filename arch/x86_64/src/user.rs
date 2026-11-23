@@ -3,14 +3,18 @@
 
 use core::arch::{asm, global_asm};
 use core::ptr;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::percpu::prefix;
 use crate::prefix::{CpuPrefix, OFFSET_KERNEL_RSP, OFFSET_USER_RSP};
 use crate::segments::{USER_CODE, USER_DATA};
-use crate::sysreg::{MSR_EFER, MSR_FMASK, MSR_LSTAR, MSR_STAR, rdmsr, wrmsr};
+use crate::sysreg::{
+    CR3_NOFLUSH, CR3_PCID_MASK, CR4_PCIDE, CR4_PGE, MSR_EFER, MSR_FMASK, MSR_LSTAR, MSR_STAR,
+    rdmsr, read_cr4, write_cr4, wrmsr,
+};
 use crate::sysret::{FMASK, STAR, USER_RFLAGS};
 use crate::traps::SYSCALL_VECTOR;
+use rustos_hal::{TagFlush, TlbTag};
 
 /// `EFER.SCE`: liga `SYSCALL` e `SYSRET`.
 const EFER_SCE: u64 = 1;
@@ -82,23 +86,125 @@ pub fn set_kernel_root(root: u64) {
     KERNEL_ROOT.store(root, Ordering::Release);
 }
 
-/// Põe no `CR3` a raiz da tarefa (`0`: a do kernel) e, se é de usuário, `kernel_stack_top` no `RSP0`
-/// e em `gs:[kernel_rsp]`. Só escreve se a raiz mudou; o alocador garante que nenhuma raiz de processo é `0`.
+/// As etiquetas de TLB (PCID) estão ligadas em todas as CPUs: decidido pelo BSP em `enable_tags`.
+static TAGGED: AtomicBool = AtomicBool::new(false);
+/// `INVPCID` existe nesta máquina (`CPUID.7.0:EBX[10]`); sem ele, esvaziar tudo é `CR4.PGE` e a
+/// troca de uma etiqueta esvazia tudo.
+static INVPCID: AtomicBool = AtomicBool::new(false);
+
+/// Liga `CR4.PCIDE` no BSP, se o `CR3` do kernel tem os 12 bits baixos zerados (o `CR4` não aceita
+/// a troca com eles acesos). Devolve se as etiquetas valem para todas as CPUs.
 /// # Safety
-/// Ring 0, mascarada; `root` mapeia o kernel inteiro na metade alta.
-pub unsafe fn switch_space(root: u64, kernel_stack_top: u64) {
+/// Ring 0, com a raiz do kernel no `CR3`, antes de qualquer espaço de usuário.
+pub unsafe fn enable_tags(invpcid: bool) -> bool {
+    let cr3: u64;
+    // SAFETY: ler `CR3` não tem efeito; ring 0.
+    unsafe { asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags)) };
+    if cr3 & CR3_PCID_MASK != 0 {
+        return false;
+    }
+    INVPCID.store(invpcid, Ordering::Relaxed);
+    TAGGED.store(true, Ordering::Release);
+    // SAFETY: ring 0; `PCIDE` só muda a interpretação de `CR3[11:0]`, que é zero.
+    unsafe { write_cr4(read_cr4() | CR4_PCIDE) };
+    true
+}
+
+/// Põe `CR4.PCIDE` nesta CPU, se as etiquetas valem (cada núcleo tem o seu `CR4`). Devolve se a CPU
+/// ficou com as etiquetas que o BSP ligou: falso se o `CR3` dela tem bits de PCID acesos.
+/// # Safety
+/// Ring 0, com a raiz do kernel no `CR3`, depois de `enable_tags` no BSP.
+pub unsafe fn load_tags_cpu() -> bool {
+    if !TAGGED.load(Ordering::Acquire) {
+        return true;
+    }
+    let cr3: u64;
+    // SAFETY: ler `CR3` não tem efeito; ring 0.
+    unsafe { asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags)) };
+    if cr3 & CR3_PCID_MASK != 0 {
+        return false;
+    }
+    // SAFETY: o mesmo que `enable_tags`: `CR3[11:0]` é zero.
+    unsafe { write_cr4(read_cr4() | CR4_PCIDE) };
+    true
+}
+
+/// `INVPCID` com o descritor de 16 bytes: o PCID (com os bits altos zero) e o endereço linear.
+/// # Safety
+/// Ring 0 com `CR4.PCIDE` ligado (ou só tipos 2 e 3, sem ele); `kind` é 0 a 3.
+unsafe fn invpcid(kind: u64, pcid: u64, address: u64) {
+    let descriptor = [pcid, address];
+    // SAFETY: o contrato da função; o descritor vive na pilha durante a instrução.
+    unsafe {
+        asm!(
+            "invpcid {kind}, [{desc}]",
+            kind = in(reg) kind,
+            desc = in(reg) descriptor.as_ptr(),
+            options(nostack, readonly, preserves_flags),
+        );
+    }
+}
+
+/// Esvazia o TLB inteiro desta CPU, inclusive o global: `INVPCID` tipo 2 ou, sem ele, o `CR4.PGE`
+/// desligado e de volta (um `mov cr3` sem `NOFLUSH` só esvazia o PCID carregado).
+fn flush_all_local() {
+    if INVPCID.load(Ordering::Relaxed) {
+        // SAFETY: ring 0; tipo 2 vale com ou sem PCIDE, e o descritor é zero.
+        unsafe { invpcid(2, 0, 0) };
+    } else {
+        let cr4 = read_cr4();
+        // SAFETY: ring 0; mudar `PGE` esvazia o TLB e o valor volta ao que era.
+        unsafe { write_cr4(cr4 ^ CR4_PGE) };
+        // SAFETY: o mesmo contrato; restaura o valor de antes.
+        unsafe { write_cr4(cr4) };
+    }
+}
+
+/// Põe no `CR3` a raiz da tarefa (`0`: a do kernel, PCID 0) e, se é de usuário, `kernel_stack_top`
+/// no `RSP0`. Esvazia o que `flush` pede antes de carregar; sem etiqueta, escreve se a raiz mudou.
+/// # Safety
+/// Ring 0, mascarada; `root` mapeia o kernel na metade alta; `Tagged` só com `enable_tags` ligado.
+pub unsafe fn switch_space(root: u64, tag: TlbTag, kernel_stack_top: u64) {
     let cpu = prefix();
-    let target = if root == 0 {
+    let kernel = root == 0;
+    let target = if kernel {
         KERNEL_ROOT.load(Ordering::Acquire)
     } else {
         root
     };
-    if cpu.active_root.load(Ordering::Relaxed) != target {
-        // SAFETY: o contrato da função; `target` mapeia o código e a pilha em uso.
-        unsafe { asm!("mov cr3, {}", in(reg) target, options(nostack, preserves_flags)) };
-        cpu.active_root.store(target, Ordering::Relaxed);
+    match tag {
+        TlbTag::Untagged => {
+            if cpu.active_root.load(Ordering::Relaxed) != target {
+                // SAFETY: o contrato da função; `target` mapeia o código e a pilha em uso.
+                unsafe { asm!("mov cr3, {}", in(reg) target, options(nostack, preserves_flags)) };
+                cpu.active_root.store(target, Ordering::Relaxed);
+            }
+        }
+        TlbTag::Tagged { index, flush } => {
+            let pcid = if kernel { 0 } else { u64::from(index) };
+            let value = target | pcid;
+            match flush {
+                TagFlush::Keep => {}
+                TagFlush::Space => {
+                    if INVPCID.load(Ordering::Relaxed) {
+                        // SAFETY: ring 0; tipo 1 invalida só este PCID, sem endereço.
+                        unsafe { invpcid(1, pcid, 0) };
+                    } else {
+                        flush_all_local();
+                    }
+                }
+                TagFlush::All => flush_all_local(),
+            }
+            if flush != TagFlush::Keep || cpu.active_root.load(Ordering::Relaxed) != value {
+                // SAFETY: o contrato da função; `value` tem o PCID da raiz e `NOFLUSH` já cuidou do TLB.
+                unsafe {
+                    asm!("mov cr3, {}", in(reg) value | CR3_NOFLUSH, options(nostack, preserves_flags));
+                }
+                cpu.active_root.store(value, Ordering::Relaxed);
+            }
+        }
     }
-    if root != 0 {
+    if !kernel {
         set_entry_stack(cpu, kernel_stack_top);
     }
 }

@@ -170,7 +170,7 @@ const COUNT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// O que só o modo de teste imprime: se uma destas faltar, a linha de comando se perdeu e o
 /// boot que passou foi o normal.
-const SELFTEST_LINES: [(&str, &str); 23] = [
+const SELFTEST_LINES: [(&str, &str); 25] = [
     (
         "[rustos] cpu features: ",
         "os recursos de CPU das mitigações",
@@ -226,6 +226,14 @@ const SELFTEST_LINES: [(&str, &str); 23] = [
     (
         "[rustos] tlb shootdown ring: ok (",
         "o estresse de invalidação do TLB em anel com todas as CPUs",
+    ),
+    (
+        "[rustos] asid self-test: ok (",
+        "as etiquetas de TLB: nenhum espaço lê a página de outro depois da virada de geração",
+    ),
+    (
+        "[rustos] asid bench: ",
+        "a medida de troca entre dois espaços com etiqueta",
     ),
 ];
 /// O que o boot normal confere, além do que o `REQUIRED` tem de comum aos dois modos.

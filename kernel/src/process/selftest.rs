@@ -13,11 +13,12 @@ use rustos_hal::abi::{ProcessEvent, USER_TOP, event_kind, fault_access, fault_ki
 
 mod demand;
 mod procs;
+mod tags;
 
 use super::{Source, fault_peak, last_event, spawn, spawn_as, spawn_keeping};
 use crate::frames::Frames;
 use crate::uspace::{Resolved, UserSpace, set_frame_budget};
-use crate::{loader, platform, scrub, task};
+use crate::{asid, loader, platform, scrub, task};
 use rustos_mm::vmar::Access;
 
 /// Quanto o autoteste espera um processo acabar, e o passo da espera.
@@ -590,6 +591,8 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
     let shot = demand::shootdown(frames, map_offset)
         && demand::ring_stress(frames, map_offset, demand::RING_ROUNDS, false)
         && demand::ring_stress(frames, map_offset, demand::RING_ROUNDS, true);
+    let tagged = tags::isolation(frames, map_offset);
+    let switch = tags::switch_ns(frames, map_offset);
     let (syscall_depth, fault_depth) = (scrub::deepest(), fault_peak());
     scrub::set_measuring(false);
     let clean_found = residue(frames, map_offset, archive);
@@ -622,6 +625,12 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
         syscall_depth,
         fault_depth
     );
+    if let Some(ns) = switch {
+        kprintln!(
+            "[rustos] asid bench: {ns} ns per switch between two spaces, one read each ({} bits)",
+            asid::bits()
+        );
+    }
     let ok = hello
         && kernel_ok
         && privileged
@@ -637,6 +646,8 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
         && resolver
         && lazy
         && shot
+        && tagged
+        && switch.is_some()
         && medians.is_some();
     kprintln!(
         "[rustos] user self-test: {} (hello {hello}, kernel page {kernel_ok}, privileged {privileged}, trap {trap}, bad stack {stack}, flags {flags}, stack clean {scrub_ok}, big {big}, handles {handles}, processes {processes}, bad executables {refused}, unaligned segment {unaligned}, fault resolver {resolver}, lazy program {lazy}, tlb shootdown {shot})",

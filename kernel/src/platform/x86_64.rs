@@ -28,6 +28,7 @@ pub use rustos_arch_x86_64::{Context, CpuPrefix, call_on_stack, switch};
 use rustos_arch_x86_64::{DirectMapTables, pte::X86Format};
 use rustos_driver_i8042::I8042;
 use rustos_driver_uart16550::{DIVISOR_115200, Uart16550};
+use rustos_hal::TlbTag;
 use rustos_hal::{
     BootInfo, FrameSource, Handlers, Irq, KeyEvent, MapError, MmuControl, PAGE_SIZE, PageMapper,
     PhysAddr, TickScale,
@@ -649,6 +650,10 @@ pub fn secondary_init(resources: SecondaryResources) -> Result<(), PlatformError
 /// O x86_64 mantém o cache de instrução coerente com as escritas: nada a fazer.
 pub fn sync_icache(_start: usize, _len: usize) {}
 
+/// Liga as etiquetas de PCID no x86_64. Desligado até o primeiro boot em metal ou KVM com PCID (DEBT-0155):
+/// o caminho com etiqueta está compilado e não foi executado.
+const PCID_ENABLED: bool = false;
+
 /// A raiz do kernel e o que o usuário precisa antes da primeira tarefa. Uma vez, depois de
 /// `Vm::activate`; o x86_64 não aloca nada.
 #[allow(
@@ -657,19 +662,33 @@ pub fn sync_icache(_start: usize, _len: usize) {}
 )]
 pub fn user_init(_frames: &mut impl FrameSource) -> Result<(), MapError> {
     rustos_arch_x86_64::set_kernel_root(kernel_root().as_u64());
+    let features = mitigation_features();
+    crate::asid::note_hardware(features.pcid);
+    // SAFETY: ring 0 no BSP, com a raiz do kernel no `CR3` e antes de qualquer espaço de usuário.
+    let tagged = PCID_ENABLED
+        && features.pcid
+        && unsafe { rustos_arch_x86_64::enable_tags(features.invpcid) };
+    crate::asid::init(tagged.then_some(12));
     Ok(())
 }
 
 /// O que cada CPU faz antes de rodar tarefa de usuário: no x86_64, nada (`load_cpu` já ligou o
 /// `SYSCALL`).
-pub fn user_cpu_init() {}
+pub fn user_cpu_init() {
+    // SAFETY: ring 0 num secundário, com a raiz do kernel no `CR3`, depois de `enable_tags` no BSP.
+    let same = unsafe { rustos_arch_x86_64::load_tags_cpu() };
+    assert!(
+        same,
+        "CR3 com bits de PCID num secundário: etiquetas só em parte das CPUs"
+    );
+}
 
 /// Troca o espaço de endereçamento desta CPU para o da tarefa que vai rodar; `root` zero é
 /// tarefa do kernel. Com a IRQ mascarada.
-pub fn switch_space(root: u64, kernel_stack_top: u64) {
+pub fn switch_space(root: u64, tag: TlbTag, kernel_stack_top: u64) {
     // SAFETY: o chamador mascara a IRQ, `root` é de um espaço montado por `new_user_space` (com a
-    // metade do kernel) e o topo é o da pilha da tarefa.
-    unsafe { rustos_arch_x86_64::switch_space(root, kernel_stack_top) };
+    // metade do kernel), a etiqueta é da geração do gerador e o topo é o da pilha da tarefa.
+    unsafe { rustos_arch_x86_64::switch_space(root, tag, kernel_stack_top) };
 }
 
 /// Primeira volta ao anel 3. Nunca volta.

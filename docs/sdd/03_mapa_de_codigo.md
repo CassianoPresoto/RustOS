@@ -29,9 +29,10 @@
 │       ├── programs.rs         # o que o shell faz com programas (M1): `ls` lê o `cpio`, `run` carrega com `process::spawn_as` (o nome vai ao `ps`) e espera o fim do processo (a tabela de 16 fins que `process::terminate` alimenta)
 │       ├── userout.rs          # a saída `[user]` e o shell: direto durante o `run` em primeiro plano, senão numa fila de 1 KiB (`Backlog` do `core/shell`) que o laço do shell mostra sem rasgar o prompt; as linhas `kprintln_serial!` esperam do mesmo modo, marcadas para só a serial
 │       ├── init.rs             # (feature `selftest`) lança o `init` do initramfs, espera e confere o código de saída; mede o custo do menor processo
-│       ├── uspace.rs           # UserSpace: tabelas da metade baixa, mapeamento de frames zerados (`map_at`), a falta de página resolvida (página zero, frame novo, cópia da página zero), `unmap_page` com *shootdown*, a máscara de CPUs ativas e a devolução zerada na morte (4c)
+│       ├── uspace.rs           # UserSpace (com `Shared`: a máscara de CPUs ativas, a etiqueta do espaço e o `tlb_gen`, 4e parte 2): tabelas da metade baixa, mapeamento de frames zerados (`map_at`), a falta de página resolvida (página zero, frame novo, cópia da página zero), `unmap_page` com *shootdown*, a máscara de CPUs ativas e a devolução zerada na morte (4c)
 │       ├── commit.rs           # a promessa estrita das páginas preguiçosas contra os frames livres (decisão 9 do SDD 17, a parte da 4c)
 │       ├── tlb.rs              # *shootdown* de TLB: no x86_64 caixas por par de CPUs e o IPI `0xFC` com espera; no aarch64 nada (o `tlbi ...is` basta)
+│       ├── asid.rs             # etiquetas de TLB (PCID e ASID): o gerador global atrás de um lock, `for_switch` (a regra de geração e a migração pelo `tlb_gen`); sem etiqueta, a troca é a de antes (4e, parte 2)
 │       ├── syscall.rs          # o despacho da ABI nativa por tabela com clamp: `nop`, `clock_get_monotonic`, `random_get`, `process_exit`, `debug_write(console, …)`; `syscall/handles.rs`: handle, canal e espera (4c); VMO, VMAR, processo e thread ainda devolvem `NotSupported`
 │       ├── scrub.rs            # a limpeza da pilha do kernel na volta ao usuário (`Handlers::leave_user`)
 │       ├── stack.rs            # marca d'água das pilhas: pinta com um padrão e lê o pico varrendo do fundo (SDD 15)
@@ -143,6 +144,7 @@ EEVDF) escolhe a próxima tarefa e o kernel guarda o estado dela ([SDD 14](14_es
 | Comando do shell embutido | `core/shell/`; o dado do sistema chega pela porta `Host` |
 | Tema, barra do topo, como a grade vira pixel | `kernel/src/screen.rs` |
 | Vulnerabilidade de CPU, mitigação e a linha `mitigations:` | a decodificação do CPUID e dos registradores e a regra do Linux em `arch/<isa>/src/mitigation.rs` (puro); o tipo `Vulns`, a política `kpti=` e o texto da linha em `core/hal/src/mitigation.rs`; o clamp de índice em `core/hal/src/nospec.rs` (a `CSDB` do aarch64 em `arch/aarch64/src/nospec.rs`); a linha em `kernel/src/mitigation.rs` |
+| Etiqueta de TLB (PCID e ASID) | o tipo `TlbTag` e o `TagFlush` em `core/hal/src/tag.rs` (a troca só recebe o que esvazia); o `Asid` e o gerador em `core/mm/src/asid.rs` (puro); o gerador global, a regra de geração e a migração em `kernel/src/asid.rs`; o `CR4.PCIDE`, o `INVPCID` e o `CR3` em `arch/x86_64/src/user.rs`, e o `TTBR0_EL1` e o `TCR_EL1.AS` em `arch/aarch64/src/user.rs`; o autoteste em `kernel/src/process/selftest/tags.rs` |
 | Contrato que o núcleo precisa do hardware | trait em `core/hal` |
 | Instrução privilegiada, registrador de sistema, formato de tabela de página | `arch/<isa>/`; a parte pura (codificação, caminhada) em módulo sem `asm!`, testável no host |
 | Protocolo de bootloader | `boot/<protocolo>/` |

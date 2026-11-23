@@ -30,6 +30,11 @@ pub const MSR_TSC_DEADLINE: u32 = 0x6E0;
 pub const CR4_UMIP: u64 = 1 << 11;
 pub const CR4_SMEP: u64 = 1 << 20;
 pub const CR4_SMAP: u64 = 1 << 21;
+/// `CR4.PCIDE` (bit 17): liga as etiquetas de TLB (PCID) nos 12 bits baixos do `CR3`.
+pub const CR4_PCIDE: u64 = 1 << 17;
+/// Bits baixos do `CR3` que o PCID ocupa; bit 63 (`NOFLUSH`) não esvazia o TLB no `mov cr3`.
+pub const CR3_PCID_MASK: u64 = 0xFFF;
+pub const CR3_NOFLUSH: u64 = 1 << 63;
 
 /// Lê o MSR `msr`.
 ///

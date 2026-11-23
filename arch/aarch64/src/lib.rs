@@ -71,7 +71,7 @@ pub use prefix::CpuPrefix;
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub use stack::{Continuation, call_on_stack};
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub use user::{enter_user, init_user, switch_space};
+pub use user::{asid_bits, enter_user, init_user, switch_space};
 
 /// PL011, distribuidor e redistribuidor do GICv3 da máquina `virt` da QEMU (DEBT-0002).
 pub const QEMU_VIRT_PL011: u64 = 0x0900_0000;
