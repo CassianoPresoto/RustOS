@@ -115,9 +115,8 @@ fn wait_for(pid: u32, process: &Arc<Process>) -> (Ended, bool) {
         task::watch_input();
         let ended = take(pid);
         if ended.is_none() && !interrupted && interrupts::take_interrupt() {
-            interrupted = true;
-            // `BadState`: o processo já morria, e o fim chega do mesmo jeito.
-            let _ = process.kill();
+            // `BadState`: o processo já morria por conta própria; o fim dele é o que se mostra.
+            interrupted = process.kill().is_ok();
             interrupts::flush_input();
             WAITERS.unregister(bit);
             continue;
