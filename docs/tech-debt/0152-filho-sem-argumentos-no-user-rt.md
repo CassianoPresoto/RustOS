@@ -1,7 +1,7 @@
 ---
 id: DEBT-0152
 title: `user/rt` não passa argumentos ao filho que cria (`process_create` sem `argv`)
-status: Open # Open | Paid | Dropped
+status: Open
 date: 2026-11-23
 trigger: O primeiro programa de `user/` que crie um processo filho com argumentos
 paid_date:
@@ -27,6 +27,6 @@ O primeiro programa de `user/` que crie um processo filho com argumentos.
 
 ## Como pagar
 
-`Child::spawn` do `user/rt` recebe o `argv` e o passa a `InitialStack::build` (que já aceita, com os tetos
+`spawn::create` do `user/rt` recebe o `argv` e `Child::map_stack` o passa a `InitialStack::build` (que já aceita, com os tetos
 `ARGS_MAX` e `ARGS_BYTES_MAX`). Se a criação pelo kernel precisar do `argv`, a mudança passa pela decisão
 de syscall antes de qualquer código.

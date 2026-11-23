@@ -1140,6 +1140,14 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_argument_is_just_its_zero() {
+        let args: [&[u8]; 3] = [b"count", b"", b"3"];
+        let stack = InitialStack::build(TOP, &start(None), &args).unwrap();
+        assert_argv_is(&stack, &args);
+        assert_eq!(stack.sp() % 16, 0);
+    }
+
+    #[test]
     fn several_arguments_keep_their_order_and_their_own_strings() {
         let args: [&[u8]; 3] = [b"count", b"3", b"x y"];
         let stack = InitialStack::build(TOP, &start(None), &args).unwrap();

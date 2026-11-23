@@ -987,6 +987,12 @@ mod tests {
                 true
             ))
         );
+        // Só um `&` final é o operador: em `&&`, o outro fica como argumento.
+        let (_, seen) = run_with(RunOutcome::Started { pid: 9 }, &["count", "&&"]);
+        assert_eq!(
+            seen,
+            Some(("count".to_owned(), vec!["&".to_owned()], false))
+        );
     }
 
     #[test]
