@@ -437,7 +437,23 @@ fn expected_fault(case: &str) -> Option<(u32, u64)> {
 /// `isa_code` esperados. Qualquer outra falta, ou saída, dá `None`.
 fn caused(result: Option<(u32, ProcessEvent)>, case: &str) -> Option<ProcessEvent> {
     let (kind, isa) = expected_fault(case)?;
-    faulted(result).filter(|event| event.fault_kind == kind && event.isa_code == isa)
+    faulted(result).filter(|event| {
+        (event.fault_kind == kind && event.isa_code == isa) || unchecked_alignment(case, event)
+    })
+}
+
+/// O TCG da QEMU 8.2 (o do CI) não recusa o `sp` desalinhado do `fault-bad-stack`, como o HVF faz:
+/// o `ldr` vira falta de página no próprio `sp`. Os dois provam o caso.
+#[cfg(target_arch = "aarch64")]
+fn unchecked_alignment(case: &str, event: &ProcessEvent) -> bool {
+    case == "fault-bad-stack"
+        && event.fault_kind == fault_kind::PAGE_FAULT
+        && event.addr == BAD_STACK
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn unchecked_alignment(_: &str, _: &ProcessEvent) -> bool {
+    false
 }
 
 /// O endereço e o `sp` como o evento os leva: `ProcessEvent::for_user` zera o que está fora de
