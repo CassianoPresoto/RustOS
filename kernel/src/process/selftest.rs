@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use alloc::string::ToString;
 
-use rustos_hal::abi::{ProcessEvent, event_kind, fault_kind};
+use rustos_hal::abi::{ProcessEvent, USER_TOP, event_kind, fault_access, fault_kind};
 
 mod demand;
 mod procs;
@@ -405,6 +405,50 @@ fn faulted(result: Option<(u32, ProcessEvent)>) -> Option<ProcessEvent> {
         .filter(|event| event.kind == event_kind::FAULT)
 }
 
+/// O `sp` que `fault-bad-stack` recebe pelo `argv` e põe no `rsp`/`sp`: o evento o leva só até `USER_TOP`.
+#[cfg(target_arch = "x86_64")]
+const BAD_STACK: u64 = 0x1234_8000_0000_0000;
+#[cfg(target_arch = "aarch64")]
+const BAD_STACK: u64 = 1;
+
+/// O `fault_kind` e o `isa_code` que cada falta do `cases` deixa nesta ISA, medidos com o programa.
+/// O `isa_code` é o vetor e o código de erro do x86_64 e a `ESR` do aarch64.
+#[cfg(target_arch = "x86_64")]
+fn expected_fault(case: &str) -> Option<(u32, u64)> {
+    Some(match case {
+        "fault-memory" => (fault_kind::PAGE_FAULT, 0xe_0000_0005),
+        "fault-privileged" | "fault-bad-stack" => (fault_kind::OTHER, 0xd_0000_0000),
+        "fault-trap" => (fault_kind::OTHER, 0x1_0000_0000),
+        _ => return None,
+    })
+}
+#[cfg(target_arch = "aarch64")]
+fn expected_fault(case: &str) -> Option<(u32, u64)> {
+    Some(match case {
+        "fault-memory" => (fault_kind::PAGE_FAULT, 0x9200_000f),
+        "fault-privileged" => (fault_kind::ILLEGAL_INSTRUCTION, 0x200_0000),
+        "fault-trap" => (fault_kind::BREAKPOINT, 0xf200_0000),
+        "fault-bad-stack" => (fault_kind::UNALIGNED, 0x9a00_0000),
+        _ => return None,
+    })
+}
+
+/// A falta que `case` deve causar nesta ISA: o evento de morte por falta com o `fault_kind` e o
+/// `isa_code` esperados. Qualquer outra falta, ou saída, dá `None`.
+fn caused(result: Option<(u32, ProcessEvent)>, case: &str) -> Option<ProcessEvent> {
+    let (kind, isa) = expected_fault(case)?;
+    faulted(result).filter(|event| event.fault_kind == kind && event.isa_code == isa)
+}
+
+/// O endereço e o `sp` como o evento os leva: `ProcessEvent::for_user` zera o que está fora de
+/// `[0, USER_TOP)`, então um endereço do kernel nunca aparece no evento.
+fn visible_addr(addr: u64) -> u64 {
+    if addr < USER_TOP { addr } else { 0 }
+}
+fn visible_sp(sp: u64) -> u64 {
+    if sp <= USER_TOP { sp } else { 0 }
+}
+
 /// Décimos de ns por chamada de uma execução do laço, na CPU `cpu` (sem migração no meio).
 fn sample_tenths_ns(
     frames: Frames,
@@ -495,36 +539,30 @@ fn hello_on_every_cpu(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -
 pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
     let hello = hello_on_every_cpu(frames, map_offset, archive) && copy_fixup_ran_with_ac_clear();
     let probe = ptr::addr_of!(KERNEL_PROBE).expose_provenance() as u64;
-    let kernel = faulted(run_case(
-        frames,
-        map_offset,
-        archive,
+    let kernel = caused(
+        run_case(frames, map_offset, archive, "fault-memory", probe, 0),
         "fault-memory",
-        probe,
-        0,
-    ));
-    let kernel_ok = kernel.is_some_and(|event| event.fault_kind == fault_kind::PAGE_FAULT);
+    );
+    let kernel_ok = kernel.is_some_and(|event| {
+        event.access == fault_access::PROTECTION && event.addr == visible_addr(probe)
+    });
     AC_LEAKS.store(0, Ordering::Relaxed);
-    let privileged = faulted(run_case(
-        frames,
-        map_offset,
-        archive,
+    let privileged = caused(
+        run_case(frames, map_offset, archive, "fault-privileged", 0, 0),
         "fault-privileged",
-        0,
-        0,
-    ))
+    )
     .is_some()
         && AC_LEAKS.load(Ordering::Relaxed) == 0;
-    let trap = faulted(run_case(frames, map_offset, archive, "fault-trap", 0, 0)).is_some();
-    let stack = faulted(run_case(
-        frames,
-        map_offset,
-        archive,
-        "fault-bad-stack",
-        0,
-        0,
-    ))
+    let trap = caused(
+        run_case(frames, map_offset, archive, "fault-trap", 0, 0),
+        "fault-trap",
+    )
     .is_some();
+    let stack = caused(
+        run_case(frames, map_offset, archive, "fault-bad-stack", BAD_STACK, 0),
+        "fault-bad-stack",
+    )
+    .is_some_and(|event| event.sp == visible_sp(BAD_STACK));
     let flags = flags_survive(frames, map_offset, archive);
     let resolver = demand::resolver_cases(frames, map_offset);
     let big = big_program_runs(frames, map_offset, archive);

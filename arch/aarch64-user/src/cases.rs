@@ -1,5 +1,6 @@
-//! Os casos de falha do `user/tests/cases` (SDD 17, fatia 4a), em aarch64: cada função é um caso,
-//! com as instruções que antes ficavam num blob do kernel. Nenhum volta: morre na falta ou sai.
+//! Os casos de falha do `user/tests/cases` (SDD 17, fatia 4a), em aarch64: cada função é um caso.
+//! Seguras por fora: o valor recebido (endereço ou `sp`) só age como falta que mata o processo, ou
+//! como a saída pela syscall de saída. Nenhuma função volta.
 
 use core::arch::asm;
 
@@ -135,21 +136,20 @@ pub fn trap() -> ! {
     }
 }
 
-/// Aponta `sp` para um endereço inválido e lê a pilha: o kernel não pode cair ao voltar.
-pub fn bad_stack() -> ! {
+/// Aponta `sp` para `sp`, um endereço inválido, e lê a pilha: o kernel não pode cair ao voltar.
+pub fn bad_stack(sp: u64) -> ! {
     // SAFETY: o `sp` inválido só vale para o processo, que morre na leitura da pilha; o bloco não
     // volta, então o `sp` antigo não precisa ser restaurado.
     unsafe {
         asm!(
-            "mov x1, #1",
             "mov sp, x1",
             "ldr x0, [sp]",
             "mov x0, #0",
             "mov x8, #{process_exit}",
             "svc #0",
             "brk #0",
+            in("x1") sp,
             process_exit = const Syscall::ProcessExit as u64,
-
             options(noreturn),
         )
     }

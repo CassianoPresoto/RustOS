@@ -30,6 +30,7 @@ clippy: ## lint no host e nos dois alvos bare-metal (kernel com e sem `selftest`
 		for program in rustos-user-rt rustos-user-init rustos-user-hello rustos-user-crash rustos-user-sysinfo rustos-user-count rustos-user-test-big rustos-user-test-handles rustos-user-test-lazy rustos-user-test-child rustos-user-test-procs; do \
 			cargo clippy --package $$program --package rustos-arch-$${target%%-*}-user --target $$target -- -D warnings || exit 1; \
 		done; \
+		cargo clippy --package rustos-user-test-cases --package rustos-arch-$${target%%-*}-user --features rustos-arch-$${target%%-*}-user/test-cases --target $$target -- -D warnings || exit 1; \
 	done
 
 layers-check: ## dependências entre camadas, crates externos, unsafe e asm no lugar certo
