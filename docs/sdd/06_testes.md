@@ -18,7 +18,8 @@
 
 Todo crate de `core/` e `lib/` é `#![cfg_attr(not(test), no_std)]`: no teste, tem
 `std`; no kernel, não. Exemplos: `core/mm/src/frame.rs` (alocação, dupla liberação,
-faixas recortadas, palavras parciais), `core/mm/src/buddy.rs` e `heap.rs` (400 mil e
+faixas recortadas, palavras parciais), `core/mm/src/buddy.rs` (o frame 0 nunca sai do
+alocador, nem em faixa de uma página só) e `heap.rs` (400 mil e
 300 mil passos aleatórios contra um modelo `BTreeMap`: nada se sobrepõe, o conteúdo
 sobrevive e tudo volta ao estado de partida), `lib/sync/src/spin.rs` (4 threads × 10 000
 incrementos — foi esse teste que achou o `then_some` que soltava o lock alheio).
