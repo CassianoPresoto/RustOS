@@ -82,8 +82,8 @@ pub fn set_kernel_root(root: u64) {
     KERNEL_ROOT.store(root, Ordering::Release);
 }
 
-/// Põe no `CR3` a raiz da tarefa (`0`: a do kernel) e, se é de usuário, `kernel_stack_top` no
-/// `RSP0` da TSS e em `gs:[kernel_rsp]`. Só escreve o `CR3` se a raiz mudou.
+/// Põe no `CR3` a raiz da tarefa (`0`: a do kernel) e, se é de usuário, `kernel_stack_top` no `RSP0`
+/// e em `gs:[kernel_rsp]`. Só escreve se a raiz mudou; o alocador garante que nenhuma raiz de processo é `0`.
 /// # Safety
 /// Ring 0, mascarada; `root` mapeia o kernel inteiro na metade alta.
 pub unsafe fn switch_space(root: u64, kernel_stack_top: u64) {

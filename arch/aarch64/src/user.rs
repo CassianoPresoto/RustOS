@@ -45,7 +45,7 @@ pub unsafe fn init_user(empty_root: u64) {
     unsafe { asm!("msr tcr_el1, {}", "isb", in(reg) tcr, options(nostack, preserves_flags)) };
 }
 
-/// Põe no `TTBR0_EL1` a raiz da tarefa que vai rodar (`0`: a raiz vazia); só escreve se mudou.
+/// Põe no `TTBR0_EL1` a raiz da tarefa (`0`: a vazia); só escreve se mudou. O alocador garante que nenhuma raiz de processo é `0`.
 ///
 /// # Safety
 /// EL1, mascarada, depois de `init_user` nesta CPU; `root` é de um espaço de usuário válido.

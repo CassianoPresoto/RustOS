@@ -1,6 +1,6 @@
 //! Alocador buddy de frames: blocos de 2^k frames alinhados a 2^k, sem tocar a memória deles.
 
-use rustos_hal::{FrameSource, PhysAddr};
+use rustos_hal::{FrameSource, PAGE_SIZE, PhysAddr};
 
 use crate::bittree::{BitTree, words_for};
 use crate::frame::{FRAME_SIZE, FrameError, PhysFrame};
@@ -8,6 +8,8 @@ use crate::frame::{FRAME_SIZE, FrameError, PhysFrame};
 /// Maior bloco: 2^18 frames = 1 GiB, o tamanho da página grande do x86_64 e do aarch64.
 pub const MAX_ORDER: usize = 18;
 const ORDERS: usize = MAX_ORDER + 1;
+/// Índice do frame em `PAGE_SIZE`: o frame 0 fica fora do alocador (ver `release_range`).
+const FIRST_ALLOCATABLE_FRAME: usize = (PAGE_SIZE / FRAME_SIZE) as usize;
 
 /// Fonte de frames em corridas contíguas, em ordem alinhada; o heap e o cache falam com ela.
 pub trait FrameAllocator {
@@ -172,9 +174,12 @@ impl<'a> BuddyAllocator<'a> {
     }
 
     /// Libera os frames inteiramente contidos em `[start, start + len)`; os já livres ficam.
+    /// Nunca libera o frame 0: o kernel usa o endereço 0 como sentinela de "nenhuma"
+    /// (raiz do kernel em `switch_space`, entrada vazia na tabela). Se entrasse, uma
+    /// raiz de processo 0 viraria a do kernel.
     pub fn release_range(&mut self, start: PhysAddr, len: u64) {
         if let Some((first, last)) = self.span(start, len, true) {
-            let mut frame = first;
+            let mut frame = first.max(FIRST_ALLOCATABLE_FRAME);
             while frame < last {
                 let order = fit_order(frame, last);
                 self.release_block(frame, order);
@@ -457,6 +462,28 @@ mod tests {
         assert_eq!(buddy.largest_free_order(), Some(10));
     }
 
+    /// O frame 0 é sentinela no kernel: `release_range` nunca o entrega, nem a uma faixa que o cobre.
+    #[test]
+    fn frame_zero_never_enters_the_allocator() {
+        let mut storage = Vec::new();
+        let mut buddy = released(&mut storage, 0, 64);
+        assert_eq!(buddy.free_frames(), 63);
+        let mut seen = vec![number(buddy.allocate().unwrap())];
+        while let Some(frame) = buddy.allocate() {
+            seen.push(number(frame));
+        }
+        assert_eq!(seen.len(), 63);
+        assert_eq!(seen[0], 1);
+        assert!(!seen.contains(&0));
+    }
+
+    #[test]
+    fn single_frame_range_at_zero_releases_nothing() {
+        let mut storage = Vec::new();
+        let buddy = released(&mut storage, 0, 1);
+        assert_eq!((buddy.free_frames(), buddy.largest_free_order()), (0, None));
+    }
+
     #[test]
     fn region_that_starts_unaligned_is_cut_into_aligned_blocks() {
         let mut storage = Vec::new();
@@ -501,18 +528,18 @@ mod tests {
     #[test]
     fn hands_out_the_lowest_address_of_the_smallest_fitting_order() {
         let mut storage = Vec::new();
-        let mut buddy = released(&mut storage, 0, 16);
-        assert_eq!(number(buddy.allocate().unwrap()), 0);
-        assert_eq!(number(buddy.allocate().unwrap()), 1);
-        assert_eq!(number(buddy.allocate_order(1).unwrap()), 2);
-        assert_eq!(number(buddy.allocate().unwrap()), 4);
+        let mut buddy = released(&mut storage, 16, 16);
+        assert_eq!(number(buddy.allocate().unwrap()), 16);
+        assert_eq!(number(buddy.allocate().unwrap()), 17);
+        assert_eq!(number(buddy.allocate_order(1).unwrap()), 18);
+        assert_eq!(number(buddy.allocate().unwrap()), 20);
         assert_eq!(buddy.free_frames(), 16 - 5);
     }
 
     #[test]
     fn freeing_one_frame_merges_the_whole_cascade() {
         let mut storage = Vec::new();
-        let mut buddy = released(&mut storage, 0, 1 << 12);
+        let mut buddy = released(&mut storage, 1 << 12, 1 << 12);
         assert_eq!(buddy.largest_free_order(), Some(12));
         let frame = buddy.allocate().unwrap();
         assert_eq!(buddy.largest_free_order(), Some(11));
@@ -525,10 +552,10 @@ mod tests {
     fn serves_the_maximum_order_and_refuses_the_next() {
         let frames = 1 << MAX_ORDER;
         let mut storage = Vec::new();
-        let mut buddy = released(&mut storage, 0, frames);
+        let mut buddy = released(&mut storage, 1 << MAX_ORDER, frames);
         assert_eq!(buddy.allocate_order(MAX_ORDER + 1), None);
         let block = buddy.allocate_order(MAX_ORDER).unwrap();
-        assert_eq!(block.start(), PhysAddr::new(0));
+        assert_eq!(block.start(), PhysAddr::new((1 << MAX_ORDER) * FRAME_SIZE));
         assert_eq!(buddy.free_frames(), 0);
         assert_eq!(buddy.deallocate_order(block, MAX_ORDER), Ok(()));
         assert_eq!(
@@ -550,7 +577,7 @@ mod tests {
     #[test]
     fn detects_double_free_of_a_frame_a_block_and_a_part_of_a_free_block() {
         let mut storage = Vec::new();
-        let mut buddy = released(&mut storage, 0, 64);
+        let mut buddy = released(&mut storage, 64, 64);
         let frame = buddy.allocate().unwrap();
         assert_eq!(buddy.deallocate(frame), Ok(()));
         assert_eq!(
@@ -564,8 +591,8 @@ mod tests {
             Err(FrameError::DoubleFree(block.start()))
         );
         assert_eq!(
-            buddy.deallocate(at(5)),
-            Err(FrameError::DoubleFree(at(5).start()))
+            buddy.deallocate(at(69)),
+            Err(FrameError::DoubleFree(at(69).start()))
         );
         assert_eq!(buddy.free_frames(), 64);
     }
@@ -596,9 +623,9 @@ mod tests {
     #[test]
     fn detects_a_big_block_freed_over_free_small_ones() {
         let mut storage = Vec::new();
-        let mut buddy = released(&mut storage, 0, 16);
+        let mut buddy = released(&mut storage, 16, 16);
         let all = buddy.allocate_order(4).unwrap();
-        assert_eq!(buddy.deallocate(at(3)), Ok(()));
+        assert_eq!(buddy.deallocate(at(19)), Ok(()));
         assert_eq!(
             buddy.deallocate_order(all, 4),
             Err(FrameError::DoubleFree(all.start()))
@@ -632,15 +659,15 @@ mod tests {
     #[test]
     fn reserve_splits_free_blocks_and_never_hands_the_reserved_frames_out() {
         let mut storage = Vec::new();
-        let mut buddy = released(&mut storage, 0, 64);
-        buddy.reserve_range(PhysAddr::new(10 * FRAME_SIZE + 1), 2 * FRAME_SIZE);
+        let mut buddy = released(&mut storage, 64, 64);
+        buddy.reserve_range(PhysAddr::new(74 * FRAME_SIZE + 1), 2 * FRAME_SIZE);
         assert_eq!(buddy.free_frames(), 64 - 3);
         let mut seen = Vec::new();
         while let Some(frame) = buddy.allocate() {
             seen.push(number(frame));
         }
         assert_eq!(seen.len(), 61);
-        assert!(!seen.iter().any(|frame| (10..13).contains(frame)));
+        assert!(!seen.iter().any(|frame| (74..77).contains(frame)));
     }
 
     #[test]
@@ -658,10 +685,10 @@ mod tests {
     #[test]
     fn reserved_range_can_be_released_and_merges_back() {
         let mut storage = Vec::new();
-        let mut buddy = released(&mut storage, 0, 256);
-        buddy.reserve_range(PhysAddr::new(77 * FRAME_SIZE), 5 * FRAME_SIZE);
+        let mut buddy = released(&mut storage, 256, 256);
+        buddy.reserve_range(PhysAddr::new(333 * FRAME_SIZE), 5 * FRAME_SIZE);
         assert_eq!(buddy.largest_free_order(), Some(7));
-        buddy.release_range(PhysAddr::new(77 * FRAME_SIZE), 5 * FRAME_SIZE);
+        buddy.release_range(PhysAddr::new(333 * FRAME_SIZE), 5 * FRAME_SIZE);
         assert_eq!(
             (buddy.free_frames(), buddy.largest_free_order()),
             (256, Some(8))
@@ -671,7 +698,7 @@ mod tests {
     #[test]
     fn checkerboard_fragmentation_blocks_larger_requests_until_the_rest_is_freed() {
         let mut storage = Vec::new();
-        let mut buddy = released(&mut storage, 0, 256);
+        let mut buddy = released(&mut storage, 256, 256);
         let frames: Vec<_> = (0..256).map(|_| buddy.allocate().unwrap()).collect();
         for frame in frames.iter().step_by(2) {
             buddy.deallocate(*frame).unwrap();
@@ -692,9 +719,9 @@ mod tests {
     #[test]
     fn contiguous_run_of_odd_length_returns_the_tail_of_its_block() {
         let mut storage = Vec::new();
-        let mut buddy = released(&mut storage, 0, 64);
+        let mut buddy = released(&mut storage, 64, 64);
         let run = buddy.allocate_contiguous(5).unwrap();
-        assert_eq!((number(run), buddy.free_frames()), (0, 59));
+        assert_eq!((number(run), buddy.free_frames()), (64, 59));
         assert_eq!(buddy.allocate_contiguous(0), None);
         assert_eq!(buddy.allocate_contiguous(65), None);
         assert_eq!(buddy.deallocate_contiguous(run, 5), Ok(()));
@@ -712,14 +739,14 @@ mod tests {
     #[test]
     fn contiguous_run_is_refused_when_only_fragments_remain() {
         let mut storage = Vec::new();
-        let mut buddy = released(&mut storage, 0, 8);
+        let mut buddy = released(&mut storage, 8, 8);
         let _ = buddy.allocate_order(3).unwrap();
-        buddy.deallocate_contiguous(at(1), 2).unwrap();
-        buddy.deallocate_contiguous(at(5), 2).unwrap();
+        buddy.deallocate_contiguous(at(9), 2).unwrap();
+        buddy.deallocate_contiguous(at(13), 2).unwrap();
         assert_eq!(buddy.free_frames(), 4);
         assert_eq!(buddy.allocate_contiguous(3), None);
         assert_eq!(buddy.allocate_contiguous(2), None);
-        assert_eq!(buddy.allocate().map(number), Some(1));
+        assert_eq!(buddy.allocate().map(number), Some(9));
     }
 
     #[test]

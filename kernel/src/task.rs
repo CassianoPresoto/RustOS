@@ -1070,6 +1070,7 @@ pub fn current() -> TaskId {
 /// os repõem. `active` é o endereço da máscara de CPUs do espaço, que vale até `unbind_user`. Deixa a
 /// IRQ mascarada, para a entrada no usuário. Devolve o topo da pilha do kernel.
 pub fn bind_user(root: u64, process: usize, active: usize) -> u64 {
+    assert!(root != 0, "raiz de processo 0 é a do kernel");
     platform::cpu().save_and_disable_interrupts();
     let here = percpu::current();
     let current = slot(here.current.load(Ordering::Relaxed) as usize);
