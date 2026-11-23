@@ -16,9 +16,13 @@ struct Sample {
     promised: u64,
 }
 
+// As páginas do heap contam como frame retido: o heap guarda uma página de reserva por classe e
+// solta as outras conforme o tempo entre CPUs, e isso move um frame sem que ninguém o vaze.
 fn sample(frames: Frames) -> Sample {
     Sample {
-        frames: frames.free_frames(),
+        frames: frames
+            .free_frames()
+            .saturating_add(usize::try_from(heap::stats().pages).unwrap_or(usize::MAX)),
         heap: heap::stats().used_bytes,
         promised: commit::reserved(),
     }
