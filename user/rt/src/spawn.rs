@@ -76,9 +76,32 @@ fn limits() -> Limits {
 /// Cria o processo para `file`: valida o ELF, abre o canal de boot e mapeia cada `PT_LOAD`. Ainda
 /// sem pilha nem thread.
 pub fn create(parent: Parent, file: &[u8]) -> Result<Child, Error> {
-    let image = elf::parse(file, &limits()).map_err(Error::Elf)?;
+    create_with(parent, file, None)
+}
+
+/// Como `create`, com `events` (uma ponta com `WRITE` e `TRANSFER`) como canal de eventos do filho: o
+/// kernel a move e escreve nela o evento do fim. Consome `events` em qualquer resultado.
+pub fn create_with_events(parent: Parent, file: &[u8], events: Handle) -> Result<Child, Error> {
+    create_with(parent, file, Some(events))
+}
+
+fn create_with(parent: Parent, file: &[u8], events: Option<Handle>) -> Result<Child, Error> {
+    let image = match elf::parse(file, &limits()) {
+        Ok(image) => image,
+        Err(error) => {
+            if let Some(events) = events {
+                let _ = sys::handle_close(events);
+            }
+            return Err(Error::Elf(error));
+        }
+    };
     let (mine, theirs) = sys::channel_create()?;
-    let (process, vmar) = match sys::process_create(parent.process, b"child", theirs) {
+    let (process, vmar) = match sys::process_create_with_events(
+        parent.process,
+        b"child",
+        theirs,
+        events.unwrap_or(Handle::INVALID),
+    ) {
         Ok(created) => created,
         Err(status) => {
             let _ = sys::handle_close(mine);

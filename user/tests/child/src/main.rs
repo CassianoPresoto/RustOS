@@ -23,6 +23,12 @@ const MODE_OVERFLOW: u8 = 4;
 const MODE_ECHO: u8 = 5;
 const MODE_EXIT: u8 = 6;
 const MODE_SELF_KILL: u8 = 7;
+const MODE_WRITE_FAULT: u8 = 8;
+const MODE_KERNEL_READ: u8 = 9;
+/// Um endereço de usuário que ninguém mapeia: a escrita nele mata o processo (falta de página).
+const UNMAPPED: usize = 0x2_0000;
+/// O começo da metade do kernel: a leitura dele mata o processo, e o evento não leva o endereço.
+const KERNEL_HALF: usize = 0xFFFF_8000_0000_0000;
 
 /// O `arg0` das threads a mais: gira para sempre, ou sai.
 const WORKER_SPIN: u64 = 0;
@@ -40,6 +46,29 @@ fn recurse(depth: u64) -> u64 {
     pad[usize::try_from(depth % 512).unwrap_or(0)] = depth.to_le_bytes()[0];
     black_box(&mut pad);
     recurse(black_box(depth + 1)) + u64::from(pad[0])
+}
+
+/// Escreve no endereço não mapeado: a falta de página de escrita mata o processo e a escrita não
+/// acontece.
+#[allow(
+    unsafe_code,
+    reason = "escrita crua de teste hostil (guidelines 03, regra 11)"
+)]
+fn write_unmapped() -> i64 {
+    // SAFETY: o endereço não está mapeado; a falta mata o processo antes de a escrita acontecer.
+    unsafe { core::ptr::write_volatile(UNMAPPED as *mut u8, 1) };
+    0
+}
+
+/// Lê na metade do kernel: a falta mata o processo antes de o byte voltar.
+#[allow(
+    unsafe_code,
+    reason = "leitura crua de teste hostil (guidelines 03, regra 11)"
+)]
+fn read_kernel_half() -> i64 {
+    // SAFETY: o endereço é da metade do kernel, e a falta de página do anel 3 mata o processo.
+    let byte = unsafe { core::ptr::read_volatile(KERNEL_HALF as *const u8) };
+    i64::from(byte)
 }
 
 fn spin() -> ! {
@@ -131,6 +160,8 @@ fn main(env: &Env) -> i64 {
         Some((MODE_OVERFLOW, _)) => i64::try_from(recurse(0)).unwrap_or(0),
         Some((MODE_ECHO, rounds)) => echo(channel, u32::from(rounds) * 16),
         Some((MODE_EXIT, code)) => i64::from(code),
+        Some((MODE_WRITE_FAULT, _)) => write_unmapped(),
+        Some((MODE_KERNEL_READ, _)) => read_kernel_half(),
         Some((MODE_SELF_KILL, _)) => {
             let own = boot.process.map(sys::process_kill);
             println!("child: process_kill of itself came back: {own:?}");

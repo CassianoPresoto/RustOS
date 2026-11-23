@@ -41,8 +41,8 @@ fn close_taken(taken: Transits<Obj>) {
 
 /// `process_create(parent, name_ptr, name_len, bootstrap, events, out)`: um processo vazio, sem
 /// thread: o espaço, o VMAR raiz e o `bootstrap` na tabela dele, como o primeiro handle (valor 1).
-/// `parent` exige `MANAGE_PROCESS`; `bootstrap`, `TRANSFER`. O canal de eventos é da 4d: `events`
-/// diferente de 0 é `NotSupported`. Processo e VMAR raiz voltam em `out`, dois `u64`.
+/// `parent` exige `MANAGE_PROCESS`; `bootstrap`, `TRANSFER`; `events`, `WRITE` e `TRANSFER`, e fica no
+/// processo, que escreve nele o evento do fim. Processo e VMAR raiz voltam em `out`, dois `u64`.
 pub fn process_create(args: &[u64; 6]) -> Outcome {
     let [parent, name_ptr, name_len, bootstrap, events, out] = *args;
     let items = [
@@ -82,8 +82,8 @@ pub fn process_create(args: &[u64; 6]) -> Outcome {
     result
 }
 
-/// O resto de `process_create`, depois de o pai conferido e os handles tirados da tabela. O
-/// `bootstrap` sai de `taken` só quando vai ao filho; o que sobra o chamador fecha.
+/// O resto de `process_create`, depois de o pai conferido e os handles tirados da tabela. `bootstrap`
+/// e `events` saem de `taken` só quando vão ao filho; o que sobra o chamador fecha.
 fn create_child(
     name_ptr: u64,
     name_len: u64,
@@ -91,9 +91,6 @@ fn create_child(
     has_events: bool,
     taken: &mut Transits<Obj>,
 ) -> Outcome {
-    if has_events {
-        return Err(Status::NotSupported);
-    }
     let name_len = usize::try_from(name_len).map_err(|_| Status::InvalidArgs)?;
     if name_len > PROCESS_NAME_MAX {
         return Err(Status::InvalidArgs);
@@ -153,9 +150,29 @@ fn create_child(
         let mut values = [0_u8; 16];
         values[..8].copy_from_slice(&slots.0.handle().raw().to_le_bytes());
         values[8..].copy_from_slice(&slots.1.handle().raw().to_le_bytes());
+        let event_slot = if has_events {
+            match child.reserve_events() {
+                Ok(slot) => Some(slot),
+                Err(status) => {
+                    cancel(slots);
+                    return Err(status);
+                }
+            }
+        } else {
+            None
+        };
         if !platform::copy_to_user(out_range, &values) {
             cancel(slots);
+            if let Some(slot) = event_slot {
+                child.cancel_events(slot);
+            }
             return Err(Status::OutOfRange);
+        }
+        if let Some(slot) = event_slot {
+            match taken.take(1) {
+                Some(end) => child.keep_events(slot, end),
+                None => child.cancel_events(slot),
+            }
         }
         let mut table = p.table().lock();
         table.commit(slots.0, Obj::Process(child), Rights::PROCESS);

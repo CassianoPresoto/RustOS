@@ -11,17 +11,18 @@ use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 
 use rustos_hal::abi::{
-    self, PROCESS_KILLED_CODE, ProcessEvent, Status, USER_TOP, event_kind, fault_access, fault_kind,
+    self, Handle, PROCESS_KILLED_CODE, ProcessEvent, Status, USER_TOP, event_kind, fault_access,
+    fault_kind,
 };
 use rustos_hal::{Cpu, Fault, FaultKind, PhysAddr};
 use rustos_mm::vmar::Access;
-use rustos_object::HandleCount;
+use rustos_object::{HandleCount, Reservation, Transit, channel_write};
 use rustos_sched::SchedParams;
 use rustos_shell::TaskName;
 
 use crate::frames::Frames;
 use crate::loader::{self, LoadError, Loaded};
-use crate::object::{ByteCharge, Lifecycle, Quota, Table, VecSlots, Work};
+use crate::object::{ByteCharge, Bytes, Lifecycle, Obj, Quota, Table, VecSlots, Work};
 use crate::sync::IrqLock;
 use crate::task::{self, MAX_TASKS, Spawn, TaskError};
 use crate::uspace::{SpaceStats, Unresolved, UserSpace};
@@ -128,6 +129,10 @@ pub struct Process {
     kernel_half: AtomicBool,
     /// O evento do fim: o primeiro que chega vale.
     event: IrqLock<Option<ProcessEvent>>,
+    /// A ponta de eventos (o `events` de `process_create`), guardada numa tabela de uma posição:
+    /// `channel_write` escreve por ela e `event_handle` diz qual é o handle (0, nenhum).
+    events: IrqLock<Table>,
+    event_handle: AtomicU64,
     /// O programa que o processo roda, como o `ps` o mostra; `user` sem nome dado.
     name: TaskName,
 }
@@ -306,6 +311,8 @@ impl Process {
             out_of_memory: AtomicBool::new(false),
             kernel_half: AtomicBool::new(false),
             event: IrqLock::new(None),
+            events: IrqLock::new(Table::new(VecSlots::default())),
+            event_handle: AtomicU64::new(Handle::INVALID.raw()),
             name,
         })
     }
@@ -341,6 +348,23 @@ impl Process {
     /// O que o processo cria no kernel: pontas, mensagens, VMOs, filhos e threads.
     pub const fn quota(&self) -> &Arc<Quota> {
         &self.quota
+    }
+
+    /// Reserva o lugar da ponta de eventos, antes de qualquer movimento: sem ele, nada se move.
+    pub fn reserve_events(&self) -> Result<Reservation, Status> {
+        self.events.lock().reserve()
+    }
+
+    /// Desfaz a reserva da ponta de eventos (o erro que vem depois dela).
+    pub fn cancel_events(&self, slot: Reservation) {
+        self.events.lock().cancel(slot);
+    }
+
+    /// Guarda a ponta de eventos no lugar reservado: conta em `handle_count` e o processo a escreve
+    /// e fecha no fim (`report`).
+    pub fn keep_events(&self, slot: Reservation, end: Transit<Obj>) {
+        let handle = self.events.lock().commit_moved(slot, end);
+        self.event_handle.store(handle.raw(), Ordering::Release);
     }
 
     /// Roda `f` com a memória do processo, esperando o *shootdown* das outras CPUs enquanto gira no
@@ -462,6 +486,7 @@ impl Process {
         let kernel_half = self.kernel_half.load(Ordering::Relaxed);
         self.state.lock().phase = Phase::Dead;
         self.life.terminate();
+        self.report(&event);
         let pid = self.pid;
         if event.kind == event_kind::EXIT && event.code == PROCESS_KILLED_CODE {
             kprintln_serial!("[rustos] user: pid {pid} killed (cpu {cpu})");
@@ -478,6 +503,35 @@ impl Process {
         forget(pid);
         crate::programs::finished(pid, &event, no_memory, kernel_half);
     }
+
+    /// Escreve o evento final na ponta de eventos e a fecha, nessa ordem: quem a guarda lê a
+    /// mensagem e só depois vê `PEER_CLOSED`. Sem ponta, nada. Uma ponta cheia ou já fechada pelo
+    /// pai perde a mensagem em silêncio: o processo morre do mesmo jeito.
+    fn report(&self, event: &ProcessEvent) {
+        let handle = Handle::from_raw(self.event_handle.load(Ordering::Acquire));
+        if let Some(handle) = handle {
+            let bytes = Bytes::uncharged(&wire(event).to_bytes());
+            if let Some(bytes) = bytes {
+                let _ = channel_write(&self.events, handle, bytes, &[], &mut Work::new());
+            }
+        }
+        close_handles(&self.events);
+    }
+}
+
+/// O evento como sai do kernel: só endereço de usuário, o que passa do topo da metade baixa vira 0.
+fn wire(event: &ProcessEvent) -> ProcessEvent {
+    ProcessEvent {
+        pc: user_address(event.pc),
+        sp: user_address(event.sp),
+        addr: user_address(event.addr),
+        ..*event
+    }
+}
+
+/// Um endereço que sai para fora do kernel (evento, log): `0` se não está na metade de usuário.
+const fn user_address(value: u64) -> u64 {
+    if value < USER_TOP { value } else { 0 }
 }
 
 /// O processo que nunca rodou (ou nunca foi desfeito) e perdeu o último handle: desfaz-se aqui.
@@ -488,6 +542,7 @@ impl Drop for Process {
         }
         let mem = self.mem.lock_serving(tlb::service).take();
         close_handles(&self.table);
+        close_handles(&self.events);
         if let Some(mem) = mem {
             mem.wait_inactive();
             mem.destroy();
@@ -926,9 +981,9 @@ pub fn user_fault(fault: &Fault) -> ! {
         kind: event_kind::FAULT,
         fault_kind: kind,
         access,
-        pc: fault.pc.as_u64().min(USER_TOP),
-        sp: fault.user_sp,
-        addr: if addr < USER_TOP { addr } else { 0 },
+        pc: user_address(fault.pc.as_u64()),
+        sp: user_address(fault.user_sp),
+        addr: user_address(addr),
         isa_code: fault.code,
         ..ProcessEvent::default()
     }))
