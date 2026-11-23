@@ -9,6 +9,7 @@ use rustos_hal::abi::{Handle, PROCESS_NAME_MAX, Rights, Status, USER_MIN, USER_T
 use rustos_mm::UserRange;
 use rustos_object::rights::required;
 use rustos_object::{ObjectKind, TakeFailed, Transits, handle_from_raw};
+use rustos_shell::TaskName;
 
 use super::handles::{Outcome, current, lenient};
 use crate::object::{ByteCharge, Obj, Work};
@@ -22,6 +23,14 @@ fn process_of(p: &Process, raw: u64, rights: Rights) -> Result<Arc<Process>, Sta
     match granted.object {
         Obj::Process(target) => Ok(Arc::clone(target)),
         _ => Err(Status::WrongType),
+    }
+}
+
+/// O nome que o `ps` mostra: os bytes até o primeiro que não é UTF-8 (o `TaskName` corta o resto).
+fn name_text(bytes: &[u8]) -> &str {
+    match core::str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => core::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or(""),
     }
 }
 
@@ -90,9 +99,14 @@ fn create_child(
         return Err(Status::InvalidArgs);
     }
     let out_range = UserRange::new(out, 16).map_err(|_| Status::OutOfRange)?;
+    let mut name_bytes = [0_u8; PROCESS_NAME_MAX];
     if name_len > 0 {
-        UserRange::new(name_ptr, name_len as u64).map_err(|_| Status::OutOfRange)?;
+        let range = UserRange::new(name_ptr, name_len as u64).map_err(|_| Status::OutOfRange)?;
+        if !platform::copy_from_user(range, &mut name_bytes[..name_len]) {
+            return Err(Status::OutOfRange);
+        }
     }
+    let name = TaskName::new(name_text(&name_bytes[..name_len]));
     current(|p| {
         let slots = {
             let mut table = p.table().lock();
@@ -114,7 +128,7 @@ fn create_child(
             cancel(slots);
             return Err(Status::NoMemory);
         };
-        let child = match Process::create_empty(cost) {
+        let child = match Process::create_empty(cost, name) {
             Ok(child) => child,
             Err(status) => {
                 cancel(slots);

@@ -133,12 +133,31 @@ textos são em inglês, como a saída do sistema, e o `core/shell` segue puro e 
 | --- | --- | --- |
 | `ls` | Lista os arquivos do initramfs | `bytes  name` e uma linha por arquivo, em ordem; `ls: no initramfs in this boot` sem initramfs |
 | `run <programa> [&]` | Carrega o ELF, roda como processo isolado com o canal de boot e o console, **espera** e mostra como acabou. Com `&` (solto ou colado ao nome) não espera | `exit code N (pid P)`; `killed: <causa> (pid P)` (`page fault on a write to 0x…`, `… (null or low address)`, `… a kernel address` sem endereço, `illegal instruction`, `out of memory`…); `started pid P` com `&`; `run: X: no such program (try 'ls')`; `run: X: too many processes` com a tabela de tarefas cheia. Cada resposta sai numa escrita só |
-| `ps` | Ganha a coluna `pid` (depois de `name`): o processo que a tarefa roda, ou `-` na tarefa de kernel | Uma linha `user` por processo vivo |
+| `ps` | Ganha a coluna `pid` (depois de `name`): o processo que a tarefa roda, ou `-` na tarefa de kernel. A coluna `name` tem 16 caracteres e, na tarefa de um processo, mostra o programa (`count`, `hello`), cortado em 16 bytes sem partir um caractere | Uma linha por processo vivo, com o nome do programa |
 
 A saída do programa (`[user] …`) aparece na tela e na serial, antes do `exit code`. As linhas do kernel sobre o ciclo de vida (`[rustos] user: pid N exited …`) vão só para a serial: a tela mostra só o que o shell já diz. Argumentos do programa ainda não passam ([DEBT-0130](../tech-debt/0130-run-sem-argumentos-para-o-programa.md)).
-O shell espera sem prazo e não há Ctrl-C que solte um processo travado ([DEBT-0131](../tech-debt/0131-sem-ctrl-c-nem-kill-de-processo.md)),
-e a saída de um processo em segundo plano cola no prompt ([DEBT-0132](../tech-debt/0132-saida-de-segundo-plano-cola-no-prompt.md)).
+O shell espera sem prazo e não há Ctrl-C que solte um processo travado ([DEBT-0131](../tech-debt/0131-sem-ctrl-c-nem-kill-de-processo.md)).
 O caminho do kernel está no [SDD 17](17_processos_isolamento_e_syscalls.md#o-m1-programas-pelo-shell-como-entrou).
+
+## Saída de segundo plano
+
+Um processo lançado com `&` segue escrevendo enquanto o shell mostra o prompt ou imprime a resposta de um comando. A regra é que **a saída de usuário nunca entra no meio do que o shell escreve** e **nunca fica colada no prompt**. Duas peças, uma pura e uma do kernel:
+
+| Peça | Onde mora | O que faz |
+| --- | --- | --- |
+| `Backlog<N>` | `core/shell/src/backlog.rs`, testado no host | Fila limitada de texto: `push` entra **inteiro ou não entra**; o que não coube é contado; `drain` escreve o texto e, se algo se perdeu, a linha `[rustos] user output: N writes lost (backlog full)` |
+| `Shell::interject` | `core/shell/src/shell.rs`, testado no host com o `Host` falso e a tela VT dos testes | Com a fila não vazia: sobe até a linha do prompt (`at / cols` linhas), apaga daí até o fim da tela (`\r\x1b[J`), deixa a fila sair a partir da coluna 0 e chama `redraw`, que reescreve prompt e linha em edição e põe o cursor onde estava |
+| `userout` | `kernel/src/userout.rs` | A porta de saída do usuário: o `debug_write` (e as linhas `kprintln_serial!` do ciclo de vida) passam por ela, e ela escolhe entre a tela e a fila |
+
+**Os dois estados.** Fora do `run` em primeiro plano (o estado normal, a partir do laço do shell), a saída de usuário vai **sempre para a fila** e acorda o laço do shell (o mesmo `notify_input` da entrada). O laço, depois de cada tecla e quando acorda sem tecla, chama `interject` se há o que mostrar. Assim a saída que chega com o shell no meio de um `ps`, de um `bench` ou do eco de uma tecla espera o comando acabar e entra **inteira**, depois do prompt redesenhado, e a que chega com o shell parado no prompt apaga o prompt, passa e o devolve. Durante o `run` em primeiro plano o shell dorme sem escrever, com o cursor na coluna 0: `programs::run` chama `userout::direct()`, que despeja o que esperava e deixa a saída ir direto à tela (é o que mantém `[user] hello…` antes do `exit code`), e `userout::queued()` ao voltar. Antes de o laço do shell existir (o `init` do modo de teste), o estado é direto.
+
+**Tamanho e estouro.** A fila tem **1 024 bytes** (`BACKLOG_BYTES`, em `.bss`): cerca de doze linhas de 80 colunas. Uma escrita de usuário (`debug_write`, até 512 bytes mais o prefixo `[user] ` de cada linha) cabe inteira ou é descartada inteira; cheia, a fila conta as escritas descartadas e o shell, ao esvaziá-la, diz quantas (`[rustos] user output: N writes lost (backlog full)`). Uma linha nunca sai pela metade: toda escrita termina em `\n` (`debug_sanitize`, regra da 4a) e entra ou sai por inteiro. O lock da fila é um `IrqLock` e o despejo roda sob ele, em ordem `userout` → serial → tela, a mesma de todo `print`.
+
+**As linhas só da serial.** O ciclo de vida (`entered ring3/el0`, `pid N exited`, `fault contained`) é diagnóstico da serial e a tela não o mostra. Com o prompt na tela elas também esperam na fila, marcadas com `U+0001` no começo; o despejo escreve o texto marcado só na serial, até o fim da linha. Na tela o prompt sai e volta no mesmo lugar, sem mudança visível. Sem isso a linha do kernel desalinhava a contagem de linhas do shell (o `redraw` seguinte apagava a linha errada na serial).
+
+**Por que `\x1b[J` e não só `\x1b[K`.** A linha de comando longa quebra em várias linhas da tela; `\x1b[K` apagaria só a primeira. O shell sabe em que linha do prompt o cursor está (`at / cols`), sobe até ela e apaga até o fim da tela.
+
+**O que fica de fora** (cada um é a mesma limitação da saída do shell hoje): com a tela alternativa (`alt`) ligada, a saída de fundo entra na alternativa ([DEBT-0151](../tech-debt/0151-saida-de-segundo-plano-entra-na-tela-alternativa.md)); o despejo roda com IRQ mascarada pelo tempo de escrever a fila (no máximo 1 KiB, a mesma ordem de um `print` de 512 bytes, [DEBT-0051](../tech-debt/0051-redesenho-da-tela-com-irq-mascarada.md)); e a fila cheia descarta ([DEBT-0150](../tech-debt/0150-fila-de-saida-de-segundo-plano-descarta-ao-encher.md)).
 
 ## Conferido contra o xterm
 
@@ -191,4 +210,5 @@ O que divergia e foi corrigido, cada um com teste em
 - Símbolos de controle do DEC, NRCS e G2/G3: [DEBT-0048](../tech-debt/0048-dec-sem-simbolos-de-controle-nem-nrcs.md).
 - Histórico sem rolagem no aarch64: [DEBT-0050](../tech-debt/0050-historico-sem-rolagem-no-aarch64.md).
 - Redesenho com IRQ mascarada: [DEBT-0051](../tech-debt/0051-redesenho-da-tela-com-irq-mascarada.md).
-- Ctrl-C que solte o `run`, argumentos e saída de segundo plano sem colar no prompt: [DEBT-0131](../tech-debt/0131-sem-ctrl-c-nem-kill-de-processo.md), [0130](../tech-debt/0130-run-sem-argumentos-para-o-programa.md), [0132](../tech-debt/0132-saida-de-segundo-plano-cola-no-prompt.md).
+- Ctrl-C que solte o `run` e argumentos para o programa: [DEBT-0131](../tech-debt/0131-sem-ctrl-c-nem-kill-de-processo.md), [0130](../tech-debt/0130-run-sem-argumentos-para-o-programa.md).
+- Fila de saída de segundo plano que não descarta ao encher e saída de fundo na tela alternativa: [DEBT-0150](../tech-debt/0150-fila-de-saida-de-segundo-plano-descarta-ao-encher.md), [0151](../tech-debt/0151-saida-de-segundo-plano-entra-na-tela-alternativa.md).

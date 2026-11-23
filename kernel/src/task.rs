@@ -14,6 +14,7 @@ use core::sync::atomic::{
 
 use rustos_hal::{Cpu, Ipi, IpiKind, MAX_CPUS, MapError};
 use rustos_sched::{Composite, SchedError, SchedParams, Scheduler, TaskId};
+use rustos_shell::TaskName;
 
 #[cfg(feature = "selftest")]
 use crate::bench;
@@ -133,6 +134,8 @@ impl Drop for FpuArea {
 #[derive(Debug)]
 struct Meta {
     name: &'static str,
+    /// O nome do programa que a tarefa de processo roda; vazio nas tarefas só de kernel.
+    user_name: TaskName,
     entry: Option<fn(usize)>,
     arg: usize,
     /// A pilha mapeada fica com o slot: a tarefa nova que o reusa não mapeia outra.
@@ -200,6 +203,7 @@ impl Slot {
             user_active: AtomicUsize::new(0),
             meta: IrqLock::new(Meta {
                 name: "",
+                user_name: TaskName::EMPTY,
                 entry: None,
                 arg: 0,
                 stack: None,
@@ -490,6 +494,7 @@ fn start(id: usize, config: Spawn) -> Result<bool, TaskError> {
     {
         let mut meta = target.meta.lock();
         meta.name = config.name;
+        meta.user_name = TaskName::EMPTY;
         meta.entry = Some(config.entry);
         meta.arg = config.arg;
         meta.stack = Some(stack);
@@ -1192,6 +1197,11 @@ pub fn note_user_depth(bytes: usize) {
     TASK_PEAK.fetch_max(bytes, Ordering::Relaxed);
 }
 
+/// Dá à tarefa corrente o nome do programa que ela roda, para o `ps`.
+pub fn set_user_name(name: TaskName) {
+    slot(current().as_u32() as usize).meta.lock().user_name = name;
+}
+
 pub fn set_current_name(name: &'static str) {
     slot(current().as_u32() as usize).meta.lock().name = name;
 }
@@ -1309,7 +1319,7 @@ pub fn notify_input() {
 #[derive(Clone, Copy, Debug)]
 pub struct Snapshot {
     pub id: u32,
-    pub name: &'static str,
+    pub name: TaskName,
     /// O processo de usuário da tarefa, se roda um.
     pub pid: Option<u32>,
     pub state: State,
@@ -1340,7 +1350,12 @@ pub fn for_each_snapshot(visit: &mut dyn FnMut(Snapshot)) {
         };
         let (name, stack) = {
             let meta = task.meta.lock();
-            (meta.name, meta.stack)
+            let name = if meta.user_name.is_empty() {
+                TaskName::new(meta.name)
+            } else {
+                meta.user_name
+            };
+            (name, meta.stack)
         };
         visit(Snapshot {
             id: slot_u32(id),

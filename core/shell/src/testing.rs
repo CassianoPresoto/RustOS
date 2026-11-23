@@ -157,7 +157,7 @@ impl Host for FakeHost {
         let task = |id, name, state, cpu_ns, simd| TaskInfo {
             id,
             name,
-            pid: (name == "user").then_some(id + 40),
+            pid: (name == "count").then_some(id + 40),
             state,
             cpu: u8::try_from(id).unwrap(),
             cpu_ns,
@@ -169,7 +169,7 @@ impl Host for FakeHost {
         visit(&task(0, "idle", TaskState::Ready, 250_000_000, false));
         visit(&task(1, "shell", TaskState::Running, 12_345_678_901, false));
         visit(&task(2, "worker", TaskState::Sleeping, 1_000_000, true));
-        visit(&task(3, "user", TaskState::Blocked, 2_000_000, true));
+        visit(&task(3, "count", TaskState::Blocked, 2_000_000, true));
     }
 
     fn cpus(&self, visit: &mut dyn FnMut(&CpuInfo)) {
@@ -252,6 +252,8 @@ pub(crate) struct Screen {
     y: usize,
     pending: bool,
     deferred: bool,
+    /// `\n` também volta à coluna 0, como o `onlcr` do console do kernel.
+    onlcr: bool,
     parse: Parse,
     params: String,
     pub(crate) raw: String,
@@ -268,11 +270,17 @@ impl Screen {
             y: 0,
             pending: false,
             deferred,
+            onlcr: false,
             parse: Parse::Ground,
             params: String::new(),
             raw: String::new(),
             bells: 0,
         }
+    }
+
+    pub(crate) fn with_onlcr(mut self) -> Self {
+        self.onlcr = true;
+        self
     }
 
     pub(crate) fn cursor(&self) -> (usize, usize) {
@@ -352,7 +360,12 @@ impl Screen {
         match (self.parse, c) {
             (Parse::Ground, '\x1b') => self.parse = Parse::Escape,
             (Parse::Ground, '\r') => (self.x, self.pending) = (0, false),
-            (Parse::Ground, '\n') => self.newline(),
+            (Parse::Ground, '\n') => {
+                self.newline();
+                if self.onlcr {
+                    self.x = 0;
+                }
+            }
             (Parse::Ground, '\x08') => self.x = self.x.saturating_sub(1),
             (Parse::Ground, '\x07') => self.bells += 1,
             (Parse::Ground, c) if c >= ' ' => self.put(c),

@@ -4,6 +4,7 @@ use core::cmp::Ordering;
 use core::fmt;
 
 use crate::ansi::{ACCENT, BEL, CLEAR_SCREEN, RESET};
+use crate::backlog::Backlog;
 use crate::commands::{self, COMMANDS, Ctx};
 use crate::decoder::{Decoder, Key};
 use crate::history::History;
@@ -109,6 +110,25 @@ impl<const LINE: usize, const HISTORY: usize> Shell<LINE, HISTORY> {
             Some(key) => self.dispatch(key, &*host, out),
             None => Ok(()),
         }
+    }
+
+    /// Mostra o que `backlog` guardou sem rasgar a linha em edição: apaga o prompt, deixa o
+    /// texto entrar a partir da coluna 0 e redesenha prompt e linha onde o cursor estava.
+    pub fn interject<const N: usize>(
+        &mut self,
+        host: &impl Host,
+        backlog: &mut Backlog<N>,
+        out: &mut impl fmt::Write,
+    ) -> fmt::Result {
+        if backlog.is_empty() {
+            return Ok(());
+        }
+        let cols = terminal_cols(host);
+        move_cursor(out, self.at / cols, 'A')?;
+        out.write_str("\r\x1b[J")?;
+        self.at = 0;
+        backlog.drain(out)?;
+        self.redraw(cols, out)
     }
 
     fn reset_line(&mut self) {
@@ -1146,5 +1166,134 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Quantas linhas de `text` (cada uma terminada em `\n`) ocupam a tela, com `cols` colunas.
+    fn rows_of(text: &str, cols: usize) -> usize {
+        text.lines().map(|l| l.len().div_ceil(cols).max(1)).sum()
+    }
+
+    /// Faz o que o kernel faz com a saída de segundo plano: guarda, e o shell a mostra.
+    fn interject<const L: usize, const H: usize, const N: usize>(
+        term: &mut Term<L, H>,
+        backlog: &mut Backlog<N>,
+        cols: usize,
+    ) -> usize {
+        let (row, _) = term.screen.cursor();
+        let above = term.shell.at / cols;
+        let first = row - above;
+        let mut text = String::new();
+        let mut copy = backlog.clone();
+        copy.drain(&mut text).unwrap();
+        term.shell
+            .interject(&term.host, backlog, &mut term.screen)
+            .unwrap();
+        first + rows_of(&text, cols)
+    }
+
+    fn onlcr_term<const L: usize>(cols: usize, rows: usize) -> Term<L, 4> {
+        let mut term = Term::<L, 4>::sized(cols, rows, true);
+        term.screen = Screen::new(cols, rows, true).with_onlcr();
+        term.shell.start(&term.host, &mut term.screen).unwrap();
+        term.top = term.screen.cursor().0;
+        term
+    }
+
+    #[test]
+    fn background_output_lands_above_the_prompt_and_keeps_the_line() {
+        let mut term = onlcr_term::<64>(80, 30);
+        term.type_str("ab\x1b[D");
+        let mut backlog = Backlog::<256>::new();
+        backlog.push(format_args!("[user] count: 1/5\n[user] count: 2/5\n"));
+        let prompt = interject(&mut term, &mut backlog, 80);
+        assert_eq!(
+            term.lines(),
+            ["[user] count: 1/5", "[user] count: 2/5", "rustos ~ % ab"]
+        );
+        assert_eq!(term.line(), "ab");
+        term.top = prompt;
+        assert_screen_matches(&term, 80);
+        assert!(backlog.is_empty());
+        term.type_str("c");
+        assert_eq!(term.line(), "acb");
+        assert_screen_matches(&term, 80);
+    }
+
+    #[test]
+    fn background_output_never_sticks_to_the_prompt() {
+        let mut term = onlcr_term::<64>(80, 30);
+        let mut backlog = Backlog::<256>::new();
+        for n in 1..=3 {
+            backlog.push(format_args!("[user] count: {n}/3\n"));
+            interject(&mut term, &mut backlog, 80);
+            term.type_str("x");
+        }
+        assert_eq!(
+            term.lines(),
+            [
+                "[user] count: 1/3",
+                "[user] count: 2/3",
+                "[user] count: 3/3",
+                "rustos ~ % xxx"
+            ]
+        );
+    }
+
+    #[test]
+    fn background_output_clears_every_row_of_a_wrapped_line() {
+        for deferred in [true, false] {
+            let mut term = Term::<64, 4>::sized(20, 30, deferred);
+            term.screen = Screen::new(20, 30, deferred).with_onlcr();
+            term.shell.start(&term.host, &mut term.screen).unwrap();
+            term.top = term.screen.cursor().0;
+            term.type_str("the quick brown fox jumps over\x1b[D\x1b[D");
+            let mut backlog = Backlog::<256>::new();
+            backlog.push(format_args!("[user] hi\n"));
+            term.top = interject(&mut term, &mut backlog, 20);
+            assert_eq!(term.screen.row(term.top - 1), "[user] hi");
+            assert_screen_matches(&term, 20);
+        }
+    }
+
+    #[test]
+    fn an_empty_backlog_writes_nothing() {
+        let mut term = Term::<64, 4>::new();
+        term.type_str("ab");
+        term.take_raw();
+        let mut backlog = Backlog::<16>::new();
+        term.shell
+            .interject(&term.host, &mut backlog, &mut term.screen)
+            .unwrap();
+        assert_eq!(term.take_raw(), "");
+    }
+
+    #[test]
+    fn a_full_backlog_says_what_it_lost_above_the_prompt() {
+        let mut term = onlcr_term::<64>(80, 30);
+        let mut backlog = Backlog::<16>::new();
+        backlog.push(format_args!("[user] first\n"));
+        backlog.push(format_args!("[user] second\n"));
+        interject(&mut term, &mut backlog, 80);
+        assert_eq!(
+            term.lines(),
+            [
+                "[user] first",
+                "[rustos] user output: 1 writes lost (backlog full)",
+                "rustos ~ %"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_prompt_comes_back_exactly_where_it_was_after_a_command() {
+        let mut term = onlcr_term::<64>(80, 30);
+        term.type_str("echo hi\r");
+        let mut backlog = Backlog::<64>::new();
+        backlog.push(format_args!("[user] late\n"));
+        interject(&mut term, &mut backlog, 80);
+        assert_eq!(
+            term.lines(),
+            ["rustos ~ % echo hi", "hi", "[user] late", "rustos ~ %"]
+        );
     }
 }

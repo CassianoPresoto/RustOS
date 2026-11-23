@@ -17,6 +17,7 @@ use rustos_hal::{Cpu, Fault, FaultKind, PhysAddr};
 use rustos_mm::vmar::Access;
 use rustos_object::HandleCount;
 use rustos_sched::SchedParams;
+use rustos_shell::TaskName;
 
 use crate::frames::Frames;
 use crate::loader::{self, LoadError, Loaded};
@@ -125,6 +126,8 @@ pub struct Process {
     kernel_half: AtomicBool,
     /// O evento do fim: o primeiro que chega vale.
     event: IrqLock<Option<ProcessEvent>>,
+    /// O programa que o processo roda, como o `ps` o mostra; `user` sem nome dado.
+    name: TaskName,
 }
 
 /// Uma thread como objeto: o que se espera (`TERMINATED`) e o processo dela.
@@ -210,6 +213,9 @@ pub struct Spawned {
 #[cfg(feature = "selftest")]
 static FAULT_PEAK: AtomicUsize = AtomicUsize::new(0);
 
+/// O nome da tarefa de um processo criado sem nome.
+const DEFAULT_NAME: &str = "user";
+
 static NEXT_PID: AtomicU32 = AtomicU32::new(1);
 /// O maior número de CPUs que rodavam um processo no instante em que `process_kill` o parou.
 #[cfg(feature = "selftest")]
@@ -234,7 +240,7 @@ static ENTRY_CYCLES: AtomicU64 = AtomicU64::new(0);
 
 impl Process {
     /// Um processo novo sobre `mem`, sem thread e com a tabela vazia. `cost` é o que o criador paga.
-    fn new(mem: Mem, cost: Option<ByteCharge>) -> Arc<Self> {
+    fn new(mem: Mem, cost: Option<ByteCharge>, name: TaskName) -> Arc<Self> {
         Arc::new(Self {
             life: Lifecycle::new(),
             pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
@@ -251,12 +257,13 @@ impl Process {
             out_of_memory: AtomicBool::new(false),
             kernel_half: AtomicBool::new(false),
             event: IrqLock::new(None),
+            name,
         })
     }
 
     /// Um processo vazio para `process_create`: espaço sem imagem, árvore vazia e o `mmap_base`
     /// sorteado. A memória do espaço vem do alocador de frames; `cost` é a cobrança ao pai.
-    pub fn create_empty(cost: ByteCharge) -> Result<Arc<Self>, Status> {
+    pub fn create_empty(cost: ByteCharge, name: TaskName) -> Result<Arc<Self>, Status> {
         let system = system().ok_or(Status::NotSupported)?;
         // SAFETY: o mapa direto cobre todo frame do alocador, e o kernel já roda nas próprias tabelas.
         let space = unsafe { UserSpace::new(system.frames, system.direct_map_offset) }
@@ -270,7 +277,7 @@ impl Process {
             return Err(Status::NoMemory);
         };
         let mem = Mem::new(space, regions)?;
-        Ok(Self::new(mem, Some(cost)))
+        Ok(Self::new(mem, Some(cost), name))
     }
 
     pub const fn lifecycle(&self) -> &Lifecycle {
@@ -503,6 +510,13 @@ pub struct Options {
 }
 
 /// Cria o processo e a tarefa que o roda. Devolve a tarefa e o número do processo.
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(
+        dead_code,
+        reason = "só o modo de teste cria sem nome; o resto usa `spawn_as`"
+    )
+)]
 pub fn spawn(
     frames: Frames,
     direct_map_offset: u64,
@@ -515,6 +529,26 @@ pub fn spawn(
         source,
         affinity,
         Options::default(),
+        DEFAULT_NAME,
+    )
+    .map(|(spawned, _)| spawned)
+}
+
+/// Como `spawn`, com o nome do programa que a tarefa mostra no `ps` (cortado ao tamanho do campo).
+pub fn spawn_as(
+    frames: Frames,
+    direct_map_offset: u64,
+    source: Source<'_>,
+    affinity: u32,
+    name: &str,
+) -> Result<Spawned, ProcessError> {
+    spawn_with(
+        frames,
+        direct_map_offset,
+        source,
+        affinity,
+        Options::default(),
+        name,
     )
     .map(|(spawned, _)| spawned)
 }
@@ -539,17 +573,25 @@ pub fn spawn_keeping(
         keep_peer,
         initramfs: false,
     };
-    spawn_with(frames, direct_map_offset, source, affinity, options)
+    spawn_with(
+        frames,
+        direct_map_offset,
+        source,
+        affinity,
+        options,
+        DEFAULT_NAME,
+    )
 }
 
 /// Monta o espaço (a imagem de `source`, a pilha inicial e as regiões), o processo, o canal de boot e
-/// a primeira thread.
+/// a primeira thread. `name` é o que o `ps` mostra da tarefa (o ponto único de criação).
 pub fn spawn_with(
     frames: Frames,
     direct_map_offset: u64,
     source: Source<'_>,
     affinity: u32,
     options: Options,
+    name: &str,
 ) -> Result<(Spawned, Option<boot::BootPeer>), ProcessError> {
     // SAFETY: o mapa direto cobre todo frame do alocador, e o kernel já roda nas próprias tabelas.
     let mut space = unsafe { UserSpace::new(frames, direct_map_offset) }?;
@@ -567,7 +609,7 @@ pub fn spawn_with(
     }
     let mem = Mem::new(space, regions).map_err(ProcessError::Handles)?;
     let stats = mem.space.stats();
-    let process = Process::new(mem, None);
+    let process = Process::new(mem, None, TaskName::new(name));
     let (arg0, peer) =
         boot::handles_of(&process, source, arg0, options).map_err(ProcessError::Handles)?;
     let thread = ThreadObj::new(&process, None);
@@ -683,6 +725,7 @@ fn thread_main(arg: usize) {
         *unsafe { Box::from_raw(ptr::with_exposed_provenance_mut::<Start>(arg)) };
     let process = Arc::clone(&thread.process);
     let pid = process.pid;
+    let name = process.name;
     let (root, active) = process
         .with_mem(|mem| (mem.space.root().as_u64(), mem.space.active_addr()))
         .expect("o processo só desfaz com zero threads, e esta conta");
@@ -691,6 +734,7 @@ fn thread_main(arg: usize) {
     drop(process);
     let top = task::bind_user(root, raw, active);
     task::set_pid(pid);
+    task::set_user_name(name);
     if process_is_dying() {
         leave_current(None);
     }

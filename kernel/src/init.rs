@@ -32,7 +32,7 @@ pub fn run(vm: &Vm, frames: Frames, map_offset: u64) -> bool {
                 keep_peer: false,
                 initramfs: true,
             };
-            process::spawn_with(frames, map_offset, Source::Elf(file), 0, options)
+            process::spawn_with(frames, map_offset, Source::Elf(file), 0, options, "init")
                 .map(|(spawned, _)| spawned)
         });
     let spawned = match spawned {

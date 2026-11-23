@@ -640,6 +640,30 @@ A diferença é do ruído do host (o "antes" rodou com a máquina mais carregada
 
 **Custo de lançar um processo, no shell**: o mesmo da 4b (o `init` consumia 21 frames: 7 de dados, 7 de tabelas e 7 do kernel, e 30 us até a entrada em usuário no aarch64); `ps` e `mem` voltam ao que eram quando o processo morre (a morte devolve os frames zerados). O boot normal segue com a pilha do shell em 13,0 KiB de 64 (`ps`, gate de 75%).
 
+### A saída de segundo plano e o nome no `ps` (M1.1)
+
+Medido em 2026-11-19, `make size` e `make smoke-fast PROFILE=release-small`, rustc 1.100.0, QEMU 11.1.3 (x86_64 em TCG, aarch64 em HVF, `-smp 4`, 256 MiB). "Antes" é a `main` `0ec2104`; "depois" é a mudança que arruma a saída de segundo plano que colava no prompt ([SDD 16](16_terminal.md#saída-de-segundo-plano)) e o nome `user` no `ps` (a fila de 1 KiB em `userout`, `Backlog`, `Shell::interject`, o nome de 16 bytes por tarefa).
+
+| `make size` (`release-small`) | x86_64 antes | x86_64 depois | aarch64 antes | aarch64 depois |
+| --- | --- | --- | --- | --- |
+| `text` | 161 527 | 165 703 (+4 176) | 145 744 | 149 512 (+3 768) |
+| `rodata` | 45 373 | 46 077 (+704) | 41 077 | 41 781 (+704) |
+| `data` | 21 010 | 22 138 (+1 128) | 20 784 | 21 912 (+1 128) |
+| `bss` | 17 417 | 18 481 (+1 064) | 14 664 | 15 720 (+1 056) |
+| **carregado** | 245 327 | 252 399 (**+7 072, +2,9%**) | 222 269 | 228 925 (**+6 656, +3,0%**) |
+| arquivo | 333 376 | 340 944 (+7 568) | 372 688 | 382 632 (+9 944) |
+
+De onde vêm os bytes (`nm -S`): a fila de 1 024 bytes e o resto de `userout::GATE` são `.bss` (a fila sozinha é 1 KiB do +1 064: o estado inicial é tudo zero de propósito, para não ir ao `.data`); o `.data` de +1 128 é o nome de 16 bytes em cada slot de `task::TASKS` (24 slots, `Meta::user_name`); o `text` é o `Backlog`, o `interject`, o despejo da fila e a parte nova do laço do shell. O custo por processo em tempo não mudou: o nome é copiado uma vez por `spawn`.
+
+**Tempo de boot** (`make smoke-fast`, linha `boot time:`, 3 boots cada): **sem mudança**, porque o boot não escreve saída de usuário nem lança processo.
+
+| ISA | Antes | Depois |
+| --- | --- | --- |
+| x86_64 (TCG) | 37, 30, 32 ms | 28, 28, 30 ms |
+| aarch64 (HVF) | 2, 2, 2 ms | 2, 2, 2 ms |
+
+A diferença do x86_64 é o ruído do host (varia de 24 a 40 ms entre execuções, como no [Tempo de boot](#tempo-de-boot)). O caminho quente muda assim: cada `debug_write` pega mais um `IrqLock` (`userout::GATE`) e, na fila, sobe uma bandeira atômica e acorda o laço do shell; o laço pega o lock uma vez por byte digitado só se `pending()` (um `load`) diz que há o que mostrar.
+
 ### Escalonador (fase 3, medido no host; o alvo está acima)
 
 Comando: `cargo test --release -p rustos-sched bench -- --ignored --nocapture

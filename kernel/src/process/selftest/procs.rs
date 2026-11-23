@@ -103,7 +103,8 @@ pub fn run(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
         keep_peer: true,
         initramfs: true,
     };
-    let Ok((spawned, Some(peer))) = spawn_with(frames, map_offset, Source::Elf(file), 0, options)
+    let Ok((spawned, Some(peer))) =
+        spawn_with(frames, map_offset, Source::Elf(file), 0, options, "child")
     else {
         return false;
     };

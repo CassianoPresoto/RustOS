@@ -12,6 +12,7 @@ use crate::object::Waiters;
 use crate::process::{self, ProcessError, Source};
 use crate::sync::IrqLock;
 use crate::task;
+use crate::userout;
 
 /// Quantos fins de processo a tabela lembra: o mais antigo cai quando passa disso.
 const REMEMBERED: usize = 16;
@@ -151,14 +152,17 @@ pub fn run(
         Err(LoadError::Missing) => return RunOutcome::NotFound,
         Err(_) => return RunOutcome::Failed,
     };
-    let spawned = match process::spawn(frames, direct_map_offset, Source::Elf(file), 0) {
+    let spawned = match process::spawn_as(frames, direct_map_offset, Source::Elf(file), 0, name) {
         Ok(spawned) => spawned,
         Err(error) => return refusal(&error),
     };
     if !wait {
         return RunOutcome::Started { pid: spawned.pid };
     }
-    match wait_for(spawned.pid) {
+    userout::direct();
+    let ended = wait_for(spawned.pid);
+    userout::queued();
+    match ended {
         Ended::Exit(code) => RunOutcome::Exited {
             pid: spawned.pid,
             code,
