@@ -79,7 +79,7 @@ capítulo segue como desenho. Os números estão em
 | `UserRange` e a metade de usuário das tabelas (`adopt_top_entries`, `release_user_half`) | `core/mm/src/{user,tables}.rs` |
 | x86_64: `SYSCALL` e `SYSRET`, `swapgs`, entrada paranoica de NMI, `#DF`, `#MC` e `#DB` (IST4), `usercopy`, `CpuPrefix`, `sysret` puro | `arch/x86_64/src/{traps,user,usercopy,prefix,sysret}.rs` |
 | aarch64: vetores de EL0, `SVC`, `eret`, `usercopy` com `ldtr`/`sttr`, `CNTKCTL_EL1`, `TTBR0_EL1`, `WXN` | `arch/aarch64/src/{exception,user,usercopy,mmu,prefix}.rs` |
-| Programa de usuário de teste (`global_asm!` em `arch/<isa>`, atrás da feature `selftest`) | `arch/<isa>/src/user_blob.rs` |
+| Casos de falha da 4a (`user/tests/cases`, com o `asm!` de cada caso em `arch/<isa>-user`, atrás da feature `test-cases`) | `user/tests/cases`, `arch/<isa>-user/src/cases.rs` |
 | Processo, espaço de usuário, syscalls, limpeza da pilha | `kernel/src/{process,uspace,syscall,scrub}.rs`; o autoteste em `kernel/src/process/selftest.rs` |
 | `check-layers` com `user/` e `arch/<isa>-user` | `xtask/src/checks/layers.rs` (o teste de que o `kernel/` não liga `arch/x86_64-user` nasceu vermelho) |
 
@@ -105,7 +105,7 @@ capítulo segue como desenho. Os números estão em
 | Pilha de falhas do aarch64 | O `vector_fault` lê o topo pelo `TPIDR_EL1` e guarda o `x0` no `TPIDRRO_EL0`; exceção síncrona de EL1h segue na pilha de falhas, sem o teste de estouro da pilha da tarefa | O `SP_EL0` agora é a pilha do usuário; a ordem do Linux fica na [DEBT-0078](../tech-debt/0078-aarch64-excecao-do-el1h-na-pilha-de-falhas.md) |
 | `T0SZ` do aarch64 | Fica em 16 (48 bits), o que o Limine deixa; o mapeador só mapeia abaixo de `USER_TOP` | Mudar para 17 não ganha nada, e o código de serial precoce já confere o 16 |
 | Limpeza da pilha | A volta ao usuário repinta a pilha do kernel abaixo do quadro com `STACK_PAINT`, varrendo até 128 bytes limpos; o `arch/` repinta os 256 bytes logo abaixo sem usar pilha | Custo medido; a heurística é a [DEBT-0073](../tech-debt/0073-limpeza-da-pilha-so-ate-128-bytes-de-limpo.md) |
-| Onde mora o programa de teste | Blob de `global_asm!` em `arch/<isa>/src/user_blob.rs`, na seção `.text` do kernel, copiado para uma página de usuário em `0x40_0000` | O `asm!` só mora em `arch/` (regra 4 do guidelines 04) e o `kernel/` nunca liga `arch/<isa>-user` (regra 12); código de teste fica atrás da feature `selftest` |
+| Onde mora o programa de teste | `user/tests/cases` no initramfs, lançado pelo `kernel` com `argv = [cases, <caso>, <arg0>]` (`spawn_as`, como o `lazy` e o `procs`); cada caso é uma função segura de `arch/<isa>-user/src/cases.rs` | O `asm!` só mora em `arch/` (regra 4 do guidelines 04) e o `kernel/` nunca liga `arch/<isa>-user` (regra 12); o `user/tests/cases` não tem `unsafe` (regra 11) e o xtask só o põe na imagem com `selftest` |
 | `simd` | A tarefa de usuário nasce com `simd: true` | Sem área de estado, o `xmm0` e o `v0` vazariam entre tarefas; a 4d fecha o resto |
 | `kernel_half_in_sync` | `Process::load` confere que as 256 entradas altas da raiz nova são as da raiz do kernel e recusa o processo se não forem | Entrada nova do kernel depois da cópia dessincronizaria as raízes |
 | `AC` (x86_64) | **Toda** entrada por vetor (a comum, a paranoica e a do `#DB`) faz `clac` **antes** de olhar a origem, se a CPU tem SMAP (sem SMAP, `clac` é `#UD`), como o `ASM_CLAC` do Linux; o `iretq` restaura o `AC` do quadro, então limpar é seguro. Vale para o usuário que liga `AC` por `popf` e para a exceção ou NMI que chega dentro da janela `stac`…`clac` da cópia (um `#PF` recuperável, por exemplo). A entrada por `SYSCALL` já tem o `AC` no `FMASK`. A QEMU limpa o `AC` na IRQ mas não na exceção, e o autoteste pega a exceção: de usuário (`privileged`) e de kernel (o `#PF` do `hello` num ponteiro não mapeado, contado em `usercopy::fixup_stats`) | Sem o `clac`, o tratador e a tarefa de kernel retomada rodariam com o SMAP desarmado. **Sem SMAP na CPU** (`RUSTOS_CPU=qemu64`: `protections: +wp +nx -smep -smap -umip`) a entrada não faz `clac` e o `AC` ligado no anel 0 não tem efeito: o autoteste só conta `AC` ligado no kernel (`AC_LEAKS`, `check_ac`) quando o SMAP está ligado, e o caso `privileged` passa |
@@ -223,7 +223,7 @@ zera as contagens que estão em ciclos entre filas: é o limite documentado e a
 | --- | --- |
 | Auxv (`AT_*`), `StartInfo`, `InitialStack` (monta `argc`, `argv` com as cadeias, `envp`, auxv e `AT_RANDOM` no topo da pilha, `sp` alinhado a 16, e os tetos `ARGS_MAX` e `ARGS_BYTES_MAX`) e o teto de `p_memsz` de um executável (`EXEC_MAX_LOADS_BYTES`, 64 MiB) | `core/hal/src/abi.rs`, com teste de layout e de cada tag |
 | Carregador: acha o arquivo (`core/cpio`), valida (`core/elf`, com os `Limits` de `hal::abi`), copia e mapeia cada `PT_LOAD`, registra as regiões no `Vmar` (`core/mm`) e monta a pilha com guarda e topo sorteado | `kernel/src/loader.rs` |
-| `Source::{Elf, Flat}` (o `Flat` é o blob da 4a, atrás de `selftest`), `Spawned`, a árvore de regiões em `Process` | `kernel/src/process.rs` |
+| `Source::Elf`, `Spawned`, a árvore de regiões em `Process` | `kernel/src/process.rs` |
 | `UserSpace::map_at` (o `p_vaddr` do segmento não é de página: o começo da primeira página e a cauda ficam zero) e `SpaceStats` | `kernel/src/uspace.rs` |
 | O lançamento do `init`, a espera e a conferência do código de saída | `kernel/src/init.rs` (só com `selftest`) |
 | `_start` (alinha o `sp`, zera o frame pointer, chama `rustos_user_main(pilha, handle)`) e o stub de `syscall`/`svc` | `arch/{x86_64,aarch64}-user` |
@@ -251,8 +251,8 @@ prefixo `[user] `.
 | Auxv e pilha inicial em `hal::abi` | O kernel (`InitialStack::build`) e o `user/rt` (`Env::from_stack`) partilham as tags, e o teste do `rt` lê o que o `build` monta | Um lado só não deriva do outro |
 | `debug_write` por linha | `println!` formata a linha num buffer de 512 bytes e faz uma `debug_write`; o kernel põe `[user] ` em cada chamada | Peça por peça viraria uma linha por pedaço |
 | `rt` testado no host | `make test` roda `cargo test --package rustos-user-rt` (o auxv, o `println!` e o alocador); `default-members` segue sem `user/` e sem `arch/*-user` | Os crates só compilam o asm para o alvo bare-metal; o `make clippy` os confere nos dois alvos |
-| Os casos de falha da 4a | Ficam no blob de `global_asm!` do `arch/<isa>`, atrás de `selftest`; só o `big` é programa em `user/tests/` ([DEBT-0086](../tech-debt/0086-casos-de-falha-de-usuario-no-blob-do-kernel.md)) | Cada caso pede `asm!`, que o usuário em Rust seguro não tem |
-| `rdx` na entrada | O `enter_user` do x86_64 zera todo registrador menos `rdi` e `rsi` desde a 4a; a 4b o torna contrato (o caso `hello` do blob confere `rdx == 0` na primeira instrução) | O psABI o lê como ponteiro de `atexit`: uma libc o registraria |
+| Os casos de falha da 4a | Saíram do blob do kernel: são o programa `user/tests/cases`, e cada caso é uma função segura de `arch/<isa>-user` com o `asm!` dele (feature `test-cases`) | Cada caso pede `asm!`, que o usuário em Rust seguro não tem; o `asm!` foi para `arch/<isa>-user` (regra 12) e o programa não tem `unsafe` (regra 11) |
+| `rdx` na entrada | O `enter_user` do x86_64 zera todo registrador menos `rdi` e `rsi` desde a 4a; a 4b o torna contrato (o `hello` do blob conferia `rdx == 0` na primeira instrução; o `cases` não confere mais, [DEBT-0154](../tech-debt/0154-rdx-na-entrada-sem-conferencia.md)) | O psABI o lê como ponteiro de `atexit`: uma libc o registraria |
 | `#[used]` | O `user/rt` não usa `#[used]` ([DEBT-0074](../tech-debt/0074-elf-recusa-osabi-gnu-do-used.md)); o `init` sai com `EI_OSABI = 0` | — |
 
 **Conflito do `x0` com a glibc (para a fase 5 decidir).** A ABI põe o handle de boot em `rdi`/`x0`. No x86_64 a
@@ -287,7 +287,7 @@ de boot. VMO, VMAR, `process_create`, `thread_create` e `process_kill` são as p
 | --- | --- |
 | `Obj`, o enum fechado de `Arc` (`Process`, `Channel`, `Console`; `Vmo`, `Vmar` e `Thread` entram com as chamadas que os criam), `Lock` sobre o `IrqLock`, `VecSlots` (`try_reserve`, e o clamp do índice do handle por `platform::array_index_nospec`), `Work` (a lista de trabalho), o par de pontas, a cobrança de pontas por processo | `kernel/src/object.rs` |
 | `Process` com a tabela de handles, o objeto `ProcessObj` e a cobrança; `with_current`; a morte esvazia a tabela (`drain`) antes de liberar o espaço e levanta `TERMINATED` depois | `kernel/src/process.rs` |
-| O canal de boot e o console de um programa plano de teste | `kernel/src/process/boot.rs` |
+| O canal de boot e o console de cada programa | `kernel/src/process/boot.rs` |
 | `handle_close`, `handle_duplicate`, `handle_replace`, `object_wait_one`, `channel_create`, `channel_write`, `channel_read`, `debug_write(console, ptr, len)`; a tabela de despacho ganhou as entradas | `kernel/src/syscall.rs`, `kernel/src/syscall/handles.rs` |
 | `block_until`, `wake_waiters`, `wait_bit`, `clear_permit`, (a ponte com o escalonador) | `kernel/src/task.rs` |
 | `ReadActual`, `encode_boot_message`, `parse_boot_message`, `MAX_CHANNEL_ENDS`, `USER_HANDLE_ARRAY_MAX` | `core/hal/src/abi.rs` |
@@ -312,8 +312,7 @@ o programa lê a mensagem e vê `PEER_CLOSED`. A mensagem de boot é a do contra
 e um `u32` de `kind` por item), com `count = 2` e `kind`s `[1 Process, 3 Console]`, na ordem dos handles da mensagem:
 o Process do próprio programa (todos os direitos de processo) e o console (`WRITE`, `DUPLICATE`, `TRANSFER`). O
 VMAR raiz (`kind` 2) e o VMO do initramfs (`kind` 4) **entram na parte seguinte**, quando existirem como objetos; o
-leitor casa por `kind` e não por posição, então a mensagem maior não quebra o `init`. O programa plano de teste
-(`Source::Flat`) não tem canal de boot: recebe só o console, no handle `1`.
+leitor casa por `kind` e não por posição, então a mensagem maior não quebra o `init`. Os programas de teste recebem a mesma mensagem: o `cases` escreve pelo console dela, não pelo handle `1` fixo do blob.
 
 **Divergências e preenchimentos do desenho** (decisões do agente; nenhuma muda número, `Status` nem o layout da mensagem
 de boot):

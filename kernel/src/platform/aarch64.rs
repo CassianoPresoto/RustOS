@@ -11,8 +11,6 @@ pub use rustos_arch_aarch64::fpu::{
 pub use rustos_arch_aarch64::fpu::{read_probe as fpu_read_probe, write_probe as fpu_write_probe};
 use rustos_arch_aarch64::intid::{QEMU_VIRT_PL011_INTID, VIRTUAL_TIMER_INTID};
 use rustos_arch_aarch64::sgi::{SGI_RESCHEDULE, SGI_STOP};
-#[cfg(feature = "selftest")]
-pub use rustos_arch_aarch64::user_blob;
 pub use rustos_arch_aarch64::zero::zero_aligned;
 use rustos_arch_aarch64::{
     Aarch64Cpu, Aarch64CpuLocal, Aarch64Entropy, Aarch64Ipi, Aarch64Mmu, DirectMapTables, MmioBus,

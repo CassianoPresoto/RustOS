@@ -19,7 +19,7 @@ pub struct Program {
 
 /// Todos os programas de `user/`. O `init` e as demonstrações do shell vão em toda imagem; os de
 /// teste, só com `selftest`.
-pub const PROGRAMS: [Program; 11] = [
+pub const PROGRAMS: [Program; 12] = [
     Program {
         package: "rustos-user-init",
         file: "init",
@@ -73,6 +73,11 @@ pub const PROGRAMS: [Program; 11] = [
     Program {
         package: "rustos-user-test-procs",
         file: "procs",
+        selftest_only: true,
+    },
+    Program {
+        package: "rustos-user-test-cases",
+        file: "cases",
         selftest_only: true,
     },
 ];
@@ -324,7 +329,11 @@ mod tests {
         assert_eq!(plain, demos);
         assert_eq!(
             tested,
-            [&demos[..], &["big", "handles", "lazy", "child", "procs"]].concat()
+            [
+                &demos[..],
+                &["big", "handles", "lazy", "child", "procs", "cases"]
+            ]
+            .concat()
         );
     }
 

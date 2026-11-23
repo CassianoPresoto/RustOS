@@ -15,3 +15,6 @@ pub use syscall::syscall;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use simd::simd_hold;
+
+#[cfg(all(target_arch = "x86_64", target_os = "none", feature = "test-cases"))]
+pub mod cases;

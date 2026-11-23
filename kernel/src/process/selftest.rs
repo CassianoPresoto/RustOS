@@ -1,4 +1,4 @@
-//! O autoteste de usuário (só na imagem com a feature `selftest`): o programa embutido no kernel
+//! O autoteste de usuário (só na imagem com a feature `selftest`): o programa `cases` do initramfs
 //! roda em anel 3 ou EL0 nos casos `hello`, falha contida e laço de syscall nula, e a limpeza da
 //! pilha do kernel na volta ao usuário se confere por um resíduo plantado (4a); o programa `big` do
 //! initramfs passa o carregador por segmentos grandes e o carregador recusa o que é inválido (4b).
@@ -7,14 +7,15 @@ use core::hint::black_box;
 use core::ptr;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
+use alloc::string::ToString;
+
 use rustos_hal::abi::{ProcessEvent, event_kind, fault_kind};
 
 mod demand;
 mod procs;
 
-use super::{Program, Source, fault_peak, last_event, spawn, spawn_keeping};
+use super::{Source, fault_peak, last_event, spawn, spawn_as, spawn_keeping};
 use crate::frames::Frames;
-use crate::platform::user_blob::{Case, image, offset};
 use crate::uspace::{Resolved, UserSpace, set_frame_budget};
 use crate::{loader, platform, scrub, task};
 use rustos_mm::vmar::Access;
@@ -55,7 +56,7 @@ pub fn check_ac() {
 /// O processo liga `NT` e `AC` por `popf` e faz syscalls durante 8 ms, na CPU 0, onde o timer
 /// do próprio autoteste o interrompe: sobrevive, e o kernel nunca roda com `AC`. O caso
 /// `privileged` liga `AC` e leva um `#GP`, o caminho que a QEMU não limpa sozinho.
-fn flags_survive(frames: Frames, map_offset: u64) -> bool {
+fn flags_survive(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
     let start = (platform::now_ns(), platform::cycles());
     while platform::now_ns()
         .zip(start.0)
@@ -63,7 +64,7 @@ fn flags_survive(frames: Frames, map_offset: u64) -> bool {
     {}
     let per_ms = platform::cycles().saturating_sub(start.1);
     AC_LEAKS.store(0, Ordering::Relaxed);
-    let result = run_case(frames, map_offset, Case::FlagsAc, per_ms * 8, 1);
+    let result = run_case(frames, map_offset, archive, "flags-ac", per_ms * 8, 1);
     exited_with(result, 0) && AC_LEAKS.load(Ordering::Relaxed) == 0
 }
 
@@ -104,20 +105,29 @@ fn scan() -> usize {
         .count()
 }
 
-/// Roda um caso até o processo acabar e devolve o evento dele.
+/// Roda o caso `case` do `cases` do initramfs com `arg0` até o processo acabar e devolve o evento
+/// dele; `None` se o initramfs não tem `cases` ou o processo não acaba.
 fn run_case(
     frames: Frames,
-    offset_of_map: u64,
-    case: Case,
+    map_offset: u64,
+    archive: Option<&[u8]>,
+    case: &str,
     arg0: u64,
     affinity: u32,
 ) -> Option<(u32, ProcessEvent)> {
-    let program = Program {
-        code: image(),
-        entry_offset: offset(case),
-        arg0,
-    };
-    run_source(frames, offset_of_map, Source::Flat(program), affinity)
+    let file = loader::find(archive?, b"cases").ok()?;
+    let arg0 = arg0.to_string();
+    let arguments: [&[u8]; 3] = [b"cases", case.as_bytes(), arg0.as_bytes()];
+    let spawned = spawn_as(
+        frames,
+        map_offset,
+        Source::Elf(file),
+        affinity,
+        "cases",
+        &arguments,
+    )
+    .ok()?;
+    finish(&spawned)
 }
 
 /// Roda `source` até o processo acabar e devolve o evento dele.
@@ -396,8 +406,20 @@ fn faulted(result: Option<(u32, ProcessEvent)>) -> Option<ProcessEvent> {
 }
 
 /// Décimos de ns por chamada de uma execução do laço, na CPU `cpu` (sem migração no meio).
-fn sample_tenths_ns(frames: Frames, map_offset: u64, cpu: usize) -> Option<u64> {
-    let (_, event) = run_case(frames, map_offset, Case::NullLoop, LOOP_CALLS, 1 << cpu)?;
+fn sample_tenths_ns(
+    frames: Frames,
+    map_offset: u64,
+    archive: Option<&[u8]>,
+    cpu: usize,
+) -> Option<u64> {
+    let (_, event) = run_case(
+        frames,
+        map_offset,
+        archive,
+        "null-loop",
+        LOOP_CALLS,
+        1 << cpu,
+    )?;
     if event.kind != event_kind::EXIT {
         return None;
     }
@@ -419,18 +441,18 @@ fn median(mut samples: [u64; RUNS]) -> u64 {
     samples[RUNS / 2]
 }
 
-fn null_loop_medians(frames: Frames, map_offset: u64) -> Option<Medians> {
+fn null_loop_medians(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> Option<Medians> {
     let cpu = usize::from(task::active_cpus() & 2 != 0);
     let (mut clean, mut dirty, mut slow) = ([0; RUNS], [0; RUNS], [0; RUNS]);
     for round in 0..RUNS {
         scrub::set_enabled(true);
-        clean[round] = sample_tenths_ns(frames, map_offset, cpu)?;
+        clean[round] = sample_tenths_ns(frames, map_offset, archive, cpu)?;
         scrub::set_enabled(false);
-        dirty[round] = sample_tenths_ns(frames, map_offset, cpu)?;
+        dirty[round] = sample_tenths_ns(frames, map_offset, archive, cpu)?;
         scrub::set_enabled(true);
         if platform::HAS_FAST_RETURN {
             platform::set_fast_return(false);
-            let sample = sample_tenths_ns(frames, map_offset, cpu);
+            let sample = sample_tenths_ns(frames, map_offset, archive, cpu);
             platform::set_fast_return(true);
             slow[round] = sample?;
         }
@@ -443,10 +465,10 @@ fn null_loop_medians(frames: Frames, map_offset: u64) -> Option<Medians> {
 }
 
 /// O resíduo achado depois de plantar na primeira chamada e varrer na segunda.
-fn residue(frames: Frames, map_offset: u64) -> Option<usize> {
+fn residue(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> Option<usize> {
     FOUND.store(usize::MAX, Ordering::Relaxed);
     PROBE.store(PLANT_NEXT, Ordering::Relaxed);
-    run_case(frames, map_offset, Case::NullLoop, 16, 0)?;
+    run_case(frames, map_offset, archive, "null-loop", 16, 0)?;
     PROBE.store(OFF, Ordering::Relaxed);
     Some(FOUND.load(Ordering::Relaxed)).filter(|&found| found != usize::MAX)
 }
@@ -459,28 +481,51 @@ fn copy_fixup_ran_with_ac_clear() -> bool {
 
 /// O `hello` roda e sai com 0 em cada CPU ativa: a entrada de syscall e o espaço de usuário de
 /// cada núcleo (os MSRs de `SYSCALL` ou o `TTBR0_EL1`) são conferidos um a um.
-fn hello_on_every_cpu(frames: Frames, map_offset: u64) -> bool {
+fn hello_on_every_cpu(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
     let active = task::active_cpus();
     (0..rustos_hal::MAX_CPUS)
         .filter(|cpu| active >> cpu & 1 != 0)
         .all(|cpu| {
-            let result = run_case(frames, map_offset, Case::Hello, 0, 1 << cpu);
+            let result = run_case(frames, map_offset, archive, "hello", 0, 1 << cpu);
             exited_with(result, 0)
         })
 }
 
 /// Os casos do programa embutido. `false` se algum falhou.
 pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
-    let hello = hello_on_every_cpu(frames, map_offset) && copy_fixup_ran_with_ac_clear();
+    let hello = hello_on_every_cpu(frames, map_offset, archive) && copy_fixup_ran_with_ac_clear();
     let probe = ptr::addr_of!(KERNEL_PROBE).expose_provenance() as u64;
-    let kernel = faulted(run_case(frames, map_offset, Case::FaultMemory, probe, 0));
+    let kernel = faulted(run_case(
+        frames,
+        map_offset,
+        archive,
+        "fault-memory",
+        probe,
+        0,
+    ));
     let kernel_ok = kernel.is_some_and(|event| event.fault_kind == fault_kind::PAGE_FAULT);
     AC_LEAKS.store(0, Ordering::Relaxed);
-    let privileged = faulted(run_case(frames, map_offset, Case::FaultPrivileged, 0, 0)).is_some()
+    let privileged = faulted(run_case(
+        frames,
+        map_offset,
+        archive,
+        "fault-privileged",
+        0,
+        0,
+    ))
+    .is_some()
         && AC_LEAKS.load(Ordering::Relaxed) == 0;
-    let trap = faulted(run_case(frames, map_offset, Case::FaultTrap, 0, 0)).is_some();
-    let stack = faulted(run_case(frames, map_offset, Case::FaultBadStack, 0, 0)).is_some();
-    let flags = flags_survive(frames, map_offset);
+    let trap = faulted(run_case(frames, map_offset, archive, "fault-trap", 0, 0)).is_some();
+    let stack = faulted(run_case(
+        frames,
+        map_offset,
+        archive,
+        "fault-bad-stack",
+        0,
+        0,
+    ))
+    .is_some();
+    let flags = flags_survive(frames, map_offset, archive);
     let resolver = demand::resolver_cases(frames, map_offset);
     let big = big_program_runs(frames, map_offset, archive);
     let handles = handles_program_runs(frames, map_offset, archive);
@@ -493,11 +538,11 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
         && demand::ring_stress(frames, map_offset, demand::RING_ROUNDS, true);
     let (syscall_depth, fault_depth) = (scrub::deepest(), fault_peak());
     scrub::set_measuring(false);
-    let clean_found = residue(frames, map_offset);
+    let clean_found = residue(frames, map_offset, archive);
     scrub::set_enabled(false);
-    let dirty_found = residue(frames, map_offset);
+    let dirty_found = residue(frames, map_offset, archive);
     scrub::set_enabled(true);
-    let medians = null_loop_medians(frames, map_offset);
+    let medians = null_loop_medians(frames, map_offset, archive);
     scrub::set_measuring(true);
     let scrub_ok = clean_found == Some(0) && dirty_found.is_some_and(|found| found > 0);
     if let Some(medians) = medians {

@@ -17,8 +17,6 @@ use rustos_arch_x86_64::lapic::{
 };
 use rustos_arch_x86_64::pic;
 use rustos_arch_x86_64::pit::{self, Pit, Reading};
-#[cfg(feature = "selftest")]
-pub use rustos_arch_x86_64::user_blob;
 use rustos_arch_x86_64::{
     ApicAccess, ApicMode, COM1, CpuTables, IstStacks, MmioBus, PIC_MASTER, PIC_SLAVE, PIT_PORTS,
     PortBus, Protections, TimerMode, X86Cpu, X86CpuLocal, X86Entropy, X86Ipi, X86Mmu, active_root,
