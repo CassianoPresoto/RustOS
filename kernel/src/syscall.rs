@@ -97,13 +97,23 @@ fn call(args: &SyscallArgs) -> SyscallReturn {
     let Some(call) = lookup(args.number) else {
         return SyscallReturn::err(Status::NotSupported);
     };
-    let [a0, a1, a2, ..] = args.args;
     match call {
         Syscall::Nop => {
             #[cfg(feature = "selftest")]
             process::on_nop();
             SyscallReturn::ok(0)
         }
+        _ => run(call, args),
+    }
+}
+
+// Fora de `call`: o quadro das outras chamadas (buffers de até 1 KiB) não pode ficar abaixo do
+// despacho, ou a limpeza para antes do que a nop deixa (DEBT-0073).
+#[inline(never)]
+fn run(call: Syscall, args: &SyscallArgs) -> SyscallReturn {
+    let [a0, a1, a2, ..] = args.args;
+    match call {
+        Syscall::Nop => SyscallReturn::ok(0),
         Syscall::ProcessExit => process::exit(a0.cast_signed()),
         Syscall::ThreadExit => process::thread_exit(),
         Syscall::DebugWrite => debug_write(a0, a1, a2),
