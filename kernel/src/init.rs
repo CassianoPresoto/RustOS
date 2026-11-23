@@ -27,7 +27,7 @@ pub fn run(vm: &Vm, frames: Frames, map_offset: u64) -> bool {
     let free_before = frames.free_frames();
     let spawned = loader::find(archive, NAME)
         .map_err(process::ProcessError::Load)
-        .and_then(|file| process::spawn(frames, map_offset, Source::Elf(file), 0));
+        .and_then(|file| process::spawn_as(frames, map_offset, Source::Elf(file), 0, "init"));
     let spawned = match spawned {
         Ok(spawned) => spawned,
         Err(process::ProcessError::Load(LoadError::Missing)) => {
