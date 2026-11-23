@@ -32,6 +32,8 @@ const MODE_BLOCK: u8 = 3;
 const MODE_OVERFLOW: u8 = 4;
 const MODE_ECHO: u8 = 5;
 const MODE_SELF_KILL: u8 = 7;
+/// O modo que segura um valor de 8 bytes em `xmm0`/`v0` (o `child` sai com 0 se ele se manteve).
+const MODE_SIMD: u8 = 8;
 /// O modo de sair com o código do segundo byte (`process_exit` do `child`).
 const MODE_EXIT_CODE: u8 = 6;
 const WORKER_SPIN: u64 = 0;
@@ -39,6 +41,9 @@ const WORKER_EXIT: u64 = 7;
 /// Rodadas do laço de criar e matar, e idas e voltas do eco entre processos.
 const LOOPS: u32 = 300;
 const ECHOES: u32 = 2000;
+/// Filhos que seguram valores diferentes em `xmm0`/`v0` ao mesmo tempo: mais que as 4 CPUs da QEMU.
+const SIMD_CHILDREN: usize = 8;
+const SIMD_TAG: u64 = 0x5349_4D44_0000_0000;
 
 type Raw = Result<u64, Status>;
 
@@ -743,12 +748,12 @@ fn pair() -> Option<(Handle, Handle)> {
 /// iniciada. A ponta de `events` sai do pai.
 fn start_with_events(
     cx: &Cx<'_>,
-    msg: [u8; 2],
+    msg: &[u8],
     events: Handle,
 ) -> Result<(Child, Handle), spawn::Error> {
     let child = spawn::create_with_events(cx.parent, cx.child, events)?;
     child.send_boot(&[])?;
-    sys::channel_write(child.channel, &msg, &[]).map_err(spawn::Error::Sys)?;
+    sys::channel_write(child.channel, msg, &[]).map_err(spawn::Error::Sys)?;
     let sp = child.stack()?;
     let thread = child.start(sp)?;
     Ok((child, thread))
@@ -774,7 +779,7 @@ fn events_channel(c: &mut Checks, cx: &Cx<'_>) {
         c.expect("a channel for the events", false);
         return;
     };
-    match start_with_events(cx, [MODE_EXIT_CODE, 7], theirs) {
+    match start_with_events(cx, &[MODE_EXIT_CODE, 7], theirs) {
         Ok((child, thread)) => {
             c.expect(
                 "a child that exits with 7 terminates",
@@ -803,7 +808,7 @@ fn events_channel(c: &mut Checks, cx: &Cx<'_>) {
         c.expect("a channel for the fault event", false);
         return;
     };
-    match start_with_events(cx, [MODE_OVERFLOW, 0], theirs) {
+    match start_with_events(cx, &[MODE_OVERFLOW, 0], theirs) {
         Ok((child, thread)) => {
             c.expect(
                 "a child that overflows its stack terminates",
@@ -847,7 +852,7 @@ fn events_kill_and_gone(c: &mut Checks, cx: &Cx<'_>) {
         c.expect("a channel for the kill event", false);
         return;
     };
-    match start_with_events(cx, [MODE_BLOCK, 0], theirs) {
+    match start_with_events(cx, &[MODE_BLOCK, 0], theirs) {
         Ok((child, thread)) => {
             c.expect(
                 "process_kill of a blocked child",
@@ -873,7 +878,7 @@ fn events_kill_and_gone(c: &mut Checks, cx: &Cx<'_>) {
         return;
     };
     let _ = sys::handle_close(mine);
-    match start_with_events(cx, [MODE_EXIT_CODE, 3], theirs) {
+    match start_with_events(cx, &[MODE_EXIT_CODE, 3], theirs) {
         Ok((child, thread)) => {
             c.expect(
                 "a child whose parent closed the events end still terminates",
@@ -1261,6 +1266,56 @@ fn echo(c: &mut Checks, cx: &Cx<'_>, rounds: u8) -> u64 {
     elapsed / u64::from(total.max(1))
 }
 
+/// A mensagem do modo `MODE_SIMD`: o modo e o valor, em 8 bytes little-endian.
+fn simd_message(value: u64) -> [u8; 9] {
+    let mut msg = [0_u8; 9];
+    msg[0] = MODE_SIMD;
+    msg[1..].copy_from_slice(&value.to_le_bytes());
+    msg
+}
+
+/// Oito filhos que seguram valores diferentes em `xmm0`/`v0` ao mesmo tempo, mais que as CPUs da QEMU,
+/// para dividirem núcleo e trocarem de contexto entre si. Cada um sai com 0 se o seu valor se manteve.
+fn simd_across_processes(c: &mut Checks, cx: &Cx<'_>) {
+    let mut running = [const { None }; SIMD_CHILDREN];
+    for (i, slot) in running.iter_mut().enumerate() {
+        let value = SIMD_TAG | u64::try_from(i).unwrap_or(0);
+        *slot = pair().and_then(|(mine, theirs)| {
+            let msg = simd_message(value);
+            // `theirs` sai com a chamada, que o `user/rt` consome em qualquer resultado.
+            let started = start_with_events(cx, &msg, theirs);
+            if started.is_err() {
+                let _ = sys::handle_close(mine);
+            }
+            started.ok().map(|(child, thread)| (mine, child, thread))
+        });
+    }
+    c.expect(
+        "all eight SIMD children started",
+        running.iter().all(Option::is_some),
+    );
+    let deadline = now() + 20 * SECOND;
+    for slot in running {
+        let Some((mine, child, thread)) = slot else {
+            continue;
+        };
+        let exited = child.wait(deadline).is_ok();
+        let kept =
+            exited && read_event(mine).is_some_and(|e| e.kind == event_kind::EXIT && e.code == 0);
+        c.expect(
+            "a SIMD child kept its xmm0/v0 value with the others running",
+            kept,
+        );
+        let _ = sys::handle_close(thread);
+        let _ = sys::handle_close(mine);
+        if exited {
+            child.release();
+        } else {
+            child.abandon();
+        }
+    }
+}
+
 /// Solta o filho bloqueado que o ponto `B` mediu.
 fn release_blocked(c: &mut Checks, blocked: Result<(Child, Handle), spawn::Error>) {
     if let Ok((child, thread)) = blocked {
@@ -1342,6 +1397,7 @@ fn main(env: &Env) -> i64 {
     threads_and_kill(&mut c, &cx);
     byte_cap(&mut c, &cx);
     map_loop(&mut c, &cx);
+    simd_across_processes(&mut c, &cx);
     warm_up(&mut c, &cx);
     sleep(30 * MS);
     sync(&cx, b"A");

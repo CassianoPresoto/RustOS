@@ -11,7 +11,7 @@ use core::hint::black_box;
 
 use rustos_user_rt::boot::{self, Boot};
 use rustos_user_rt::vm;
-use rustos_user_rt::{Env, Handle, entry, entry_address, println, signals, sys};
+use rustos_user_rt::{Env, Handle, entry, entry_address, println, signals, simd_hold, sys};
 
 entry!(main);
 
@@ -23,6 +23,12 @@ const MODE_OVERFLOW: u8 = 4;
 const MODE_ECHO: u8 = 5;
 const MODE_EXIT: u8 = 6;
 const MODE_SELF_KILL: u8 = 7;
+/// Segura o valor de 8 bytes que segue o modo em `xmm0`/`v0` por ~300 ms.
+const MODE_SIMD: u8 = 8;
+
+/// Rodadas de `simd_hold` por chamada, e o tempo total do laço do modo `MODE_SIMD`.
+const SIMD_ROUNDS: u64 = 4096;
+const SIMD_MS: u64 = 300;
 
 /// O `arg0` das threads a mais: gira para sempre, ou sai.
 const WORKER_SPIN: u64 = 0;
@@ -49,11 +55,31 @@ fn spin() -> ! {
     }
 }
 
-/// A segunda mensagem do pai, sem bloquear: o modo e o byte seguinte.
-fn mode(channel: Handle) -> Option<(u8, u8)> {
-    let mut bytes = [0_u8; 8];
+/// A segunda mensagem do pai, sem bloquear: o modo, o byte seguinte e os oito bytes depois dele.
+fn mode(channel: Handle) -> Option<(u8, u8, u64)> {
+    let mut bytes = [0_u8; 16];
     let actual = sys::channel_read(channel, &mut bytes, &mut []).ok()?;
-    (actual.bytes >= 1).then(|| (bytes[0], bytes.get(1).copied().unwrap_or(0)))
+    (actual.bytes >= 1).then(|| {
+        let word = <[u8; 8]>::try_from(&bytes[1..9]).map_or(0, u64::from_le_bytes);
+        (bytes[0], bytes[1], word)
+    })
+}
+
+/// `simd_hold` em laço por `SIMD_MS`: 0 se `value` se manteve em `xmm0`/`v0` o tempo todo, 1 se não.
+fn simd(value: u64) -> i64 {
+    let Ok(started) = sys::clock_get_monotonic() else {
+        return 2;
+    };
+    loop {
+        if !simd_hold(value, SIMD_ROUNDS) {
+            return 1;
+        }
+        match sys::clock_get_monotonic() {
+            Ok(now) if now - started < SIMD_MS * 1_000_000 => {}
+            Ok(_) => return 0,
+            Err(_) => return 2,
+        }
+    }
 }
 
 /// Eco: devolve cada mensagem que chega ao pai, `rounds` vezes.
@@ -122,16 +148,17 @@ fn main(env: &Env) -> i64 {
     }
     match mode(channel) {
         None => hello(env, boot),
-        Some((MODE_QUIET, _)) => 0,
-        Some((MODE_SPIN, _)) => spin(),
-        Some((MODE_BLOCK, _)) => {
+        Some((MODE_QUIET, ..)) => 0,
+        Some((MODE_SPIN, ..)) => spin(),
+        Some((MODE_BLOCK, ..)) => {
             let _ = sys::object_wait_one(channel, signals::PEER_CLOSED, u64::MAX);
             0
         }
-        Some((MODE_OVERFLOW, _)) => i64::try_from(recurse(0)).unwrap_or(0),
-        Some((MODE_ECHO, rounds)) => echo(channel, u32::from(rounds) * 16),
-        Some((MODE_EXIT, code)) => i64::from(code),
-        Some((MODE_SELF_KILL, _)) => {
+        Some((MODE_OVERFLOW, ..)) => i64::try_from(recurse(0)).unwrap_or(0),
+        Some((MODE_ECHO, rounds, _)) => echo(channel, u32::from(rounds) * 16),
+        Some((MODE_EXIT, code, _)) => i64::from(code),
+        Some((MODE_SIMD, _, value)) => simd(value),
+        Some((MODE_SELF_KILL, ..)) => {
             let own = boot.process.map(sys::process_kill);
             println!("child: process_kill of itself came back: {own:?}");
             95

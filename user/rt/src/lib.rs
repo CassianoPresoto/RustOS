@@ -21,6 +21,10 @@ pub mod vm;
 
 pub use console::{LineBuffer, print_line, set_console};
 pub use env::{Args, Auxv, Env};
+#[cfg(all(target_os = "none", target_arch = "aarch64"))]
+pub use rustos_arch_aarch64_user::simd_hold;
+#[cfg(all(target_os = "none", target_arch = "x86_64"))]
+pub use rustos_arch_x86_64_user::simd_hold;
 #[cfg(feature = "raw-syscalls")]
 pub use rustos_hal::abi::Syscall;
 pub use rustos_hal::abi::{

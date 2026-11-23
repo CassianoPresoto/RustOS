@@ -3,7 +3,7 @@ id: DEBT-0035
 title: SVE, SME e AMX sem estado por tarefa
 status: Open
 date: 2026-11-17
-trigger: O primeiro código de usuário (fase 4), ou a primeira CPU de teste com SVE, SME ou AMX
+trigger: O primeiro programa que use SVE, SME ou AMX, ou o primeiro sinal Linux
 paid_date:
 ---
 
@@ -17,9 +17,11 @@ A troca de contexto salva V0–V31, FPSR e FPCR no aarch64, e x87, SSE, AVX e AV
 
 O kernel não usa nenhum deles, e as áreas teriam de ser alocadas por tarefa e por vetor (SVE tem VL configurável; AMX tem 8 KiB de tile, e o Linux exige permissão por processo).
 
+O gatilho antigo disparou com a 4d, mas nenhum programa usa SVE, SME ou AMX. O kernel deixa esses estados desligados, então o acesso trapeia e o processo morre, sem vazar estado. Por isso a dívida segue aberta, com o gatilho novo.
+
 ## Gatilho
 
-O primeiro código de usuário (fase 4): programa que usa SVE, SME ou AMX.
+O primeiro programa que use SVE, SME ou AMX, ou o primeiro sinal Linux.
 
 ## Como pagar
 
