@@ -650,12 +650,12 @@ pub fn secondary_init(resources: SecondaryResources) -> Result<(), PlatformError
 /// O x86_64 mantém o cache de instrução coerente com as escritas: nada a fazer.
 pub fn sync_icache(_start: usize, _len: usize) {}
 
-/// A raiz do kernel e o que o usuário precisa antes da primeira tarefa. Uma vez, depois de
-/// `Vm::activate`; o x86_64 não aloca nada.
 /// Liga as etiquetas de PCID no x86_64. Desligado até o primeiro boot em metal ou KVM com PCID (DEBT-0155):
 /// o caminho com etiqueta está compilado e não foi executado.
 const PCID_ENABLED: bool = false;
 
+/// A raiz do kernel e o que o usuário precisa antes da primeira tarefa. Uma vez, depois de
+/// `Vm::activate`; o x86_64 não aloca nada.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "mesma assinatura em todas as ISAs"

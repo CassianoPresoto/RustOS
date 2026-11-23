@@ -22,8 +22,10 @@ pub fn note_hardware(pcid: bool) {
     HARDWARE_PCID.store(pcid, Ordering::Relaxed);
 }
 static ON: AtomicBool = AtomicBool::new(false);
-/// A largura em uso (12 ou 8/16 bits), para a linha `mitigations:`.
+/// A largura em uso (o que o gerador recebeu: no modo de teste, 4 bits).
 static BITS: AtomicU32 = AtomicU32::new(0);
+/// A largura que o hardware anuncia (12 no PCID, 8 ou 16 no ASID), para a linha `tlb tags:`.
+static HARDWARE_BITS: AtomicU32 = AtomicU32::new(0);
 /// Esvaziamentos de TLB que a regra mandou (tudo e só de uma etiqueta), para o autoteste.
 static FLUSH_ALL: AtomicU64 = AtomicU64::new(0);
 static FLUSH_SPACE: AtomicU64 = AtomicU64::new(0);
@@ -36,11 +38,14 @@ const TEST_BITS: u32 = 4;
 /// Liga as etiquetas com `bits` de largura (`None`: a máquina não tem PCID/ASID). Antes de qualquer
 /// espaço de usuário. Devolve se valem.
 pub fn init(bits: Option<u32>) -> bool {
-    let Some(bits) = bits else {
+    let Some(hardware) = bits else {
         return false;
     };
+    HARDWARE_BITS.store(hardware, Ordering::Relaxed);
     #[cfg(feature = "selftest")]
-    let bits = bits.min(TEST_BITS);
+    let bits = hardware.min(TEST_BITS);
+    #[cfg(not(feature = "selftest"))]
+    let bits = hardware;
     let Ok(alloc) = AsidAllocator::new(bits, 1) else {
         return false;
     };
@@ -122,24 +127,35 @@ pub fn bits() -> u32 {
     BITS.load(Ordering::Relaxed)
 }
 
-/// O trecho da linha `mitigations:` que diz se as etiquetas estão ligadas (no modo de teste o
-/// aarch64 mostra `asid 8-bit` com as 4 bits do autoteste: o número exato sai do `stats`).
-pub fn label() -> &'static str {
-    match (
-        cfg!(target_arch = "x86_64"),
-        enabled(),
-        BITS.load(Ordering::Relaxed),
-    ) {
-        (true, true, _) => "pcid on",
-        (true, false, _) => {
-            if HARDWARE_PCID.load(Ordering::Relaxed) {
-                "pcid off (untested)"
+/// O que a linha `tlb tags:` diz: a largura do hardware e, no modo de teste, a largura de teste.
+pub struct Label;
+
+impl core::fmt::Display for Label {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let on = enabled();
+        let hardware = HARDWARE_BITS.load(Ordering::Relaxed);
+        if cfg!(target_arch = "x86_64") {
+            if on {
+                f.write_str("pcid on")?;
+            } else if HARDWARE_PCID.load(Ordering::Relaxed) {
+                f.write_str("pcid off (untested)")?;
             } else {
-                "pcid off (absent)"
+                f.write_str("pcid off (absent)")?;
             }
+        } else if on {
+            write!(f, "asid {hardware}-bit")?;
+        } else {
+            f.write_str("asid off")?;
         }
-        (false, false, _) => "asid off",
-        (false, true, 16) => "asid 16-bit",
-        (false, true, _) => "asid 8-bit",
+        #[cfg(feature = "selftest")]
+        if on && BITS.load(Ordering::Relaxed) != hardware {
+            write!(f, " (test tags {}-bit)", BITS.load(Ordering::Relaxed))?;
+        }
+        Ok(())
     }
+}
+
+/// A linha `tlb tags:` (ver `Label`).
+pub fn label() -> Label {
+    Label
 }

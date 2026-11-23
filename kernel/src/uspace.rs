@@ -497,6 +497,9 @@ impl UserSpace {
             }
             FaultPlan::CopyZero => {
                 let frame = self.fresh_frame()?;
+                // Troca uma folha existente (a página zero, lida numa CPU): a geração sobe antes, como em
+                // `unmap_pages`, para a CPU que volta ao espaço esvaziar a etiqueta.
+                self.shared.tlb_gen.fetch_add(1, Ordering::SeqCst);
                 if self
                     .tables
                     .remap_page(page, frame, PageFlags::USER_DATA)

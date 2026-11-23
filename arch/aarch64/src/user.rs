@@ -99,7 +99,8 @@ pub unsafe fn switch_space(root: u64, tag: TlbTag) {
             match flush {
                 TagFlush::Keep => {}
                 TagFlush::Space => {
-                    // SAFETY: invalidar só o TLB desta CPU não tem pré-condição; `dsb` e `isb` vêm antes.
+                    // SAFETY: invalidar só o TLB desta CPU não tem pré-condição; o `dsb nsh` e o `isb` depois do
+                    // `tlbi` completam a invalidação antes da escrita do `TTBR0`.
                     unsafe {
                         asm!("tlbi aside1, {asid}", "dsb nsh", "isb", asid = in(reg) asid, options(nostack));
                     }

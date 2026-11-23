@@ -32,3 +32,8 @@ O primeiro boot em metal, ou em KVM, com uma CPU x86_64 que anuncie PCID. Nesse 
 Trocar `PCID_ENABLED` para `true`, rodar o smoke e o autoteste de etiquetas, medir a troca nas duas configurações,
 registrar os números no SDD 07 e trocar `off (untested)` por `on` no SDD 17. Se a máquina não tiver `INVPCID`,
 conferir o caminho com `CR4.PGE`.
+
+Ao ligar o PCID entra também o **teste de migração**, que não existe hoje: ler a página em A, escrever em B
+depois de a página mudar de permissão ou de frame, e reler em A, com A tendo a tradução velha na TLB. Nenhum
+autoteste cobre isso (o *shootdown* só prova a tradução velha com a parte remota desligada).
+
