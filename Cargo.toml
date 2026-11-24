@@ -34,6 +34,7 @@ members = [
     "user/tests/procs",
     "user/tests/handles",
     "user/tests/lazy",
+    "user/tests/fb",
     "user/tests/cases",
     "xtask",
 ]

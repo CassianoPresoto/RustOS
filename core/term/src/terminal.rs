@@ -302,6 +302,11 @@ impl<'a> Terminal<'a> {
         }
     }
 
+    /// Marca a grade inteira: o próximo `take_dirty` devolve todas as linhas (redesenho da tela).
+    pub fn mark_all_dirty(&mut self) {
+        self.dirty.mark_range(0, self.rows);
+    }
+
     /// Linhas que mudaram desde a última chamada, incluindo a antiga e a nova linha do
     /// cursor se ele andou ou mudou de visibilidade. Zera o conjunto.
     pub fn take_dirty(&mut self) -> DirtyRows {

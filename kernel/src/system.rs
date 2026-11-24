@@ -12,6 +12,7 @@ use rustos_sync::SpinLock;
 use rustos_term::Layout;
 
 use crate::console::{self, Sink};
+use crate::framebuffer;
 use crate::heap;
 use crate::interrupts::{self, Input};
 use crate::memory::Memory;
@@ -265,7 +266,8 @@ pub fn run_shell(host: &mut impl Host) -> ! {
     shell.start(host, &mut Sink).ok();
     console::flush();
     loop {
-        if let Input::Byte(byte) = interrupts::read_input_blocking(userout::pending) {
+        let wake = || userout::pending() || framebuffer::repaint_pending();
+        if let Input::Byte(byte) = interrupts::read_input_blocking(wake) {
             shell.feed(byte, host, &mut Sink).ok();
         }
         if userout::pending() {

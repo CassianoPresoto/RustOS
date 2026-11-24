@@ -57,13 +57,13 @@ const fn leaf_bits(flags: PageFlags) -> u64 {
 }
 
 const fn user_leaf_bits(flags: PageFlags) -> u64 {
-    let mut bits = VALID
-        | ACCESS_FLAG
-        | USER_ACCESS
-        | NOT_GLOBAL
-        | PRIVILEGED_EXECUTE_NEVER
-        | (MAIR_NORMAL_INDEX << ATTR_INDEX_SHIFT)
-        | INNER_SHAREABLE;
+    let mut bits = VALID | ACCESS_FLAG | USER_ACCESS | NOT_GLOBAL | PRIVILEGED_EXECUTE_NEVER;
+    // O mesmo atributo que o alias do kernel usa: o framebuffer é o mesmo endereço nos dois.
+    bits |= match flags.cache {
+        CacheMode::WriteBack => (MAIR_NORMAL_INDEX << ATTR_INDEX_SHIFT) | INNER_SHAREABLE,
+        CacheMode::WriteCombining => (MAIR_FRAMEBUFFER_INDEX << ATTR_INDEX_SHIFT) | OUTER_SHAREABLE,
+        CacheMode::Device | CacheMode::Other => MAIR_DEVICE_INDEX << ATTR_INDEX_SHIFT,
+    };
     if !flags.writable {
         bits |= READ_ONLY;
     }
@@ -189,6 +189,20 @@ mod tests {
         assert_eq!((entry >> ATTR_INDEX_SHIFT) & 0b111, MAIR_DEVICE_INDEX);
         assert_ne!(entry & PRIVILEGED_EXECUTE_NEVER, 0);
         assert_eq!(0x0900_0000 % (1u64 << 21), 0);
+    }
+
+    #[test]
+    fn user_framebuffer_page_is_write_combining_like_the_kernel_alias() {
+        let user = PageFlags {
+            cache: CacheMode::WriteCombining,
+            ..PageFlags::USER_DATA
+        };
+        let entry = page_descriptor(PhysAddr::new(0x0900_0000), user);
+        assert_eq!((entry >> ATTR_INDEX_SHIFT) & 0b111, MAIR_FRAMEBUFFER_INDEX);
+        assert_eq!(entry & SHAREABILITY_MASK, OUTER_SHAREABLE);
+        let (phys, flags) = decode_leaf(entry, false);
+        assert_eq!(phys, PhysAddr::new(0x0900_0000));
+        assert_eq!(flags, user);
     }
 
     #[test]

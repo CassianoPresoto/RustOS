@@ -106,6 +106,7 @@ pub fn run(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
     let options = Options {
         keep_peer: true,
         initramfs: true,
+        framebuffer: false,
     };
     let Ok((spawned, Some(peer))) = spawn_with(
         frames,

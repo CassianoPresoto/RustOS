@@ -272,6 +272,12 @@ impl Rights {
         .union(Self::TRANSFER)
         .union(Self::READ)
         .union(Self::MAP);
+    /// Framebuffer entregue ao programa (SDD 18, caso 6): sem `EXECUTE`, nem `INSPECT`.
+    pub const FRAMEBUFFER: Self = Self::DUPLICATE
+        .union(Self::TRANSFER)
+        .union(Self::READ)
+        .union(Self::WRITE)
+        .union(Self::MAP);
 }
 
 /// Prazos de `object_wait_one` acima de `agora + WAIT_HORIZON_NS` (cerca de 73 anos) valem "sem prazo",
@@ -463,7 +469,8 @@ impl ProcessEvent {
     }
 }
 
-/// Cabeçalho da mensagem de boot: seguido de `count` valores `u32` de `BootKind`.
+/// Cabeçalho da mensagem de boot: seguido de `count` valores `u32` de `boot_kind`; na versão 2, com
+/// um `boot_kind::FRAMEBUFFER`, o bloco de `FramebufferFormat` vem por último.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct BootMessageHeader {
@@ -475,7 +482,9 @@ pub struct BootMessageHeader {
 
 impl BootMessageHeader {
     pub const MAGIC: u32 = 0x544F_4F42;
-    pub const VERSION: u32 = 1;
+    /// A versão que o kernel escreve. A 1 (sem `FRAMEBUFFER`) o leitor ainda aceita.
+    pub const VERSION: u32 = 2;
+    pub const VERSION_1: u32 = 1;
 
     pub const fn new(count: u32) -> Self {
         Self {
@@ -487,6 +496,48 @@ impl BootMessageHeader {
     }
 }
 
+/// O formato do framebuffer que o `boot_kind::FRAMEBUFFER` entrega: bloco fixo de 16 bytes, `#[repr(C)]`,
+/// depois dos `boot_kind` da mensagem de boot v2 (SDD 17, "Mensagem de boot"). O único `format` é
+/// `XRGB8888` (32 bits por pixel, 8 bits por canal, B nos bits baixos).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct FramebufferFormat {
+    pub width: u32,
+    pub height: u32,
+    /// Bytes por linha; pode ser maior que `width * 4`.
+    pub stride: u32,
+    pub format: u32,
+}
+
+impl FramebufferFormat {
+    /// Bytes do bloco na mensagem.
+    pub const WIRE_BYTES: usize = 16;
+    /// `format` 1: XRGB8888.
+    pub const XRGB8888: u32 = 1;
+
+    /// Bytes que o framebuffer ocupa a partir do início: `stride * height`.
+    pub const fn len_bytes(&self) -> u64 {
+        self.stride as u64 * self.height as u64
+    }
+
+    /// Se o bloco descreve um framebuffer que o usuário pode escrever: formato conhecido, área não
+    /// vazia, `stride` múltiplo de 4 e cabendo `width` pixels.
+    pub const fn is_valid(&self) -> bool {
+        self.format == Self::XRGB8888
+            && self.width > 0
+            && self.height > 0
+            && self.stride.is_multiple_of(4)
+            && self.stride as u64 >= self.width as u64 * 4
+    }
+}
+
+/// O que `parse_boot_message` lê: quantos `boot_kind` a mensagem traz e, se há um `FRAMEBUFFER`, o formato.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BootMessage {
+    pub count: usize,
+    pub framebuffer: Option<FramebufferFormat>,
+}
+
 /// Onde o `channel_read` grava os tamanhos da mensagem (`actual*`): dois `u64` seguidos, como o
 /// `out` de `channel_create`. Em `BufferTooSmall` leva o que a mensagem pede.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -496,47 +547,99 @@ pub struct ReadActual {
     pub handles: u64,
 }
 
-/// Escreve a mensagem de boot em `out`: o cabeçalho e um `u32` de `boot_kind` por item, o i-ésimo
-/// valor para o i-ésimo handle da mensagem. Devolve o tamanho, ou `None` se não cabe em `out`
-/// ou passa de `CHANNEL_MAX_HANDLES` itens.
-pub fn encode_boot_message(kinds: &[u32], out: &mut [u8]) -> Option<usize> {
-    let len = size_of::<BootMessageHeader>() + kinds.len() * 4;
-    if kinds.len() > CHANNEL_MAX_HANDLES || out.len() < len {
+/// Escreve a mensagem de boot (versão 2) em `out`: o cabeçalho, um `u32` de `boot_kind` por item (o
+/// i-ésimo valor para o i-ésimo handle da mensagem) e, se há `FRAMEBUFFER`, o bloco de formato. Devolve o
+/// tamanho, ou `None` se não cabe em `out`, passa de `CHANNEL_MAX_HANDLES` itens, se `framebuffer` não
+/// bate com a presença do `FRAMEBUFFER` nos `kinds` ou se o formato não é válido.
+pub fn encode_boot_message(
+    kinds: &[u32],
+    framebuffer: Option<FramebufferFormat>,
+    out: &mut [u8],
+) -> Option<usize> {
+    let has_framebuffer = kinds.contains(&boot_kind::FRAMEBUFFER);
+    if kinds.len() > CHANNEL_MAX_HANDLES
+        || kinds
+            .iter()
+            .filter(|&&kind| kind == boot_kind::FRAMEBUFFER)
+            .count()
+            > 1
+        || has_framebuffer != framebuffer.is_some()
+        || framebuffer.is_some_and(|format| !format.is_valid())
+    {
+        return None;
+    }
+    let block = if has_framebuffer {
+        FramebufferFormat::WIRE_BYTES
+    } else {
+        0
+    };
+    let len = size_of::<BootMessageHeader>() + kinds.len() * 4 + block;
+    if out.len() < len {
         return None;
     }
     let header = BootMessageHeader::new(u32::try_from(kinds.len()).ok()?);
     let words = [header.magic, header.version, header.count, header.reserved];
-    for (chunk, word) in out
-        .as_chunks_mut::<4>()
-        .0
-        .iter_mut()
-        .zip(words.iter().chain(kinds))
-    {
-        chunk.copy_from_slice(&word.to_le_bytes());
+    let mut at = 0;
+    for word in words.iter().chain(kinds) {
+        out[at..at + 4].copy_from_slice(&word.to_le_bytes());
+        at += 4;
+    }
+    if let Some(format) = framebuffer {
+        for word in [format.width, format.height, format.stride, format.format] {
+            out[at..at + 4].copy_from_slice(&word.to_le_bytes());
+            at += 4;
+        }
     }
     Some(len)
 }
 
-/// Lê a mensagem de boot: confere magic, versão, `reserved` zero, tamanho exato e o teto de
-/// itens, e copia os `boot_kind` para `kinds`. Devolve quantos são, ou `None` se a mensagem não é válida.
-pub fn parse_boot_message(bytes: &[u8], kinds: &mut [u32; CHANNEL_MAX_HANDLES]) -> Option<usize> {
+/// Lê a mensagem de boot: confere magic, versão (1 ou 2), `reserved` zero, o teto de itens, o tamanho
+/// exato (com o bloco de formato só na versão 2 com `FRAMEBUFFER`, e um formato válido) e copia os
+/// `boot_kind` para `kinds`. `None` se a mensagem não é válida.
+pub fn parse_boot_message(
+    bytes: &[u8],
+    kinds: &mut [u32; CHANNEL_MAX_HANDLES],
+) -> Option<BootMessage> {
     let word = |at: usize| -> Option<u32> {
         let raw: [u8; 4] = bytes.get(at..at + 4)?.try_into().ok()?;
         Some(u32::from_le_bytes(raw))
     };
+    if word(0)? != BootMessageHeader::MAGIC || word(12)? != 0 {
+        return None;
+    }
     let count = usize::try_from(word(8)?).ok()?;
-    let valid = word(0)? == BootMessageHeader::MAGIC
-        && word(4)? == BootMessageHeader::VERSION
-        && word(12)? == 0
-        && count <= CHANNEL_MAX_HANDLES
-        && bytes.len() == size_of::<BootMessageHeader>() + count * 4;
-    if !valid {
+    if count > CHANNEL_MAX_HANDLES {
         return None;
     }
     for (index, kind) in kinds.iter_mut().take(count).enumerate() {
         *kind = word(16 + index * 4)?;
     }
-    Some(count)
+    let framebuffers = kinds[..count]
+        .iter()
+        .filter(|&&kind| kind == boot_kind::FRAMEBUFFER)
+        .count();
+    if framebuffers > 1 {
+        return None;
+    }
+    let has_framebuffer = framebuffers == 1;
+    let end = size_of::<BootMessageHeader>() + count * 4;
+    let (framebuffer, expected) = match (word(4)?, has_framebuffer) {
+        (BootMessageHeader::VERSION_1 | BootMessageHeader::VERSION, false) => (None, end),
+        (BootMessageHeader::VERSION, true) => {
+            let format = FramebufferFormat {
+                width: word(end)?,
+                height: word(end + 4)?,
+                stride: word(end + 8)?,
+                format: word(end + 12)?,
+            };
+            if !format.is_valid() {
+                return None;
+            }
+            (Some(format), end + FramebufferFormat::WIRE_BYTES)
+        }
+        _ => return None,
+    };
+    (bytes.len() == expected).then_some(BootMessage { count, framebuffer })
 }
 
 /// O que cada handle da mensagem de boot é, na ordem do array de handles.
@@ -545,6 +648,8 @@ pub mod boot_kind {
     pub const VMAR_ROOT: u32 = 2;
     pub const CONSOLE: u32 = 3;
     pub const INITRAMFS: u32 = 4;
+    /// VMO físico do framebuffer (SDD 18, caso 6); o bloco `FramebufferFormat` acompanha.
+    pub const FRAMEBUFFER: u32 = 5;
 }
 
 /// O byte passa pelo filtro do `debug_write`: só ASCII imprimível, `\n` e `\t`. ESC, os outros
@@ -991,12 +1096,12 @@ mod tests {
         let header = BootMessageHeader::new(4);
         assert_eq!(
             (header.magic, header.version, header.count),
-            (0x544F_4F42, 1, 4)
+            (0x544F_4F42, 2, 4)
         );
         assert_eq!(BootMessageHeader::MAGIC.to_le_bytes(), *b"BOOT");
     }
 
-    const _: () = assert!(16 + CHANNEL_MAX_HANDLES * 4 <= CHANNEL_MAX_BYTES);
+    const _: () = assert!(16 + CHANNEL_MAX_HANDLES * 4 + 16 <= CHANNEL_MAX_BYTES);
     const _: () = assert!(USER_HANDLE_ARRAY_MAX >= CHANNEL_MAX_HANDLES);
 
     #[test]
@@ -1041,39 +1146,156 @@ mod tests {
         assert_eq!(offset_of!(ReadActual, handles), 8);
     }
 
+    const FORMAT: FramebufferFormat = FramebufferFormat {
+        width: 640,
+        height: 400,
+        stride: 2560,
+        format: FramebufferFormat::XRGB8888,
+    };
+
+    /// A mensagem da versão 1 como o kernel a escrevia antes de `FRAMEBUFFER`: o layout que o leitor
+    /// ainda aceita, feito à mão para não depender do codificador.
+    fn version_1(kinds: &[u32]) -> ([u8; 48], usize) {
+        let mut out = [0_u8; 48];
+        let words = [0x544F_4F42, 1, u32::try_from(kinds.len()).unwrap(), 0];
+        let mut at = 0;
+        for word in words.into_iter().chain(kinds.iter().copied()) {
+            out[at..at + 4].copy_from_slice(&word.to_le_bytes());
+            at += 4;
+        }
+        (out, at)
+    }
+
     #[test]
-    fn the_boot_message_round_trips_and_the_kinds_follow_the_header() {
+    fn the_boot_message_v2_round_trips_without_a_framebuffer() {
         let mut out = [0_u8; 64];
-        let len = encode_boot_message(&[boot_kind::PROCESS, boot_kind::CONSOLE], &mut out).unwrap();
+        let len =
+            encode_boot_message(&[boot_kind::PROCESS, boot_kind::CONSOLE], None, &mut out).unwrap();
         assert_eq!(len, 24);
         assert_eq!(&out[..4], b"BOOT");
+        assert_eq!(&out[4..8], &2_u32.to_le_bytes());
         assert_eq!(&out[16..20], &1_u32.to_le_bytes());
         assert_eq!(&out[20..24], &3_u32.to_le_bytes());
         let mut kinds = [0; CHANNEL_MAX_HANDLES];
-        assert_eq!(parse_boot_message(&out[..len], &mut kinds), Some(2));
+        let message = parse_boot_message(&out[..len], &mut kinds).unwrap();
+        assert_eq!((message.count, message.framebuffer), (2, None));
         assert_eq!(&kinds[..2], &[boot_kind::PROCESS, boot_kind::CONSOLE]);
+    }
+
+    #[test]
+    fn the_boot_message_v2_carries_the_format_block_after_the_kinds_when_there_is_a_framebuffer() {
+        let mut out = [0_u8; 64];
+        let kinds = [boot_kind::PROCESS, boot_kind::FRAMEBUFFER];
+        let len = encode_boot_message(&kinds, Some(FORMAT), &mut out).unwrap();
+        assert_eq!(len, 16 + 8 + 16);
+        assert_eq!(&out[24..28], &640_u32.to_le_bytes());
+        assert_eq!(&out[28..32], &400_u32.to_le_bytes());
+        assert_eq!(&out[32..36], &2560_u32.to_le_bytes());
+        assert_eq!(&out[36..40], &1_u32.to_le_bytes());
+        let mut kinds_out = [0; CHANNEL_MAX_HANDLES];
+        let message = parse_boot_message(&out[..len], &mut kinds_out).unwrap();
+        assert_eq!(message.count, 2);
+        assert_eq!(message.framebuffer, Some(FORMAT));
+        assert_eq!(kinds_out[1], boot_kind::FRAMEBUFFER);
+    }
+
+    #[test]
+    fn the_boot_message_v1_still_parses_and_has_no_framebuffer() {
+        let mut kinds = [0; CHANNEL_MAX_HANDLES];
+        let (bytes, len) = version_1(&[boot_kind::PROCESS, boot_kind::CONSOLE]);
+        let message = parse_boot_message(&bytes[..len], &mut kinds).unwrap();
+        assert_eq!((message.count, message.framebuffer), (2, None));
+        assert_eq!(&kinds[..2], &[boot_kind::PROCESS, boot_kind::CONSOLE]);
+        // A versão 1 não tem `FRAMEBUFFER`: com o kind 5 ela é recusada, e com bloco sobrando também.
+        let (framebuffer, flen) = version_1(&[boot_kind::FRAMEBUFFER]);
+        assert_eq!(parse_boot_message(&framebuffer[..flen], &mut kinds), None);
+        assert_eq!(parse_boot_message(&bytes[..len + 16], &mut kinds), None);
+    }
+
+    #[test]
+    fn the_boot_message_refuses_a_framebuffer_without_its_block_or_with_a_bad_one() {
+        let mut kinds = [0; CHANNEL_MAX_HANDLES];
+        let (mut bytes, len) = version_1(&[boot_kind::FRAMEBUFFER]);
+        bytes[4..8].copy_from_slice(&2_u32.to_le_bytes());
+        assert_eq!(parse_boot_message(&bytes[..len], &mut kinds), None);
+        let mut out = [0_u8; 64];
+        let len = encode_boot_message(&[boot_kind::FRAMEBUFFER], Some(FORMAT), &mut out).unwrap();
+        assert_eq!(len, 36);
+        assert_eq!(parse_boot_message(&out[..len - 1], &mut kinds), None);
+        assert_eq!(parse_boot_message(&out[..len - 16], &mut kinds), None);
+        for (at, value) in [(20, 0_u32), (24, 0), (28, 1000), (32, 2)] {
+            let mut bad = out;
+            bad[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            assert_eq!(parse_boot_message(&bad[..len], &mut kinds), None, "{at}");
+        }
+    }
+
+    #[test]
+    fn the_boot_message_carries_at_most_one_framebuffer() {
+        let mut out = [0_u8; 64];
+        let twice = [boot_kind::FRAMEBUFFER, boot_kind::FRAMEBUFFER];
+        assert!(encode_boot_message(&twice, Some(FORMAT), &mut out).is_none());
+        // Mensagem v2 à mão, com dois `FRAMEBUFFER` e um bloco de formato válido.
+        let (mut bytes, _) = version_1(&[]);
+        bytes[8..12].copy_from_slice(&2_u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&2_u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&boot_kind::FRAMEBUFFER.to_le_bytes());
+        bytes[20..24].copy_from_slice(&boot_kind::FRAMEBUFFER.to_le_bytes());
+        for (at, value) in [(24, 640_u32), (28, 400), (32, 2560), (36, 1)] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut kinds = [0; CHANNEL_MAX_HANDLES];
+        assert_eq!(parse_boot_message(&bytes[..40], &mut kinds), None);
+    }
+
+    #[test]
+    fn the_boot_message_encoder_refuses_a_kind_that_does_not_match_its_block() {
+        let mut out = [0_u8; 64];
+        let kinds = [boot_kind::FRAMEBUFFER];
+        assert!(encode_boot_message(&kinds, None, &mut out).is_none());
+        assert!(encode_boot_message(&[boot_kind::PROCESS], Some(FORMAT), &mut out).is_none());
+        let bad = FramebufferFormat {
+            format: 2,
+            ..FORMAT
+        };
+        assert!(encode_boot_message(&kinds, Some(bad), &mut out).is_none());
+        let narrow = FramebufferFormat {
+            stride: 1000,
+            ..FORMAT
+        };
+        assert!(encode_boot_message(&kinds, Some(narrow), &mut out).is_none());
     }
 
     #[test]
     fn the_boot_message_refuses_what_is_not_the_contract() {
         let mut out = [0_u8; 64];
-        let len = encode_boot_message(&[1, 2, 3, 4], &mut out).unwrap();
+        let len = encode_boot_message(&[1, 2, 3, 4], None, &mut out).unwrap();
         let mut kinds = [0; CHANNEL_MAX_HANDLES];
-        assert_eq!(parse_boot_message(&out[..len], &mut kinds), Some(4));
+        let four = BootMessage {
+            count: 4,
+            framebuffer: None,
+        };
+        assert_eq!(parse_boot_message(&out[..len], &mut kinds), Some(four));
         assert_eq!(parse_boot_message(&out[..len - 1], &mut kinds), None);
         assert_eq!(parse_boot_message(&out[..len + 4], &mut kinds), None);
         assert_eq!(parse_boot_message(&out[..15], &mut kinds), None);
         assert_eq!(parse_boot_message(&[], &mut kinds), None);
-        for (at, byte) in [(0, 0x00), (4, 2), (12, 1), (8, 9)] {
+        for (at, byte) in [(0, 0x00), (4, 3), (12, 1), (8, 9)] {
             let mut bad = out;
             bad[at] = byte;
             assert_eq!(parse_boot_message(&bad[..len], &mut kinds), None, "{at}");
         }
-        assert!(encode_boot_message(&[0; CHANNEL_MAX_HANDLES + 1], &mut [0; 128]).is_none());
-        assert!(encode_boot_message(&[1, 2], &mut [0; 23]).is_none());
-        let mut full = [0_u8; 16 + 4 * CHANNEL_MAX_HANDLES];
+        assert!(encode_boot_message(&[0; CHANNEL_MAX_HANDLES + 1], None, &mut [0; 128]).is_none());
+        assert!(encode_boot_message(&[1, 2], None, &mut [0; 23]).is_none());
+        let mut full = [0_u8; 16 + 4 * CHANNEL_MAX_HANDLES + 16];
         let eight = [boot_kind::PROCESS; CHANNEL_MAX_HANDLES];
-        assert_eq!(encode_boot_message(&eight, &mut full), Some(full.len()));
+        assert_eq!(encode_boot_message(&eight, None, &mut full), Some(48));
+        let mut with_fb = [boot_kind::PROCESS; CHANNEL_MAX_HANDLES];
+        with_fb[7] = boot_kind::FRAMEBUFFER;
+        assert_eq!(
+            encode_boot_message(&with_fb, Some(FORMAT), &mut full),
+            Some(64)
+        );
     }
 
     const _: () = assert!(USER_MIN < USER_IMAGE_BASE && USER_IMAGE_BASE < USER_TOP);

@@ -5,18 +5,20 @@ use alloc::sync::Arc;
 
 use rustos_hal::PAGE_SIZE;
 use rustos_hal::abi::{
-    CHANNEL_MAX_BYTES, CHANNEL_MAX_HANDLES, Handle, Rights, Status, boot_kind, encode_boot_message,
+    CHANNEL_MAX_BYTES, CHANNEL_MAX_HANDLES, FramebufferFormat, Handle, Rights, Status, boot_kind,
+    encode_boot_message,
 };
 use rustos_object::{HandleTable, Lock, channel_read, channel_write, close};
 
 use super::{Options, Process, VmarObj, system};
+use crate::framebuffer;
 use crate::object::{Bytes, ConsoleObj, Obj, Table, VecSlots, Work, new_channel};
 use crate::sync::IrqLock;
 use crate::vmo::Vmo;
 
 /// Os itens da mensagem de boot, na ordem dos handles: o processo, o VMAR raiz e o console; o VMO do
-/// initramfs, só para o `init`, vem por último.
-const ITEMS_MAX: usize = 4;
+/// initramfs, só para o `init`, e o do framebuffer, só para o shell, vêm depois.
+const ITEMS_MAX: usize = 5;
 
 /// A ponta do canal de boot que o kernel guarda (só o modo de teste): fala com o programa por uma
 /// tabela de handles própria, como o pai de um processo falaria.
@@ -124,8 +126,20 @@ fn boot_channel(
     if let Some(vmo) = initramfs {
         add(boot_kind::INITRAMFS, put(Obj::Vmo(vmo), Rights::INITRAMFS)?);
     }
-    let mut message = [0_u8; 16 + 4 * ITEMS_MAX];
-    let len = encode_boot_message(&kinds[..count], &mut message).ok_or(Status::InvalidArgs)?;
+    let mut format = None;
+    if options.framebuffer
+        && let Some((vmo, described)) =
+            system().and_then(|system| framebuffer::boot_vmo(system.frames))
+    {
+        add(
+            boot_kind::FRAMEBUFFER,
+            put(Obj::Vmo(vmo), Rights::FRAMEBUFFER)?,
+        );
+        format = Some(described);
+    }
+    let mut message = [0_u8; 16 + 4 * ITEMS_MAX + FramebufferFormat::WIRE_BYTES];
+    let len =
+        encode_boot_message(&kinds[..count], format, &mut message).ok_or(Status::InvalidArgs)?;
     let mut work = Work::new();
     channel_write(
         &kernel,

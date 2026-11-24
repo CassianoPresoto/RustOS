@@ -170,7 +170,7 @@ const COUNT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// O que só o modo de teste imprime: se uma destas faltar, a linha de comando se perdeu e o
 /// boot que passou foi o normal.
-const SELFTEST_LINES: [(&str, &str); 27] = [
+const SELFTEST_LINES: [(&str, &str); 28] = [
     (
         "[rustos] cpu features: ",
         "os recursos de CPU das mitigações",
@@ -208,8 +208,12 @@ const SELFTEST_LINES: [(&str, &str); 27] = [
         "o autoteste dos casos de usuário",
     ),
     (
-        "[rustos] initramfs: 12 files, ",
-        "a leitura do initramfs (o `init`, as cinco demonstrações e os seis de teste)",
+        "[rustos] initramfs: 13 files, ",
+        "a leitura do initramfs (o `init`, as cinco demonstrações e os sete de teste)",
+    ),
+    (
+        "[rustos] fb self-test: ok (",
+        "o framebuffer como VMO: o programa segura a tela, o console fica quieto e volta depois",
     ),
     (
         "[user] lazy: ok (",

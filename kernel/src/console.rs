@@ -7,6 +7,7 @@ use rustos_hal::{ByteSource, Console, KeyEvent};
 
 use crate::addr;
 use crate::early;
+use crate::framebuffer;
 use crate::memory::Memory;
 use crate::panic;
 use crate::platform::PlatformConsole;
@@ -65,14 +66,28 @@ pub fn print_serial_now(args: fmt::Arguments<'_>) {
 }
 
 /// Desenha na tela o que o `Sink` escreveu: uma vez por mensagem ou tecla, não
-/// por pedaço de texto, porque cada desenho repinta linhas inteiras.
+/// por pedaço de texto, porque cada desenho repinta linhas inteiras. Com a tela mapeada por um
+/// programa (`framebuffer::held`), não desenha, e conta; quando a posse acaba, redesenha tudo.
 pub fn flush() {
     if panic::elsewhere() {
         return;
     }
     if let Some(screen) = SCREEN.lock().as_mut() {
+        if framebuffer::held() {
+            framebuffer::note_skipped();
+            return;
+        }
+        if framebuffer::take_repaint() {
+            screen.repaint();
+        }
         screen.render();
     }
+}
+
+/// Espera quem segura a tela terminar a renderização em curso: depois, nenhuma nova começa com a
+/// tela de um programa. Chamado por `framebuffer::hold`, com o lock do processo tomado.
+pub fn settle() {
+    drop(SCREEN.lock());
 }
 
 /// Próximo byte digitado na serial, sem esperar.

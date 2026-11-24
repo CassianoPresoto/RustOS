@@ -123,6 +123,24 @@ O shell tem dois comandos de demonstração: `lines` desenha uma tabela com o DE
 Special Graphics e `alt` / `alt off` entra e sai da tela alternativa. Sem grade
 alternativa (`Host::has_alternate_screen` falso), `alt` avisa e não envia `?1049`.
 
+## A posse da tela (framebuffer como VMO)
+
+Quando um programa mapeia o framebuffer (o `kind` 5 da mensagem de boot, [SDD 17](17_processos_isolamento_e_syscalls.md#o-canal-de-boot)),
+a tela é dele enquanto houver um mapeamento. A regra está em `kernel/src/framebuffer.rs`:
+
+- Cada `vmar_map` de um VMO de framebuffer soma um mapeamento vivo (`framebuffer::hold`); cada um que sai
+  (`vmar_unmap` que deixa a região sem uso, ou a morte do processo) subtrai (`framebuffer::release`).
+- Com o contador acima de zero, `console::flush` não desenha: conta a vez (`skipped`) e a grade fica
+  suja para depois. A serial segue, e o texto continua entrando na grade (`Screen::write`); só os pixels param.
+- Quando o último mapeamento sai, a marca de redesenho fica levantada e `notify_input` acorda o laço do shell.
+  O laço chama `flush` (dentro de `read_input_blocking`, com a IRQ mascarada, como todo `flush`; o pior caso é o de
+  [DEBT-0051](../tech-debt/0051-redesenho-da-tela-com-irq-mascarada.md)), e o `flush` redesenha a tela inteira:
+  fundo, barra e grade (`Screen::repaint`). O predicado de espera do laço inclui essa marca, então a tela volta
+  mesmo sem tecla. A morte só marca e acorda; não desenha ali dentro.
+- `vmar_map` de um VMO de framebuffer espera, depois de soltar o lock do processo, a renderização que já estava em
+  curso (`console::settle`). Depois disso, nenhuma renderização começa com a tela de um programa. Quem sai do
+  `print_panic` desenha mesmo assim, para o pânico aparecer ([SDD 18](18_m2_doom_nativo.md#como-entrou-fatia-1a)).
+
 ## Comandos que falam com processos (M1)
 
 Três comandos do shell tratam de programas do initramfs; a porta é o `Host` do `core/shell`

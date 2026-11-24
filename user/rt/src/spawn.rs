@@ -225,8 +225,9 @@ impl Child {
             handles[count] = handle;
             count += 1;
         }
-        let mut message = [0_u8; 16 + 4 * CHANNEL_MAX_HANDLES];
-        let len = encode_boot_message(&kinds[..count], &mut message).ok_or(Error::Stack)?;
+        // O framebuffer não passa por aqui: só o pai do programa que o recebe (o shell) o entrega.
+        let mut message = [0_u8; 16 + 4 * CHANNEL_MAX_HANDLES + 16];
+        let len = encode_boot_message(&kinds[..count], None, &mut message).ok_or(Error::Stack)?;
         sys::channel_write(self.channel, &message[..len], &handles[..count])?;
         Ok(())
     }

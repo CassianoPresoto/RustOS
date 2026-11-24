@@ -305,6 +305,21 @@ mod tests {
     }
 
     #[test]
+    fn user_framebuffer_page_is_write_combining_with_the_pat_bits() {
+        let user = PageFlags {
+            cache: CacheMode::WriteCombining,
+            ..PageFlags::USER_DATA
+        };
+        let entry = page_entry(PhysAddr::new(0x1000), user);
+        assert_eq!(
+            entry & (PAT_PAGE | WRITE_THROUGH | CACHE_DISABLE),
+            PAT_PAGE | WRITE_THROUGH
+        );
+        assert_eq!(entry & USER, USER);
+        assert_eq!(decode_leaf(entry, false).1, user);
+    }
+
+    #[test]
     fn user_tables_carry_the_user_bit_and_kernel_tables_do_not() {
         assert_eq!(
             user_table_entry(PhysAddr::new(0x2000)),

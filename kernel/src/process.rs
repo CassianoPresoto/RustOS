@@ -554,6 +554,8 @@ pub struct Options {
     pub keep_peer: bool,
     /// O initramfs vai ao programa como VMO físico, no canal de boot (só o `init`).
     pub initramfs: bool,
+    /// O framebuffer vai ao programa como VMO físico, com o formato (SDD 18; o shell e o teste `fb`).
+    pub framebuffer: bool,
 }
 
 /// Cria o processo e a tarefa que o roda. Devolve a tarefa e o número do processo.
@@ -584,6 +586,10 @@ pub fn spawn(
 
 /// Como `spawn`, com o nome do programa que a tarefa mostra no `ps` (cortado ao tamanho do campo) e
 /// o `argv` inteiro, com o nome do programa primeiro (vazio deixa `argc` em 0).
+#[cfg_attr(
+    not(feature = "selftest"),
+    allow(dead_code, reason = "o shell usa `spawn_with`; o teste usa esta")
+)]
 pub fn spawn_as(
     frames: Frames,
     direct_map_offset: u64,
@@ -622,7 +628,7 @@ pub fn spawn_keeping(
 ) -> Result<(Spawned, Option<boot::BootPeer>), ProcessError> {
     let options = Options {
         keep_peer,
-        initramfs: false,
+        ..Options::default()
     };
     spawn_with(
         frames,

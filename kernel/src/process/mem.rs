@@ -12,6 +12,7 @@ use rustos_mm::vmar::{
     Access, Attrs, Backing, Fit, Kind, Perms, Placement, Region, VmarError, aslr_base,
 };
 
+use crate::framebuffer;
 use crate::loader::{REGION_CAPACITY, RegionTree};
 use crate::random;
 use crate::uspace::{Pages, Resolved, Unresolved, UserSpace};
@@ -131,6 +132,9 @@ impl Mem {
         match placed {
             Ok(at) => {
                 self.next_id = self.next_id.wrapping_add(1);
+                if vmo.is_framebuffer() {
+                    framebuffer::hold();
+                }
                 self.maps.push(Mapping {
                     id,
                     vmo: Arc::clone(vmo),
@@ -192,6 +196,9 @@ impl Mem {
             });
             if !used {
                 space.release_promise(mapping.table_promise);
+                if mapping.vmo.is_framebuffer() {
+                    framebuffer::release();
+                }
             }
             used
         });
@@ -214,6 +221,9 @@ impl Mem {
         }
         for mapping in &self.maps {
             self.space.release_promise(mapping.table_promise);
+            if mapping.vmo.is_framebuffer() {
+                framebuffer::release();
+            }
         }
         self.maps.clear();
         self.space.destroy();

@@ -88,6 +88,8 @@ teste no host que confere ida e volta (`decode_leaf(page_entry(f)) == f`).
 | `DEVICE` | como `DATA` com `PCD\|PWT` (entrada 3 do PAT, UC) | `AttrIndx` 7 (Device-nGnRnE, do kernel) |
 | `FRAMEBUFFER` | como `DATA` com `PAT\|PWT` (entrada 5, WC) | `AttrIndx` 1 (o do framebuffer, do Limine), outer shareable |
 
+O mesmo `FRAMEBUFFER` vale no mapeamento de **usuário** da tela, pelo VMO de framebuffer da fatia 1a do M2 (`PageFlags` com `USER_DATA` e o cache do VMO; [SDD 18](18_m2_doom_nativo.md#como-entrou-fatia-1a)).
+
 Em todas as folhas do aarch64 o UXN fica ligado (página do kernel nunca executa em EL0).
 
 - **Uma caminhada só.** `rustos_mm::PageTables<Fmt, Mem, Ctl>` (`core/mm/src/tables.rs`)
