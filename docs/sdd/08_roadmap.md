@@ -24,7 +24,7 @@ modelo de ameaça e o porquê de cada mecanismo estão no [SDD 09](09_seguranca.
 | **2 — Memória virtual e heap** ✅ | Tabelas próprias com W^X, heap do kernel, aleatório do kernel, memória do bootloader recuperada | Escrita em `.text` falha; memória livre depois do boot medida |
 | **3 — Tarefas, SMP e escalonador** (1ª e 2ª ondas ✅) | Troca de contexto com estado FPU/SIMD por tarefa, threads do kernel, fila por CPU, escalonador atrás de trait (rodízio, depois EEVDF), timer de um tiro, idle sem tique | Latência de troca medida em N núcleos, e o teste que escreve `xmm0`/`v0` em duas tarefas passa |
 | **4 — Processos e isolamento** ✅ | Anel 3/EL0, syscall, carregador ELF, initramfs (o tmpfs e o VFS foram para a fase 5), espaço de endereçamento por processo, handles com direitos, mitigações de CPU (KPTI e Spectre v2 ficaram para o metal), estado SIMD visível ao usuário, página zero e COW | Syscall nula medida; processo que toca o kernel morre sem derrubar nada |
-| **5 — ABI Linux e primeiros aplicativos** | Syscalls Linux traduzidas, credenciais Linux, musl estático, BusyBox | BusyBox roda sem recompilar e é medido contra o Linux; DOOM por software roda no x86_64 (marco 1 dos jogos; no aarch64 fecha na fase 6); memória ociosa medida contra a linha de base ([Memória ociosa](#memória-ociosa-o-alvo-vem-de-uma-medida)) e contra a hipótese do SDD 07 (≤ 36 MiB usados no x86_64 e ≤ 30,8 no aarch64, mesmo `-smp`) |
+| **5 — ABI Linux e primeiros aplicativos** | Syscalls Linux traduzidas, credenciais Linux, musl estático, BusyBox | BusyBox roda sem recompilar e é medido contra o Linux; o DOOM por software sai desta fase e vira o M2, logo depois da fase 4 ([SDD 18](18_m2_doom_nativo.md)); memória ociosa medida contra a linha de base ([Memória ociosa](#memória-ociosa-o-alvo-vem-de-uma-medida)) e contra a hipótese do SDD 07 (≤ 36 MiB usados no x86_64 e ≤ 30,8 no aarch64, mesmo `-smp`) |
 | **6 — Armazenamento persistente** | PCI Express, IOMMU, virtio-blk, NVMe, AHCI, page cache, sistema de arquivos da raiz com escrita, permissões em disco, ACPI/DTB, virtio-input e virtio-snd, readahead com janela crescente, LRU de gerações | Benchmark de E/S ao lado do Linux; virtio-input entrega eventos e virtio-snd toca um buffer |
 | **7 — Usuários e sessões** | Contas e grupos, login, Argon2id, elevação de privilégio por capacidade, auditoria | Dois usuários sem acesso aos arquivos um do outro |
 | **8 — Instalação** | Imagem live de pendrive, teclado e mouse USB (xHCI), instalador em modo texto, GPT, partição EFI, entrada de boot UEFI, gamepad USB HID | Instalar num disco vazio da QEMU e subir dele sem a mídia live |
@@ -34,7 +34,7 @@ modelo de ameaça e o porquê de cada mecanismo estão no [SDD 09](09_seguranca.
 | **12 — Endurecimento avançado** | CET, PAC/BTI, MTE, CFI, filtro de syscalls, MAC, boot verificado | Cada mecanismo com custo medido no SDD 07 |
 | **13 — Jogos 3D** | Mesa com virgl ou Venus sobre a ABI Linux e o DRM do guest (se a decisão sobre a Mesa for essa) | Um programa GL ou Vulkan desenha com aceleração do host e o tempo de quadro é medido |
 
-Jogos entram por uma escada de seis marcos, do DOOM por software (fase 5) ao 3D
+Jogos entram por uma escada de seis marcos, do DOOM por software (M2, depois da fase 4) ao 3D
 acelerado (fase 13): ver [Jogos: a escada](#jogos-a-escada). Os dois pedaços de
 código de terceiros que ela exige (SDL e Mesa) são decisões futuras, listadas em
 [Decisões futuras](#decisões-futuras-casos-do-agentsmd).
@@ -363,8 +363,8 @@ fase em que sua dependência fica pronta. Fonte da escada: pesquisa de novembro 
 
 | Marco | O que é | Depende de | Fase |
 | --- | --- | --- | --- |
-| 1 | DOOM (ou Quake) por software sobre o framebuffer linear | Timer, `clock_gettime` (a parte de tempo do marco 2), entrada (PS/2 no x86_64; virtio-input no aarch64, que precisa de PCI), processo de usuário, ELF com libc | 5 no x86_64; 6 no aarch64 (as fases 3 e 4 vêm antes) |
-| 2 | Tempo e áudio: `clock_gettime(CLOCK_MONOTONIC)` e virtio-snd (ou Intel HDA) | PCI (só o áudio) | 5 (tempo, que o marco 1 já usa) e 6 (áudio) |
+| 1 | DOOM (ou Quake) por software sobre o framebuffer linear | Timer, `clock_gettime` (a parte de tempo do marco 2), entrada (PS/2 no x86_64; virtio-input no aarch64, que precisa de PCI), processo de usuário, ELF com libc | M2, logo depois da fase 4, no x86_64 ([SDD 18](18_m2_doom_nativo.md)); no aarch64, o timedemo no M2 e o jogo na fase 6 (proposta, decisão 1 do SDD 18) |
+| 2 | Tempo e áudio: `clock_gettime(CLOCK_MONOTONIC)` e virtio-snd (ou Intel HDA) | PCI (só o áudio) | 4 (tempo: `clock_get_monotonic` já está na 4a, e o M2 o usa) e 6 (áudio) |
 | 3 | Entrada de jogo: virtio-input na QEMU, gamepad USB HID em metal | xHCI | 6 (virtio-input) e 8 (HID) |
 | 4 | SDL com backend próprio (vídeo, eventos, áudio, timer) | Marcos 1 a 3, compositor | 11 |
 | 5 | Page flip e vsync em virtio-gpu 2D | Driver virtio-gpu | 11 |
@@ -372,7 +372,7 @@ fase em que sua dependência fica pronta. Fonte da escada: pesquisa de novembro 
 
 O marco 1 **não** precisa da fase 11: o jogo desenha direto no framebuffer. A
 interface com que o programa de usuário acessa o framebuffer e os eventos de entrada
-é decisão futura (tabela abaixo).
+é decisão futura, proposta no [SDD 18](18_m2_doom_nativo.md) (tabela abaixo).
 
 | O que vale | Fonte | Marca |
 | --- | --- | --- |
@@ -429,8 +429,8 @@ fase chegar**, antes de escrever código.
 | **Mesa** (virgl e Venus) | 2 | 13 | Código de terceiros, muito maior que o SDL; exige DRM Linux no guest. A fase 13 depende dela |
 | **DRM do guest** para a Mesa | 6 | 13 | Contrato com o mundo de fora: sem ele o 3D vira protocolo próprio |
 | **Ligação dinâmica** (`dlopen`, carregador de `.so`) | 6 | 11 ou 13 | Formato de executável e ABI. Só se o SDL ou a Mesa precisarem; senão, ligação estática |
-| **DOOM e o WAD** como código e binário de terceiros | 2 | 5 | O marco 1 roda código e dados que não são do repositório |
-| **Interface do framebuffer e dos eventos de entrada** para o programa de usuário (`/dev/fb`, evdev ou própria) | 6 | 5 | O marco 1 já precisa dela; é o que o mundo de fora enxerga. O desenho da fase 4 a mantém na fase 5 ([SDD 17](17_processos_isolamento_e_syscalls.md#decisões-do-agente)) |
+| **DOOM e o WAD** como código e binário de terceiros | 2 | M2 (depois da 4) | O marco 1 roda código e dados que não são do repositório. **Proposta no [SDD 18](18_m2_doom_nativo.md)** (decisões 2 a 4, 7), aguarda o merge do Draft |
+| **Interface do framebuffer e dos eventos de entrada** para o programa de usuário (`/dev/fb`, evdev ou própria) | 6 | M2 (depois da 4) | O marco 1 já precisa dela; é o que o mundo de fora enxerga. **Proposta no [SDD 18](18_m2_doom_nativo.md)** (decisões 5 e 6: `kind` 5 e 6), aguarda o merge do Draft. Antes, o desenho da fase 4 a mantinha na fase 5 ([SDD 17](17_processos_isolamento_e_syscalls.md#decisões-do-agente)) |
 | **Registrador do handle de boot** (`x0` no aarch64) contra a glibc | 6 | 5 | A glibc lê o `x0` da entrada como `rtld_fini` (`atexit`), e a ABI nativa ali põe o handle de boot; no x86_64 o `rdx` já sai zerado. Hoje o handle é `0` e não conflita. [SDD 17, 4b](17_processos_isolamento_e_syscalls.md#a-fatia-4b-como-entrou) |
 | **`AT_HWCAP`/`AT_HWCAP2`** no auxv | 6 | 5 | O programa lê o auxv para saber o que a CPU tem |
 | **Pedido de AMX** (equivalente do `ARCH_REQ_XCOMP_PERM`) e **VL do SVE** por processo | 6 | 4 (antes dos sinais) | O sigframe dos sinais da fase 4 depende do tamanho do estado. [SDD 17, decisão 6](17_processos_isolamento_e_syscalls.md#decisão-6--falha-de-usuário-canal-de-eventos-ou-sinal-síncrono): sem sinais na fase 4, a decisão espera a fase 5 |

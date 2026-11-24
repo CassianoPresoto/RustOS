@@ -38,6 +38,11 @@
 12. **`arch/<isa>-user` é adaptador do lado do usuário**: segue a regra 4 (só `core/hal`
     e `lib/`), é o lugar do `asm!` de `syscall`/`svc` e do ponto de entrada, e o `kernel/`
     nunca o liga.
+13. **Exceção à regra 11 (decisão 7a do [SDD 18](../sdd/18_m2_doom_nativo.md#libc-mínima)):**
+    `user/libc` (a ABI C para o doomgeneric) pode ter `unsafe` só nas funções
+    `extern "C"` que a ABI exige, com `// SAFETY:`. O crate tem
+    `#![deny(unsafe_code)]` e `#[allow(unsafe_code)]` pontual. Nada depende de
+    `user/libc` além de `user/doom` e de programas C ligados por `user/`.
 
 ## Como se verifica
 
