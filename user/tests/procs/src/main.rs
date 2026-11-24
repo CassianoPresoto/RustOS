@@ -41,6 +41,8 @@ const WORKER_EXIT: u64 = 7;
 /// Rodadas do laço de criar e matar, e idas e voltas do eco entre processos.
 const LOOPS: u32 = 300;
 const ECHOES: u32 = 2000;
+// O `echo` roda em blocos de 16: a linha da medida diz `ECHOES` idas e voltas.
+const _: () = assert!(ECHOES.is_multiple_of(16));
 /// Filhos que seguram valores diferentes em `xmm0`/`v0` ao mesmo tempo: mais que as 4 CPUs da QEMU.
 const SIMD_CHILDREN: usize = 8;
 const SIMD_TAG: u64 = 0x5349_4D44_0000_0000;

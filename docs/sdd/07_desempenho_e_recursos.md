@@ -158,43 +158,43 @@ RustOS consigo mesmo) e **x86_64 em TCG** (sem KVM).
 
 ### Fase 4: as medidas (fatia 4f)
 
-Fecha a fase 4. Cada número sai do `make smoke` do código deste PR, sem mudar o kernel: a criação de
-processo e a ida e volta por canal são do `procs` (`user/tests/procs`, laços de 300 processos e de 2 000
-ida e volta, depois de aquecer); as outras linhas já existiam. **aarch64 em HVF**: `make smoke ARCH=aarch64`,
-5 boots, QEMU 11.1.3 num Mac com Apple Silicon. **x86_64 em TCG**: `make smoke ARCH=x86_64`, 3 boots, só se
-compara o RustOS consigo mesmo. Mediana e faixa (mínimo a máximo) de cada conjunto.
+Fecha a fase 4. Cada número sai do smoke do código deste PR, em **`PROFILE=release`** (o perfil das
+medidas da 4c; o padrão do `make smoke` é `dev`, que mede um build de depuração): `make smoke
+ARCH=aarch64 PROFILE=release`, 5 boots, **HVF**, QEMU 11.1.3 num Mac com Apple Silicon; `make smoke
+ARCH=x86_64 PROFILE=release`, 3 boots, **TCG**, só para comparar o RustOS consigo mesmo. Mediana e
+faixa (mínimo a máximo). A criação de processo e a ida e volta por canal são do `procs`
+(`user/tests/procs`, laços de 300 processos e de 2 000 idas e voltas, depois de aquecer); as outras
+linhas já existiam.
 
-| Medida | aarch64 HVF (mediana, faixa) | x86_64 TCG (mediana, faixa) | De onde vem (linha do log) | Commit |
-| --- | --- | --- | --- | --- |
-| Syscall nula, pilha limpa | 70,6 ns (66,5 a 74,1) | 781,9 ns (773,9 a 1 068,4) | `[rustos] user: null syscall N ns with the stack clean` (200 000 chamadas no aarch64; 20 000 no x86_64) | este PR |
-| Syscall nula, sem a limpeza da pilha | 56,7 ns (54,7 a 63,1) | 392,0 ns (363,8 a 410,9) | `... ns without` (mesma linha) | este PR |
-| Criação de processo: criar, mapear, iniciar, sair e soltar | 156,7 us (146,1 a 182,1) | 3 152,1 us (2 940,7 a 3 190,4) | `[user] procs: process create+exit: X us per process (300 rounds)`, laço sem `process_kill` (o laço com a morte no meio roda antes, só para cobertura) | este PR |
-| Ida e volta por canal entre dois processos (`object_wait_one`) | 42 120 ns (38 475 a 44 039) | 196 101 ns (186 672 a 223 563) | `[user] procs: channel ping-pong: N ns per round trip (2000 round trips)` | este PR |
-| Troca entre dois espaços (`asid bench`) | 58 ns (56 a 60), ASID com etiquetas de teste de 4 bits | 12 619 ns (11 232 a 13 966), **sem PCID** (0 bits) | `[rustos] asid bench: N ns per switch between two spaces` | este PR |
-| Falta de página: primeiro toque de escrita (aloca e zera) | 958,6 ns (779,6 a 1 230,7) | 23 614,5 ns (19 785,9 a 25 440,4) | `[user] lazy: ok (... first write N ns ...)`, por página | este PR |
-| Falta de página: leitura da página zero | 337,6 ns (258,7 a 426,7) | 6 318,9 ns (6 133,1 a 7 320,4) | `... zero-page read N ns ...` | este PR |
-| Falta de página: escrita sobre a página zero (cópia) | 1 178,5 ns (897,7 a 1 580,8) | 12 025,7 ns (10 632,2 a 12 644,2) | `... zero-page copy N ns ...` | este PR |
-| Menor processo: frames e KiB (heap, 9 732 B nos dois) | 14 frames, 56 KiB (faixa 13 a 14; 52 a 56 KiB) | 15 frames, 60 KiB (15 a 15) | `[rustos] user: smallest child: N frames (K KiB)` | este PR |
+| Medida | aarch64 HVF | x86_64 TCG | De onde vem (linha do log) |
+| --- | --- | --- | --- |
+| Syscall nula, pilha limpa | 68,0 ns (65,3 a 86,4) | 535,1 ns (492,1 a 542,9) | `[rustos] user: null syscall N.N ns with the stack clean` (200 000 chamadas no aarch64; 20 000 no x86_64) |
+| Syscall nula, sem a limpeza da pilha | 56,3 ns (54,9 a 64,4) | 243,0 ns (231,2 a 288,4) | `..., N.N ns without` (mesma linha) |
+| Criação de processo: criar, mapear, iniciar, sair e soltar | 171,1 µs (146,3 a 211,3) | 1 934,1 µs (1 768,1 a 1 971,7) | `[user] procs: process create+exit: X us per process (300 rounds)`, laço sem `process_kill` (o laço com a morte no meio roda antes, só para cobertura) |
+| Ida e volta por canal entre dois processos (`object_wait_one`) | 49 721 ns (39 660 a 70 141) | 98 358 ns (91 341 a 135 044) | `[user] procs: channel ping-pong: N ns per round trip (2000 round trips)` |
+| Troca entre dois espaços (`asid bench`) | 51 ns (49 a 72), ASID com etiquetas de teste de 4 bits | 7 422 ns (6 642 a 8 487), **sem PCID** | `[rustos] asid bench: N ns per switch between two spaces` |
+| Falta de página: primeiro toque de escrita (aloca e zera) | 738,3 ns (708,8 a 1 063,9) | 15 239,1 ns (13 616,3 a 15 798,8) | `[user] lazy: ok (... first write N ns ...)`, por página |
+| Falta de página: leitura da página zero | 180,8 ns (169,7 a 260,1) | 2 263,7 ns (2 051,0 a 2 484,3) | `... zero-page read N ns ...` |
+| Falta de página: escrita sobre a página zero (cópia) | 995,3 ns (879,1 a 1 932,3) | 5 111,7 ns (4 471,1 a 5 650,0) | `... zero-page copy N ns ...` |
+| Menor processo | 12 frames, 48 KiB, 9 724 B de heap (os 5 boots) | 13 frames, 52 KiB, 9 724 B de heap (os 3) | `[rustos] user: smallest child: N frames (K KiB) and B B of heap while it waits` |
 
-- A criação de processo mede a média de 300 processos que saem logo (`MODE_QUIET`) e não mata nenhum;
-  o laço de antes matava metade, e a morte com kill tem os seus casos no próprio `procs`.
-- O `asid bench` e a ida e volta são médias de laço, não mediana de rodadas; a faixa é a das cinco
-  execuções (ou três no x86_64).
-- Os números de falta de página do aarch64 não batem com os da seção de paginação (0,51 a 0,69 us no
-  primeiro toque, 4c); a diferença não foi investigada, e esta tabela é a referência da fase.
-- O menor processo ficou em 13 a 14 frames no aarch64, contra 14 a 15 da 4c, na mesma linha; a faixa se
-  moveu e não foi investigada.
-- A ida e volta do aarch64 (38 a 44 us) está muito acima do `lat_ctx` de referência (1,2 a 2,2 us, [SDD 17](17_processos_isolamento_e_syscalls.md#medidas-da-fase)) e cerca de mil vezes acima do ping-pong entre tarefas do kernel (42 ns, acima): o custo está fora da troca em si e não foi decomposto ([DEBT-0158](../tech-debt/0158-ida-e-volta-por-canal-lenta-sem-decomposicao.md)).
-  Cada ida e volta acorda duas vezes uma tarefa que espera; o custo do acordar (outra CPU, ociosa) não foi
-  decomposto. Não se compara com o Linux sem isso.
-
-**O que a QEMU não prova.** Sob TCG o TLB é de software, e o custo de CR3, PCID e ASID não representa o metal.
-Os números do x86_64 servem para regressão entre PRs, não para comparar com o Linux. O `asid bench` do x86_64
-não tem PCID (0 bits): a etiqueta de TLB do x86_64 fica sem execução ([DEBT-0155](../tech-debt/0155-pcid-x86-sem-execucao.md)).
-KPTI, PCID e as mitigações de CPU só valem em KVM, HVF ou metal. Por isso o KPTI ([DEBT-0100](../tech-debt/0100-kpti-nao-implementado.md))
-e o Spectre v2 ([DEBT-0101](../tech-debt/0101-spectre-v2-nao-implementado.md)) ficam para o metal; o zerar da
-falta de página no x86_64 só se decide em KVM ou metal ([DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)).
-
+- **Contra a 4c** (também `release`): a syscall, as faltas de página e o menor processo ficam na faixa
+  da 4c ou abaixo; a criação de processo do x86_64 (1,4 ms na 4c) não se compara, porque o laço da 4c
+  matava metade dos processos no meio.
+- **A ida e volta por canal varia muito entre boots e não regrediu.** Medida em três commits com o
+  mesmo comando (3 boots cada, aarch64 HVF): antes do PCID/ASID, de 25 a 99 µs; com ele, de 43 a
+  65 µs; os 21,9 µs da 4c são uma amostra dessa faixa. As linhas do kernel nos mesmos boots dizem
+  onde está o custo: a troca na mesma CPU custa cerca de 42 ns, mas a troca entre CPUs custa de 8 a
+  20 µs e a ida e volta de IPI, de 9 a 27 µs; a ida e volta por canal **no mesmo processo** custa
+  de 1,5 a 2,5 µs. Cada ida e volta entre processos acorda duas vezes uma tarefa noutra CPU, e o
+  acordar por IPI sob HVF domina: 20 a 35 vezes o `lat_ctx` de referência
+  ([SDD 17](17_processos_isolamento_e_syscalls.md#medidas-da-fase);
+  [DEBT-0158](../tech-debt/0158-ida-e-volta-por-canal-lenta-sem-decomposicao.md)).
+- O `asid bench` e a ida e volta são médias de laço; a faixa é a das execuções.
+- Ficam para o metal: o zeramento no x86_64 ([DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)),
+  o KPTI ([DEBT-0100](../tech-debt/0100-kpti-nao-implementado.md)), o Spectre v2
+  ([DEBT-0101](../tech-debt/0101-spectre-v2-nao-implementado.md)) e o PCID do x86_64
+  ([DEBT-0155](../tech-debt/0155-pcid-x86-sem-execucao.md)).
 ### Troca de contexto e jitter de acordar (fase 3)
 
 Como se mede: `make screenshot ARCH=… PROFILE=release CMDS="bench;bench;bench"` e a linha

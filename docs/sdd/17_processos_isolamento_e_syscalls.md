@@ -5,13 +5,13 @@
 > de syscall, handles, ABI nativa), como o primeiro programa chega à memória, e quais
 > decisões do dono o desenho aplica.
 
-**A fase 4 está fechada** (fatia 4f, 2026-11-24): as medidas estão no [SDD 07](07_desempenho_e_recursos.md#fase-4-as-medidas-fatia-4f). **Estado: desenho aprovado no #9 (2026-11-18). As fatias 4a ([abaixo](#a-fatia-4a-como-entrou)) e 4b ([abaixo](#a-fatia-4b-como-entrou)) estão implementadas; da 4c, o crate puro `core/object` ([abaixo](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) a parte 1, objetos, handles, canais, espera e canal de boot no kernel ([abaixo](#a-fatia-4c-parte-1-como-entrou)), a paginação sob demanda, a página zero e o *shootdown* de TLB ([abaixo](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou)); e a parte 3, VMO, VMAR, processos, threads, o teto em bytes e o `init` com um filho ([abaixo](#a-fatia-4c-parte-3-como-entrou)); as demais, não.** A ABI de
+**A fase 4 está fechada** (fatia 4f, 2026-11-24): as medidas estão no [SDD 07](07_desempenho_e_recursos.md#fase-4-as-medidas-fatia-4f). **Estado: desenho aprovado no #9 (2026-11-18); todas as fatias, de 4a a 4f, estão implementadas, cada uma com a sua seção "como entrou" abaixo; o KPTI e o Spectre v2 ficaram para o metal ([DEBT-0100](../tech-debt/0100-kpti-nao-implementado.md), [DEBT-0101](../tech-debt/0101-spectre-v2-nao-implementado.md)).** A ABI de
 syscall e o formato de executável são contrato que o mundo de fora enxerga (caso 6 do
 [`AGENTS.md`](../../AGENTS.md)), e crate novo em `core/` e pasta nova de primeiro nível são
 o caso 1; por isso o desenho nasceu num PR em Draft só com docs. O dono aprovou as nove
-[decisões pedidas](#as-decisões-do-dono) sem mudança. O código vem em PRs seguintes, e
-este capítulo passa a descritivo à medida que cada fatia entra: o que a 4a e a 4b tornaram verdade está
-em [A fatia 4a, como entrou](#a-fatia-4a-como-entrou), [A fatia 4b, como entrou](#a-fatia-4b-como-entrou) [A fatia 4c, paginação sob demanda e *shootdown*, como entrou](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou) e [A fatia 4c, parte 3, como entrou](#a-fatia-4c-parte-3-como-entrou), a 4e, parte 2 ([PCID e ASID na troca, como entrou](#a-fatia-4e-parte-2-pcid-e-asid-na-troca-como-entrou)), o **M1**, em que o shell lança os programas do initramfs ([abaixo](#o-m1-programas-pelo-shell-como-entrou)); e o resto do texto continua sendo desenho.
+[decisões pedidas](#as-decisões-do-dono) sem mudança. O código entrou em PRs seguintes, e
+o que cada fatia tornou verdade está
+em [A fatia 4a, como entrou](#a-fatia-4a-como-entrou), [A fatia 4b, como entrou](#a-fatia-4b-como-entrou) [A fatia 4c, paginação sob demanda e *shootdown*, como entrou](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou) e [A fatia 4c, parte 3, como entrou](#a-fatia-4c-parte-3-como-entrou), a 4e, parte 2 ([PCID e ASID na troca, como entrou](#a-fatia-4e-parte-2-pcid-e-asid-na-troca-como-entrou)), o **M1**, em que o shell lança os programas do initramfs ([abaixo](#o-m1-programas-pelo-shell-como-entrou)), e as 4d e 4f nas suas seções. Onde o texto de desenho e uma seção "como entrou" divergem, vale a seção "como entrou".
 
 Fase 4 do [roadmap](08_roadmap.md). Pesquisa de origem, com as marcas de
 verificação: `syscalls-processes.md` (2026-11-17). O modelo de controle de acesso
