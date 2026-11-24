@@ -41,6 +41,8 @@ const WORKER_EXIT: u64 = 7;
 /// Rodadas do laço de criar e matar, e idas e voltas do eco entre processos.
 const LOOPS: u32 = 300;
 const ECHOES: u32 = 2000;
+// O `echo` roda em blocos de 16: a linha da medida diz `ECHOES` idas e voltas.
+const _: () = assert!(ECHOES.is_multiple_of(16));
 /// Filhos que seguram valores diferentes em `xmm0`/`v0` ao mesmo tempo: mais que as 4 CPUs da QEMU.
 const SIMD_CHILDREN: usize = 8;
 const SIMD_TAG: u64 = 0x5349_4D44_0000_0000;
@@ -1202,9 +1204,10 @@ fn cap_objects(c: &mut Checks, cx: &Cx<'_>) {
     }
 }
 
-/// Um processo por rodada: criar, mapear o programa, iniciar, esperar `TERMINATED` (ou matar logo) e
-/// soltar tudo. Devolve os microssegundos por processo.
-fn lifecycle_loop(c: &mut Checks, cx: &Cx<'_>, rounds: u32) -> u64 {
+/// Um processo por rodada, que sai logo (`MODE_QUIET`): criar, mapear o programa, iniciar, esperar
+/// `TERMINATED` e soltar tudo. Com `kill_odd`, as rodadas ímpares matam o filho logo depois de iniciar
+/// (a morte no meio da partida); a medida usa o laço sem morte. Devolve os nanossegundos do laço.
+fn lifecycle_loop(c: &mut Checks, cx: &Cx<'_>, rounds: u32, kill_odd: bool) -> u64 {
     let started = now();
     let mut good = 0;
     for round in 0..rounds {
@@ -1215,7 +1218,7 @@ fn lifecycle_loop(c: &mut Checks, cx: &Cx<'_>, rounds: u32) -> u64 {
             child.abandon();
             break;
         };
-        if round % 2 == 1 {
+        if kill_odd && round % 2 == 1 {
             let _ = sys::process_kill(child.process);
         }
         good += u32::from(child.wait(now() + 5 * SECOND).is_ok());
@@ -1223,7 +1226,7 @@ fn lifecycle_loop(c: &mut Checks, cx: &Cx<'_>, rounds: u32) -> u64 {
         child.release();
     }
     c.expect("every process of the loop terminated", good == rounds);
-    (now() - started) / 1000 / u64::from(rounds.max(1))
+    now() - started
 }
 
 /// O eco entre dois processos por canal, com `object_wait_one`: o análogo do `lat_ctx`. Cada ida e
@@ -1344,7 +1347,7 @@ fn warm_up(c: &mut Checks, cx: &Cx<'_>) {
     for blocked in crowd {
         release_blocked(c, blocked.ok_or(spawn::Error::Stack));
     }
-    let _ = lifecycle_loop(c, cx, 8);
+    let _ = lifecycle_loop(c, cx, 8, true);
     let _ = echo(c, cx, 2);
 }
 
@@ -1408,12 +1411,17 @@ fn main(env: &Env) -> i64 {
     sleep(20 * MS);
     sync(&cx, b"B");
     release_blocked(&mut c, blocked);
-    let per_process = lifecycle_loop(&mut c, &cx, LOOPS);
+    let _ = lifecycle_loop(&mut c, &cx, LOOPS, true);
+    let create_ns = lifecycle_loop(&mut c, &cx, LOOPS, false);
+    // Décimos de microssegundo, como o `lazy`: a média de LOOPS processos, sem arredondar para baixo.
+    let tenths = create_ns * 10 / (1000 * u64::from(LOOPS.max(1)));
     println!(
-        "procs: create, map, start, run, exit and wait took {per_process} us per process ({LOOPS} processes)"
+        "procs: process create+exit: {}.{} us per process ({LOOPS} rounds)",
+        tenths / 10,
+        tenths % 10
     );
-    let per_round = echo(&mut c, &cx, u8::try_from(ECHOES / 16).unwrap_or(1));
-    println!("procs: echo between two processes took {per_round} ns per round trip");
+    let round_trip = echo(&mut c, &cx, u8::try_from(ECHOES / 16).unwrap_or(1));
+    println!("procs: channel ping-pong: {round_trip} ns per round trip ({ECHOES} round trips)");
     sleep(30 * MS);
     sync(&cx, b"C");
     if c.failed == 0 {

@@ -16,6 +16,7 @@ jobs:
   check:
     name: gates e testes
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - name: Toolchain do rust-toolchain.toml
@@ -27,6 +28,7 @@ jobs:
     name: smoke (${{ matrix.arch }})
     needs: check
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

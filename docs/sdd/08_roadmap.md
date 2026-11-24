@@ -23,7 +23,7 @@ modelo de ameaça e o porquê de cada mecanismo estão no [SDD 09](09_seguranca.
 | **1 — Exceções, interrupções e tempo** ✅ | Vetores de exceção, controlador de interrupção, timer, relógio, entrada por interrupção, proteções de hardware ligadas | Page fault proposital vira relatório; tique contado; shell dorme em `hlt`/`wfi` |
 | **2 — Memória virtual e heap** ✅ | Tabelas próprias com W^X, heap do kernel, aleatório do kernel, memória do bootloader recuperada | Escrita em `.text` falha; memória livre depois do boot medida |
 | **3 — Tarefas, SMP e escalonador** (1ª e 2ª ondas ✅) | Troca de contexto com estado FPU/SIMD por tarefa, threads do kernel, fila por CPU, escalonador atrás de trait (rodízio, depois EEVDF), timer de um tiro, idle sem tique | Latência de troca medida em N núcleos, e o teste que escreve `xmm0`/`v0` em duas tarefas passa |
-| **4 — Processos e isolamento** | Anel 3/EL0, syscall, carregador ELF, VFS em memória (initramfs, tmpfs), espaço de endereçamento por processo, handles com direitos, mitigações de CPU, estado SIMD visível ao usuário, página zero e COW | Syscall nula medida; processo que toca o kernel morre sem derrubar nada |
+| **4 — Processos e isolamento** ✅ | Anel 3/EL0, syscall, carregador ELF, initramfs (o tmpfs e o VFS foram para a fase 5), espaço de endereçamento por processo, handles com direitos, mitigações de CPU (KPTI e Spectre v2 ficaram para o metal), estado SIMD visível ao usuário, página zero e COW | Syscall nula medida; processo que toca o kernel morre sem derrubar nada |
 | **5 — ABI Linux e primeiros aplicativos** | Syscalls Linux traduzidas, credenciais Linux, musl estático, BusyBox | BusyBox roda sem recompilar e é medido contra o Linux; DOOM por software roda no x86_64 (marco 1 dos jogos; no aarch64 fecha na fase 6); memória ociosa medida contra a linha de base ([Memória ociosa](#memória-ociosa-o-alvo-vem-de-uma-medida)) e contra a hipótese do SDD 07 (≤ 36 MiB usados no x86_64 e ≤ 30,8 no aarch64, mesmo `-smp`) |
 | **6 — Armazenamento persistente** | PCI Express, IOMMU, virtio-blk, NVMe, AHCI, page cache, sistema de arquivos da raiz com escrita, permissões em disco, ACPI/DTB, virtio-input e virtio-snd, readahead com janela crescente, LRU de gerações | Benchmark de E/S ao lado do Linux; virtio-input entrega eventos e virtio-snd toca um buffer |
 | **7 — Usuários e sessões** | Contas e grupos, login, Argon2id, elevação de privilégio por capacidade, auditoria | Dois usuários sem acesso aos arquivos um do outro |
@@ -152,7 +152,7 @@ código de terceiros que ela exige (SDL e Mesa) são decisões futuras, listadas
 
 ### 4 — Processos e isolamento
 
-> **Desenho aprovado no #9 (2026-11-18), ainda não implementado:** [SDD 17](17_processos_isolamento_e_syscalls.md)
+> **Feita** (#10 a #47, 2026-11-18 a 2026-11-24), no desenho aprovado no #9: [SDD 17](17_processos_isolamento_e_syscalls.md)
 > (entrada de syscall por ISA, espaço de usuário, handles, ABI nativa, ELF, init, falhas,
 > SIMD, mitigações, medidas e as [nove decisões do dono](17_processos_isolamento_e_syscalls.md#as-decisões-do-dono)).
 > O texto abaixo é o roadmap de antes do desenho; onde divergem (VFS e tmpfs, sinais
