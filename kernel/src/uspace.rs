@@ -521,7 +521,10 @@ impl UserSpace {
                     .ok_or(Unresolved::Region(FaultError::Unbacked))?;
                 let vmo = objects(id).ok_or(Unresolved::Region(FaultError::Unbacked))?;
                 let frame = vmo.frame_at(index)?;
-                let flags = flags_of(region.attrs.perms);
+                let flags = PageFlags {
+                    cache: vmo.cache(),
+                    ..flags_of(region.attrs.perms)
+                };
                 self.map_resolved(page, frame, flags)?;
                 if flags.executable {
                     memory::sync_code_frame(frame);

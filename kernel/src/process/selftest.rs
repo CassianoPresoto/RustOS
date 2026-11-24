@@ -15,10 +15,10 @@ mod demand;
 mod procs;
 mod tags;
 
-use super::{Source, fault_peak, last_event, spawn, spawn_as, spawn_keeping};
+use super::{Options, Source, fault_peak, last_event, spawn, spawn_as, spawn_keeping, spawn_with};
 use crate::frames::Frames;
 use crate::uspace::{Resolved, UserSpace, set_frame_budget};
-use crate::{asid, loader, platform, scrub, task};
+use crate::{asid, console, framebuffer, loader, platform, scrub, task};
 use rustos_mm::vmar::Access;
 
 /// Quanto o autoteste espera um processo acabar, e o passo da espera.
@@ -245,6 +245,57 @@ fn lazy_program_runs(frames: Frames, map_offset: u64, archive: Option<&[u8]>) ->
         return false;
     };
     demand::lazy_program(frames, map_offset, lazy, slack)
+}
+
+/// Pixel (0, 0) que o `fb` pinta: azul 0, verde 0, vermelho cheio, em XRGB8888 (`0x00FF_0000`).
+const FB_PATTERN_ORIGIN: u32 = 0x00FF_0000;
+
+/// O `fb` do initramfs: mapeia a tela como VMO e pinta um padrão. Enquanto ele a segura, o console não
+/// desenha (conta as vezes que quis, e o padrão segue na tela); quando ele sai, o console redesenha e
+/// o pixel (0, 0) volta à barra (SDD 18, caso 6).
+fn fb_program_runs(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
+    let Some(file) = archive.and_then(|archive| loader::find(archive, b"fb").ok()) else {
+        return false;
+    };
+    let (Some((width, height, pitch)), Some(before)) =
+        (framebuffer::size(), framebuffer::pixel(0, 0))
+    else {
+        return false;
+    };
+    let options = Options {
+        keep_peer: true,
+        initramfs: false,
+        framebuffer: true,
+    };
+    let Ok((spawned, Some(peer))) =
+        spawn_with(frames, map_offset, Source::Elf(file), 0, options, "fb", &[])
+    else {
+        return false;
+    };
+    let mapped = wait_for_message(&peer, b"mapped");
+    let owned = framebuffer::held();
+    let skipped_before = framebuffer::skipped();
+    kprintln!("[rustos] fb self-test: the program holds the screen, the console must stay quiet");
+    let paused = owned
+        && framebuffer::skipped() > skipped_before
+        && framebuffer::pixel(0, 0) == Some(FB_PATTERN_ORIGIN);
+    let _ = peer.write(b"go");
+    let exited = exited_with(finish(&spawned), 0);
+    peer.close();
+    let released = !framebuffer::held();
+    console::flush();
+    let restored = framebuffer::pixel(0, 0) == Some(before);
+    let ok = mapped && paused && exited && released && restored;
+    if ok {
+        kprintln!(
+            "[rustos] fb self-test: ok ({width}x{height} stride {pitch}, console paused and restored)"
+        );
+    } else {
+        kprintln!(
+            "[rustos] fb self-test: FAILED (mapped {mapped}, paused {paused}, exited {exited}, released {released}, restored {restored})"
+        );
+    }
+    ok
 }
 
 /// Escreve `value` em `bytes` bytes little-endian a partir de `at`.
@@ -553,6 +604,10 @@ fn hello_on_every_cpu(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -
 }
 
 /// Os casos do programa embutido. `false` se algum falhou.
+#[allow(
+    clippy::too_many_lines,
+    reason = "a lista linear dos casos do autoteste"
+)]
 pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> bool {
     let hello = hello_on_every_cpu(frames, map_offset, archive) && copy_fixup_ran_with_ac_clear();
     let probe = ptr::addr_of!(KERNEL_PROBE).expose_provenance() as u64;
@@ -588,6 +643,7 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
     let refused = loader_leaves_no_frame_behind(frames, map_offset, archive);
     let unaligned = unaligned_segment_loads_zeroed(frames, map_offset);
     let lazy = resolver && lazy_program_runs(frames, map_offset, archive);
+    let screen = fb_program_runs(frames, map_offset, archive);
     let shot = demand::shootdown(frames, map_offset)
         && demand::ring_stress(frames, map_offset, demand::RING_ROUNDS, false)
         && demand::ring_stress(frames, map_offset, demand::RING_ROUNDS, true);
@@ -645,6 +701,7 @@ pub fn self_test(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> boo
         && unaligned
         && resolver
         && lazy
+        && screen
         && shot
         && tagged
         && switch.is_some()

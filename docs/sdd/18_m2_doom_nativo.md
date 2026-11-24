@@ -5,9 +5,10 @@
 > violar o `AGENTS.md`, e quais contratos novos (framebuffer, entrada, libc) o programa
 > enxerga.
 
-**Estado: desenho aprovado (#46, 2026-11-24), sem código.** O dono aprovou as sete decisões
-com as recomendações ([Decisões](#decisões)); o que abaixo ainda diz **Proposta** é o desenho
-aprovado, que passa a descritivo à medida que cada fatia do M2 entra.
+**Estado: desenho aprovado (#46, 2026-11-24); a fatia 1a (contrato de tela) está no código.** O dono
+aprovou as sete decisões com as recomendações ([Decisões](#decisões)); o que abaixo ainda diz **Proposta**
+é o desenho aprovado, que passa a descritivo à medida que cada fatia do M2 entra. A fatia 1a está descrita em
+[Como entrou](#como-entrou-fatia-1a).
 O M2 é o marco 1 dos jogos da [escada do SDD 08](08_roadmap.md#jogos-a-escada), antecipado
 para logo depois da fase 4, sobre a ABI nativa do [SDD 17](17_processos_isolamento_e_syscalls.md).
 
@@ -202,6 +203,44 @@ mapeia).
 decisões do agente](17_processos_isolamento_e_syscalls.md#decisões-do-agente) como
 caminho aberto para o framebuffer; este capítulo é quem a usa.
 
+### Como entrou (fatia 1a)
+
+O contrato de tela está no código, com o desenho aprovado e as lacunas que ele deixava decididas aqui:
+
+- **VMO de framebuffer** (`kernel/src/vmo.rs`, `Kind::Framebuffer`): físico, sobre a memória da tela. Não cobra
+  quota e não devolve frames ao morrer (como o initramfs). O mapeamento usa `PageFlags::FRAMEBUFFER`
+  (write-combining) pelo `Vmo::cache`, na falta de página da região (`FaultPlan::MapObject`). Direitos:
+  `READ`, `WRITE`, `MAP`, `DUPLICATE`, `TRANSFER`, sem `EXECUTE` ([SDD 17](17_processos_isolamento_e_syscalls.md#direitos-iniciais-decisão-3)).
+- **Quem recebe o `kind` 5**: o programa que o `run` do shell lança (`kernel/src/programs.rs`, opção
+  `framebuffer`) e o `fb` do autoteste. O `init` e os filhos que ele cria não recebem.
+- **Mensagem de boot v2** (`core/hal/src/abi.rs`): o bloco de formato de 16 bytes depois dos `kind`s, só com
+  `kind` 5. O kernel escreve a v2 sempre; o `user/rt` lê a v1 e a v2 e expõe `Boot::framebuffer`.
+- **Posse** ([SDD 16](16_terminal.md#a-posse-da-tela-framebuffer-como-vmo)): a contagem é de mapeamentos, como
+  recomendado (decisão 5b). Só o handle, sem mapear, não dá a tela a ninguém.
+- **Teste `fb`** (`user/tests/fb`): lê o formato, mapeia, pinta 64 linhas, avisa o kernel (`mapped`), espera
+  `go`, confere que o padrão segue e sai. O autoteste confere que o console ficou quieto (`skipped` subiu, o
+  pixel (0, 0) segue com o padrão) e que redesenhou depois (o pixel (0, 0) volta à barra).
+
+**Decisões que fecham as lacunas do desenho:**
+
+- **5c, formato.** O bloco `format` só descreve XRGB8888: canais de 8 bits em `red` 16, `green` 8, `blue` 0. Outra
+  ordem de canais (que o boot aceita, [SDD 04](04_boot.md)) fica **sem** `kind` 5, e o console desenha normal.
+  Dívida [DEBT-0159](../tech-debt/0159-framebuffer-com-outra-ordem-de-canais-sem-vmo.md).
+- **5d, `stride` em bytes.** É o `pitch` do bootloader. O VMO tem `ceil(stride * height / 4096)` páginas; a ABI
+  não diz o tamanho do VMO ([DEBT-0140](../tech-debt/0140-abi-sem-tamanho-de-vmo.md)), e o formato diz.
+- **5e, pânico.** `print_panic` desenha mesmo com a tela mapeada por um programa. O pânico é a última saída, e um
+  programa travado não deve esconder a causa.
+- **5f, redesenho no laço do shell.** A morte do processo só marca a tela para redesenhar; quem redesenha é o
+  `flush` do laço do shell, fora dos locks do processo e com IRQ liberada. Até o próximo `flush` (o próximo
+  texto ou o prompt), a tela fica com o último quadro do programa.
+- **5g, espera pela renderização em curso.** O primeiro mapeamento espera o lock da tela (`console::settle`), para
+  que nenhuma renderização que começou antes escreva por cima do padrão depois do `vmar_map`.
+
+**Medido (fatia 1a):** `make smoke ARCH=all`, `smoke-fast` nas duas ISAs e a imagem enxuta passam; o autoteste
+`fb` roda nas duas ISAs (x86_64 1280x800, stride 5120; aarch64 ramfb 1024x768, stride 4096). O tamanho do kernel
+`release-small` (x86_64) sobe de 278 199 para 280 183 bytes carregados (+1 984, +0,7%); a medida do custo do
+framebuffer por quadro fica para a fatia do DOOM, com a mesma medida antes e depois.
+
 ## Contrato de entrada, caso 6
 
 **Proposta, decisão 6 (`kind` 6 Input).** Um canal em que o kernel escreve um evento por tecla
@@ -366,9 +405,11 @@ recomendação** (o merge do #46); as opções descartadas estão no corpo do #4
 
 ## Dívidas
 
-Nenhuma nova neste Draft. As que o desenho toca já existem: [DEBT-0057](../tech-debt/0057-tsc-entre-nucleos-sem-verificacao.md)
-(TSC entre núcleos, que pesa na medida de tempo), e as de teclado e de framebuffer já listadas no
-SDD 11 e no SDD 16 (sem teclado no aarch64, [DEBT-0050](../tech-debt/0050-historico-sem-rolagem-no-aarch64.md)).
+Nova na fatia 1a: [DEBT-0159](../tech-debt/0159-framebuffer-com-outra-ordem-de-canais-sem-vmo.md) (framebuffer com
+outra ordem de canais fica sem `kind` 5). As que o desenho toca já existem: [DEBT-0057](../tech-debt/0057-tsc-entre-nucleos-sem-verificacao.md)
+(TSC entre núcleos, que pesa na medida de tempo), [DEBT-0051](../tech-debt/0051-redesenho-da-tela-com-irq-mascarada.md)
+(o redesenho com IRQ mascarada, que a posse da tela usa), e as de teclado já listadas no SDD 11
+(sem teclado no aarch64, [DEBT-0050](../tech-debt/0050-historico-sem-rolagem-no-aarch64.md)).
 
 ---
 

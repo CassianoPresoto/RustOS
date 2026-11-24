@@ -19,7 +19,7 @@ pub struct Program {
 
 /// Todos os programas de `user/`. O `init` e as demonstrações do shell vão em toda imagem; os de
 /// teste, só com `selftest`.
-pub const PROGRAMS: [Program; 12] = [
+pub const PROGRAMS: [Program; 13] = [
     Program {
         package: "rustos-user-init",
         file: "init",
@@ -63,6 +63,11 @@ pub const PROGRAMS: [Program; 12] = [
     Program {
         package: "rustos-user-test-lazy",
         file: "lazy",
+        selftest_only: true,
+    },
+    Program {
+        package: "rustos-user-test-fb",
+        file: "fb",
         selftest_only: true,
     },
     Program {
@@ -331,7 +336,7 @@ mod tests {
             tested,
             [
                 &demos[..],
-                &["big", "handles", "lazy", "child", "procs", "cases"]
+                &["big", "handles", "lazy", "fb", "child", "procs", "cases"]
             ]
             .concat()
         );

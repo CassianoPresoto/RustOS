@@ -31,6 +31,7 @@ pub fn run(vm: &Vm, frames: Frames, map_offset: u64) -> bool {
             let options = Options {
                 keep_peer: false,
                 initramfs: true,
+                framebuffer: false,
             };
             process::spawn_with(
                 frames,

@@ -222,6 +222,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustos-user-test-fb"
+version = "0.1.0"
+dependencies = [
+ "rustos-user-rt",
+]
+
+[[package]]
 name = "rustos-user-test-handles"
 version = "0.1.0"
 dependencies = [

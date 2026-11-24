@@ -1,13 +1,13 @@
 //! O VMO (objeto de memória virtual, SDD 17, fatia 4c): um conjunto de páginas que um ou mais espaços
 //! mapeiam. O anônimo é preguiçoso e dono dos frames (zerados no primeiro toque, devolvidos zerados
 //! quando o último `Arc` solta); o físico aponta frames que já existem (o initramfs), só leitura,
-//! sem zerar e sem devolver.
+//! sem zerar e sem devolver. O de framebuffer é físico também, mas mapeia com write-combining (SDD 18).
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use rustos_hal::PhysAddr;
 use rustos_hal::abi::{PROCESS_BYTES_MAX, Status};
+use rustos_hal::{CacheMode, PhysAddr};
 use rustos_mm::PhysFrame;
 use rustos_object::HandleCount;
 
@@ -30,6 +30,8 @@ enum Kind {
     Anonymous,
     /// Frames contíguos que o kernel não aloca nem devolve.
     Physical(PhysAddr),
+    /// Como `Physical`, do framebuffer: o mapeamento é write-combining e segura a tela (`framebuffer`).
+    Framebuffer(PhysAddr),
 }
 
 /// Os frames que o VMO anônimo já tem: `slots[i]` é o número do frame da página `i` mais um, ou 0.
@@ -94,6 +96,31 @@ impl Vmo {
         })
     }
 
+    /// Um VMO sobre a memória do framebuffer, `pages` páginas a partir de `base`. Como o físico, não
+    /// cobra nem devolve frames; só o mapeamento o diferencia.
+    pub fn framebuffer(frames: Frames, base: PhysAddr, pages: u64) -> Arc<Self> {
+        Arc::new(Self {
+            handles: HandleCount::new(0),
+            pages,
+            kind: Kind::Framebuffer(base),
+            frames,
+            store: IrqLock::new(Store::default()),
+            cost: None,
+        })
+    }
+
+    pub fn is_framebuffer(&self) -> bool {
+        matches!(self.kind, Kind::Framebuffer(_))
+    }
+
+    /// A política de cache das páginas que o mapeamento dele cria.
+    pub const fn cache(&self) -> CacheMode {
+        match self.kind {
+            Kind::Framebuffer(_) => CacheMode::WriteCombining,
+            Kind::Anonymous | Kind::Physical(_) => CacheMode::WriteBack,
+        }
+    }
+
     pub const fn handles(&self) -> &HandleCount {
         &self.handles
     }
@@ -108,7 +135,7 @@ impl Vmo {
         if page >= self.pages {
             return Err(Unresolved::Region(rustos_mm::vmar::FaultError::Unbacked));
         }
-        if let Kind::Physical(base) = self.kind {
+        if let Kind::Physical(base) | Kind::Framebuffer(base) = self.kind {
             return Ok(PhysAddr::new(base.as_u64() + page * PAGE));
         }
         let index = usize::try_from(page).map_err(|_| Unresolved::OutOfMemory)?;

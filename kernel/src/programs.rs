@@ -189,15 +189,21 @@ pub fn run(
     let Some((argv, count)) = argv_of(name, extra) else {
         return too_many_arguments();
     };
-    let spawned = match process::spawn_as(
+    // O programa do shell recebe o framebuffer, se a tela é XRGB (SDD 18); o `init` não.
+    let options = process::Options {
+        framebuffer: true,
+        ..process::Options::default()
+    };
+    let spawned = match process::spawn_with(
         frames,
         direct_map_offset,
         Source::Elf(file),
         0,
+        options,
         name,
         &argv[..count],
     ) {
-        Ok(spawned) => spawned,
+        Ok((spawned, _)) => spawned,
         Err(error) => return refusal(&error),
     };
     if !wait {

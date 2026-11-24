@@ -236,6 +236,15 @@ impl Screen {
         while self.terminal.take_reply(&mut discard) > 0 {}
     }
 
+    /// Redesenha a tela inteira: o fundo, a barra e cada linha da grade. Quem chama é o laço do shell,
+    /// quando um programa deixa de segurar o framebuffer (SDD 16).
+    pub fn repaint(&mut self) {
+        self.surface.fill(self.palette.background);
+        self.draw_bar();
+        self.terminal.mark_all_dirty();
+        self.render();
+    }
+
     /// Desenha as linhas sujas desde o último `render`. Rolar suja a grade inteira.
     /// Células sem tinta (espaço sem sublinhado) da mesma cor viram um retângulo só.
     pub fn render(&mut self) {

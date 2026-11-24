@@ -28,8 +28,8 @@ pub use rustos_arch_x86_64_user::simd_hold;
 #[cfg(feature = "raw-syscalls")]
 pub use rustos_hal::abi::Syscall;
 pub use rustos_hal::abi::{
-    Handle, PROCESS_KILLED_CODE, ProcessEvent, ReadActual, Rights, Status, boot_kind, event_kind,
-    fault_access, fault_kind, signals, vmar_flags,
+    FramebufferFormat, Handle, PROCESS_KILLED_CODE, ProcessEvent, ReadActual, Rights, Status,
+    boot_kind, event_kind, fault_access, fault_kind, signals, vmar_flags,
 };
 
 /// Declara o `main` do programa: `fn(&Env) -> i64`, cujo valor é o código de `process_exit`.

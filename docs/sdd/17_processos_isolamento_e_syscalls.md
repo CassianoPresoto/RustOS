@@ -488,7 +488,7 @@ seguem proibidas no log **inteiro**, boot e sessão, menos as três que lançar 
 
 | Peça | Onde mora |
 | --- | --- |
-| VMO anônimo (preguiçoso, dono dos frames) e físico (initramfs, só leitura, sem zerar nem devolver) | `kernel/src/vmo.rs` |
+| VMO anônimo (preguiçoso, dono dos frames), físico (initramfs, só leitura, sem zerar nem devolver) e de framebuffer (físico, write-combining, que segura a tela, [SDD 16](16_terminal.md#a-posse-da-tela-framebuffer-como-vmo)) | `kernel/src/vmo.rs`; a posse da tela em `kernel/src/framebuffer.rs` |
 | A memória do processo (`Mem`: espaço, árvore de regiões, os VMOs mapeados) sob um `IrqLock` que espera o *shootdown* girando; `map`, `unmap`, a falta | `kernel/src/process/mem.rs`, `kernel/src/sync.rs` (`lock_serving`) |
 | `Process` (objeto, tabela, cota, vida e morte), `ThreadObj`, `VmarObj`, `start_thread`, `leave_current` | `kernel/src/process.rs` |
 | `vmo_create`, `vmar_map`, `vmar_unmap`; `process_create`, `thread_create`, `process_kill` | `kernel/src/syscall/{memory,tasks}.rs`; `thread_exit` e `process_exit` em `syscall.rs` |
@@ -524,7 +524,7 @@ Um processo sem thread que `process_kill` mata é desfeito por quem matou, na ho
 
 ### VMO e VMAR
 
-O VMO **é dono dos frames**; cada mapeamento segura um `Arc<Vmo>`. A falta numa região de VMO (`FaultPlan::MapObject`) pede o frame ao VMO, que o cria zerado no primeiro toque, **leitura ou escrita**, e o mapeia com a permissão da região. O VMO físico responde `base + página`. O desmapeamento tira a folha e **não** devolve o frame de VMO; a região do carregador (imagem, pilha) segue dona dos frames. O que os dois dão a quem chama:
+O VMO **é dono dos frames** (exceto o físico, que só aponta: o initramfs e o framebuffer); cada mapeamento segura um `Arc<Vmo>`. O cache de cada página vem do VMO (`Vmo::cache`): write-combining no framebuffer, escrita comum nos outros. A falta numa região de VMO (`FaultPlan::MapObject`) pede o frame ao VMO, que o cria zerado no primeiro toque, **leitura ou escrita**, e o mapeia com a permissão da região. O VMO físico responde `base + página`. O desmapeamento tira a folha e **não** devolve o frame de VMO; a região do carregador (imagem, pilha) segue dona dos frames. O que os dois dão a quem chama:
 
 | Chamada | Contrato preenchido |
 | --- | --- |
@@ -554,7 +554,7 @@ O que fica fora do teto é a [DEBT-0142](../tech-debt/0142-objeto-do-kernel-sem-
 
 ### O canal de boot e o `init`
 
-A mensagem de boot do `init` leva agora `[Process, VMAR raiz, Console, Initramfs]`: o VMAR raiz com os direitos de VMAR e o initramfs como **VMO físico** (`READ`, `MAP`, `DUPLICATE`, `TRANSFER`), só para o `init` (a opção `initramfs` de `spawn_with`); os programas que o shell lança recebem só os três primeiros. O leitor casa por `kind`, então o programa que não conhece um item o ignora.
+A mensagem de boot do `init` leva agora `[Process, VMAR raiz, Console, Initramfs]`: o VMAR raiz com os direitos de VMAR e o initramfs como **VMO físico** (`READ`, `MAP`, `DUPLICATE`, `TRANSFER`), só para o `init` (a opção `initramfs` de `spawn_with`); os programas que o shell lança recebem os três primeiros e, com tela XRGB, o framebuffer (`kind` 5, a opção `framebuffer`). O leitor casa por `kind`, então o programa que não conhece um item o ignora.
 
 O **`init` cria um filho** (`user/init`, com `user/rt/src/spawn.rs`): mapeia o initramfs pelo VMO, acha o `child` com o `core/cpio`, valida o ELF com o `core/elf`, cria o canal de boot e o processo (`process_create`, que move a ponta do filho para a tabela dele como o handle 1), preenche um VMO por `PT_LOAD` mapeando-o em si, mapeia o mesmo VMO no filho com a permissão do segmento e o endereço do linker, monta a pilha (um VMO de 18 páginas reservado sem permissão, as 16 do meio desmapeadas e remapeadas, de modo que as páginas de cada lado ficam reservadas e sempre faltam) com o `InitialStack` do `hal`, escreve a mensagem de boot com o processo, o VMAR raiz e o console duplicado, e chama `thread_create` com o handle de boot em `rdi`/`x0`. Depois espera o `TERMINATED`. O filho escreve pelo console que recebeu e sai: as linhas `[user] child: hello from a child process` e `[user] init: the child process ran and terminated`. A ABI não diz o tamanho de um VMO, e o `init` o acha por tentativa de mapeamento ([DEBT-0140](../tech-debt/0140-abi-sem-tamanho-de-vmo.md)).
 
@@ -1324,7 +1324,7 @@ segue o Zircon, com as páginas **verificadas** abaixo. O que não foi lido do Z
 | --- | --- | --- |
 | **Process** | Espaço de endereçamento, tabela de handles, threads, canal de eventos | `process_create`; o kernel cria o do `init` |
 | **Thread** | Uma tarefa do escalonador com contexto de usuário, pilha de kernel e área de SIMD | `thread_create` |
-| **VMO** (objeto de memória virtual) | Um conjunto de páginas: anônimas e preguiçosas, ou de frames físicos já existentes (initramfs) | `vmo_create`; o kernel cria os físicos |
+| **VMO** (objeto de memória virtual) | Um conjunto de páginas: anônimas e preguiçosas, ou de frames físicos já existentes (initramfs, framebuffer) | `vmo_create`; o kernel cria os físicos |
 | **VMAR** (região de endereço) | Um intervalo do espaço de um processo, com as permissões máximas que mapeamentos sob ele podem ter | O VMAR raiz vem com `process_create`; sem sub-VMARs na fase 4 |
 | **Channel** | Dois handles pares; fila limitada de mensagens com bytes e handles | `channel_create` |
 | **Console de depuração** | Escrita no console do kernel (serial e tela) | Só o kernel; vai ao `init` como handle |
@@ -1605,6 +1605,7 @@ ilegal, falta sem região) mata, pelo [canal de eventos](#falhas-de-usuário).
 | Boot do `init` | Process dele | Os mesmos de `process_create` |
 | Boot do `init` | Console | `DUPLICATE`, `TRANSFER`, `WRITE` |
 | Boot do `init` | Initramfs (VMO físico) | `DUPLICATE`, `TRANSFER`, `READ`, `MAP` (sem `EXECUTE`, sem `WRITE`) |
+| Boot de um programa lançado pelo shell (com tela XRGB) | Framebuffer (VMO físico, `kind` 5) | `DUPLICATE`, `TRANSFER`, `READ`, `WRITE`, `MAP` (sem `EXECUTE`, sem `INSPECT`) |
 
 **Handle:** `u64`, `0` inválido, geração de 48 bits e índice de 16 com aposentadoria do slot, teto de 4 096 em tabela por processo e **orçamento de 2^48 − 1 usos por slot** ([tabela de handles](#tabela-de-handles)).
 
@@ -1646,7 +1647,7 @@ VMO. O custo é que um protocolo que precise de mensagem grande tem de usar VMO.
 | 24 | `pc`, 32 `sp`, 40 `addr` | `u64` | Fault, do usuário (**nunca** endereço do kernel) |
 | 48 | `isa_code` | `u64` | O `code` cru da ISA (vetor e erro no x86_64, `ESR_EL1` no aarch64) |
 
-**Mensagem de boot** (`#[repr(C)]`; cabe em 1 KiB): cabeçalho `{ magic: u32 = 0x544F_4F42, version: u32 = 1, count: u32, reserved: u32 }` seguido de `count` valores `u32` de `kind`; o **i-ésimo handle do array de handles da mensagem** corresponde ao i-ésimo `kind`. `kind`: `1` Process (si mesmo), `2` VMAR raiz, `3` Console, `4` Initramfs. Os mesmos tipos servem a um pai qualquer. **Proposta do M2** ([SDD 18](18_m2_doom_nativo.md#contrato-de-tela-framebuffer-caso-6)): `kind` `5` Framebuffer e `6` Input, ainda não aprovados.
+**Mensagem de boot** (`#[repr(C)]`; cabe em 1 KiB; `core/hal/src/abi.rs`): cabeçalho `{ magic: u32 = 0x544F_4F42, version: u32, count: u32, reserved: u32 }` seguido de `count` valores `u32` de `kind`; o **i-ésimo handle do array de handles da mensagem** corresponde ao i-ésimo `kind`. `kind`: `1` Process (si mesmo), `2` VMAR raiz, `3` Console, `4` Initramfs, `5` Framebuffer. Os mesmos tipos servem a um pai qualquer. **Versão 2** (o kernel escreve esta; o leitor aceita a 1 também): o bloco de formato do framebuffer, `{ width: u32, height: u32, stride: u32 (bytes por linha), format: u32 }` (16 bytes, `#[repr(C)]`), vem **depois dos `kind`s e só quando há um `kind` 5**; `format` `1` é XRGB8888. Sem `kind` 5, a mensagem v2 é igual à v1 no corpo, com `version` 2. O leitor (`user/rt`) expõe `Boot::framebuffer: Option<(Handle, FramebufferFormat)>`. `kind` `6` Input segue proposto no [SDD 18](18_m2_doom_nativo.md#contrato-de-entrada-caso-6), sem aprovação.
 
 ### O que a ABI deixa de fora de propósito
 
@@ -1855,6 +1856,7 @@ Como o módulo cai em `KernelAndModules`, ele **fica fora do mapa direto** ([SDD
 | `kernel/src/vm.rs` | **Feito.** `Vm::map_initramfs` mapeia a faixa do módulo de `string` `initramfs` só leitura e NX, numa janela própria (a terceira, de 1 GiB, depois das de dispositivos e de pilhas; [SDD 13](13_memoria_virtual.md#o-módulo-initramfs)); o W^X confere. Sem módulo, o boot segue |
 | Conteúdo do initramfs | **Feito (4b).** O `xtask image` monta `target/initramfs/<isa>.image.cpio` com o `init` e, na imagem com `selftest`, o `big`; o autoteste lê o cpio e confere que os dois são ELF (`initramfs: 2 files, N bytes`, [SDD 04](04_boot.md)). O `hello.txt` provisório saiu |
 | Initramfs como VMO | **A partir da 4c** (na 4b o kernel só mapeia a faixa e lê o `init` dela): o arquivo vira um **VMO físico** (frames que já existem, sem zerar) com `READ`, `MAP`, `DUPLICATE`, `TRANSFER`, e vai ao `init` pelo canal de boot |
+| Framebuffer como VMO | **Feito na fatia 1a do M2** ([SDD 18](18_m2_doom_nativo.md#como-entrou-fatia-1a)): o VMO físico da tela, com `READ`, `WRITE`, `MAP`, `DUPLICATE`, `TRANSFER` e write-combining no mapeamento, vai ao programa do shell pelo `kind` 5 da mensagem de boot v2. Não cobra quota e não devolve frames ao morrer | `kernel/src/framebuffer.rs`, `kernel/src/vmo.rs` |
 | Devolver ao buddy | Quando o último handle do VMO fechar, devolver os frames do módulo. Que o protocolo permita reusar a memória `Executable/Modules` que não é da imagem **NÃO VERIFICADO** (o PROTOCOL.md não diz); enquanto isso o initramfs **fica residente**: [DEBT-0080](../tech-debt/0080-initramfs-residente-sem-devolver-os-frames.md) |
 
 ### O canal de boot

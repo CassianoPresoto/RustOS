@@ -20,6 +20,7 @@ mod commit;
 mod console;
 mod early;
 mod fmt;
+mod framebuffer;
 mod frames;
 mod heap;
 #[cfg(feature = "selftest")]
@@ -177,6 +178,7 @@ fn boot_kernel(handoff: Handoff) -> ! {
         match unsafe { screen::Screen::new(&info, &mut memory) } {
             Ok(screen) => {
                 let display = display_info(&screen);
+                framebuffer::install(&info, boot.direct_map_offset());
                 console::install_screen(screen);
                 Some(display)
             }
