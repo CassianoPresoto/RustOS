@@ -168,9 +168,9 @@ compara o RustOS consigo mesmo. Mediana e faixa (mínimo a máximo) de cada conj
 | --- | --- | --- | --- | --- |
 | Syscall nula, pilha limpa | 70,6 ns (66,5 a 74,1) | 781,9 ns (773,9 a 1 068,4) | `[rustos] user: null syscall N ns with the stack clean` (200 000 chamadas no aarch64; 20 000 no x86_64) | este PR |
 | Syscall nula, sem a limpeza da pilha | 56,7 ns (54,7 a 63,1) | 392,0 ns (363,8 a 410,9) | `... ns without` (mesma linha) | este PR |
-| Criação de processo: criar, mapear, iniciar, sair e soltar | 174,4 us (157,0 a 237,8) | 3 533,8 us (3 418,1 a 4 108,5) | `[user] procs: process create+exit: X us per process (300 rounds)` | este PR |
-| Ida e volta por canal entre dois processos (`object_wait_one`) | 41 935 ns (32 748 a 57 481) | 220 619 ns (195 372 a 230 531) | `[user] procs: channel ping-pong: N ns per round trip (2000 round trips)` | este PR |
-| Troca entre dois espaços (`asid bench`) | 58 ns (56 a 60), com 4 bits de PCID | 12 619 ns (11 232 a 13 966), **sem PCID** (0 bits) | `[rustos] asid bench: N ns per switch between two spaces` | este PR |
+| Criação de processo: criar, mapear, iniciar, sair e soltar | 156,7 us (146,1 a 182,1) | 3 152,1 us (2 940,7 a 3 190,4) | `[user] procs: process create+exit: X us per process (300 rounds)`, laço sem `process_kill` (o laço com a morte no meio roda antes, só para cobertura) | este PR |
+| Ida e volta por canal entre dois processos (`object_wait_one`) | 42 120 ns (38 475 a 44 039) | 196 101 ns (186 672 a 223 563) | `[user] procs: channel ping-pong: N ns per round trip (2000 round trips)` | este PR |
+| Troca entre dois espaços (`asid bench`) | 58 ns (56 a 60), ASID com etiquetas de teste de 4 bits | 12 619 ns (11 232 a 13 966), **sem PCID** (0 bits) | `[rustos] asid bench: N ns per switch between two spaces` | este PR |
 | Falta de página: primeiro toque de escrita (aloca e zera) | 958,6 ns (779,6 a 1 230,7) | 23 614,5 ns (19 785,9 a 25 440,4) | `[user] lazy: ok (... first write N ns ...)`, por página | este PR |
 | Falta de página: leitura da página zero | 337,6 ns (258,7 a 426,7) | 6 318,9 ns (6 133,1 a 7 320,4) | `... zero-page read N ns ...` | este PR |
 | Falta de página: escrita sobre a página zero (cópia) | 1 178,5 ns (897,7 a 1 580,8) | 12 025,7 ns (10 632,2 a 12 644,2) | `... zero-page copy N ns ...` | este PR |
@@ -184,7 +184,7 @@ compara o RustOS consigo mesmo. Mediana e faixa (mínimo a máximo) de cada conj
   primeiro toque, 4c); a diferença não foi investigada, e esta tabela é a referência da fase.
 - O menor processo ficou em 13 a 14 frames no aarch64, contra 14 a 15 da 4c, na mesma linha; a faixa se
   moveu e não foi investigada.
-- A ida e volta do aarch64 (33 a 57 us) está muito acima do `lat_ctx` de referência (1,2 a 2,2 us, [SDD 17](17_processos_isolamento_e_syscalls.md#medidas-da-fase)).
+- A ida e volta do aarch64 (38 a 44 us) está muito acima do `lat_ctx` de referência (1,2 a 2,2 us, [SDD 17](17_processos_isolamento_e_syscalls.md#medidas-da-fase)) e cerca de mil vezes acima do ping-pong entre tarefas do kernel (42 ns, acima): o custo está fora da troca em si e não foi decomposto ([DEBT-0158](../tech-debt/0158-ida-e-volta-por-canal-lenta-sem-decomposicao.md)).
   Cada ida e volta acorda duas vezes uma tarefa que espera; o custo do acordar (outra CPU, ociosa) não foi
   decomposto. Não se compara com o Linux sem isso.
 

@@ -1203,12 +1203,12 @@ fn cap_objects(c: &mut Checks, cx: &Cx<'_>) {
 }
 
 /// Um processo por rodada, que sai logo (`MODE_QUIET`): criar, mapear o programa, iniciar, esperar
-/// `TERMINATED` e soltar tudo. Sem `process_kill`, que tem os seus casos em `threads_and_kill`. Devolve
-/// os nanossegundos do laço inteiro.
-fn lifecycle_loop(c: &mut Checks, cx: &Cx<'_>, rounds: u32) -> u64 {
+/// `TERMINATED` e soltar tudo. Com `kill_odd`, as rodadas ímpares matam o filho logo depois de iniciar
+/// (a morte no meio da partida); a medida usa o laço sem morte. Devolve os nanossegundos do laço.
+fn lifecycle_loop(c: &mut Checks, cx: &Cx<'_>, rounds: u32, kill_odd: bool) -> u64 {
     let started = now();
     let mut good = 0;
-    for _ in 0..rounds {
+    for round in 0..rounds {
         let Ok(child) = start(cx, Some(MODE_QUIET), false) else {
             break;
         };
@@ -1216,6 +1216,9 @@ fn lifecycle_loop(c: &mut Checks, cx: &Cx<'_>, rounds: u32) -> u64 {
             child.abandon();
             break;
         };
+        if kill_odd && round % 2 == 1 {
+            let _ = sys::process_kill(child.process);
+        }
         good += u32::from(child.wait(now() + 5 * SECOND).is_ok());
         let _ = sys::handle_close(thread);
         child.release();
@@ -1342,7 +1345,7 @@ fn warm_up(c: &mut Checks, cx: &Cx<'_>) {
     for blocked in crowd {
         release_blocked(c, blocked.ok_or(spawn::Error::Stack));
     }
-    let _ = lifecycle_loop(c, cx, 8);
+    let _ = lifecycle_loop(c, cx, 8, true);
     let _ = echo(c, cx, 2);
 }
 
@@ -1406,7 +1409,8 @@ fn main(env: &Env) -> i64 {
     sleep(20 * MS);
     sync(&cx, b"B");
     release_blocked(&mut c, blocked);
-    let create_ns = lifecycle_loop(&mut c, &cx, LOOPS);
+    let _ = lifecycle_loop(&mut c, &cx, LOOPS, true);
+    let create_ns = lifecycle_loop(&mut c, &cx, LOOPS, false);
     // Décimos de microssegundo, como o `lazy`: a média de LOOPS processos, sem arredondar para baixo.
     let tenths = create_ns * 10 / (1000 * u64::from(LOOPS.max(1)));
     println!(
