@@ -5,7 +5,7 @@
 > de syscall, handles, ABI nativa), como o primeiro programa chega à memória, e quais
 > decisões do dono o desenho aplica.
 
-**Estado: desenho aprovado no #9 (2026-11-18). As fatias 4a ([abaixo](#a-fatia-4a-como-entrou)) e 4b ([abaixo](#a-fatia-4b-como-entrou)) estão implementadas; da 4c, o crate puro `core/object` ([abaixo](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) a parte 1, objetos, handles, canais, espera e canal de boot no kernel ([abaixo](#a-fatia-4c-parte-1-como-entrou)), a paginação sob demanda, a página zero e o *shootdown* de TLB ([abaixo](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou)); e a parte 3, VMO, VMAR, processos, threads, o teto em bytes e o `init` com um filho ([abaixo](#a-fatia-4c-parte-3-como-entrou)); as demais, não.** A ABI de
+**A fase 4 está fechada** (fatia 4f, 2026-11-24): as medidas estão no [SDD 07](07_desempenho_e_recursos.md#fase-4-as-medidas-fatia-4f). **Estado: desenho aprovado no #9 (2026-11-18). As fatias 4a ([abaixo](#a-fatia-4a-como-entrou)) e 4b ([abaixo](#a-fatia-4b-como-entrou)) estão implementadas; da 4c, o crate puro `core/object` ([abaixo](#o-que-o-coreobject-torna-verdade-fatia-4c-parte-pura)) a parte 1, objetos, handles, canais, espera e canal de boot no kernel ([abaixo](#a-fatia-4c-parte-1-como-entrou)), a paginação sob demanda, a página zero e o *shootdown* de TLB ([abaixo](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou)); e a parte 3, VMO, VMAR, processos, threads, o teto em bytes e o `init` com um filho ([abaixo](#a-fatia-4c-parte-3-como-entrou)); as demais, não.** A ABI de
 syscall e o formato de executável são contrato que o mundo de fora enxerga (caso 6 do
 [`AGENTS.md`](../../AGENTS.md)), e crate novo em `core/` e pasta nova de primeiro nível são
 o caso 1; por isso o desenho nasceu num PR em Draft só com docs. O dono aprovou as nove
@@ -61,7 +61,7 @@ número novo no [SDD 07](07_desempenho_e_recursos.md).
 | 4c (**feita**: a parte 1, handles, canais, espera e canal de boot; a paginação sob demanda e o *shootdown*; e a parte 3, VMO, VMAR, `process_create`, `thread_create`, `thread_exit` e `process_kill`, o teto em bytes e o `init` com um filho, [abaixo](#a-fatia-4c-parte-3-como-entrou)) | `core/object`; handles e direitos; **VMO e VMAR como objetos**; `debug_write` ganha o argumento `console` (**feito**); **página zero** e **falta de página de usuário resolvida** (**feitas**, [abaixo](#a-fatia-4c-paginação-sob-demanda-e-shootdown-como-entrou)); ASLR; `process_create`, `thread_create`, `process_kill`, `object_wait_one`, canais; ***shootdown* de TLB** e espera da CPU que ainda roda o espaço na morte do processo (**feitos e pagos**: dívidas 0055 e 0085); o `init` recebe os handles pelo canal de boot (**feitos**) | Um processo cria outro, que escreve no console por um handle que recebeu (**atingido**: o `init` cria o `child`) |
 | 4d (**feita**: a parte 1, o canal de eventos, [abaixo](#a-fatia-4d-parte-1-como-entrou); a parte 2, o SIMD entre processos e o teste de `xmm0`/`v0`, [abaixo](#a-fatia-4d-parte-2-como-entrou)) | SIMD de usuário, canal de eventos do processo, teste de `xmm0`/`v0` entre processos | Dois processos preservam `xmm0`/`v0`; o culpado de uma falha chega ao pai (**paga** o SIMD sem trap na parte 2) |
 | 4e | KPTI, PCID/ASID com a regra de geração entre CPUs, mitigações de CPU ([seção](#mitigações-de-cpu)), relatório no boot. **Parte 1 (feita):** detecção de vulnerabilidade e de recurso nas duas ISAs, a linha `mitigations:`, a chave `kpti=` (só no relatório) e o clamp do Spectre v1. **Parte 2:** o PCID/ASID na troca (**feito**, [como entrou](#a-fatia-4e-parte-2-pcid-e-asid-na-troca-como-entrou)); o KPTI ficou para o metal por decisão do dono (2026-11-24; [DEBT-0100](../tech-debt/0100-kpti-nao-implementado.md)), e o IBPB e as outras mitigações do Spectre v2 também, porque a QEMU não as modela ([DEBT-0101](../tech-debt/0101-spectre-v2-nao-implementado.md)). **A 4e está fechada** | Linha `mitigations:` no boot; custo de cada uma medida |
-| 4f | As medidas da fase (inclui a falta de página que zera, [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)) ([abaixo](#medidas-da-fase)) e este capítulo virando descritivo | Fecha a fase: "syscall nula medida; processo que toca o kernel morre sem derrubar nada" |
+| 4f (**feita**) | As medidas da fase (inclui a falta de página que zera, [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md)) ([abaixo](#medidas-da-fase)) e este capítulo virando descritivo | Fecha a fase: "syscall nula medida; processo que toca o kernel morre sem derrubar nada" |
 
 **A ABI da 4a e da 4b era provisória.** `debug_write` ganhou o argumento `console` na parte 1 da 4c e todas as chamadas já implementadas têm a forma final. A ABI nativa é experimental
 até o fim da fase 5, então a mudança não quebra contrato.
@@ -2016,20 +2016,22 @@ Em inglês, como toda saída serial. As da 4a e da 4b valem hoje, no modo de tes
 | `[rustos] cpu features: ` (só o modo de teste) | 4e, parte 1 (**feito**) |
 | `[rustos] user: self-test ok` (handles, SIMD, falha, canal) | 4d |
 | `[rustos] asid self-test: ok (` (nenhum espaço lê a página de outro depois da virada de geração) e `[rustos] asid bench: ` (o custo da troca entre dois espaços) | 4e, parte 2 (**feito**) |
+| `[user] procs: process create+exit: ` e `[user] procs: channel ping-pong: ` (as medidas da 4f, no modo de teste) | 4f |
 
 ## Medidas da fase
 
-Regra do projeto: o mesmo comando antes e depois, nas duas ISAs ([SDD 07](07_desempenho_e_recursos.md)). Cada número entra no SDD 07 com a máquina e o acelerador.
+Descritivo. Os números e a máquina de cada um estão no [SDD 07](07_desempenho_e_recursos.md#fase-4-as-medidas-fatia-4f);
+a tabela diz onde cada medida está e o que ficou para o metal.
 
-| Medida | Como (proposta) |
+| Medida | Onde está |
 | --- | --- |
-| **Syscall nula** | `user/tests/null_syscall`: 1 M de `nop`, tempo por `rdtsc`/`cntvct`, mediana de 5, aquecimento descartado |
-| **Entrada com KPTI** | O mesmo laço com `kpti=on` e `off` |
-| **Criação de processo** | `process_create`, VMOs e mapeamentos de um programa mínimo, `thread_create`, `process_exit` e espera do `TERMINATED`, em laço |
-| **Falta de página de usuário** | Três laços sobre 64 MiB: primeiro toque de escrita (zera um frame), leitura de página não tocada (página zero), escrita sobre a página zero (COW). Tempo por página. **Medida na 4c** (`user/tests/lazy`, três laços de 16 MiB; [SDD 07](07_desempenho_e_recursos.md#paginação-sob-demanda-e-shootdown-fatia-4c)) |
-| **Troca entre processos** | Dois processos passam a vez por canal com `object_wait_one` (o análogo do `lat_ctx`), com e sem PCID/ASID e com e sem KPTI |
-| **Memória do menor processo** | Frames de um `hello`: tabelas de página, código, dados, pilha de usuário, pilha de kernel, tabela de handles. É a medida da meta de memória |
-| **Mitigações** | Custo de cada uma da [seção](#mitigações-de-cpu), ligada e desligada |
+| **Syscall nula** | Linha `user: null syscall` do autoteste do kernel, com e sem a limpeza da pilha ([SDD 07](07_desempenho_e_recursos.md#fase-4-as-medidas-fatia-4f)) |
+| **Entrada com KPTI** | **Fica para o metal**: o KPTI não está implementado ([DEBT-0100](../tech-debt/0100-kpti-nao-implementado.md)); sem medida nesta fase |
+| **Criação de processo** | Linha `[user] procs: process create+exit` (`user/tests/procs`), média de 300 processos ([SDD 07](07_desempenho_e_recursos.md#fase-4-as-medidas-fatia-4f)) |
+| **Falta de página de usuário** | Linhas `[user] lazy` (primeiro toque, página zero e cópia da página zero, por página) ([SDD 07](07_desempenho_e_recursos.md#fase-4-as-medidas-fatia-4f)); o zerar do x86_64 segue na [DEBT-0058](../tech-debt/0058-zerar-pagina-no-x86-sem-medida-em-hardware.md) |
+| **Troca entre processos** | Linha `[user] procs: channel ping-pong` (por canal, com `object_wait_one`) e linha `asid bench` (troca entre espaços); o x86_64 não tem PCID ([DEBT-0155](../tech-debt/0155-pcid-x86-sem-execucao.md)); sem KPTI ([DEBT-0100](../tech-debt/0100-kpti-nao-implementado.md)) |
+| **Memória do menor processo** | Linha `user: smallest child` (frames e KiB) ([SDD 07](07_desempenho_e_recursos.md#fase-4-as-medidas-fatia-4f)) |
+| **Mitigações** | **Fica para o metal**: o custo de cada uma não é medido na QEMU; o clamp do Spectre v1 tem medida ([SDD 07](07_desempenho_e_recursos.md#clamp-do-spectre-v1-na-syscall-fatia-4e-parte-1)); o Spectre v2 segue na [DEBT-0101](../tech-debt/0101-spectre-v2-nao-implementado.md) |
 
 ### Números de referência (de outros sistemas)
 

@@ -1202,12 +1202,13 @@ fn cap_objects(c: &mut Checks, cx: &Cx<'_>) {
     }
 }
 
-/// Um processo por rodada: criar, mapear o programa, iniciar, esperar `TERMINATED` (ou matar logo) e
-/// soltar tudo. Devolve os microssegundos por processo.
+/// Um processo por rodada, que sai logo (`MODE_QUIET`): criar, mapear o programa, iniciar, esperar
+/// `TERMINATED` e soltar tudo. Sem `process_kill`, que tem os seus casos em `threads_and_kill`. Devolve
+/// os nanossegundos do laço inteiro.
 fn lifecycle_loop(c: &mut Checks, cx: &Cx<'_>, rounds: u32) -> u64 {
     let started = now();
     let mut good = 0;
-    for round in 0..rounds {
+    for _ in 0..rounds {
         let Ok(child) = start(cx, Some(MODE_QUIET), false) else {
             break;
         };
@@ -1215,15 +1216,12 @@ fn lifecycle_loop(c: &mut Checks, cx: &Cx<'_>, rounds: u32) -> u64 {
             child.abandon();
             break;
         };
-        if round % 2 == 1 {
-            let _ = sys::process_kill(child.process);
-        }
         good += u32::from(child.wait(now() + 5 * SECOND).is_ok());
         let _ = sys::handle_close(thread);
         child.release();
     }
     c.expect("every process of the loop terminated", good == rounds);
-    (now() - started) / 1000 / u64::from(rounds.max(1))
+    now() - started
 }
 
 /// O eco entre dois processos por canal, com `object_wait_one`: o análogo do `lat_ctx`. Cada ida e
@@ -1408,12 +1406,16 @@ fn main(env: &Env) -> i64 {
     sleep(20 * MS);
     sync(&cx, b"B");
     release_blocked(&mut c, blocked);
-    let per_process = lifecycle_loop(&mut c, &cx, LOOPS);
+    let create_ns = lifecycle_loop(&mut c, &cx, LOOPS);
+    // Décimos de microssegundo, como o `lazy`: a média de LOOPS processos, sem arredondar para baixo.
+    let tenths = create_ns * 10 / (1000 * u64::from(LOOPS.max(1)));
     println!(
-        "procs: create, map, start, run, exit and wait took {per_process} us per process ({LOOPS} processes)"
+        "procs: process create+exit: {}.{} us per process ({LOOPS} rounds)",
+        tenths / 10,
+        tenths % 10
     );
-    let per_round = echo(&mut c, &cx, u8::try_from(ECHOES / 16).unwrap_or(1));
-    println!("procs: echo between two processes took {per_round} ns per round trip");
+    let round_trip = echo(&mut c, &cx, u8::try_from(ECHOES / 16).unwrap_or(1));
+    println!("procs: channel ping-pong: {round_trip} ns per round trip ({ECHOES} round trips)");
     sleep(30 * MS);
     sync(&cx, b"C");
     if c.failed == 0 {
