@@ -257,10 +257,12 @@ fn fb_program_runs(frames: Frames, map_offset: u64, archive: Option<&[u8]>) -> b
     let Some(file) = archive.and_then(|archive| loader::find(archive, b"fb").ok()) else {
         return false;
     };
+    // Sem tela XRGB o programa não recebe o `kind` 5: o caso fica pulado, como o `has_screen` da tela.
     let (Some((width, height, pitch)), Some(before)) =
         (framebuffer::size(), framebuffer::pixel(0, 0))
     else {
-        return false;
+        kprintln!("[rustos] fb self-test: skipped (no XRGB screen)");
+        return true;
     };
     let options = Options {
         keep_peer: true,

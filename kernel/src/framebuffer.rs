@@ -8,9 +8,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use rustos_hal::abi::FramebufferFormat;
 use rustos_hal::{FramebufferInfo, PAGE_SIZE, PhysAddr};
 
-use crate::console;
 use crate::frames::Frames;
 use crate::sync::IrqLock;
+use crate::task;
 use crate::vmo::Vmo;
 
 /// Onde a tela está: o endereço virtual pelo qual o kernel a desenha e o físico, que o VMO usa.
@@ -74,19 +74,25 @@ pub fn boot_vmo(frames: Frames) -> Option<(Arc<Vmo>, FramebufferFormat)> {
     Some((vmo, format))
 }
 
-/// Um mapeamento do VMO do framebuffer nasce. Antes de voltar, espera o console terminar a
-/// renderização que já começou: a partir daí, ele não desenha mais na tela.
+/// Um mapeamento do VMO do framebuffer nasce. Só conta: quem chama (o `vmar_map`) espera a
+/// renderização em curso depois de soltar o lock do processo (`console::settle`).
 pub fn hold() {
     MAPPED.fetch_add(1, Ordering::AcqRel);
-    console::settle();
 }
 
-/// Um mapeamento do VMO do framebuffer saiu. Quando é o último, o console redesenha no laço do shell.
-/// Sem lock e sem console: a morte do processo chama isto com IRQ mascarada.
+/// Um mapeamento do VMO do framebuffer saiu. Quando é o último, acorda o laço do shell, que redesenha
+/// no `flush`. Roda na morte do processo, com IRQ mascarada: `notify_input` só acorda, sem trocar.
 pub fn release() {
     if MAPPED.fetch_sub(1, Ordering::AcqRel) == 1 {
         REPAINT.store(true, Ordering::Release);
+        task::notify_input();
     }
+}
+
+/// Se o laço do shell tem redesenho a fazer: a posse acabou e ninguém segura a tela de novo. Não
+/// consome a marca (quem a consome é `take_repaint`, no `flush`).
+pub fn repaint_pending() -> bool {
+    !held() && REPAINT.load(Ordering::Acquire)
 }
 
 /// Se um programa segura a tela agora.

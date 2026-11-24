@@ -132,12 +132,14 @@ a tela é dele enquanto houver um mapeamento. A regra está em `kernel/src/frame
   (`vmar_unmap` que deixa a região sem uso, ou a morte do processo) subtrai (`framebuffer::release`).
 - Com o contador acima de zero, `console::flush` não desenha: conta a vez (`skipped`) e a grade fica
   suja para depois. A serial segue, e o texto continua entrando na grade (`Screen::write`); só os pixels param.
-- Quando o último mapeamento sai, a marca de redesenho fica levantada. O próximo `flush` do laço do shell
-  (fora de qualquer lock de processo) redesenha a tela inteira: fundo, barra e grade (`Screen::repaint`).
-  A morte não redesenha ali dentro, porque roda com IRQ mascarada. O redesenho roda com a IRQ mascarada, como
-  todo `flush`, e o pior caso é o de [DEBT-0051](../tech-debt/0051-redesenho-da-tela-com-irq-mascarada.md).
-- `hold` espera, com o lock da tela, a renderização que já estava em curso: depois dele, nenhuma começa com a tela
-  de um programa. Quem sai do `print_panic` desenha mesmo assim, para o pânico aparecer ([SDD 18](18_m2_doom_nativo.md#como-entrou-fatia-1a)).
+- Quando o último mapeamento sai, a marca de redesenho fica levantada e `notify_input` acorda o laço do shell.
+  O laço chama `flush` (dentro de `read_input_blocking`, com a IRQ mascarada, como todo `flush`; o pior caso é o de
+  [DEBT-0051](../tech-debt/0051-redesenho-da-tela-com-irq-mascarada.md)), e o `flush` redesenha a tela inteira:
+  fundo, barra e grade (`Screen::repaint`). O predicado de espera do laço inclui essa marca, então a tela volta
+  mesmo sem tecla. A morte só marca e acorda; não desenha ali dentro.
+- `vmar_map` de um VMO de framebuffer espera, depois de soltar o lock do processo, a renderização que já estava em
+  curso (`console::settle`). Depois disso, nenhuma renderização começa com a tela de um programa. Quem sai do
+  `print_panic` desenha mesmo assim, para o pânico aparecer ([SDD 18](18_m2_doom_nativo.md#como-entrou-fatia-1a)).
 
 ## Comandos que falam com processos (M1)
 

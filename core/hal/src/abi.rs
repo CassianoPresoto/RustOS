@@ -558,6 +558,11 @@ pub fn encode_boot_message(
 ) -> Option<usize> {
     let has_framebuffer = kinds.contains(&boot_kind::FRAMEBUFFER);
     if kinds.len() > CHANNEL_MAX_HANDLES
+        || kinds
+            .iter()
+            .filter(|&&kind| kind == boot_kind::FRAMEBUFFER)
+            .count()
+            > 1
         || has_framebuffer != framebuffer.is_some()
         || framebuffer.is_some_and(|format| !format.is_valid())
     {
@@ -609,7 +614,14 @@ pub fn parse_boot_message(
     for (index, kind) in kinds.iter_mut().take(count).enumerate() {
         *kind = word(16 + index * 4)?;
     }
-    let has_framebuffer = kinds[..count].contains(&boot_kind::FRAMEBUFFER);
+    let framebuffers = kinds[..count]
+        .iter()
+        .filter(|&&kind| kind == boot_kind::FRAMEBUFFER)
+        .count();
+    if framebuffers > 1 {
+        return None;
+    }
+    let has_framebuffer = framebuffers == 1;
     let end = size_of::<BootMessageHeader>() + count * 4;
     let (framebuffer, expected) = match (word(4)?, has_framebuffer) {
         (BootMessageHeader::VERSION_1 | BootMessageHeader::VERSION, false) => (None, end),
@@ -1216,6 +1228,24 @@ mod tests {
             bad[at..at + 4].copy_from_slice(&value.to_le_bytes());
             assert_eq!(parse_boot_message(&bad[..len], &mut kinds), None, "{at}");
         }
+    }
+
+    #[test]
+    fn the_boot_message_carries_at_most_one_framebuffer() {
+        let mut out = [0_u8; 64];
+        let twice = [boot_kind::FRAMEBUFFER, boot_kind::FRAMEBUFFER];
+        assert!(encode_boot_message(&twice, Some(FORMAT), &mut out).is_none());
+        // Mensagem v2 à mão, com dois `FRAMEBUFFER` e um bloco de formato válido.
+        let (mut bytes, _) = version_1(&[]);
+        bytes[8..12].copy_from_slice(&2_u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&2_u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&boot_kind::FRAMEBUFFER.to_le_bytes());
+        bytes[20..24].copy_from_slice(&boot_kind::FRAMEBUFFER.to_le_bytes());
+        for (at, value) in [(24, 640_u32), (28, 400), (32, 2560), (36, 1)] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut kinds = [0; CHANNEL_MAX_HANDLES];
+        assert_eq!(parse_boot_message(&bytes[..40], &mut kinds), None);
     }
 
     #[test]

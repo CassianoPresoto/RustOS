@@ -11,6 +11,7 @@ use rustos_object::rights::required;
 use rustos_object::{ObjectKind, handle_from_raw};
 
 use super::handles::{Outcome, current, u32_arg};
+use crate::console;
 use crate::object::Obj;
 use crate::process::{MapRequest, Process, VmarObj};
 use crate::vmo::Vmo;
@@ -110,7 +111,12 @@ pub fn vmar_map(args: &[u64; 6]) -> Outcome {
         perms: perms_of(flags),
         fixed: fixed.then_some(vmar_off),
     };
-    target.process().with_mem(|mem| mem.map(&object, request))?
+    let mapped = target.process().with_mem(|mem| mem.map(&object, request))?;
+    // Só depois de soltar o lock do processo: espera a renderização em curso antes de devolver o endereço.
+    if object.is_framebuffer() && mapped.is_ok() {
+        console::settle();
+    }
+    mapped
 }
 
 /// `vmar_unmap(vmar, addr, len)`: solta a faixa (inteira ou em parte de uma região) com *shootdown*.

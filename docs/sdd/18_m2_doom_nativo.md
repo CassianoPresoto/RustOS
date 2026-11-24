@@ -230,11 +230,13 @@ O contrato de tela está no código, com o desenho aprovado e as lacunas que ele
   não diz o tamanho do VMO ([DEBT-0140](../tech-debt/0140-abi-sem-tamanho-de-vmo.md)), e o formato diz.
 - **5e, pânico.** `print_panic` desenha mesmo com a tela mapeada por um programa. O pânico é a última saída, e um
   programa travado não deve esconder a causa.
-- **5f, redesenho no laço do shell.** A morte do processo só marca a tela para redesenhar; quem redesenha é o
-  `flush` do laço do shell, fora dos locks do processo e com IRQ liberada. Até o próximo `flush` (o próximo
-  texto ou o prompt), a tela fica com o último quadro do programa.
-- **5g, espera pela renderização em curso.** O primeiro mapeamento espera o lock da tela (`console::settle`), para
-  que nenhuma renderização que começou antes escreva por cima do padrão depois do `vmar_map`.
+- **5f, redesenho no laço do shell.** A morte do processo levanta a marca de redesenho e acorda o laço do shell
+  com `notify_input` (que roda com a IRQ mascarada, como na IRQ de teclado). O predicado de espera do laço
+  inclui a marca, então a tela volta sem tecla. Quem redesenha é o `flush` desse laço, que roda com a IRQ
+  mascarada (`read_input_blocking`), como qualquer `flush` ([DEBT-0051](../tech-debt/0051-redesenho-da-tela-com-irq-mascarada.md)).
+- **5g, espera pela renderização em curso.** Cada mapeamento de framebuffer (cada `vmar_map` que dá certo) espera o
+  lock da tela (`console::settle`) depois de soltar o lock do processo, para que nenhuma renderização que começou
+  antes escreva por cima do padrão depois que o endereço volta ao programa.
 
 **Medido (fatia 1a):** `make smoke ARCH=all`, `smoke-fast` nas duas ISAs e a imagem enxuta passam; o autoteste
 `fb` roda nas duas ISAs (x86_64 1280x800, stride 5120; aarch64 ramfb 1024x768, stride 4096). O tamanho do kernel
