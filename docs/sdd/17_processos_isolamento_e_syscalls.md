@@ -1646,7 +1646,7 @@ VMO. O custo é que um protocolo que precise de mensagem grande tem de usar VMO.
 | 24 | `pc`, 32 `sp`, 40 `addr` | `u64` | Fault, do usuário (**nunca** endereço do kernel) |
 | 48 | `isa_code` | `u64` | O `code` cru da ISA (vetor e erro no x86_64, `ESR_EL1` no aarch64) |
 
-**Mensagem de boot** (`#[repr(C)]`; cabe em 1 KiB): cabeçalho `{ magic: u32 = 0x544F_4F42, version: u32 = 1, count: u32, reserved: u32 }` seguido de `count` valores `u32` de `kind`; o **i-ésimo handle do array de handles da mensagem** corresponde ao i-ésimo `kind`. `kind`: `1` Process (si mesmo), `2` VMAR raiz, `3` Console, `4` Initramfs. Os mesmos tipos servem a um pai qualquer.
+**Mensagem de boot** (`#[repr(C)]`; cabe em 1 KiB): cabeçalho `{ magic: u32 = 0x544F_4F42, version: u32 = 1, count: u32, reserved: u32 }` seguido de `count` valores `u32` de `kind`; o **i-ésimo handle do array de handles da mensagem** corresponde ao i-ésimo `kind`. `kind`: `1` Process (si mesmo), `2` VMAR raiz, `3` Console, `4` Initramfs. Os mesmos tipos servem a um pai qualquer. **Proposta do M2** ([SDD 18](18_m2_doom_nativo.md#contrato-de-tela-framebuffer-caso-6)): `kind` `5` Framebuffer e `6` Input, ainda não aprovados.
 
 ### O que a ABI deixa de fora de propósito
 
