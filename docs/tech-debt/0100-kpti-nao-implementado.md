@@ -3,7 +3,7 @@ id: DEBT-0100
 title: KPTI não implementado, e `kpti=on|off|auto` só entra no relatório
 status: Open
 date: 2026-11-18
-trigger: O PR do KPTI (fatia 4e), que cria a raiz de usuário com o trampolim e o byte de teste na entrada e na saída
+trigger: O primeiro boot em metal numa CPU que a detecção marca com Meltdown
 paid_date:
 ---
 
@@ -18,13 +18,15 @@ A chave `kpti=on|off|auto` da linha de comando já é lida e só muda o texto da
 
 ## Por que foi aceito
 
-Esta fatia entrega a detecção, o relatório e o clamp do Spectre v1. O KPTI mexe na entrada, na
-saída e nas tabelas, e entra com o custo medido, num PR próprio
-([SDD 17](../sdd/17_processos_isolamento_e_syscalls.md#o-trampolim-e-o-caminho-pronto-para-kpti)).
+A parte 1 da 4e entregou a detecção, o relatório e o clamp do Spectre v1; a parte 2, o PCID/ASID.
+O dono decidiu (2026-11-24) não fazer o KPTI na fase 4: ele só protege CPU vulnerável a Meltdown
+(Intel anterior a 2019), as máquinas de comparação de desempenho não são, e o Linux o desliga nelas.
+O desenho segue no [SDD 17](../sdd/17_processos_isolamento_e_syscalls.md#o-trampolim-e-o-caminho-pronto-para-kpti).
 
 ## Gatilho
 
-O PR do KPTI.
+O primeiro boot em metal numa CPU que a detecção marca com Meltdown: ali a linha `mitigations:`
+diria `kpti off (not implemented, would be on)` com o processo podendo ler o kernel.
 
 ## Como pagar
 

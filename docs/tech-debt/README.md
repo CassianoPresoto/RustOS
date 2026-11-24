@@ -80,7 +80,7 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0087](0087-init-so-no-boot-de-teste.md) | O `init` não sobe sozinho no boot normal | Open | O dono fixar o orçamento do boot que cabe o `init` (com o filho), ou a fase 5 |
 | [0090](0090-ciclos-entre-filas-de-canais-nao-coletados.md) | Ciclos entre filas de canais não são coletados | Open | O primeiro programa que produza o ciclo entre duas filas, ou os grupos de recursos da fase 9 |
 | [0091](0091-fila-do-canal-com-armazenamento-inline.md) | Fila do canal com armazenamento inline, 7,2 KiB por par de pontas | Open | A medida de memória da 4f ou do SDD 07 mostrar canais entre as maiores parcelas do kernel, ou um processo precisar de mais de 100 canais vivos |
-| [0100](0100-kpti-nao-implementado.md) | KPTI não implementado, e `kpti=on|off|auto` só entra no relatório | Open | O PR do KPTI (fatia 4e), que cria a raiz de usuário com o trampolim e o byte de teste na entrada e na saída |
+| [0100](0100-kpti-nao-implementado.md) | KPTI não implementado, e `kpti=on|off|auto` só entra no relatório | Open | O primeiro boot em metal numa CPU que a detecção marca com Meltdown |
 | [0101](0101-spectre-v2-nao-implementado.md) | Spectre v2 sem mitigação no kernel (eIBRS, retpoline, IBPB, STIBP) | Open | O primeiro boot em metal |
 | [0102](0102-ssb-nao-implementado.md) | Spectre v4 sem mitigação (SSBD no x86_64, SSBS no aarch64) | Open | O primeiro boot em metal |
 | [0103](0103-mds-nao-implementado.md) | MDS sem limpeza de buffers na volta ao usuário (`VERW`) | Open | O primeiro boot em metal |
@@ -103,3 +103,4 @@ Dívida que já tem dono e prazo é issue, não item aqui.
 | [0155](0155-pcid-x86-sem-execucao.md) | Etiquetas de TLB no x86_64 (PCID e INVPCID) sem execução | Open | O primeiro boot do x86_64 com `tlb tags: pcid on` (metal ou KVM), ou o TCG passar a aceitar PCID e INVPCID |
 | [0156](0156-metade-alta-sem-remocao-depois-do-boot.md) | Metade alta do kernel sem remoção depois do boot, premissa das etiquetas de TLB | Open | O primeiro caminho do kernel que remove ou muda permissão de uma entrada da metade alta depois do boot |
 | [0157](0157-ramo-asid-16-bits-sem-execucao.md) | Ramo de ASID de 16 bits (`TCR_EL1.AS`) sem execução | Open | O primeiro boot aarch64 com `ASIDBits = 16` (linha `tlb tags: asid 16-bit`) |
+| [0158](0158-ida-e-volta-por-canal-lenta-sem-decomposicao.md) | Ida e volta por canal entre dois processos 20 a 35 vezes acima do `lat_ctx`: o acordar por IPI domina | Open | O primeiro programa de `user/` que troque mensagem por canal a cada quadro ou evento, ou a primeira comparação publicada de troca entre processos com o Linux |

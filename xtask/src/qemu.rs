@@ -170,7 +170,7 @@ const COUNT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// O que só o modo de teste imprime: se uma destas faltar, a linha de comando se perdeu e o
 /// boot que passou foi o normal.
-const SELFTEST_LINES: [(&str, &str); 25] = [
+const SELFTEST_LINES: [(&str, &str); 27] = [
     (
         "[rustos] cpu features: ",
         "os recursos de CPU das mitigações",
@@ -234,6 +234,14 @@ const SELFTEST_LINES: [(&str, &str); 25] = [
     (
         "[rustos] asid bench: ",
         "a medida de troca entre dois espaços com etiqueta",
+    ),
+    (
+        "[user] procs: process create+exit: ",
+        "a medida de criar, iniciar, sair e soltar um processo (média de 300)",
+    ),
+    (
+        "[user] procs: channel ping-pong: ",
+        "a medida de ida e volta por canal entre dois processos (2 000)",
     ),
 ];
 /// O que o boot normal confere, além do que o `REQUIRED` tem de comum aos dois modos.
