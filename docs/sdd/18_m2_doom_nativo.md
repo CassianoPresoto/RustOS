@@ -5,8 +5,9 @@
 > violar o `AGENTS.md`, e quais contratos novos (framebuffer, entrada, libc) o programa
 > enxerga.
 
-**Estado: desenho em Draft, sem código.** Tudo abaixo é **Proposta** até o dono fazer o
-merge deste PR; cada decisão está listada no corpo do PR com as opções e a recomendação.
+**Estado: desenho aprovado (#46, 2026-11-24), sem código.** O dono aprovou as sete decisões
+com as recomendações ([Decisões](#decisões)); o que abaixo ainda diz **Proposta** é o desenho
+aprovado, que passa a descritivo à medida que cada fatia do M2 entra.
 O M2 é o marco 1 dos jogos da [escada do SDD 08](08_roadmap.md#jogos-a-escada), antecipado
 para logo depois da fase 4, sobre a ABI nativa do [SDD 17](17_processos_isolamento_e_syscalls.md).
 
@@ -149,8 +150,9 @@ sem ativo proprietário; `doom1.wad` fica como opcional local, e o timedemo com 
 comparação com o que o jogador conhece. **Ressalva:** os demos do Freedoom não são os do
 `doom1.wad`. `demo1` do Freedoom grava E1M6 (Fase 1) e não E1M1; o número de quadros e o
 tempo mudam de WAD para WAD, então **o número do M2 só se compara com o Linux usando o mesmo
-WAD**. Freedoom (fase 1 ou fase 2) é o escolhido para o número publicado; a escolha entre
-as duas fases é do dono. **NÃO VERIFICADO:** se o `demo1` do Freedoom roda sem falha de
+WAD**. O número publicado usa a **Fase 1 do Freedoom** (`freedoom1.wad`, `demo1` em E1M6): o
+formato do DOOM 1, o mesmo do `doom1.wad` (escolha feita na aprovação do #46, com o aval do dono
+às recomendações). **NÃO VERIFICADO:** se o `demo1` do Freedoom roda sem falha de
 sincronia no doomgeneric (não rodei).
 
 ## Contrato de tela (framebuffer), caso 6
@@ -326,8 +328,8 @@ e a memória ociosa; o critério de DOOM sai dela. O [SDD 08](08_roadmap.md) mud
 
 ## Decisões
 
-Cada uma é caso do `AGENTS.md` (2, 3 ou 6). O merge deste Draft é a aprovação. As opções e a
-recomendação estão no corpo do PR.
+Cada uma é caso do `AGENTS.md` (2, 3 ou 6). **Aprovadas pelo dono em 2026-11-24, todas com a
+recomendação** (o merge do #46); as opções descartadas estão no corpo do #46.
 
 | # | Decisão | Caso | Recomendação |
 | --- | --- | --- | --- |
